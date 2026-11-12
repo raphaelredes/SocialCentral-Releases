@@ -14,18 +14,33 @@ local checkAddBtn
 local checkNextBtn
 local scrollList
 local clanPanel
+local groupPanel
+local chatPanel
 local modalFrame
 local eventModalFrame
 local ticker
 
 local activeTab = "watchlist"
 local socialFilter = "all"
+local socialFolderFilter = "all"
 local watchlistGroupFilter = "all"
+local clanEventFilter = "all"
+local clanRightView = "peers"
 local searchQuery = ""
 
 local tabButtons = {}
 local socialFilterButtons = {}
+local clanEventFilterButtons = {}
+local clanRightViewButtons = {}
 local themeTargets = {}
+
+function UI:GetFrame()
+    return frame
+end
+
+function UI:IsMainVisible()
+    return (frame and frame:IsShown()) and true or false
+end
 
 function UI:OpenUpdateModal()
     if Theme and Theme.ShowUpdatePopup then
@@ -266,7 +281,7 @@ end
 local function OpenEventModal()
     if not eventModalFrame then
         local m = CreateFrame("Frame", "SocialCentralEventModal", frame, "BackdropTemplate")
-        m:SetSize(390, 236)
+        m:SetSize(390, 290)
         m:SetPoint("CENTER")
         m:SetFrameStrata("DIALOG")
         m:EnableMouse(true)
@@ -329,6 +344,29 @@ local function OpenEventModal()
         whenInput:SetMaxLetters(24)
         m.whenInput = whenInput
 
+        local slotsLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        slotsLbl:SetPoint("TOPLEFT", 16, -196)
+        slotsLbl:SetText(L["Role Slots & Min Level (optional):"])
+
+        local function MakeSmallNumInput(xOff, lblText)
+            local l = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            l:SetPoint("TOPLEFT", xOff, -216)
+            l:SetText(lblText)
+            local box = CreateFrame("EditBox", nil, m, "InputBoxTemplate")
+            box:SetSize(34, 20)
+            box:SetPoint("LEFT", l, "RIGHT", 6, 0)
+            box:SetAutoFocus(false)
+            box:SetNumeric(true)
+            box:SetMaxLetters(2)
+            box:SetScript("OnEscapePressed", function() m:Hide() end)
+            return box
+        end
+
+        m.tankIn = MakeSmallNumInput(16, "T:")
+        m.healIn = MakeSmallNumInput(90, "H:")
+        m.dpsIn = MakeSmallNumInput(164, "D:")
+        m.lvlIn = MakeSmallNumInput(242, L["Min Lv:"])
+
         local btnSave = Theme:CreateButton(m, 96, 24, L["Save"], "primary")
         btnSave:SetPoint("BOTTOMRIGHT", -16, 14)
         m.btnSave = btnSave
@@ -347,7 +385,15 @@ local function OpenEventModal()
 
         local function SubmitEvent()
             if ns.Clan then
-                local ok = ns.Clan:CreateEventCall(m._cat, titleInput:GetText() or "", whenInput:GetText() or "")
+                local ok = ns.Clan:CreateEventCall(
+                    m._cat,
+                    titleInput:GetText() or "",
+                    whenInput:GetText() or "",
+                    m.tankIn:GetText(),
+                    m.healIn:GetText(),
+                    m.dpsIn:GetText(),
+                    m.lvlIn:GetText()
+                )
                 if ok then
                     titleInput:ClearFocus()
                     whenInput:ClearFocus()
@@ -370,6 +416,10 @@ local function OpenEventModal()
     end
     eventModalFrame.titleInput:SetText("")
     eventModalFrame.whenInput:SetText(L["Now"])
+    eventModalFrame.tankIn:SetText("")
+    eventModalFrame.healIn:SetText("")
+    eventModalFrame.dpsIn:SetText("")
+    eventModalFrame.lvlIn:SetText("")
     eventModalFrame:Show()
     eventModalFrame.titleInput:SetFocus()
 end
@@ -412,6 +462,11 @@ local function OpenRowMenu(row, item)
         end
 
         if targetName and item._tab ~= "alts" then
+            root:CreateButton(L["Edit Social Card"], function()
+                if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
+                    ns.SocialPanels:OpenSocialMetaModal(targetName, item.lookupKey or targetName)
+                end
+            end)
             root:CreateDivider()
             root:CreateButton(L["Whisper"], function()
                 if item._tab == "social" and item.samePool == false and item.bnetName then
@@ -586,6 +641,13 @@ local function FormatSocialSubline(item)
     if #tags > 0 then
         table.insert(parts, "[" .. table.concat(tags, "/") .. "]")
     end
+    local meta = ns.Store and ns.Store:GetSocialMeta(item.lookupKey or item.displayName)
+    if meta and meta.folder and meta.folder ~= "" then
+        table.insert(parts, "[" .. meta.folder .. "]")
+    end
+    if meta and meta.mainName and meta.mainName ~= "" then
+        table.insert(parts, L["Main"] .. ": " .. meta.mainName)
+    end
     if item.bnetName then
         table.insert(parts, item.bnetName)
     end
@@ -594,8 +656,10 @@ local function FormatSocialSubline(item)
     end
     if item.guild and item.guild ~= "" then
         table.insert(parts, "<" .. item.guild .. ">")
-    elseif item.note and item.note ~= "" then
-        table.insert(parts, item.note)
+    end
+    local noteText = (meta and meta.note and meta.note ~= "") and meta.note or item.note
+    if noteText and noteText ~= "" then
+        table.insert(parts, noteText)
     end
     return table.concat(parts, "  ·  ")
 end
@@ -731,7 +795,19 @@ local function BuildFilteredRows()
         end
     elseif activeTab == "social" and ns.Social then
         for _, item in ipairs(ns.Social:GetList(socialFilter)) do
-            if SafeTextMatches(searchQuery, item.displayName, item.area, item.guild, item.note, item.bnetName) then
+            local meta = ns.Store and ns.Store:GetSocialMeta(item.lookupKey or item.displayName)
+            local folderMatch = (socialFolderFilter == "all") or (meta and meta.folder == socialFolderFilter)
+            if folderMatch and SafeTextMatches(
+                searchQuery,
+                item.displayName,
+                item.area,
+                item.guild,
+                item.note,
+                item.bnetName,
+                meta and meta.folder,
+                meta and meta.mainName,
+                meta and meta.note
+            ) then
                 local copy = {}
                 for k, v in pairs(item) do copy[k] = v end
                 copy._tab = "social"
@@ -765,6 +841,7 @@ local function OpenEventMenu(anchor, evt)
     if not (MenuUtil and MenuUtil.CreateContextMenu and evt and ns.Clan) then
         return
     end
+    local sum = ns.Clan:GetSignupSummary(evt)
     MenuUtil.CreateContextMenu(anchor, function(_, root)
         root:CreateTitle(evt.title or L["Guild Event"])
         for _, roleId in ipairs({ "TANK", "HEALER", "DPS", "MAYBE", "DECLINE" }) do
@@ -773,7 +850,34 @@ local function OpenEventMenu(anchor, evt)
                 ns.Clan:SignupEvent(evt.id, rId)
             end)
         end
+        if sum and sum.signups and #sum.signups > 0 then
+            local hasOther = false
+            for _, s in ipairs(sum.signups) do
+                if s.name and not Compat.IsMe(s.name) then
+                    hasOther = true
+                    break
+                end
+            end
+            if hasOther then
+                root:CreateDivider()
+                root:CreateTitle(L["Invite Applicant"])
+                for _, s in ipairs(sum.signups) do
+                    if s.name and not Compat.IsMe(s.name) then
+                        local target = s.name
+                        root:CreateButton(L["Invite %s (%s)"]:format(target, ROLE_LABELS[s.role] or s.role), function()
+                            Compat.Invite(target)
+                        end)
+                    end
+                end
+            end
+        end
         root:CreateDivider()
+        root:CreateButton(evt.isOpen == false and L["Reopen Event"] or L["Close Event"], function()
+            ns.Clan:ToggleEventOpen(evt.id)
+        end)
+        root:CreateButton(L["Reannounce Event"], function()
+            ns.Clan:ReannounceEvent(evt.id)
+        end)
         root:CreateButton(L["Copy Name"], function()
             OpenCopyModal(evt.title or "")
         end)
@@ -874,10 +978,24 @@ local function UpdateEventRow(row, evt, idx, palette)
     row.subText:SetTextColor(palette.textMuted[1], palette.textMuted[2], palette.textMuted[3])
 
     local catLabel = CAT_LABELS[evt.category] or evt.category or ""
-    row.titleText:SetText("|cff58a6ff[" .. catLabel .. "]|r " .. (evt.title or ""))
+    local closedTag = (evt.isOpen == false) and ("|cffff6b6b[" .. L["Closed"] .. "]|r ") or ""
+    row.titleText:SetText(closedTag .. "|cff58a6ff[" .. catLabel .. "]|r " .. (evt.title or ""))
 
     local sum = ns.Clan and ns.Clan:GetSignupSummary(evt) or { TANK = 0, HEALER = 0, DPS = 0 }
-    row.subText:SetText(string.format("%s  ·  %s  ·  T:%d H:%d D:%d", evt.whenText or L["Now"], evt.creator or "", sum.TANK or 0, sum.HEALER or 0, sum.DPS or 0))
+    local function SlotStr(prefix, cur, need)
+        if need and need > 0 then
+            return string.format("%s:%d/%d", prefix, cur or 0, need)
+        end
+        return string.format("%s:%d", prefix, cur or 0)
+    end
+    local slots = string.format(
+        "%s %s %s",
+        SlotStr("T", sum.TANK, evt.needT),
+        SlotStr("H", sum.HEALER, evt.needH),
+        SlotStr("D", sum.DPS, evt.needD)
+    )
+    local lvlPart = (evt.minLvl and evt.minLvl > 0) and ("  ·  Lv" .. evt.minLvl .. "+") or ""
+    row.subText:SetText(string.format("%s  ·  %s  ·  %s%s", evt.whenText or L["Now"], evt.creator or "", slots, lvlPart))
 
     local myName = ns.Safe and ns.Safe.String(ns.Safe.Call(UnitName, "player"))
     local myParsed = myName and Compat.ParseCharacterName(myName)
@@ -945,10 +1063,23 @@ local function CreatePeerRow(parent, _, rowHeight)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:ClearLines()
             GameTooltip:AddLine((item.displayName or "") .. (item.version and ("  (v" .. item.version .. ")") or ""), 1, 1, 1)
-            local tagLabel = TAG_LABELS[item.tag or "NONE"] or item.tag or ""
-            GameTooltip:AddLine(tagLabel .. ((item.note and item.note ~= "") and (" — " .. item.note) or ""), 0.55, 0.85, 1.0, true)
-            if item.area and item.area ~= "" then
-                GameTooltip:AddLine(item.area, 0.78, 0.84, 0.92)
+            if item._clanView == "prof" then
+                local pMap = (ns.SocialPanels and ns.SocialPanels.PROF_LABELS) or {}
+                local pNames = {}
+                if item.prof1 and item.prof1 ~= "NONE" then table.insert(pNames, pMap[item.prof1] or item.prof1) end
+                if item.prof2 and item.prof2 ~= "NONE" then table.insert(pNames, pMap[item.prof2] or item.prof2) end
+                GameTooltip:AddLine(table.concat(pNames, " / "), 0.35, 0.88, 0.50)
+                if item.craftNote and item.craftNote ~= "" then
+                    GameTooltip:AddLine(item.craftNote, 0.95, 0.85, 0.45, true)
+                end
+            elseif item._clanView == "gchat" then
+                GameTooltip:AddLine(item.text or "", 0.55, 0.85, 1.0, true)
+            else
+                local tagLabel = TAG_LABELS[item.tag or "NONE"] or item.tag or ""
+                GameTooltip:AddLine(tagLabel .. ((item.note and item.note ~= "") and (" — " .. item.note) or ""), 0.55, 0.85, 1.0, true)
+                if item.area and item.area ~= "" then
+                    GameTooltip:AddLine(item.area, 0.78, 0.84, 0.92)
+                end
             end
             GameTooltip:Show()
         end
@@ -972,9 +1103,27 @@ local function UpdatePeerRow(row, item, idx, palette)
     row._item = item
     row._dataIdx = idx
     row.subText:SetTextColor(palette.textMuted[1], palette.textMuted[2], palette.textMuted[3])
-    Theme:ApplyStatusColor(row.dot, item.online and "online" or "offline")
+    local isOnline = item._clanView == "gchat" and true or (item.online == true)
+    Theme:ApplyStatusColor(row.dot, item._clanView == "gchat" and "nearby" or (isOnline and "online" or "offline"))
 
     local hex = Compat.ClassHex(item.classFile)
+    if item._clanView == "prof" then
+        local pMap = (ns.SocialPanels and ns.SocialPanels.PROF_LABELS) or {}
+        local pList = {}
+        if item.prof1 and item.prof1 ~= "NONE" then table.insert(pList, pMap[item.prof1] or item.prof1) end
+        if item.prof2 and item.prof2 ~= "NONE" then table.insert(pList, pMap[item.prof2] or item.prof2) end
+        row.nameText:SetText(hex .. (item.displayName or "") .. "|r  |cff3fb950[" .. table.concat(pList, " / ") .. "]|r")
+        local subParts = {}
+        if item.craftNote and item.craftNote ~= "" then table.insert(subParts, item.craftNote) end
+        table.insert(subParts, Compat.FormatRelativeTime(item.updatedAt, L))
+        row.subText:SetText(table.concat(subParts, "  ·  "))
+        return
+    elseif item._clanView == "gchat" then
+        row.nameText:SetText(hex .. (item.displayName or "") .. "|r  |cff58a6ff[/g LFM]|r")
+        row.subText:SetText((item.text or "") .. "  ·  " .. Compat.FormatRelativeTime(item.ts, L))
+        return
+    end
+
     local ver = item.version and (" |cff9da7b5[v" .. item.version .. "]|r") or ""
     row.nameText:SetText(hex .. (item.displayName or "") .. "|r" .. ver)
 
@@ -1022,15 +1171,43 @@ local function UpdateClanPanel()
     local tagName = TAG_LABELS[bucket.myTag or "NONE"] or L["No Status"]
     Theme:SetButtonText(clanPanel.statusBtn, L["My Status: %s"]:format(tagName))
 
+    for id, b in pairs(clanEventFilterButtons) do
+        Theme:SetButtonActive(b, clanEventFilter == id, "default")
+    end
+    for id, b in pairs(clanRightViewButtons) do
+        Theme:SetButtonActive(b, clanRightView == id, "default")
+    end
+
     local peers = ns.Clan and ns.Clan:GetPeersList() or {}
-    local events = ns.Clan and ns.Clan:GetEventsList() or {}
+    local events = ns.Clan and ns.Clan:GetEventsList(clanEventFilter) or {}
     local locked = ns.Clan and ns.Clan:IsMessagingLocked()
     local modeTag = syncEnabled and (locked and L["Locked"] or "SCentral1") or L["Local only"]
     clanPanel.syncStatus:SetText(string.format("SCentral1  ·  %s: %d  ·  [%s]", L["Peers"], #peers, modeTag))
     clanPanel.syncStatus:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
 
     clanPanel.eventsScroll:SetData(events, L["No Clan event calls yet. Click '+ Event Call' to create one!"], false)
-    clanPanel.peersScroll:SetData(peers, L["No Clan peers seen yet. Enable Clan Sync or click 'Sync'."], false)
+
+    if clanRightView == "prof" then
+        local profList = {}
+        for _, item in ipairs(ns.Clan and ns.Clan:GetProfessionsList() or {}) do
+            local copy = {}
+            for k, v in pairs(item) do copy[k] = v end
+            copy._clanView = "prof"
+            table.insert(profList, copy)
+        end
+        clanPanel.peersScroll:SetData(profList, L["No Clan professions set yet. Click '+ Prof' above to add yours!"], false)
+    elseif clanRightView == "gchat" then
+        local gcList = {}
+        for _, item in ipairs(ns.Clan and ns.Clan:GetGuildChatLFGList() or {}) do
+            local copy = {}
+            for k, v in pairs(item) do copy[k] = v end
+            copy._clanView = "gchat"
+            table.insert(gcList, copy)
+        end
+        clanPanel.peersScroll:SetData(gcList, L["No /g LFM calls captured yet (enable 'Detect LFM calls in Guild chat' in Settings)."], false)
+    else
+        clanPanel.peersScroll:SetData(peers, L["No Clan peers seen yet. Enable Clan Sync or click 'Sync'."], false)
+    end
 end
 
 local function CreateClanPanel(parent)
@@ -1082,14 +1259,14 @@ local function CreateClanPanel(parent)
         L["Leave unchecked for 100% local Clan tracking, or enable to sync tags and event calls safely with guildmates who also use SocialCentral."]
     )
 
-    local statusBtn = Theme:CreateButton(controlsBar, 138, 22, L["My Status"], "default")
+    local statusBtn = Theme:CreateButton(controlsBar, 124, 22, L["My Status"], "default")
     if statusBtn.label then
         statusBtn.label:ClearAllPoints()
         statusBtn.label:SetPoint("LEFT", 6, 0)
         statusBtn.label:SetPoint("RIGHT", -6, 0)
         statusBtn.label:SetWordWrap(false)
     end
-    statusBtn:SetPoint("LEFT", syncHelp, "RIGHT", 10, 0)
+    statusBtn:SetPoint("LEFT", syncHelp, "RIGHT", 8, 0)
     themeTargets[#themeTargets + 1] = { btn = statusBtn, variant = "default" }
 
     statusBtn:SetScript("OnClick", function(self)
@@ -1125,8 +1302,8 @@ local function CreateClanPanel(parent)
         L["Click 'My Status', pick an activity tag, and optionally add a short note like '+10 tank LFG'."]
     )
 
-    local newEventBtn = Theme:CreateButton(controlsBar, 108, 22, L["+ Event Call"], "primary")
-    newEventBtn:SetPoint("LEFT", statusHelp, "RIGHT", 10, 0)
+    local newEventBtn = Theme:CreateButton(controlsBar, 96, 22, L["+ Event Call"], "primary")
+    newEventBtn:SetPoint("LEFT", statusHelp, "RIGHT", 8, 0)
     newEventBtn:SetScript("OnClick", OpenEventModal)
     themeTargets[#themeTargets + 1] = { btn = newEventBtn, variant = "primary" }
 
@@ -1135,11 +1312,28 @@ local function CreateClanPanel(parent)
         newEventBtn,
         L["Help: Clan Event Calls"],
         L["Creates guild-wide group calls for Dungeons, M+, Raids, World Bosses, or PvP where guildmates sign up as Tank, Healer, DPS, or Maybe."],
-        L["Click '+ Event Call' to post an event, click T / H / D on any row to sign up, hover for the full roster, or right-click for more options."]
+        L["Click '+ Event Call' to post an event, click T / H / D on any row to sign up, hover for the full roster, or right-click to invite applicants or close."]
     )
 
-    local syncBtn = Theme:CreateButton(controlsBar, 64, 22, L["Sync"], "default")
-    syncBtn:SetPoint("LEFT", eventHelp, "RIGHT", 10, 0)
+    local profBtn = Theme:CreateButton(controlsBar, 74, 22, "+ " .. L["Prof"], "default")
+    profBtn:SetPoint("LEFT", eventHelp, "RIGHT", 8, 0)
+    profBtn:SetScript("OnClick", function()
+        if ns.SocialPanels and ns.SocialPanels.OpenProfessionModal then
+            ns.SocialPanels:OpenProfessionModal()
+        end
+    end)
+    themeTargets[#themeTargets + 1] = { btn = profBtn, variant = "default" }
+
+    local profHelp = AddHelp(
+        controlsBar,
+        profBtn,
+        L["Help: Clan Professions"],
+        L["Share up to 2 crafting professions and a short service note (e.g. Flasks, Lariat, Enchanting) with guildmates using SocialCentral."],
+        L["Click '+ Prof' to set your professions, then view the 'Professions' subtab on the right panel to find guild crafters."]
+    )
+
+    local syncBtn = Theme:CreateButton(controlsBar, 54, 22, L["Sync"], "default")
+    syncBtn:SetPoint("LEFT", profHelp, "RIGHT", 8, 0)
     syncBtn:SetScript("OnClick", function()
         if ns.Clan then ns.Clan:RequestClanSync() end
     end)
@@ -1170,11 +1364,39 @@ local function CreateClanPanel(parent)
         eventsTitle,
         L["Help: Clan Event Calls"],
         L["Creates guild-wide group calls for Dungeons, M+, Raids, World Bosses, or PvP where guildmates sign up as Tank, Healer, DPS, or Maybe."],
-        L["Click '+ Event Call' to post an event, click T / H / D on any row to sign up, hover for the full roster, or right-click for more options."]
+        L["Click '+ Event Call' to post an event, click T / H / D on any row to sign up, hover for the full roster, or right-click to invite applicants or close."]
     )
 
+    local evtFilterRow = CreateFrame("Frame", nil, eventsCard)
+    evtFilterRow:SetPoint("TOPLEFT", 8, -28)
+    evtFilterRow:SetPoint("TOPRIGHT", -8, -28)
+    evtFilterRow:SetHeight(22)
+
+    local evtFilters = {
+        { id = "all", label = L["All"], w = 52 },
+        { id = "open", label = L["Open Only"], w = 78 },
+        { id = "need_tank", label = L["Need T"], w = 66 },
+        { id = "need_heal", label = L["Need H"], w = 66 },
+    }
+    local prevEvtF
+    for _, ef in ipairs(evtFilters) do
+        local b = Theme:CreateButton(evtFilterRow, ef.w, 20, ef.label, "default")
+        if not prevEvtF then
+            b:SetPoint("LEFT", evtFilterRow, "LEFT", 0, 0)
+        else
+            b:SetPoint("LEFT", prevEvtF, "RIGHT", 4, 0)
+        end
+        b:SetScript("OnClick", function()
+            clanEventFilter = ef.id
+            UpdateClanPanel()
+        end)
+        clanEventFilterButtons[ef.id] = b
+        themeTargets[#themeTargets + 1] = { btn = b, variant = "default" }
+        prevEvtF = b
+    end
+
     local eventsHolder = CreateFrame("Frame", nil, eventsCard)
-    eventsHolder:SetPoint("TOPLEFT", 6, -28)
+    eventsHolder:SetPoint("TOPLEFT", 6, -54)
     eventsHolder:SetPoint("BOTTOMRIGHT", -6, 6)
     local eventsScroll = Theme:CreateScrollList(eventsHolder, 54, CreateEventRow, UpdateEventRow)
     eventsScroll.container:SetAllPoints()
@@ -1191,11 +1413,38 @@ local function CreateClanPanel(parent)
         peersTitle,
         L["Help: Clan Sync & Roster"],
         L["Manually requests fresh status tags from online guildmates without background spam loops (max once every 5s, disabled in combat)."],
-        L["Check 'Clan Sync' to enable guild addon comms, then click 'Sync' whenever you log in or want refreshed guildmate tags."]
+        L["Switch between 'Peers', 'Professions', and 'Guild Chat' LFM sightings using the filter buttons below."]
     )
 
+    local rightViewRow = CreateFrame("Frame", nil, peersCard)
+    rightViewRow:SetPoint("TOPLEFT", 8, -28)
+    rightViewRow:SetPoint("TOPRIGHT", -8, -28)
+    rightViewRow:SetHeight(22)
+
+    local rightViews = {
+        { id = "peers", label = L["Peers"], w = 72 },
+        { id = "prof", label = L["Professions"], w = 96 },
+        { id = "gchat", label = L["Guild Chat"], w = 92 },
+    }
+    local prevRV
+    for _, rv in ipairs(rightViews) do
+        local b = Theme:CreateButton(rightViewRow, rv.w, 20, rv.label, "default")
+        if not prevRV then
+            b:SetPoint("LEFT", rightViewRow, "LEFT", 0, 0)
+        else
+            b:SetPoint("LEFT", prevRV, "RIGHT", 4, 0)
+        end
+        b:SetScript("OnClick", function()
+            clanRightView = rv.id
+            UpdateClanPanel()
+        end)
+        clanRightViewButtons[rv.id] = b
+        themeTargets[#themeTargets + 1] = { btn = b, variant = "default" }
+        prevRV = b
+    end
+
     local peersHolder = CreateFrame("Frame", nil, peersCard)
-    peersHolder:SetPoint("TOPLEFT", 6, -28)
+    peersHolder:SetPoint("TOPLEFT", 6, -54)
     peersHolder:SetPoint("BOTTOMRIGHT", -6, 6)
     local peersScroll = Theme:CreateScrollList(peersHolder, 42, CreatePeerRow, UpdatePeerRow)
     peersScroll.container:SetAllPoints()
@@ -1256,18 +1505,24 @@ local function ApplyTheme()
         if clanPanel.eventsScroll then clanPanel.eventsScroll:RefreshTheme() end
         if clanPanel.peersScroll then clanPanel.peersScroll:RefreshTheme() end
     end
+    if groupPanel and groupPanel.RefreshTheme then
+        groupPanel:RefreshTheme()
+    end
+    if chatPanel and chatPanel.RefreshTheme then
+        chatPanel:RefreshTheme()
+    end
     UI:Refresh()
 end
 
 local function BuildMainFrame()
     frame = CreateFrame("Frame", "SocialCentralFrame", UIParent, "BackdropTemplate")
-    local w = ns.db and ns.db.window or { width = 760, height = 500 }
-    frame:SetSize(w.width or 760, w.height or 500)
+    local w = ns.db and ns.db.window or { width = 790, height = 520 }
+    frame:SetSize(w.width or 790, w.height or 520)
     if frame.SetResizeBounds then
-        frame:SetResizeBounds(640, 420, 1100, 800)
+        frame:SetResizeBounds(680, 440, 1140, 840)
     elseif frame.SetMinResize then
-        frame:SetMinResize(640, 420)
-        frame:SetMaxResize(1100, 800)
+        frame:SetMinResize(680, 440)
+        frame:SetMaxResize(1140, 840)
     end
 
     if w.point and w.x and w.y then
@@ -1380,15 +1635,24 @@ local function BuildMainFrame()
     tabBar:SetHeight(28)
 
     local tabDefs = {
-        { id = "watchlist", label = L["Watchlist"], width = 122 },
-        { id = "social", label = L["Social"], width = 110 },
-        { id = "nearby", label = L["Nearby"], width = 114 },
-        { id = "alts", label = L["Alts"], width = 104 },
-        { id = "clan", label = L["Clan"], width = 88 },
+        { id = "watchlist", label = L["Watchlist"], width = 108 },
+        { id = "social", label = L["Social"], width = 94 },
+        { id = "clan", label = L["Clan"], width = 80 },
+        { id = "group", label = L["Group"], width = 90 },
+        { id = "chat", label = L["Chat"], width = 88 },
+        { id = "nearby", label = L["Nearby"], width = 98 },
+        { id = "alts", label = L["Alts"], width = 84 },
     }
     local prevTab
     for _, def in ipairs(tabDefs) do
         local btn = Theme:CreateButton(tabBar, def.width, 26, def.label, "tab")
+        if btn.label then
+            btn.label:ClearAllPoints()
+            btn.label:SetPoint("LEFT", 4, 0)
+            btn.label:SetPoint("RIGHT", -4, 0)
+            btn.label:SetJustifyH("CENTER")
+            btn.label:SetWordWrap(false)
+        end
         if not prevTab then
             btn:SetPoint("LEFT", tabBar, "LEFT", 0, 0)
         else
@@ -1398,6 +1662,8 @@ local function BuildMainFrame()
             activeTab = def.id
             if def.id == "social" and ns.Social then
                 ns.Social:RequestRosters(false)
+            elseif def.id == "group" and ns.Group then
+                ns.Group:Scan()
             end
             UI:Refresh(true)
         end)
@@ -1586,10 +1852,10 @@ local function BuildMainFrame()
     )
 
     local filterDefs = {
-        { id = "all", label = L["All"], width = 62 },
-        { id = "guild", label = L["Guild"], width = 72 },
-        { id = "friend", label = L["Friends"], width = 78 },
-        { id = "bnet", label = L["Battle.net"], width = 86 },
+        { id = "all", label = L["All"], width = 54 },
+        { id = "guild", label = L["Guild"], width = 66 },
+        { id = "friend", label = L["Friends"], width = 72 },
+        { id = "bnet", label = L["Battle.net"], width = 82 },
     }
     local prevFilter
     for _, def in ipairs(filterDefs) do
@@ -1597,7 +1863,7 @@ local function BuildMainFrame()
         if not prevFilter then
             btn:SetPoint("LEFT", socialBar, "LEFT", 0, 0)
         else
-            btn:SetPoint("LEFT", prevFilter, "RIGHT", 6, 0)
+            btn:SetPoint("LEFT", prevFilter, "RIGHT", 5, 0)
         end
         btn:SetScript("OnClick", function()
             socialFilter = def.id
@@ -1607,6 +1873,52 @@ local function BuildMainFrame()
         themeTargets[#themeTargets + 1] = { btn = btn, variant = "default" }
         prevFilter = btn
     end
+
+    local socialFolderBtn = Theme:CreateButton(socialBar, 108, 22, L["All Folders"], "default")
+    if socialFolderBtn.label then
+        socialFolderBtn.label:ClearAllPoints()
+        socialFolderBtn.label:SetPoint("LEFT", 4, 0)
+        socialFolderBtn.label:SetPoint("RIGHT", -4, 0)
+        socialFolderBtn.label:SetWordWrap(false)
+    end
+    socialFolderBtn:SetPoint("LEFT", prevFilter, "RIGHT", 6, 0)
+    themeTargets[#themeTargets + 1] = { btn = socialFolderBtn, variant = "default" }
+    frame.socialFolderBtn = socialFolderBtn
+
+    socialFolderBtn:SetScript("OnClick", function(self)
+        local folders = ns.Store and ns.Store:GetSocialFolders() or {}
+        if MenuUtil and MenuUtil.CreateContextMenu then
+            MenuUtil.CreateContextMenu(self, function(_, root)
+                local addChoice = root.CreateRadio or root.CreateCheckbox
+                root:CreateTitle(L["Social Folders"])
+                addChoice(root, L["All Folders"], function()
+                    return socialFolderFilter == "all"
+                end, function()
+                    socialFolderFilter = "all"
+                    UI:Refresh(true)
+                end)
+                for _, fName in ipairs(folders) do
+                    local fn = fName
+                    addChoice(root, fn, function()
+                        return socialFolderFilter == fn
+                    end, function()
+                        socialFolderFilter = fn
+                        UI:Refresh(true)
+                    end)
+                end
+            end)
+        else
+            local opts = { "all" }
+            for _, fName in ipairs(folders) do table.insert(opts, fName) end
+            local nextIdx = 1
+            for idx, v in ipairs(opts) do
+                if v == socialFolderFilter then nextIdx = (idx % #opts) + 1; break end
+            end
+            socialFolderFilter = opts[nextIdx]
+            UI:Refresh(true)
+        end
+    end)
+
     if socialHelp then
         socialHelp:Raise()
     end
@@ -1708,6 +2020,10 @@ local function BuildMainFrame()
     scrollList.container:SetAllPoints()
 
     clanPanel = CreateClanPanel(content)
+    groupPanel = ns.SocialPanels and ns.SocialPanels:CreateGroupPanel(content)
+    if groupPanel then groupPanel:Hide() end
+    chatPanel = ns.SocialPanels and ns.SocialPanels:CreateChatPanel(content)
+    if chatPanel then chatPanel:Hide() end
 
     -- Resize Grip
     local grip = CreateFrame("Button", nil, frame)
@@ -1728,7 +2044,7 @@ local function BuildMainFrame()
         ticker = C_Timer.NewTicker(1, function()
             if frame and frame:IsShown() then
                 UpdateWhoButtons()
-                if activeTab ~= "clan" and scrollList then
+                if activeTab ~= "clan" and activeTab ~= "group" and activeTab ~= "chat" and scrollList then
                     scrollList:Render()
                 end
             end
@@ -1764,12 +2080,16 @@ function UI:Refresh(resetScroll)
     local socialCount = ns.Social and #ns.Social:GetList("all") or 0
     local nearbyCount = ns.Nearby and #ns.Nearby:GetList() or 0
     local altsCount = ns.Store and #ns.Store:GetAltsList() or 0
+    local groupCount = ns.Group and #ns.Group:GetMembers() or 0
+    local chatUnread = ns.Chat and ns.Chat:GetTotalUnread() or 0
 
     local counts = {
         watchlist = watchCount,
         social = socialCount,
         nearby = nearbyCount,
         alts = altsCount,
+        group = groupCount > 0 and groupCount or nil,
+        chat = chatUnread > 0 and chatUnread or nil,
     }
 
     for id, info in pairs(tabButtons) do
@@ -1785,7 +2105,7 @@ function UI:Refresh(resetScroll)
 
     if frame.updateBtn then
         local remoteVer = ns.Clan and ns.Clan.latestRemoteVersion
-        local hasUpdate = remoteVer and Compat.CompareSemVer(remoteVer, ns.version or "0.2.0") > 0
+        local hasUpdate = remoteVer and Compat.CompareSemVer(remoteVer, ns.version or "0.2.2") > 0
         if hasUpdate then
             Theme:SetButtonText(frame.updateBtn, L["Update %s"]:format("v" .. remoteVer))
             Theme:SetButtonActive(frame.updateBtn, true, "primary")
@@ -1808,7 +2128,21 @@ function UI:Refresh(resetScroll)
         end
     end
 
-    frame.filterBar:SetShown(activeTab ~= "clan")
+    if ns.Store and socialFolderFilter ~= "all" then
+        local validFolder = false
+        for _, fn in ipairs(ns.Store:GetSocialFolders()) do
+            if fn == socialFolderFilter then
+                validFolder = true
+                break
+            end
+        end
+        if not validFolder then
+            socialFolderFilter = "all"
+        end
+    end
+
+    local isFullPanel = (activeTab == "clan" or activeTab == "group" or activeTab == "chat")
+    frame.filterBar:SetShown(not isFullPanel)
     frame.socialBar:SetShown(activeTab == "social")
     frame.watchFilterBar:SetShown(activeTab == "watchlist")
     frame.altsBar:SetShown(activeTab == "alts")
@@ -1825,6 +2159,11 @@ function UI:Refresh(resetScroll)
         Theme:SetButtonText(frame.groupFilterBtn, groupLabel)
         Theme:SetButtonActive(frame.groupFilterBtn, watchlistGroupFilter ~= "all")
     end
+    if frame.socialFolderBtn then
+        local fLbl = socialFolderFilter == "all" and L["All Folders"] or socialFolderFilter
+        Theme:SetButtonText(frame.socialFolderBtn, fLbl)
+        Theme:SetButtonActive(frame.socialFolderBtn, socialFolderFilter ~= "all")
+    end
     if frame.sortBtn then
         local mode = (ns.db and ns.db.settings and ns.db.settings.sortBy) or "status"
         Theme:SetButtonText(frame.sortBtn, GetSortLabel(mode))
@@ -1840,20 +2179,25 @@ function UI:Refresh(resetScroll)
     frame.content:ClearAllPoints()
     if activeTab == "watchlist" then
         frame.content:SetPoint("TOPLEFT", frame.watchBar, "BOTTOMLEFT", 0, -8)
-    elseif activeTab == "clan" then
+    elseif isFullPanel then
         frame.content:SetPoint("TOPLEFT", tabButtons.watchlist.btn, "BOTTOMLEFT", 0, -10)
     else
         frame.content:SetPoint("TOPLEFT", frame.filterBar, "BOTTOMLEFT", 0, -8)
     end
     frame.content:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, 16)
 
+    clanPanel:SetShown(activeTab == "clan")
+    if groupPanel then groupPanel:SetShown(activeTab == "group") end
+    if chatPanel then chatPanel:SetShown(activeTab == "chat") end
+    scrollList.container:SetShown(not isFullPanel)
+
     if activeTab == "clan" then
-        scrollList.container:Hide()
-        clanPanel:Show()
         UpdateClanPanel()
+    elseif activeTab == "group" and groupPanel then
+        groupPanel:Refresh(resetScroll)
+    elseif activeTab == "chat" and chatPanel then
+        chatPanel:Refresh(resetScroll)
     else
-        clanPanel:Hide()
-        scrollList.container:Show()
         local emptyText = activeTab == "watchlist" and L["Watchlist is empty."] or L["No entries match your filter."]
         scrollList:SetData(BuildFilteredRows(), emptyText, resetScroll)
     end
@@ -1874,6 +2218,17 @@ function UI:Hide()
     end
 end
 
+function UI:OpenTab(tabId)
+    if not frame then
+        BuildMainFrame()
+    end
+    if tabId and tabButtons[tabId] then
+        activeTab = tabId
+    end
+    frame:Show()
+    UI:Refresh(true)
+end
+
 function UI:Toggle()
     if not frame then
         BuildMainFrame()
@@ -1887,7 +2242,7 @@ function UI:Toggle()
     end
 end
 
-for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "ALTS_UPDATED", "CLAN_UPDATED", "VERSION_UPDATE_FOUND" }) do
+for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "ALTS_UPDATED", "CLAN_UPDATED", "GROUP_UPDATED", "CHAT_UPDATED", "VERSION_UPDATE_FOUND" }) do
     ns:On(ev, function()
         UI:Refresh(false)
     end)

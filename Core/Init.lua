@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.1"
-if ns.version:find("^@") then ns.version = "0.2.1" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.2"
+if ns.version:find("^@") then ns.version = "0.2.2" end
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
 
@@ -84,15 +84,23 @@ local DEFAULTS = {
         },
         versionCheck = true,       -- passive DBM-style peer version check (rate-limited)
         clanSync = false,          -- opt-in for clan guild addon messages (status/events/signups)
+        guildChatFinder = false,   -- opt-in passive /g LFM line detector (read-only, zero auto-reply)
+        autoStatusInstance = false, -- opt-in contextual activity tag out-of-combat
+        chatSound = true,          -- subtle chime on incoming whisper or room message
+        chatHistoryLimit = 30,     -- local lines kept per character conversation thread
     },
     window = {
         point = nil,
-        width = 760,
-        height = 500,
+        width = 790,
+        height = 520,
     },
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
-    clan = {},                     -- [guildScopeKey] = { myTag, myNote, peers, events }
+    clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
+    socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note } }
+    recentCompanions = {},         -- [scopeKey] = { [lookupKey] = { name, classFile, level, zone, role, lastSeen } }
+    chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
+    chatRooms = {},                -- [scopeKey] = { [roomId] = { id, name, owner, scope, members } }
 }
 
 local function ApplyDefaults(target, defaults)
@@ -128,6 +136,18 @@ local function HandleSlash(raw)
     elseif cmd == "update" or cmd == "version" then
         if ns.UI and ns.UI.OpenUpdateModal then
             ns.UI:OpenUpdateModal()
+        end
+    elseif cmd == "chat" or cmd == "rooms" then
+        if ns.UI and ns.UI.OpenTab then
+            ns.UI:OpenTab("chat")
+        end
+    elseif cmd == "group" or cmd == "instance" then
+        if ns.UI and ns.UI.OpenTab then
+            ns.UI:OpenTab("group")
+        end
+    elseif cmd == "clan" or cmd == "lfg" then
+        if ns.UI and ns.UI.OpenTab then
+            ns.UI:OpenTab("clan")
         end
     elseif cmd == "config" or cmd == "settings" then
         if ns.Settings and ns.Settings.Open then

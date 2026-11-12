@@ -3,6 +3,14 @@
 All notable changes to **SocialCentral** are documented in this file.
 Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Per project policy, regular updates increment the second decimal (`PATCH`, e.g., `0.2.0` -> `0.2.1`).
 
+## [0.2.2] - 2026-11-12
+### Added
+- **Conversations Hub & Private Chat Rooms (`Providers/Chat.lua` & `Chat` tab):** Unified thread list for `WHISPER`, `BN_WHISPER`, `PARTY`/`RAID`/`INSTANCE_CHAT`, `GUILD`/`OFFICER`, and **Addon Private Chat Rooms** (`SCentral1` `RMI`/`RMJ`/`RML`/`RM` + `C_BattleNet.SendGameData`), unread counters, configurable audio chime (`chatSound`), local character-whisper history (`chatHistoryLimit`, zero BattleTag/Real ID saved), safe chat-box prefill for native channels, and manual `Temp Channel` (`/join` + `/leave` helper).
+- **Instance / Group Hub & Recent Companions (`Providers/Group.lua` & `Group` tab):** Live `PARTY`/`RAID`/`INSTANCE_CHAT` roster with Class, Level, Tank/Healer/DPS roles, Leader & Ready Check tracking, hardware-gated Ready Check & Promote controls, safe `/p` / `/ra` / `/i` status announcer, and 7-day `Recent Companions` log.
+- **Clan LFG Finder, Guild Professions & Auto-Status:** Role slots (`Need T / H / D`) and `Min Lv` on Clan Event Calls, Open/Closed toggle (`EVS`), Reannounce, 1-click leader applicant invite, LFG filter chips (`Open Only`, `Need T`, `Need H`), Guild Professions directory (`PRF`, 13 professions + Craft Note), opt-in read-only `/g` LFM detector (`guildChatFinder`), and opt-in `autoStatusInstance`.
+- **Social Folders, Main Linking & Social Cards (`socialMeta`):** Organize players into custom folders (`M+ Team`, `Guild Core`, etc.), link alts to a Main character, and attach persistent notes with a Folder filter in the `Social` tab.
+- **Slash Shortcuts, Minimap Integration & Complete Trilingual/Help Coverage:** Added `/sc chat`, `/sc group`, `/sc clan`, Minimap unread/group tooltips & tab shortcuts, 4 new Settings controls with `?` help buttons, and 100% EN/ptBR/esES parity.
+
 ## [0.2.1] - 2026-11-12
 ### Added
 - **Official AddOn Icon (`Media\icon.tga` & `Assets\SocialCentral-logo.png`):** Custom stylized Warcraft social medallion (`128x128` 32-bit RGBA TGA) wired into `## IconTexture`, Addon Compartment, LibDBIcon/Minimap button, and the Main Window title header.

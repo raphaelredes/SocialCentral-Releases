@@ -115,6 +115,18 @@ local function PopulateTooltip(tt)
         end
     end
 
+    local unreadChat = ns.Chat and ns.Chat:GetTotalUnread() or 0
+    local grpCount = ns.Group and #ns.Group:GetMembers() or 0
+    if unreadChat > 0 or grpCount > 0 then
+        tt:AddLine(" ")
+        if unreadChat > 0 then
+            tt:AddDoubleLine(L["Unread Chat"], tostring(unreadChat), 0.78, 0.84, 0.92, 0.35, 0.95, 0.55)
+        end
+        if grpCount > 0 then
+            tt:AddDoubleLine(L["Group"], tostring(grpCount), 0.78, 0.84, 0.92, 0.45, 0.80, 1.0)
+        end
+    end
+
     tt:AddLine(" ")
     tt:AddLine(L["Click: toggle window\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
 end
@@ -125,6 +137,15 @@ local function OpenContextMenu(anchor)
             root:CreateTitle("SocialCentral")
             root:CreateButton(L["Open SocialCentral"], function()
                 if ns.UI then ns.UI:Toggle() end
+            end)
+            root:CreateButton(L["Open Conversations"], function()
+                if ns.UI and ns.UI.OpenTab then ns.UI:OpenTab("chat") end
+            end)
+            root:CreateButton(L["Open Group"], function()
+                if ns.UI and ns.UI.OpenTab then ns.UI:OpenTab("group") end
+            end)
+            root:CreateButton(L["Open Clan"], function()
+                if ns.UI and ns.UI.OpenTab then ns.UI:OpenTab("clan") end
             end)
             root:CreateButton(L["Check Next"], function()
                 if ns.Watchlist then ns.Watchlist:CheckNext() end
@@ -321,6 +342,6 @@ function MinimapBtn:Update()
     end
 end
 
-for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED" }) do
+for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "GROUP_UPDATED", "CHAT_UPDATED" }) do
     ns:On(ev, UpdateBadge)
 end

@@ -85,7 +85,8 @@ local function CreateChoiceRow(parent, anchorTo, yOffset, options, getter, sette
     return row
 end
 
-local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit, getter, setter)
+local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit, getter, setter, stepSize)
+    local step = stepSize or 1
     local row = CreateFrame("Frame", nil, parent)
     row:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, yOffset or -6)
     row:SetSize(320, 26)
@@ -95,7 +96,7 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
 
     local valueText = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     valueText:SetPoint("LEFT", minus, "RIGHT", 10, 0)
-    valueText:SetWidth(60)
+    valueText:SetWidth(76)
     valueText:SetJustifyH("CENTER")
 
     local plus = ns.Theme:CreateButton(row, 28, 24, "+", "default")
@@ -108,13 +109,13 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
     end
 
     minus:SetScript("OnClick", function()
-        local v = math.max(minVal, getter() - 1)
+        local v = math.max(minVal, getter() - step)
         setter(v)
         RefreshValue()
     end)
 
     plus:SetScript("OnClick", function()
-        local v = math.min(maxVal, getter() + 1)
+        local v = math.min(maxVal, getter() + step)
         setter(v)
         RefreshValue()
     end)
@@ -132,12 +133,12 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 650)
+    content:SetSize(590, 860)
     scrollFrame:SetScrollChild(content)
 
     local title = content:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", 14, -14)
-    title:SetText("SocialCentral  v" .. (ns.version or "0.2.0"))
+    title:SetText("SocialCentral  v" .. (ns.version or "0.2.2"))
 
     local subtitle = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
@@ -316,7 +317,7 @@ local function BuildPanel()
         L["Keep enabled for in-game update chat links. Click 'GitHub Releases / Updater' to copy the public GitHub download link or Windows updater command."]
     )
 
-    CreateCheckbox(
+    local clanSyncCb = CreateCheckbox(
         content,
         L["Enable Clan guild sync (opt-in)"],
         updateLinkBtn,
@@ -330,6 +331,68 @@ local function BuildPanel()
         L["Enables encrypted-free opt-in guild addon messages (SCentral1) to share Status Tags, Event Calls, and Dungeon/Raid Signups with guildmates."],
         L["Leave unchecked for 100% local Clan tracking, or enable to sync tags and event calls safely with guildmates who also use SocialCentral."]
     )
+
+    local guildFinderCb = CreateCheckbox(
+        content,
+        L["Detect LFM calls in Guild chat (opt-in, read-only)"],
+        clanSyncCb,
+        -6,
+        function() return ns.db and ns.db.settings.guildChatFinder end,
+        function(checked)
+            ns.db.settings.guildChatFinder = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: Guild LFM Detector"],
+        L["Passively reads Guild chat lines looking for LFG/LFM keywords so guild calls show inside the Clan tab without running any scan or sending messages."],
+        L["Enable to capture guild group requests automatically; click a sighting in the Clan tab to whisper or request invite."]
+    )
+
+    local autoStatusCb = CreateCheckbox(
+        content,
+        L["Auto-tag Busy inside dungeons/raids (opt-in)"],
+        guildFinderCb,
+        -6,
+        function() return ns.db and ns.db.settings.autoStatusInstance end,
+        function(checked)
+            ns.db.settings.autoStatusInstance = checked
+            if ns.Clan and ns.Clan.ApplyAutoInstanceStatus then
+                ns.Clan:ApplyAutoInstanceStatus()
+            end
+        end,
+        L["Help: Auto Instance Status"],
+        L["Automatically sets your Clan Status Tag to 'Busy' while inside a Dungeon or Raid instance and restores 'None' outside."],
+        L["Respects combat lockdown and only broadcasts when Clan Guild Sync is also enabled."]
+    )
+
+    local chatSoundCb = CreateCheckbox(
+        content,
+        L["Play chime on incoming Whisper / Private Room message"],
+        autoStatusCb,
+        -6,
+        function() return ns.db and ns.db.settings.chatSound ~= false end,
+        function(checked)
+            ns.db.settings.chatSound = checked
+        end,
+        L["Help: Chat Sound Alert"],
+        L["Plays a subtle audio chime when a Whisper, Battle.net whisper, or Addon Private Room message arrives while that thread is not focused."],
+        L["Uncheck if you prefer completely silent message logs inside the Chat tab."]
+    )
+
+    local histHeader = AddSectionHeader(
+        content,
+        L["Character Whisper history per thread (0 = off)"],
+        chatSoundCb,
+        -10,
+        L["Help: Whisper History Limit"],
+        L["Saves the last N lines per Character Whisper locally (0 to 60 lines). Battle.net Real IDs and BattleTags are never persisted to disk."],
+        L["Use '-' and '+' in steps of 10. Set to 0 if you want session-only whispers without SavedVariables history."]
+    )
+    CreateStepperRow(content, histHeader, -6, 0, 60, L["lines"], function()
+        return ns.db and ns.db.settings.chatHistoryLimit or 30
+    end, function(val)
+        ns.db.settings.chatHistoryLimit = val
+        ns:Emit("CHAT_UPDATED")
+    end, 10)
 
     syncFns[#syncFns + 1] = function()
         ns.Theme:SetButtonActive(updateLinkBtn, false, "default")

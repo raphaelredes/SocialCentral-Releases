@@ -11,12 +11,16 @@ Unified social, community, clan, and compliant watchlist addon built specificall
 - **Live Social Hub:** View online Guild members, character Friends, and Battle.net friends in one searchable list with quick Whisper / Invite actions.
 - **Friendly Nearby Radar:** Passively records friendly players seen via nameplates, target/mouseover, group, and chat (respecting `16001` secret-value protections and failing closed against hostile PvP units).
 - **Account Alts & Total Gold:** Tracks your own characters across logins (level, zone, rested XP, gold, last active timestamp, plus total gold sum).
-- **Clan Hub:** Shared Guild activity Status Tags (`LFG`, `M+`, `Raid`, `PvP`, etc.), Guild Event Calls, Dungeon/Raid role Signups (`Tank` / `Healer` / `DPS` / `Maybe`), and Peer Roster via opt-in `SCentral1` addon messages.
-- **LibDBIcon-Style Minimap Button & In-Game Help (`?`):** Dynamic online counter badge, square/round minimap support, Shift+Click quick `/who`, Right-click quick menu, optional LDB broker support, and a `?` help button beside every option.
+- **Clan Hub & Guild LFG:** Shared Guild activity Status Tags (`LFG`, `M+`, `Raid`, `PvP`, etc.), Event Calls with role slots (`T/H/D` & `Min Lv`), LFG filters, 1-click applicant invites, Guild Professions directory (`PRF`), opt-in passive `/g` LFM detector, and opt-in instance auto-Busy status via `SCentral1`.
+- **Group / Instance Hub & Recent Companions:** Live Party, Raid, and Instance roster (`T/H/D` role summary, Leader & Ready Check badges), Ready Check & Promote actions, safe group chat announcement, plus a 7-day Recent Companions directory.
+- **Conversations & Private Rooms:** Unified thread inbox for Character Whispers, Battle.net whispers, Group/Guild chat, and **Addon Private Chat Rooms** (`RMI`/`RMJ`/`RM`), plus optional manual `Temp Channel` (`/join`), without storing BattleTags/Real IDs or calling restricted chat automation APIs.
+- **Social Folders & Main Linking:** Tag contacts with custom Folders, linked Main characters, and notes across Social, Watchlist, Group, and Chat.
+- **LibDBIcon-Style Minimap Button & In-Game Help (`?`):** Dynamic online counter badge, square/round minimap support, Shift+Click quick `/who`, Right-click quick menu (including Chat / Group / Clan shortcuts), optional LDB broker support, and a `?` help button beside every option.
 - **Three Languages Automatically:** Follows your World of Warcraft Game Options in **English**, **Português (`ptBR`/`ptPT`)**, and **Español (`esES`/`esMX`)**.
 
 ## Slash Commands
 - `/sc` or `/socialcentral` — Toggle main window
+- `/sc chat` / `/sc group` / `/sc clan` — Jump directly to Conversations, Group, or Clan tab
 - `/sc add <Name[-Surname]>` — Add a character to your Watchlist
 - `/sc check <Name[-Surname]>` (or `/sc who <Name>`) — Add (if new) and run one safe `/who` check outside combat
 - `/sc check` — Check the oldest Watchlist entry
