@@ -5,7 +5,7 @@
 ## Notes-esES: Central social para WoW: Forever — amigos en vivo, hermandad, Battle.net, alts de la cuenta y lista adicional con /who.
 ## Notes-esMX: Central social para WoW: Forever — amigos en vivo, hermandad, Battle.net, alts de la cuenta y lista adicional con /who.
 ## Author: raphaelredes
-## Version: 0.2.0
+## Version: 0.2.1
 ## Category: Social
 ## Category-ptBR: Social
 ## Category-esES: Social
@@ -16,7 +16,7 @@
 ## SavedVariables: SocialCentralDB
 ## SavedVariablesPerCharacter: SocialCentralCharDB
 ## LoadSavedVariablesFirst: 1
-## IconTexture: Interface\FriendsFrame\UI-Toast-FriendOnlineIcon
+## IconTexture: Interface\AddOns\SocialCentral\Media\icon
 ## AddonCompartmentFunc: SocialCentral_OnAddonCompartmentClick
 ## AddonCompartmentFuncOnEnter: SocialCentral_OnAddonCompartmentEnter
 ## AddonCompartmentFuncOnLeave: SocialCentral_OnAddonCompartmentLeave

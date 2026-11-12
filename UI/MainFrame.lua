@@ -1297,8 +1297,13 @@ local function BuildMainFrame()
     end)
     frame.header = header
 
+    local headerIcon = header:CreateTexture(nil, "ARTWORK")
+    headerIcon:SetSize(22, 22)
+    headerIcon:SetPoint("LEFT", 12, 0)
+    headerIcon:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\icon")
+
     local title = header:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("LEFT", 14, 0)
+    title:SetPoint("LEFT", headerIcon, "RIGHT", 7, 0)
     title:SetText("SocialCentral")
 
     local verText = header:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")

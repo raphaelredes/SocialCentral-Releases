@@ -7,6 +7,7 @@ ignore:
   - .pkgmeta
   - .agents
   - AGENTS.md
+  - Assets
   - README.md
   - SECURITY_POLICY.md
   - scripts

@@ -9,7 +9,7 @@ ns.Minimap = MinimapBtn
 local RING_TEX = 136430
 local BG_TEX = 136467
 local HIGHLIGHT_TEX = 136477
-local ICON_TEX = "Interface\\FriendsFrame\\UI-Toast-FriendOnlineIcon"
+local ICON_TEX = "Interface\\AddOns\\SocialCentral\\Media\\icon"
 local RADIUS_OFFSET = 8
 
 local button
@@ -68,7 +68,7 @@ local function SetIconPressed(pressed)
     if not button or not button.icon then
         return
     end
-    local inset = pressed and 0.0 or 0.06
+    local inset = pressed and 0.04 or 0.0
     button.icon:SetTexCoord(inset, 1 - inset, inset, 1 - inset)
 end
 
@@ -237,7 +237,7 @@ local function EnsureButton()
     background:SetTexture(BG_TEX)
 
     local icon = button:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(18, 18)
+    icon:SetSize(20, 20)
     icon:SetPoint("CENTER")
     icon:SetTexture(ICON_TEX)
     button.icon = icon

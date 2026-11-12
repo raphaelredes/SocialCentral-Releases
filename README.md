@@ -1,5 +1,9 @@
 # SocialCentral
 
+<p align="center">
+  <img src="Assets/SocialCentral-logo.png" alt="SocialCentral Official Emblem" width="140" />
+</p>
+
 Unified social, community, clan, and compliant watchlist addon built specifically for **World of Warcraft: Forever** (`Interface: 16001`).
 
 ## Features

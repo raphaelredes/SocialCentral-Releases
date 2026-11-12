@@ -1,7 +1,12 @@
 # Changelog
 
 All notable changes to **SocialCentral** are documented in this file.
-Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
+Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Per project policy, regular updates increment the second decimal (`PATCH`, e.g., `0.2.0` -> `0.2.1`).
+
+## [0.2.1] - 2026-11-12
+### Added
+- **Official AddOn Icon (`Media\icon.tga` & `Assets\SocialCentral-logo.png`):** Custom stylized Warcraft social medallion (`128x128` 32-bit RGBA TGA) wired into `## IconTexture`, Addon Compartment, LibDBIcon/Minimap button, and the Main Window title header.
+- **Second-Decimal Versioning Rule:** Persisted mandatory `PATCH` (`0.X.(Y+1)`) bumping policy in `AGENTS.md` and distribution scripts.
 
 ## [0.2.0] - 2026-11-12
 ### Added

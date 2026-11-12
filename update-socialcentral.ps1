@@ -129,7 +129,7 @@ try {
 
     # Security & Blizzard cleanliness whitelist: strictly runtime files enter the game AddOns folder.
     $runtimeFiles = @("SocialCentral.toc", "LICENSE")
-    $runtimeDirs = @("Locales", "Core", "Providers", "UI")
+    $runtimeDirs = @("Locales", "Core", "Providers", "UI", "Media")
 
     $luaFiles = Get-ChildItem -LiteralPath $sourceRoot -Recurse -Filter "*.lua"
     foreach ($lua in $luaFiles) {
