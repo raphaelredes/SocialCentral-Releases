@@ -1,0 +1,13 @@
+package-as: SocialCentral
+
+ignore:
+  - .git
+  - .github
+  - .gitignore
+  - .pkgmeta
+  - .agents
+  - AGENTS.md
+  - README.md
+  - SECURITY_POLICY.md
+  - scripts
+  - Tests

@@ -1,0 +1,39 @@
+## Interface: 16001
+## Title: |cff58a6ffSocial|rCentral
+## Notes: Unified social hub for WoW: Forever — live friends, guild, Battle.net, account alts, and a custom /who watchlist.
+## Notes-ptBR: Central social para WoW: Forever — amigos ao vivo, guilda, Battle.net, alts da conta e lista adicional com /who.
+## Notes-esES: Central social para WoW: Forever — amigos en vivo, hermandad, Battle.net, alts de la cuenta y lista adicional con /who.
+## Notes-esMX: Central social para WoW: Forever — amigos en vivo, hermandad, Battle.net, alts de la cuenta y lista adicional con /who.
+## Author: raphaelredes
+## Version: 0.2.0
+## Category: Social
+## Category-ptBR: Social
+## Category-esES: Social
+## Category-esMX: Social
+## X-License: MIT
+## X-Website: https://github.com/raphaelredes/SocialCentral-Releases
+# ## X-Curse-Project-ID: 0000000
+## SavedVariables: SocialCentralDB
+## SavedVariablesPerCharacter: SocialCentralCharDB
+## LoadSavedVariablesFirst: 1
+## IconTexture: Interface\FriendsFrame\UI-Toast-FriendOnlineIcon
+## AddonCompartmentFunc: SocialCentral_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: SocialCentral_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: SocialCentral_OnAddonCompartmentLeave
+
+Locales\Locale.lua
+
+Core\Compat.lua
+Core\Init.lua
+Core\Store.lua
+
+Providers\Social.lua
+Providers\Nearby.lua
+Providers\Watchlist.lua
+Providers\Alts.lua
+Providers\Clan.lua
+
+UI\Theme.lua
+UI\Minimap.lua
+UI\Settings.lua
+UI\MainFrame.lua
