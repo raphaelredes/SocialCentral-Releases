@@ -2,8 +2,9 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.2"
-if ns.version:find("^@") then ns.version = "0.2.2" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.3"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.3" end
+ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
 
@@ -68,11 +69,13 @@ end
 
 local DEFAULTS = {
     settings = {
-        theme = "dark",            -- "dark" | "native"
-        whoMode = "silent_ui",     -- "silent_ui" | "chat_filter"
-        whoCooldown = 6,           -- seconds between /who hardware-event requests
-        nearbyRetentionMin = 15,   -- minutes to keep passive nearby sightings
-        sortBy = "status",         -- "status" | "name" | "recent"
+        theme = "blizzard",         -- "blizzard" (default) | "dark" (modern optional) | "native"
+        themeChosen = false,        -- first-run visual design picker completed
+        language = "auto",          -- "auto" | "enUS" | "ptBR" | "esES"
+        whoMode = "silent_ui",      -- "silent_ui" | "chat_filter"
+        whoCooldown = 6,            -- seconds between /who hardware-event requests
+        nearbyRetentionMin = 15,    -- minutes to keep passive nearby sightings
+        sortBy = "status",          -- "status" | "name" | "recent"
         alerts = {
             chat = true,
             sound = false,
@@ -82,18 +85,40 @@ local DEFAULTS = {
             angle = 215,
             lock = false,
         },
-        versionCheck = true,       -- passive DBM-style peer version check (rate-limited)
-        clanSync = false,          -- opt-in for clan guild addon messages (status/events/signups)
-        guildChatFinder = false,   -- opt-in passive /g LFM line detector (read-only, zero auto-reply)
+        versionCheck = true,        -- passive DBM-style peer version check (rate-limited)
+        clanSync = false,           -- opt-in for clan guild addon messages (status/events/signups/lfg)
+        guildChatFinder = false,    -- opt-in passive /g LFM line detector (read-only, zero auto-reply)
+        clanLfgAlertEnabled = false, -- opt-in alert when a clan member looks for a dungeon/group
+        clanLfgAlertDungeonsOnly = true, -- notify specifically for Dungeon / M+ group searches
+        clanLfgAlertFilter = "",     -- optional comma-separated dungeon keywords
+        clanLfgAlertSound = true,    -- sound chime when a Clan Dungeon LFG alert triggers
         autoStatusInstance = false, -- opt-in contextual activity tag out-of-combat
-        chatSound = true,          -- subtle chime on incoming whisper or room message
-        chatHistoryLimit = 30,     -- local lines kept per character conversation thread
+        chatSound = true,           -- master chime toggle for direct/room conversations
+        chatSoundWhispers = true,   -- chime on Character & Battle.net whispers
+        chatSoundRooms = true,      -- chime on Addon Private Chat Room messages & invites
+        chatSoundGuild = false,     -- Guild / Officer chat sound muted by default
+        chatSoundGroup = false,     -- Party / Raid / Instance chat sound muted by default
+        chatMirrorChannels = false, -- opt-in: mirror native WoW Guild/Party/Raid channels inside Conversations
+        chatChannelUnread = false,  -- opt-in: allow mirrored WoW channels to increment unread badges
+        chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
+        chatHistoryLimit = 30,      -- local lines kept per character conversation thread
+        addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
+        spotterEnabled = true,      -- detect Same Clan / Ally Clan / Enemy Clan players on screen
+        spotterNotifyEnemy = true,  -- chat + banner notification when Enemy Clan player appears
+        spotterNotifyAlly = true,   -- chat + banner notification when Ally Clan player appears
+        spotterNotifySameClan = true, -- subtle notification when guildmate appears on screen
+        spotterSound = true,        -- subtle chime when an Enemy/Ally clan player appears
+        spotterAutoShowHUD = true,  -- automatically open target selection HUD out-of-combat on sighting
+        spotterPromptAnswered = false, -- first-time user choice for keeping spotter notifications
+        spotterLockHUD = false,     -- lock target HUD position against accidental dragging
+        spotterNameplateBadges = true, -- show subtle stance tag on non-forbidden nameplates
     },
     window = {
         point = nil,
         width = 790,
         height = 520,
     },
+    windowPositions = {},            -- [windowKey] = { dx, dy } center-normalized positions across all frames
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
     clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
@@ -101,6 +126,7 @@ local DEFAULTS = {
     recentCompanions = {},         -- [scopeKey] = { [lookupKey] = { name, classFile, level, zone, role, lastSeen } }
     chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
     chatRooms = {},                -- [scopeKey] = { [roomId] = { id, name, owner, scope, members } }
+    addonPeers = {},               -- [scopeKey] = { [lookupKey] = { displayName, version, lastSeenAt } } (strictly WoW char names, zero Real ID)
 }
 
 local function ApplyDefaults(target, defaults)
@@ -145,14 +171,36 @@ local function HandleSlash(raw)
         if ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab("group")
         end
-    elseif cmd == "clan" or cmd == "lfg" then
+    elseif cmd == "clan" or cmd == "lfg" or cmd == "diplomacy" then
+        if ns.Clan and ns.Clan.SetPreferredRightView and cmd == "diplomacy" then
+            ns.Clan:SetPreferredRightView("diplomacy")
+        end
         if ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab("clan")
+        end
+    elseif cmd == "radar" or cmd == "spotter" or cmd == "targets" then
+        if ns.SpotterHUD and ns.SpotterHUD.Toggle then
+            ns.SpotterHUD:Toggle()
+        end
+    elseif cmd == "resetpos" or cmd == "reset" then
+        if ns.Theme and ns.Theme.ResetAllWindowPositions then
+            ns.Theme:ResetAllWindowPositions()
         end
     elseif cmd == "config" or cmd == "settings" then
         if ns.Settings and ns.Settings.Open then
             ns.Settings:Open()
         end
+    elseif cmd == "help" or cmd == "?" then
+        ns:Print("|cff58a6ffSocialCentral|r v%s", ns.version or "0.0.0")
+        ns:Print("  |cffffd200/sc|r — %s", L["Open SocialCentral"])
+        ns:Print("  |cffffd200/sc chat|r — %s", L["Open Conversations"])
+        ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"])
+        ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"])
+        ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"])
+        ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
+        ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Next"])
+        ns:Print("  |cffffd200/sc resetpos|r — %s", L["Reset Window Positions"])
+        ns:Print("  |cffffd200/sc config|r — %s", L["Settings"])
     else
         if ns.UI and ns.UI.Toggle then
             ns.UI:Toggle()
@@ -192,6 +240,19 @@ ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
     ns.UnregisterEvent(boot, "PLAYER_LOGIN")
 end)
 
+ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
+    ns.UnregisterEvent(boot, "PLAYER_ENTERING_WORLD")
+    if ns.Compat and ns.Compat.SyncRosterForeverNames then
+        ns.Compat.SyncRosterForeverNames()
+    end
+    if ns.db and ns.db.settings and not ns.db.settings.themeChosen then
+        local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+        if not inCombat and ns.Theme and ns.Theme.ShowThemeWelcomePicker then
+            ns.Theme:ShowThemeWelcomePicker()
+        end
+    end
+end)
+
 -- Addon Compartment integration (WoW: Forever / modern minimap menu).
 function SocialCentral_OnAddonCompartmentClick()
     if ns.UI and ns.UI.Toggle then ns.UI:Toggle() end
@@ -211,9 +272,43 @@ end
 if EventRegistry and EventRegistry.RegisterCallback then
     EventRegistry:RegisterCallback("SetItemRef", function(_, link)
         if ns.Safe and ns.Safe.IsSecret and ns.Safe.IsSecret(link) then return end
-        if type(link) == "string" and link:find("addon:SCentral:update", 1, true) then
+        if type(link) ~= "string" then return end
+        if link:find("addon:SCentral:update", 1, true) then
             if ns.UI and ns.UI.OpenUpdateModal then
                 ns.UI:OpenUpdateModal()
+            end
+        elseif link:find("addon:SCentral:clanlfg", 1, true) then
+            if ns.Clan and ns.Clan.SetPreferredRightView then
+                ns.Clan:SetPreferredRightView("lfg")
+            end
+            if ns.UI and ns.UI.OpenTab then
+                ns.UI:OpenTab("clan")
+            end
+        elseif link:find("addon:SCentral:diplomacy", 1, true) then
+            if ns.Clan and ns.Clan.SetPreferredRightView then
+                ns.Clan:SetPreferredRightView("diplomacy")
+            end
+            if ns.UI and ns.UI.OpenTab then
+                ns.UI:OpenTab("clan")
+            end
+        elseif link:find("addon:SCentral:spotter", 1, true) then
+            if ns.SpotterHUD and ns.SpotterHUD.Show then
+                ns.SpotterHUD:Show(true)
+            end
+        elseif link:find("addon:SCentral:target:", 1, true) then
+            local targetKey = link:match("addon:SCentral:target:([^|]+)")
+            if targetKey and targetKey ~= "" and ns.Spotter and ns.Spotter.FocusTarget then
+                ns.Spotter:FocusTarget(targetKey)
+            end
+        else
+            local who = link:match("addon:SCentral:w:([^|]+)")
+            if who and who ~= "" then
+                if ns.Chat and ns.Chat.OpenDirectConversation and ns.UI and ns.UI.OpenTab then
+                    ns.Chat:OpenDirectConversation({ targetName = who })
+                    ns.UI:OpenTab("chat")
+                elseif ns.Compat and ns.Compat.Whisper then
+                    ns.Compat.Whisper(who)
+                end
             end
         end
     end)

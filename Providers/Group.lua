@@ -19,13 +19,13 @@ table.insert(ns.modules, Group)
 local scanQueued = false
 
 function Group:GetChannelName()
-    if not (IsInGroup and Safe.Value(IsInGroup())) then
+    if not Compat.IsInGroup() then
         return nil
     end
-    if LE_PARTY_CATEGORY_INSTANCE and Safe.Value(IsInGroup(LE_PARTY_CATEGORY_INSTANCE)) then
+    if LE_PARTY_CATEGORY_INSTANCE and IsInGroup and Safe.Value(IsInGroup(LE_PARTY_CATEGORY_INSTANCE)) then
         return "INSTANCE_CHAT"
     end
-    if IsInRaid and Safe.Value(IsInRaid()) then
+    if Compat.IsInRaid() then
         return "RAID"
     end
     return "PARTY"
@@ -52,7 +52,7 @@ end
 
 function Group:Scan()
     local nextList = {}
-    local inGroup = IsInGroup and Safe.Value(IsInGroup()) == true
+    local inGroup = Compat.IsInGroup()
     if not inGroup then
         self.members = {}
         self.readyCheckActive = false
@@ -61,8 +61,8 @@ function Group:Scan()
         return
     end
 
-    local inRaid = IsInRaid and Safe.Value(IsInRaid()) == true
-    local numMembers = Safe.Number(Safe.Call(GetNumGroupMembers)) or 0
+    local inRaid = Compat.IsInRaid()
+    local numMembers = Compat.GetNumGroupMembers()
     local currentZone = Compat.CurrentZoneName()
 
     local unitTokens = {}
@@ -80,17 +80,32 @@ function Group:Scan()
     local seen = {}
     for _, unit in ipairs(unitTokens) do
         if UnitExists and Safe.Value(UnitExists(unit)) == true then
-            local rawName = Safe.String(Safe.Call(GetUnitName, unit, true)) or Safe.String(Safe.Call(UnitName, unit))
             local guid = Safe.String(Safe.Call(UnitGUID, unit))
+            local existingName = nil
+            if guid and self.members then
+                for _, m in ipairs(self.members) do
+                    if m.guid == guid and m.displayName and m.displayName:find("%s") then
+                        existingName = m.displayName
+                        break
+                    end
+                end
+            end
+            local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, guid, existingName)
+            local rawName = (resolved and resolved.fullName)
+                or Safe.String(Safe.Call(GetUnitName, unit, true))
+                or Safe.String(Safe.Call(UnitName, unit))
             local parsed = rawName and Compat.ParseCharacterName(rawName)
             if parsed and not seen[parsed.lookupKey] then
                 seen[parsed.lookupKey] = true
+                if guid and Compat.CacheForeverFullName then
+                    Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                end
                 local _, classFile = Safe.Call(UnitClass, unit)
                 classFile = Safe.String(classFile)
                 local level = Safe.Number(Safe.Call(UnitLevel, unit))
                 local role = NormalizeRole(Safe.String(Safe.Call(UnitGroupRolesAssigned, unit)))
                 local online = not UnitIsConnected or Safe.Value(UnitIsConnected(unit)) ~= false
-                local isLeader = UnitIsGroupLeader and Safe.Value(UnitIsGroupLeader(unit)) == true
+                local isLeader = Compat.IsGroupLeader(unit)
                 local isMe = Compat.IsMe(rawName, guid)
 
                 local item = {
@@ -176,12 +191,11 @@ function Group:StartReadyCheck()
         ns:Print(L["In Combat"])
         return false
     end
-    if not (IsInGroup and Safe.Value(IsInGroup())) then
+    if not Compat.IsInGroup() then
         ns:Print(L["You are not in a group."])
         return false
     end
-    local canLead = (UnitIsGroupLeader and Safe.Value(UnitIsGroupLeader("player"))) or
-        (UnitIsGroupAssistant and Safe.Value(UnitIsGroupAssistant("player")))
+    local canLead = Compat.IsGroupLeader("player") or Compat.IsGroupAssistant("player")
     if not canLead then
         ns:Print(L["Only the group leader or assistant can start a Ready Check."])
         return false
@@ -198,7 +212,7 @@ function Group:PromoteMember(unit)
         ns:Print(L["In Combat"])
         return false
     end
-    if not (UnitIsGroupLeader and Safe.Value(UnitIsGroupLeader("player"))) then
+    if not Compat.IsGroupLeader("player") then
         ns:Print(L["Only the group leader can promote another member."])
         return false
     end
@@ -207,6 +221,18 @@ function Group:PromoteMember(unit)
         return true
     end
     return false
+end
+
+function Group:LeaveGroup()
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print(L["In Combat"])
+        return false
+    end
+    if not Compat.IsInGroup() then
+        ns:Print(L["You are not in a group."])
+        return false
+    end
+    return Compat.LeaveGroup()
 end
 
 function Group:OpenGroupChatAnnouncement()
@@ -250,6 +276,8 @@ function Group:Init()
     for _, ev in ipairs({
         "PLAYER_ENTERING_WORLD",
         "GROUP_ROSTER_UPDATE",
+        "PARTY_MEMBERS_CHANGED",
+        "RAID_ROSTER_UPDATE",
         "PARTY_LEADER_CHANGED",
         "UNIT_CONNECTION",
         "ROLE_CHANGED_INFORM",

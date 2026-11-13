@@ -35,7 +35,19 @@ local function CreateCheckbox(parent, labelText, anchorTo, yOffset, getter, sett
 
     local label = cb:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     label:SetPoint("LEFT", cb, "RIGHT", 6, 0)
+    label:SetJustifyH("LEFT")
+    label:SetWordWrap(true)
     label:SetText(labelText)
+    local function FitCheckboxLabel()
+        local avail = math.max(320, (parent:GetWidth() or 590) - 86)
+        local rawW = label.GetUnboundedStringWidth and label:GetUnboundedStringWidth() or label:GetStringWidth() or 0
+        if rawW > avail then
+            label:SetWidth(avail)
+        else
+            label:SetWidth(0)
+        end
+    end
+    FitCheckboxLabel()
     cb._scLabel = label
 
     if helpTitle then
@@ -47,6 +59,7 @@ local function CreateCheckbox(parent, labelText, anchorTo, yOffset, getter, sett
     end)
 
     syncFns[#syncFns + 1] = function()
+        FitCheckboxLabel()
         cb:SetChecked(getter() and true or false)
     end
     return cb
@@ -58,14 +71,9 @@ local function CreateChoiceRow(parent, anchorTo, yOffset, options, getter, sette
     row:SetSize(560, 26)
 
     local buttons = {}
-    local prev
     for _, opt in ipairs(options) do
-        local btn = ns.Theme:CreateButton(row, opt.width or 170, 24, opt.label, "default")
-        if not prev then
-            btn:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
-        else
-            btn:SetPoint("LEFT", prev, "RIGHT", 8, 0)
-        end
+        local btn = ns.Theme:CreateButton(row, opt.width or 140, 24, opt.label, "default")
+        ns.Theme:AutoFitButton(btn, math.min(opt.width or 140, 110), 22, 548)
         btn:SetScript("OnClick", function()
             setter(opt.value)
             for _, sync in ipairs(syncFns) do
@@ -73,14 +81,35 @@ local function CreateChoiceRow(parent, anchorTo, yOffset, options, getter, sette
             end
         end)
         buttons[#buttons + 1] = { btn = btn, value = opt.value }
-        prev = btn
     end
+
+    local function ReflowChoiceRow()
+        local maxW = math.max(320, (parent:GetWidth() or 590) - 34)
+        local x = 0
+        local y = 0
+        local rowH = 24
+        for _, item in ipairs(buttons) do
+            local btn = item.btn
+            local bw = math.min(maxW, math.max(80, btn:GetWidth() or 120))
+            if x > 0 and (x + bw) > maxW then
+                x = 0
+                y = y - (rowH + 6)
+            end
+            btn:ClearAllPoints()
+            btn:SetPoint("TOPLEFT", row, "TOPLEFT", x, y)
+            x = x + bw + 8
+        end
+        row:SetSize(maxW, math.abs(y) + rowH + 2)
+    end
+    ReflowChoiceRow()
 
     syncFns[#syncFns + 1] = function()
         local current = getter()
         for _, item in ipairs(buttons) do
+            ns.Theme:StyleButton(item.btn, "default")
             ns.Theme:SetButtonActive(item.btn, current == item.value, "default")
         end
+        ReflowChoiceRow()
     end
     return row
 end
@@ -104,6 +133,8 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
 
     local function RefreshValue()
         valueText:SetText(string.format("%d %s", getter(), unit))
+        ns.Theme:StyleButton(minus, "default")
+        ns.Theme:StyleButton(plus, "default")
         ns.Theme:SetButtonActive(minus, false, "default")
         ns.Theme:SetButtonActive(plus, false, "default")
     end
@@ -133,12 +164,19 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 860)
+    content:SetSize(590, 2180)
     scrollFrame:SetScrollChild(content)
+    scrollFrame:SetScript("OnSizeChanged", function(self)
+        local w = math.max(460, (self:GetWidth() or 590) - 10)
+        content:SetWidth(w)
+        for _, sync in ipairs(syncFns) do
+            sync()
+        end
+    end)
 
     local title = content:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", 14, -14)
-    title:SetText("SocialCentral  v" .. (ns.version or "0.2.2"))
+    title:SetText("SocialCentral  v" .. (ns.version or "0.0.0"))
 
     local subtitle = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
@@ -146,42 +184,99 @@ local function BuildPanel()
 
     local langHeader = AddSectionHeader(
         content,
-        L["Language (Game Options)"],
+        L["Language"],
         subtitle,
         -12,
-        L["Help: Game Language"],
-        L["Automatically matches the text language chosen in your WoW Game Options (English, Portuguese ptBR/ptPT, Spanish esES/esMX)."],
-        L["Change Text Language in Blizzard System Settings if needed; SocialCentral switches all texts automatically without violating addon rules."]
+        L["Help: Language"],
+        L["Choose Auto (WoW) to follow your game client language automatically, or override SocialCentral to English, Português (BR), or Español independently."],
+        L["Click a language button below and confirm Reload UI (outside combat) so all menus, tooltips, and labels re-render cleanly in your chosen language."]
     )
     local langValue = content:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     langValue:SetPoint("TOPLEFT", langHeader, "BOTTOMLEFT", 0, -4)
-    langValue:SetText(L["Active Language: %s (%s)"]:format(ns.activeLangLabel or "English", ns.activeLocale or "enUS"))
+    local langModeNote = ns.langOverridden and L["Manual Override"] or L["Auto (WoW)"]
+    langValue:SetText(L["Active Language: %s (%s)"]:format(ns.activeLangLabel or "English", ns.activeLocale or "enUS") .. "  [" .. langModeNote .. "]")
+
+    local langChoices = {
+        { value = "auto", label = L["Auto (WoW)"], width = 116 },
+        { value = "enUS", label = "English", width = 94 },
+        { value = "ptBR", label = "Português (BR)", width = 140 },
+        { value = "esES", label = "Español", width = 100 },
+    }
+    local langLabelByVal = {
+        auto = L["Auto (WoW)"],
+        enUS = "English",
+        ptBR = "Português (BR)",
+        esES = "Español",
+    }
+    local langRow = CreateChoiceRow(content, langValue, -6, langChoices, function()
+        return (ns.db and ns.db.settings and ns.db.settings.language) or "auto"
+    end, function(val)
+        local prev = (ns.db and ns.db.settings and ns.db.settings.language) or "auto"
+        ns.db.settings.language = val
+        if val ~= prev and ns.Theme and ns.Theme.ShowReloadPrompt then
+            ns.Theme:ShowReloadPrompt(langLabelByVal[val] or val)
+        end
+    end)
+
+    local langReloadBtn = ns.Theme:CreateButton(content, 168, 22, L["Reload UI to Apply Language"], "default")
+    ns.Theme:AutoFitButton(langReloadBtn, 160, 22)
+    langReloadBtn:SetPoint("TOPLEFT", langRow, "BOTTOMLEFT", 0, -6)
+    langReloadBtn:SetScript("OnClick", function()
+        if InCombatLockdown and InCombatLockdown() then
+            ns:Print(L["In Combat"])
+            return
+        end
+        if ReloadUI then
+            ReloadUI()
+        elseif C_UI and C_UI.Reload then
+            C_UI.Reload()
+        end
+    end)
+    syncFns[#syncFns + 1] = function()
+        ns.Theme:StyleButton(langReloadBtn, "default")
+        ns.Theme:SetButtonActive(langReloadBtn, false, "default")
+    end
 
     local themeHeader = AddSectionHeader(
         content,
         L["Theme"],
-        langValue,
+        langReloadBtn,
         -12,
         L["Help: Theme"],
-        L["Switches between Modern Dark (sleek panel) and Native Warcraft (classic gold & stone borders)."],
-        L["Click your preferred theme button; the change applies immediately across all SocialCentral windows."]
+        L["Choose between Blizzard Official (default in-game portrait window, dark marble inset, and classic red/pewter buttons), Modern Theme (optional dark minimalist UI), or Classic Gold."],
+        L["Click your preferred design button (or open the visual Preview Picker below); changes apply immediately across all SocialCentral windows without /reload."]
     )
     local themeRow = CreateChoiceRow(content, themeHeader, -6, {
-        { value = "dark", label = L["Modern Dark"], width = 160 },
-        { value = "native", label = L["Native Warcraft"], width = 160 },
+        { value = "blizzard", label = L["Blizzard Official"], width = 176 },
+        { value = "dark", label = L["Modern Theme"], width = 166 },
+        { value = "native", label = L["Classic Gold"], width = 152 },
     }, function()
-        return ns.db and ns.db.settings.theme or "dark"
+        return ns.db and ns.db.settings.theme or "blizzard"
     end, function(val)
         ns.db.settings.theme = val
+        ns.db.settings.themeChosen = true
         if ns.Theme then
             ns.Theme:NotifyChanged()
         end
     end)
 
+    local themePickerBtn = ns.Theme:CreateButton(content, 200, 22, L["Open Theme Preview Picker"], "default")
+    ns.Theme:AutoFitButton(themePickerBtn, 190, 22)
+    themePickerBtn:SetPoint("TOPLEFT", themeRow, "BOTTOMLEFT", 0, -6)
+    themePickerBtn:SetScript("OnClick", function()
+        if ns.Theme and ns.Theme.ShowThemeWelcomePicker then
+            ns.Theme:ShowThemeWelcomePicker()
+        end
+    end)
+    syncFns[#syncFns + 1] = function()
+        ns.Theme:StyleButton(themePickerBtn, "default")
+        ns.Theme:SetButtonActive(themePickerBtn, false, "default")
+    end
+
     local whoHeader = AddSectionHeader(
         content,
         L["/who mode"],
-        themeRow,
+        themePickerBtn,
         -12,
         L["Help: /who Mode"],
         L["Controls how manual /who responses are captured silently without interrupting your gameplay."],
@@ -303,6 +398,7 @@ local function BuildPanel()
     )
 
     local updateLinkBtn = ns.Theme:CreateButton(content, 210, 24, L["GitHub Releases / Updater"], "default")
+    ns.Theme:AutoFitButton(updateLinkBtn, 210, 22, 490)
     updateLinkBtn:SetPoint("TOPLEFT", verCb, "BOTTOMLEFT", 4, -6)
     updateLinkBtn:SetScript("OnClick", function()
         if ns.Theme and ns.Theme.ShowUpdatePopup then
@@ -364,38 +460,401 @@ local function BuildPanel()
         L["Respects combat lockdown and only broadcasts when Clan Guild Sync is also enabled."]
     )
 
+    local clanLfgAlertCb = CreateCheckbox(
+        content,
+        L["Notify in chat when guildmates look for Dungeon / LFG"],
+        autoStatusCb,
+        -6,
+        function() return ns.db and ns.db.settings.clanLfgAlertEnabled == true end,
+        function(checked)
+            ns.db.settings.clanLfgAlertEnabled = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: Clan Dungeon Alerts"],
+        L["Notifies you in chat (with optional sound and clickable Whisper/Clan links) whenever a guildmate looks for a Dungeon/M+ group."],
+        L["Click 'LFG Alerts' to enable/disable alerts, restrict to Dungeons only, or filter specific dungeon keywords."]
+    )
+
+    local clanLfgDngOnlyCb = CreateCheckbox(
+        content,
+        L["Alert only for Dungeons & M+ calls (exclude raids/PvP)"],
+        clanLfgAlertCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.clanLfgAlertDungeonsOnly ~= false end,
+        function(checked)
+            ns.db.settings.clanLfgAlertDungeonsOnly = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: Clan Dungeon Filter"],
+        L["Filters Clan LFG alerts to Dungeon and Mythic+ calls, ignoring Raids and PvP announcements."],
+        L["Uncheck if you want to be notified for all Clan LFG activity types (Dungeons, Raids, World Bosses, PvP)."]
+    )
+
+    local clanLfgAlertSoundCb = CreateCheckbox(
+        content,
+        L["Play chime sound on Clan Dungeon LFG alert"],
+        clanLfgDngOnlyCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.clanLfgAlertSound ~= false end,
+        function(checked)
+            ns.db.settings.clanLfgAlertSound = checked
+        end,
+        L["Help: Clan Alert Sound"],
+        L["Plays a subtle Blizzard UI chime alongside your chat alert when a matching Clan Dungeon LFG call arrives."],
+        L["Requires 'Notify in chat when guildmates look for Dungeon / LFG' to be enabled."]
+    )
+
+    local clanFilterRow = CreateFrame("Frame", nil, content)
+    clanFilterRow:SetPoint("TOPLEFT", clanLfgAlertSoundCb, "BOTTOMLEFT", 0, -6)
+    clanFilterRow:SetSize(540, 46)
+
+    local clanFilterLbl = clanFilterRow:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    clanFilterLbl:SetPoint("TOPLEFT", 2, 0)
+    clanFilterLbl:SetPoint("TOPRIGHT", -4, 0)
+    clanFilterLbl:SetJustifyH("LEFT")
+    clanFilterLbl:SetWordWrap(true)
+    clanFilterLbl:SetText(L["Dungeon keywords filter (comma-separated, blank = all):"])
+
+    local clanFilterInput = ns.Theme:CreateEditBox(clanFilterRow, { width = 260, height = 22, maxLetters = 120 })
+    clanFilterInput:SetPoint("TOPLEFT", clanFilterLbl, "BOTTOMLEFT", 0, -4)
+    clanFilterInput:SetScript("OnEnterPressed", function(self)
+        if ns.db and ns.db.settings then
+            ns.db.settings.clanLfgAlertFilter = ns.Compat.CleanInput(self:GetText() or "") or ""
+        end
+        self:ClearFocus()
+    end)
+    clanFilterInput:SetScript("OnEditFocusLost", function(self)
+        if ns.db and ns.db.settings then
+            ns.db.settings.clanLfgAlertFilter = ns.Compat.CleanInput(self:GetText() or "") or ""
+        end
+    end)
+    HelpBtn(
+        clanFilterRow,
+        clanFilterInput,
+        L["Help: Clan Alert Keywords"],
+        L["Comma-separated dungeon or level keywords (e.g. 'BRH, +10, tank') so Clan Dungeon Alerts only fire on matching requests."],
+        L["Leave blank to receive alerts for all Dungeon LFG calls inside your guild."]
+    )
+    syncFns[#syncFns + 1] = function()
+        if not clanFilterInput:HasFocus() then
+            clanFilterInput:SetText((ns.db and ns.db.settings and ns.db.settings.clanLfgAlertFilter) or "")
+        end
+    end
+
+    local chatSettingsHeader = AddSectionHeader(
+        content,
+        L["Conversations & Sound Alerts"],
+        clanFilterRow,
+        -14,
+        L["Help: Conversations & Sounds"],
+        L["Separately control sound chimes by channel type and decide whether WoW native Guild/Group channels are mirrored inside Conversations."],
+        L["By default, SocialCentral focuses on Direct Whispers and Addon Private Rooms while keeping Guild and Party chat silent."]
+    )
+
     local chatSoundCb = CreateCheckbox(
         content,
-        L["Play chime on incoming Whisper / Private Room message"],
-        autoStatusCb,
+        L["Master: Enable Chat Sound Alerts"],
+        chatSettingsHeader,
         -6,
         function() return ns.db and ns.db.settings.chatSound ~= false end,
         function(checked)
             ns.db.settings.chatSound = checked
+            ns:Emit("CHAT_UPDATED")
         end,
         L["Help: Chat Sound Alert"],
-        L["Plays a subtle audio chime when a Whisper, Battle.net whisper, or Addon Private Room message arrives while that thread is not focused."],
-        L["Uncheck if you prefer completely silent message logs inside the Chat tab."]
+        L["Master switch for incoming conversation sound chimes across SocialCentral."],
+        L["Uncheck to mute all SocialCentral conversation chimes without affecting muted individual threads."]
+    )
+
+    local chatSoundWhispersCb = CreateCheckbox(
+        content,
+        L["Play chime on Whispers & Battle.net"],
+        chatSoundCb,
+        -6,
+        function() return ns.db and ns.db.settings.chatSoundWhispers ~= false end,
+        function(checked)
+            ns.db.settings.chatSoundWhispers = checked
+        end,
+        L["Help: Whisper Sounds"],
+        L["Plays a subtle audio chime when an incoming character Whisper or Battle.net whisper arrives while unfocused."],
+        L["Requires Master Chat Sound Alerts to be enabled; individual senders can still be muted from the Conversations panel."]
+    )
+
+    local chatSoundRoomsCb = CreateCheckbox(
+        content,
+        L["Play chime on SocialCentral Private Rooms"],
+        chatSoundWhispersCb,
+        -6,
+        function() return ns.db and ns.db.settings.chatSoundRooms ~= false end,
+        function(checked)
+            ns.db.settings.chatSoundRooms = checked
+        end,
+        L["Help: Private Room Sounds"],
+        L["Plays a chime when a peer sends a message or invite inside an addon Private Room (SCentral1)."],
+        L["Turn off if your Private Room is noisy while still keeping Whisper alerts enabled."]
+    )
+
+    local chatSoundGuildCb = CreateCheckbox(
+        content,
+        L["Play chime on Guild & Officer chat (off by default)"],
+        chatSoundRoomsCb,
+        -6,
+        function() return ns.db and ns.db.settings.chatSoundGuild == true end,
+        function(checked)
+            ns.db.settings.chatSoundGuild = checked
+        end,
+        L["Help: Guild Chat Sound"],
+        L["Controls whether mirrored Guild and Officer chat lines trigger a sound chime (disabled by default)."],
+        L["Leave unchecked so WoW Guild chat never beeps inside SocialCentral."]
+    )
+
+    local chatSoundGroupCb = CreateCheckbox(
+        content,
+        L["Play chime on Party / Raid / Instance chat (off by default)"],
+        chatSoundGuildCb,
+        -6,
+        function() return ns.db and ns.db.settings.chatSoundGroup == true end,
+        function(checked)
+            ns.db.settings.chatSoundGroup = checked
+        end,
+        L["Help: Group Chat Sound"],
+        L["Controls whether mirrored Party, Raid, or Instance chat lines trigger a sound chime (disabled by default)."],
+        L["Leave unchecked so dungeon and raid chat remains silent in SocialCentral."]
+    )
+
+    local chatMirrorCb = CreateCheckbox(
+        content,
+        L["Mirror WoW Guild / Party / Raid channels inside Conversations (opt-in)"],
+        chatSoundGroupCb,
+        -6,
+        function() return ns.db and ns.db.settings.chatMirrorChannels == true end,
+        function(checked)
+            ns.db.settings.chatMirrorChannels = checked
+            ns:Emit("CHAT_UPDATED")
+        end,
+        L["Help: Mirror WoW Channels"],
+        L["When unchecked (default), SocialCentral Conversations stay separate from native WoW Guild/Party/Raid chat frames."],
+        L["Check only if you also want copies of WoW Guild/Group messages logged inside Conversations."]
+    )
+
+    local chatChannelUnreadCb = CreateCheckbox(
+        content,
+        L["Count mirrored Guild/Group lines as unread on Minimap"],
+        chatMirrorCb,
+        -6,
+        function() return ns.db and ns.db.settings.chatChannelUnread == true end,
+        function(checked)
+            ns.db.settings.chatChannelUnread = checked
+            ns:Emit("CHAT_UPDATED")
+        end,
+        L["Help: Guild Unread Badge"],
+        L["By default, only Direct Whispers, BNet whispers, and SocialCentral Private Rooms count toward the Minimap unread badge and tooltip."],
+        L["Leave unchecked so noisy Guild channels never trigger unread alerts on your Minimap icon."]
+    )
+
+    local addonDirectCb = CreateCheckbox(
+        content,
+        L["Enable Verified In-Addon 1-on-1 Direct Chat"],
+        chatChannelUnreadCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.addonDirectChat ~= false end,
+        function(checked)
+            ns.db.settings.addonDirectChat = checked
+            ns:Emit("CHAT_UPDATED")
+        end,
+        L["Help: Addon Direct Chat"],
+        L["Enables full 1-on-1 chat inside SocialCentral (with delivery confirmation and location share) ONLY when both players have the addon active."],
+        L["When unchecked or when the other player lacks SocialCentral, Conversations show a single button to open the pre-addressed official WoW chat instead."]
     )
 
     local histHeader = AddSectionHeader(
         content,
         L["Character Whisper history per thread (0 = off)"],
-        chatSoundCb,
-        -10,
+        addonDirectCb,
+        -12,
         L["Help: Whisper History Limit"],
         L["Saves the last N lines per Character Whisper locally (0 to 60 lines). Battle.net Real IDs and BattleTags are never persisted to disk."],
         L["Use '-' and '+' in steps of 10. Set to 0 if you want session-only whispers without SavedVariables history."]
     )
-    CreateStepperRow(content, histHeader, -6, 0, 60, L["lines"], function()
+    local histRow = CreateStepperRow(content, histHeader, -6, 0, 60, L["lines"], function()
         return ns.db and ns.db.settings.chatHistoryLimit or 30
     end, function(val)
         ns.db.settings.chatHistoryLimit = val
         ns:Emit("CHAT_UPDATED")
     end, 10)
 
+    local spotterHeader = AddSectionHeader(
+        content,
+        L["Screen Clan Radar & Target Selection"],
+        histRow,
+        -14,
+        L["Help: Screen Clan Radar"],
+        L["Detects Enemy, Ally, and Same-Clan players appearing on your screen via nameplates, target, focus, or mouseover using guild-isolated Diplomacy lists."],
+        L["Click a row on the floating Target Radar HUD to select that player via Blizzard-legal secure macro click (/targetexact)."]
+    )
+
+    local spotterEnabledCb = CreateCheckbox(
+        content,
+        L["Enable On-Screen Clan Spotter (Enemy / Ally / Same Clan)"],
+        spotterHeader,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterEnabled ~= false end,
+        function(checked)
+            ns.db.settings.spotterEnabled = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Screen Spotter Master"],
+        L["Master toggle for detecting Enemy, Ally, and Same-Clan players on your screen."],
+        L["Uncheck to pause screen scanning and hide the Target Radar HUD completely."]
+    )
+
+    local spotterAutoHudCb = CreateCheckbox(
+        content,
+        L["Auto-open Target Selection Radar HUD on sighting (out of combat)"],
+        spotterEnabledCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterAutoShowHUD ~= false end,
+        function(checked)
+            ns.db.settings.spotterAutoShowHUD = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Auto HUD"],
+        L["Automatically opens the floating Target Radar HUD when a flagged player appears while you are out of combat."],
+        L["Close the HUD manually at any time or use '/sc radar' to toggle it."]
+    )
+
+    local spotterBadgesCb = CreateCheckbox(
+        content,
+        L["Show Enemy/Ally/Clan badge tags above visible nameplates"],
+        spotterAutoHudCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNameplateBadges ~= false end,
+        function(checked)
+            ns.db.settings.spotterNameplateBadges = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Nameplate Stance Badges"],
+        L["Adds a lightweight non-forbidden [ENEMY]/[ALLY]/[CLAN] indicator tag above player nameplates when readable."],
+        L["Disable if you already use heavy custom nameplate addons and prefer HUD-only alerts."]
+    )
+
+    local spotterEnemyCb = CreateCheckbox(
+        content,
+        L["Notify when an Enemy Clan player appears on screen"],
+        spotterBadgesCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifyEnemy ~= false end,
+        function(checked)
+            ns.db.settings.spotterNotifyEnemy = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Enemy Alerts"],
+        L["Triggers chat, banner, and sound alerts when someone from a guild marked Enemy appears on your screen."],
+        L["Per-player cooldown prevents repeated spam if the same player stays nearby."]
+    )
+
+    local spotterAllyCb = CreateCheckbox(
+        content,
+        L["Notify when an Ally Clan player appears on screen"],
+        spotterEnemyCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifyAlly ~= false end,
+        function(checked)
+            ns.db.settings.spotterNotifyAlly = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Ally Alerts"],
+        L["Triggers chat, banner, and sound alerts when someone from an Ally guild appears on your screen."],
+        L["Keep enabled to spot friendly coalition members quickly in the world."]
+    )
+
+    local spotterSameCb = CreateCheckbox(
+        content,
+        L["Notify when a Same Clan guildmate appears on screen"],
+        spotterAllyCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifySameClan ~= false end,
+        function(checked)
+            ns.db.settings.spotterNotifySameClan = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Same Clan Alerts"],
+        L["Highlights and notifies when one of your own guildmates appears on screen."],
+        L["Uncheck if you only want notifications for Ally or Enemy guilds."]
+    )
+
+    local spotterSoundCb = CreateCheckbox(
+        content,
+        L["Play alert chime on Enemy / Ally Clan sighting"],
+        spotterSameCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterSound ~= false end,
+        function(checked)
+            ns.db.settings.spotterSound = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Sound"],
+        L["Plays a distinct alert chime when an Enemy, Ally, or Same-Clan player triggers a Spotter notification."],
+        L["Uncheck for silent visual alerts only."]
+    )
+
+    local openRadarBtn = ns.Theme:CreateButton(content, 178, 24, L["Open Target Radar"], "primary")
+    ns.Theme:AutoFitButton(openRadarBtn, 150, 18, 240)
+    openRadarBtn:SetPoint("TOPLEFT", spotterSoundCb, "BOTTOMLEFT", 4, -10)
+    openRadarBtn:SetScript("OnClick", function()
+        if ns.SpotterHUD and ns.SpotterHUD.Toggle then
+            ns.SpotterHUD:Toggle()
+        end
+    end)
+    HelpBtn(
+        content,
+        openRadarBtn,
+        L["Help: Open Target Radar"],
+        L["Manually opens the Target Radar HUD to test target tracking, distance, and directional compass."],
+        L["Click this button or type '/sc radar' to show or hide the floating radar."]
+    )
+
+    local resetPosBtn = ns.Theme:CreateButton(content, 200, 24, L["Reset All Window Positions"], "default")
+    ns.Theme:AutoFitButton(resetPosBtn, 170, 18, 270)
+    resetPosBtn:SetPoint("LEFT", openRadarBtn, "RIGHT", 32, 0)
+    resetPosBtn:SetScript("OnClick", function()
+        if ns.Theme and ns.Theme.ResetAllWindowPositions then
+            ns.Theme:ResetAllWindowPositions()
+        end
+    end)
+    HelpBtn(
+        content,
+        resetPosBtn,
+        L["Help: Reset Window Positions"],
+        L["Restores the default screen positions of the Main Window, Target Radar HUD, and all popup dialogs."],
+        L["Use this if any window was moved off-screen or after changing screen resolution."]
+    )
+
+    local resetPromptBtn = ns.Theme:CreateButton(content, 210, 24, L["Reset Radar Prompt"], "default")
+    ns.Theme:AutoFitButton(resetPromptBtn, 180, 20, 290)
+    resetPromptBtn:SetPoint("TOPLEFT", openRadarBtn, "BOTTOMLEFT", 0, -8)
+    resetPromptBtn:SetScript("OnClick", function()
+        if ns.db and ns.db.settings then
+            ns.db.settings.spotterPromptAnswered = false
+        end
+        if ns.SpotterHUD and ns.SpotterHUD.ShowFirstTimePrompt then
+            ns.SpotterHUD:ShowFirstTimePrompt()
+        end
+    end)
+    HelpBtn(
+        content,
+        resetPromptBtn,
+        L["Help: Reset Radar Prompt"],
+        L["Resets the first-time Target Radar confirmation so the prompt dialog appears again."],
+        L["Use if you previously dismissed the radar prompt and wish to review the setup options."]
+    )
+
     syncFns[#syncFns + 1] = function()
+        ns.Theme:StyleButton(updateLinkBtn, "default")
         ns.Theme:SetButtonActive(updateLinkBtn, false, "default")
+        ns.Theme:StyleButton(openRadarBtn, "primary")
+        ns.Theme:StyleButton(resetPosBtn, "default")
+        ns.Theme:StyleButton(resetPromptBtn, "default")
     end
 
     if ns.Theme and ns.Theme.RegisterListener then

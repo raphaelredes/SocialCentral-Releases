@@ -50,17 +50,24 @@ local function ScanGuild(map)
     local onlineCount = 0
 
     for i = 1, total do
-        local name, rankName, _, level, _, area, note, officerNote, online, status, classFile, _, _, _, _, _, guid = GetGuildRosterInfo(i)
+        local name, rankName, rankIndex, level, classLoc, area, note, officerNote, online, status, classFile, _, _, _, _, _, guid = GetGuildRosterInfo(i)
         name = Safe.String(name)
         guid = Safe.String(guid)
-        if Safe.Value(online) == true and name then
+        local isOnline = (online == true or online == 1)
+        if isOnline and name then
             onlineCount = onlineCount + 1
             if not Compat.IsMe(name, guid) then
                 local parsed = Compat.ParseCharacterName(name)
                 if parsed then
+                    if guid and Compat.CacheForeverFullName then
+                        Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                    end
+                    if Compat.CacheGuildMember then
+                        Compat.CacheGuildMember(guid, parsed.firstName)
+                    end
                     local key = guid or ("char:" .. parsed.lookupKey)
                     local cleanArea = Safe.String(area) or ""
-                    local cleanClass = Safe.String(classFile)
+                    local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
                     local cleanLevel = Safe.Number(level)
                     MergeEntry(map, key, {
                         displayName = parsed.displayName,
@@ -92,30 +99,70 @@ local function ScanGuild(map)
 end
 
 local function ScanCharacterFriends(map)
-    if not (C_FriendList and C_FriendList.GetNumFriends and C_FriendList.GetFriendInfoByIndex) then return end
-    local count = Safe.Number(Safe.Call(C_FriendList.GetNumFriends)) or 0
-    for i = 1, count do
-        local f = Safe.Call(C_FriendList.GetFriendInfoByIndex, i)
-        if type(f) == "table" and Safe.Value(f.connected) == true then
-            local rawName = Safe.String(f.name)
-            local guid = Safe.String(f.guid)
-            if rawName and not Compat.IsMe(rawName, guid) then
+    if C_FriendList and C_FriendList.GetNumFriends and C_FriendList.GetFriendInfoByIndex then
+        local count = Safe.Number(Safe.Call(C_FriendList.GetNumFriends)) or 0
+        for i = 1, count do
+            local f = Safe.Call(C_FriendList.GetFriendInfoByIndex, i)
+            if type(f) == "table" and Safe.Value(f.connected) == true then
+                local rawName = Safe.String(f.name)
+                local guid = Safe.String(f.guid)
+                if rawName and not Compat.IsMe(rawName, guid) then
+                    local parsed = Compat.ParseCharacterName(rawName)
+                    if parsed then
+                        if guid and Compat.CacheForeverFullName then
+                            Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                        end
+                        local key = guid or ("char:" .. parsed.lookupKey)
+                        local cleanClass = Compat.ClassFileFromLocalized(Safe.String(f.className)) or (Compat.ClassFileFromGuid and Compat.ClassFileFromGuid(guid))
+                        local cleanLevel = Safe.Number(f.level)
+                        local cleanArea = Safe.String(f.area) or ""
+                        MergeEntry(map, key, {
+                            displayName = parsed.displayName,
+                            lookupKey = parsed.lookupKey,
+                            guid = guid,
+                            level = cleanLevel,
+                            classFile = cleanClass,
+                            area = cleanArea,
+                            note = Safe.String(f.notes),
+                            afk = Safe.Value(f.afk) == true,
+                            dnd = Safe.Value(f.dnd) == true,
+                            sources = { friend = true },
+                        })
+                        Store:SyncWatchlistObservation(parsed.displayName, {
+                            online = true,
+                            source = "friend",
+                            level = cleanLevel,
+                            classFile = cleanClass,
+                            area = cleanArea,
+                        })
+                    end
+                end
+            end
+        end
+    elseif GetNumFriends and GetFriendInfo then
+        local count = Safe.Number(Safe.Call(GetNumFriends)) or 0
+        for i = 1, count do
+            local rawName, level, classLoc, area, connected, status, notes = GetFriendInfo(i)
+            rawName = Safe.String(rawName)
+            local isOnline = (connected == true or connected == 1)
+            if rawName and isOnline and not Compat.IsMe(rawName, nil) then
                 local parsed = Compat.ParseCharacterName(rawName)
                 if parsed then
-                    local key = guid or ("char:" .. parsed.lookupKey)
-                    local cleanClass = Compat.ClassFileFromLocalized(Safe.String(f.className))
-                    local cleanLevel = Safe.Number(f.level)
-                    local cleanArea = Safe.String(f.area) or ""
+                    local key = "char:" .. parsed.lookupKey
+                    local cleanClass = Compat.ClassFileFromLocalized(Safe.String(classLoc))
+                    local cleanLevel = Safe.Number(level)
+                    local cleanArea = Safe.String(area) or ""
+                    local isAfk = (status == "<AFK>" or (CHAT_FLAG_AFK and status == CHAT_FLAG_AFK))
+                    local isDnd = (status == "<DND>" or (CHAT_FLAG_DND and status == CHAT_FLAG_DND))
                     MergeEntry(map, key, {
                         displayName = parsed.displayName,
                         lookupKey = parsed.lookupKey,
-                        guid = guid,
                         level = cleanLevel,
                         classFile = cleanClass,
                         area = cleanArea,
-                        note = Safe.String(f.notes),
-                        afk = Safe.Value(f.afk) == true,
-                        dnd = Safe.Value(f.dnd) == true,
+                        note = Safe.String(notes),
+                        afk = isAfk,
+                        dnd = isDnd,
                         sources = { friend = true },
                     })
                     Store:SyncWatchlistObservation(parsed.displayName, {
@@ -149,9 +196,12 @@ local function ScanBattleNet(map)
             if sameProject and charName and not Compat.IsMe(charName, guid) then
                 local parsed = Compat.ParseCharacterName(charName)
                 if parsed then
+                    if guid and Compat.CacheForeverFullName then
+                        Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                    end
                     local samePool = (not realmName) or Compat.IsForeverShardLabel(realmName)
                     local key = guid or ("bnet:" .. (Safe.Number(g.gameAccountID) or parsed.lookupKey))
-                    local cleanClass = Compat.ClassFileFromLocalized(Safe.String(g.className))
+                    local cleanClass = Compat.ClassFileFromLocalized(Safe.String(g.className)) or (Compat.ClassFileFromGuid and Compat.ClassFileFromGuid(guid))
                     local cleanLevel = Safe.Number(g.characterLevel)
                     local cleanArea = Safe.String(g.areaName) or ""
                     local cleanFaction = Safe.String(g.factionName)
@@ -189,6 +239,9 @@ local function ScanBattleNet(map)
 end
 
 function Social:Scan()
+    if Compat.SyncRosterForeverNames then
+        Compat.SyncRosterForeverNames()
+    end
     local nextMap = {}
     for _, scanner in ipairs({ ScanGuild, ScanCharacterFriends, ScanBattleNet }) do
         local ok, err = pcall(scanner, nextMap)
@@ -202,11 +255,17 @@ function Social:RequestRosters(force)
     local now = GetTime()
     if not force and (now - LAST_ROSTER_ASK) < ROSTER_MIN_GAP then return end
     LAST_ROSTER_ASK = now
-    if IsInGuild and IsInGuild() and C_GuildInfo and C_GuildInfo.GuildRoster then
-        pcall(C_GuildInfo.GuildRoster)
+    if IsInGuild and IsInGuild() then
+        if C_GuildInfo and C_GuildInfo.GuildRoster then
+            pcall(C_GuildInfo.GuildRoster)
+        elseif GuildRoster then
+            pcall(GuildRoster)
+        end
     end
     if C_FriendList and C_FriendList.ShowFriends then
         pcall(C_FriendList.ShowFriends)
+    elseif ShowFriends then
+        pcall(ShowFriends)
     end
 end
 

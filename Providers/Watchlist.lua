@@ -108,8 +108,12 @@ end
 local function CleanupPending()
     local wasSilentUi = Watchlist.pending and Watchlist.pending.mode == "silent_ui"
     RestoreFriendsFrameEvent()
-    if wasSilentUi and C_FriendList and C_FriendList.SetWhoToUi then
-        pcall(C_FriendList.SetWhoToUi, false)
+    if wasSilentUi then
+        if C_FriendList and C_FriendList.SetWhoToUi then
+            pcall(C_FriendList.SetWhoToUi, false)
+        elseif SetWhoToUI then
+            pcall(SetWhoToUI, 0)
+        end
     end
     if Watchlist.chatFilterActive then
         Watchlist.chatFilterActive = false
@@ -173,20 +177,70 @@ function Watchlist:AddTarget()
         return false
     end
 
-    local name = Safe.String(Safe.Call(UnitName, "target"))
-    if not name or Compat.IsMe(name, Safe.String(Safe.Call(UnitGUID, "target"))) then
+    local rawName = Safe.String(Safe.Call(UnitName, "target"))
+    local guid = Safe.String(Safe.Call(UnitGUID, "target"))
+    if not rawName or Compat.IsMe(rawName, guid) then
         ns:Print(L["Select a valid player target first."])
         return false
     end
 
-    return self:Add(name)
+    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName("target", guid)
+    local fullName = resolved and resolved.fullName or rawName
+    local ok, entry = self:Add(fullName)
+    if not ok then
+        entry = self:GetEntry(fullName)
+    end
+    if entry then
+        entry.guid = guid or entry.guid
+        local _, classFile = Safe.Call(UnitClass, "target")
+        if classFile then entry.classFile = Safe.String(classFile) end
+        local lvl = Safe.Number(Safe.Call(UnitLevel, "target"))
+        if lvl and lvl > 0 then entry.level = lvl end
+        local area = Compat.CurrentZoneName()
+        if area and area ~= "" then entry.area = area end
+        if GetGuildInfo then
+            local gOk, gName = pcall(GetGuildInfo, "target")
+            if gOk and gName then entry.guild = Safe.String(gName) end
+        end
+        entry.status = "online"
+        entry.source = "target"
+        entry.lastSeen = time()
+        ns:Emit("WATCHLIST_UPDATED")
+        return true
+    end
+    return ok
+end
+
+function Watchlist:GetEntry(nameOrKey)
+    if not nameOrKey then return nil end
+    local list = Store:GetWatchlistTable()
+    if list[nameOrKey] then return list[nameOrKey] end
+    local parsed = Compat.ParseCharacterName(nameOrKey)
+    if parsed and list[parsed.lookupKey] then
+        return list[parsed.lookupKey]
+    end
+    local low = tostring(nameOrKey):lower()
+    for _, e in pairs(list) do
+        if e.id == low or (e.lookupKey and e.lookupKey == low)
+            or (e.displayName and e.displayName:lower() == low)
+            or (e.firstName and e.firstName:lower() == low) then
+            return e
+        end
+    end
+    return nil
+end
+
+function Watchlist:IsWatched(nameOrKey)
+    return self:GetEntry(nameOrKey) ~= nil
 end
 
 function Watchlist:Remove(id)
     local list = Store:GetWatchlistTable()
-    local entry = list[id]
+    local entry = list[id] or self:GetEntry(id)
     if not entry then return false end
-    local displayName = entry.displayName
+    local realId = entry.id or id
+    local displayName = entry.displayName or realId
+    list[realId] = nil
     list[id] = nil
     ns:Print(L["Removed %s from your Watchlist."]:format(displayName))
     ns:Emit("WATCHLIST_UPDATED")
@@ -236,10 +290,16 @@ end
 
 function Watchlist:PinToFriends(id)
     local list = Store:GetWatchlistTable()
-    local entry = list[id]
-    if not entry or not (C_FriendList and C_FriendList.AddFriend) then return false end
-    pcall(C_FriendList.AddFriend, entry.displayName, entry.note or "")
-    return true
+    local entry = list[id] or self:GetEntry(id)
+    if not entry then return false end
+    if C_FriendList and C_FriendList.AddFriend then
+        pcall(C_FriendList.AddFriend, entry.displayName, entry.note or "")
+        return true
+    elseif AddFriend then
+        pcall(AddFriend, entry.displayName)
+        return true
+    end
+    return false
 end
 
 function Watchlist:GetEntries(groupFilter, sortBy)
@@ -321,7 +381,20 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                     if m.level and m.level > 0 then entry.level = m.level end
                     if m.classFile then entry.classFile = m.classFile end
                     if m.area and m.area ~= "" then entry.area = m.area end
-                    if m.guild ~= nil then entry.guild = m.guild end
+                    if m.guild and m.guild ~= "" then entry.guild = m.guild end
+                    if parsed.surname and parsed.surname ~= "" and not entry.surname then
+                        local oldId = entry.id
+                        entry.surname = parsed.surname
+                        entry.displayName = parsed.displayName
+                        entry.id = parsed.lookupKey
+                        if oldId ~= entry.id then
+                            list[entry.id] = entry
+                            list[oldId] = nil
+                        end
+                        if Compat.CacheForeverFullName then
+                            Compat.CacheForeverFullName(nil, parsed.displayName, parsed.firstName)
+                        end
+                    end
                     if prevStatus ~= "online" then
                         Store:NotifyWatchlistOnline(entry)
                     end
@@ -411,9 +484,17 @@ function Watchlist:CheckEntry(id)
             local ok = pcall(FriendsFrame.UnregisterEvent, FriendsFrame, "WHO_LIST_UPDATE")
             self.friendsBorrowed = ok
         end
-        pcall(C_FriendList.SetWhoToUi, true)
+        if C_FriendList and C_FriendList.SetWhoToUi then
+            pcall(C_FriendList.SetWhoToUi, true)
+        elseif SetWhoToUI then
+            pcall(SetWhoToUI, 1)
+        end
     else
-        pcall(C_FriendList.SetWhoToUi, false)
+        if C_FriendList and C_FriendList.SetWhoToUi then
+            pcall(C_FriendList.SetWhoToUi, false)
+        elseif SetWhoToUI then
+            pcall(SetWhoToUI, 0)
+        end
         self.chatFilterActive = true
         AddChatFilter(SystemChatFilter)
     end
@@ -478,28 +559,48 @@ end
 
 local function OnWhoListUpdate()
     if not Watchlist.pending then return end
-    if not (C_FriendList and C_FriendList.GetNumWhoResults and C_FriendList.GetWhoInfo) then
+
+    local numResults, totalCount
+    if C_FriendList and C_FriendList.GetNumWhoResults then
+        numResults, totalCount = C_FriendList.GetNumWhoResults()
+    elseif GetNumWhoResults then
+        numResults, totalCount = GetNumWhoResults()
+    else
         CleanupPending()
         return
     end
 
-    local numResults, totalCount = C_FriendList.GetNumWhoResults()
     numResults = Safe.Number(numResults) or 0
     totalCount = Safe.Number(totalCount) or numResults
 
     local matches = {}
     for i = 1, numResults do
-        local info = Safe.Call(C_FriendList.GetWhoInfo, i)
-        if type(info) == "table" then
-            local fullName = Safe.String(info.fullName)
-            local parsed = fullName and Compat.ParseCharacterName(fullName)
+        if C_FriendList and C_FriendList.GetWhoInfo then
+            local info = Safe.Call(C_FriendList.GetWhoInfo, i)
+            if type(info) == "table" then
+                local fullName = Safe.String(info.fullName)
+                local parsed = fullName and Compat.ParseCharacterName(fullName)
+                if parsed then
+                    table.insert(matches, {
+                        parsed = parsed,
+                        level = Safe.Number(info.level),
+                        classFile = Safe.String(info.filename) or Compat.ClassFileFromLocalized(Safe.String(info.classStr)),
+                        area = Safe.String(info.area),
+                        guild = Safe.String(info.fullGuildName) or "",
+                    })
+                end
+            end
+        elseif GetWhoInfo then
+            local name, guild, level, _, classLoc, zone, classFileName = GetWhoInfo(i)
+            name = Safe.String(name)
+            local parsed = name and Compat.ParseCharacterName(name)
             if parsed then
                 table.insert(matches, {
                     parsed = parsed,
-                    level = Safe.Number(info.level),
-                    classFile = Safe.String(info.filename) or Compat.ClassFileFromLocalized(Safe.String(info.classStr)),
-                    area = Safe.String(info.area),
-                    guild = Safe.String(info.fullGuildName) or "",
+                    level = Safe.Number(level),
+                    classFile = Safe.String(classFileName) or Compat.ClassFileFromLocalized(Safe.String(classLoc)),
+                    area = Safe.String(zone),
+                    guild = Safe.String(guild) or "",
                 })
             end
         end

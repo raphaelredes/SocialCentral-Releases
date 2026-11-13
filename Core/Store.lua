@@ -43,9 +43,31 @@ function Store:GetClanScopeData()
     end
     if type(bucket.peers) ~= "table" then bucket.peers = {} end
     if type(bucket.events) ~= "table" then bucket.events = {} end
+    if type(bucket.lfg) ~= "table" then bucket.lfg = {} end
     if type(bucket.myProf1) ~= "string" then bucket.myProf1 = "" end
     if type(bucket.myProf2) ~= "string" then bucket.myProf2 = "" end
     if type(bucket.myCraftNote) ~= "string" then bucket.myCraftNote = "" end
+    if type(bucket.diplomacy) ~= "table" then
+        bucket.diplomacy = { rev = 0, updatedAt = 0, updatedBy = "", guilds = {} }
+    end
+    if type(bucket.diplomacy.guilds) ~= "table" then
+        bucket.diplomacy.guilds = {}
+    end
+    if type(bucket.clanInfo) ~= "table" then
+        bucket.clanInfo = {
+            rev = 0,
+            updatedAt = 0,
+            updatedBy = "",
+            editMode = "OFFICERS",
+            summary = "",
+            rules = "",
+            schedule = "",
+            contacts = "",
+        }
+    end
+    if bucket.clanInfo.editMode ~= "ALL" and bucket.clanInfo.editMode ~= "OFFICERS" then
+        bucket.clanInfo.editMode = "OFFICERS"
+    end
 
     local now = time()
     for k, p in pairs(bucket.peers) do
@@ -58,6 +80,11 @@ function Store:GetClanScopeData()
             bucket.events[id] = nil
         end
     end
+    for k, lfg in pairs(bucket.lfg) do
+        if type(lfg) ~= "table" or (lfg.updatedAt and (now - lfg.updatedAt) > 1800) then
+            bucket.lfg[k] = nil
+        end
+    end
 
     return bucket
 end
@@ -65,6 +92,7 @@ end
 function Store:GetAltsList()
     local out = {}
     local alts = ns.db and ns.db.alts or {}
+    local currentKey = Compat.CharacterKey()
     for key, info in pairs(alts) do
         if type(info) == "table" then
             info.key = key
@@ -72,16 +100,25 @@ function Store:GetAltsList()
         end
     end
     table.sort(out, function(a, b)
+        local aCur = (a.key == currentKey)
+        local bCur = (b.key == currentKey)
+        if aCur ~= bCur then
+            return aCur
+        end
         return (a.lastActive or 0) > (b.lastActive or 0)
     end)
     return out
 end
 
-function Store:GetTotalAltsGold()
+function Store:GetTotalAltsGold(poolOnly)
     local total = 0
+    local curPool = poolOnly and Compat.RealmPool(Compat.Realm())
     for _, info in pairs(ns.db and ns.db.alts or {}) do
         if type(info) == "table" and tonumber(info.money) then
-            total = total + tonumber(info.money)
+            local match = not curPool or (not info.realmPool) or info.realmPool == curPool
+            if match then
+                total = total + tonumber(info.money)
+            end
         end
     end
     return total
@@ -137,7 +174,7 @@ function Store:SyncWatchlistObservation(rawName, data)
             if data.level and data.level > 0 then entry.level = data.level end
             if data.classFile then entry.classFile = data.classFile end
             if data.area and data.area ~= "" then entry.area = data.area end
-            if data.guild ~= nil then entry.guild = data.guild end
+            if data.guild and data.guild ~= "" then entry.guild = data.guild end
             if data.online then
                 entry.lastSeen = now
                 entry.lastChecked = now
@@ -234,6 +271,12 @@ function Store:RecordCompanion(info)
     local parsed = Compat.ParseCharacterName(info.displayName)
     if not parsed then return end
     local tbl = self:GetRecentCompanionsTable()
+    if parsed.surname and tbl[parsed.firstName:lower()] then
+        local old = tbl[parsed.firstName:lower()]
+        if not info.classFile and old.classFile then info.classFile = old.classFile end
+        if (not info.level or info.level <= 0) and old.level then info.level = old.level end
+        tbl[parsed.firstName:lower()] = nil
+    end
     local existing = tbl[parsed.lookupKey] or {}
     tbl[parsed.lookupKey] = {
         lookupKey = parsed.lookupKey,

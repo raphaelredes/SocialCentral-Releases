@@ -72,9 +72,35 @@ local function SetIconPressed(pressed)
     button.icon:SetTexCoord(inset, 1 - inset, inset, 1 - inset)
 end
 
+local function GetChatSoundLabel()
+    local s = ns.db and ns.db.settings
+    if not s or s.chatSound == false then
+        return L["All Muted"], 0.96, 0.45, 0.45
+    end
+    if s.chatSoundGuild or s.chatSoundGroup then
+        return L["Whispers + Channels"], 0.98, 0.82, 0.35
+    end
+    return L["Whispers & Rooms (Guild off)"], 0.58, 0.88, 0.98
+end
+
 local function PopulateTooltip(tt)
     tt:ClearLines()
-    tt:AddDoubleLine("SocialCentral", "v" .. (ns.version or "0.1.0"), 0.25, 0.72, 0.98, 0.65, 0.70, 0.78)
+    tt:AddDoubleLine("SocialCentral", "v" .. (ns.version or "0.0.0"), 0.25, 0.72, 0.98, 0.65, 0.70, 0.78)
+
+    local remoteVer = ns.Clan and ns.Clan.latestRemoteVersion
+    if remoteVer and remoteVer ~= "" and remoteVer ~= ns.version then
+        tt:AddDoubleLine(L["Update Available"], "v" .. tostring(remoteVer), 1.0, 0.82, 0.0, 0.35, 0.95, 0.55)
+    end
+
+    local isBlizz = ns.Theme and ns.Theme.GetThemeName and ns.Theme:GetThemeName() == "blizzard"
+    local designLabel = isBlizz and L["Blizzard Official"] or L["Modern Theme"]
+    local langLabel = ns.activeLangLabel or "English"
+    tt:AddDoubleLine(L["Theme"], designLabel .. " | " .. langLabel, 0.78, 0.84, 0.92, 0.88, 0.92, 0.98)
+
+    local sndLabel, sr, sg, sb = GetChatSoundLabel()
+    tt:AddDoubleLine(L["Chat Sounds"], sndLabel, 0.78, 0.84, 0.92, sr, sg, sb)
+
+    tt:AddLine(" ")
 
     local watchOn, watchOff, watchUnk = 0, 0, 0
     if ns.Watchlist then
@@ -101,11 +127,27 @@ local function PopulateTooltip(tt)
         tt:AddDoubleLine(L["Nearby"], tostring(#ns.Nearby:GetList()), 0.88, 0.92, 0.98, 0.35, 0.80, 1.0)
     end
 
+    if ns.Spotter then
+        local eCount, aCount, sCount, totalCount = ns.Spotter:GetCounts()
+        if totalCount > 0 then
+            tt:AddDoubleLine(
+                L["Target Radar"],
+                string.format("|cfff54747E:%d|r  |cff40d973A:%d|r  |cfffacc3dC:%d|r", eCount, aCount, sCount),
+                0.88, 0.92, 0.98, 1, 1, 1
+            )
+        end
+    end
+
+    local grpCount = ns.Group and #ns.Group:GetMembers() or 0
+    if grpCount > 0 then
+        tt:AddDoubleLine(L["Group"], tostring(grpCount), 0.78, 0.84, 0.92, 0.45, 0.80, 1.0)
+    end
+
     if ns.Watchlist and watchOn > 0 then
         tt:AddLine(" ")
         local shown = 0
         for _, entry in ipairs(ns.Watchlist:GetEntries("all", "status")) do
-            if entry.status == "online" and shown < 6 then
+            if entry.status == "online" and shown < 5 then
                 local r, g, b = Compat.ClassColor(entry.classFile)
                 local star = entry.favorite and "* " or ""
                 local area = (entry.area and entry.area ~= "") and entry.area or L["Online"]
@@ -115,20 +157,35 @@ local function PopulateTooltip(tt)
         end
     end
 
-    local unreadChat = ns.Chat and ns.Chat:GetTotalUnread() or 0
-    local grpCount = ns.Group and #ns.Group:GetMembers() or 0
-    if unreadChat > 0 or grpCount > 0 then
+    local summary = ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
+    local unreadDirect = summary and summary.totalDirect or (ns.Chat and ns.Chat:GetTotalUnread() or 0)
+    local mirrorUnread = summary and summary.channels or 0
+
+    if unreadDirect > 0 or mirrorUnread > 0 then
         tt:AddLine(" ")
-        if unreadChat > 0 then
-            tt:AddDoubleLine(L["Unread Chat"], tostring(unreadChat), 0.78, 0.84, 0.92, 0.35, 0.95, 0.55)
+        if unreadDirect > 0 then
+            local msgCount = (summary and (summary.direct + summary.rooms)) or unreadDirect
+            local invCount = summary and summary.invites or 0
+            local rightSummary = invCount > 0
+                and string.format(L["%d msg | %d room invite(s)"], msgCount, invCount)
+                or tostring(unreadDirect)
+            tt:AddDoubleLine(L["Unread Messages (Direct)"], rightSummary, 0.98, 0.86, 0.32, 0.35, 0.95, 0.55)
+            if summary and summary.senders then
+                local shownSenders = 0
+                for _, item in ipairs(summary.senders) do
+                    if shownSenders >= 4 then break end
+                    tt:AddDoubleLine("  " .. tostring(item.title or ""), tostring(item.unread or 0), 0.82, 0.88, 0.96, 0.35, 0.95, 0.55)
+                    shownSenders = shownSenders + 1
+                end
+            end
         end
-        if grpCount > 0 then
-            tt:AddDoubleLine(L["Group"], tostring(grpCount), 0.78, 0.84, 0.92, 0.45, 0.80, 1.0)
+        if mirrorUnread > 0 then
+            tt:AddDoubleLine(L["Guild/Group Mirror Unread"], tostring(mirrorUnread), 0.62, 0.66, 0.74, 0.62, 0.66, 0.74)
         end
     end
 
     tt:AddLine(" ")
-    tt:AddLine(L["Click: toggle window\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+    tt:AddLine(L["Left-click: toggle window\nAlt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
 end
 
 local function OpenContextMenu(anchor)
@@ -147,10 +204,35 @@ local function OpenContextMenu(anchor)
             root:CreateButton(L["Open Clan"], function()
                 if ns.UI and ns.UI.OpenTab then ns.UI:OpenTab("clan") end
             end)
+            local radarLabel = L["Target Radar"]
+            if ns.Spotter then
+                local _, _, _, totalCount = ns.Spotter:GetCounts()
+                if totalCount > 0 then
+                    radarLabel = string.format("%s (%d)", L["Target Radar"], totalCount)
+                end
+            end
+            root:CreateButton(radarLabel, function()
+                if ns.SpotterHUD and ns.SpotterHUD.Toggle then ns.SpotterHUD:Toggle() end
+            end)
             root:CreateButton(L["Check Next"], function()
                 if ns.Watchlist then ns.Watchlist:CheckNext() end
             end)
+            if ns.Chat and ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(true) > 0 then
+                root:CreateButton(L["Mark All Conversations Read"], function()
+                    if ns.Chat and ns.Chat.MarkAllRead then
+                        ns.Chat:MarkAllRead()
+                    end
+                end)
+            end
             root:CreateDivider()
+            root:CreateCheckbox(L["Mute All Chat Sounds"], function()
+                return ns.db and ns.db.settings and ns.db.settings.chatSound == false
+            end, function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.chatSound = (ns.db.settings.chatSound == false)
+                    ns:Emit("CHAT_UPDATED")
+                end
+            end)
             root:CreateCheckbox(L["Online alerts for Watchlist"], function()
                 return ns.db and ns.db.settings and ns.db.settings.alerts and ns.db.settings.alerts.chat
             end, function()
@@ -179,6 +261,9 @@ local function OpenContextMenu(anchor)
                     ns.Theme:ShowUpdatePopup(ns.version, ns.Clan and ns.Clan.latestRemoteVersion, ns.RELEASE_URL)
                 end
             end)
+            root:CreateButton(L["Reset Window Positions"], function()
+                if ns.Theme and ns.Theme.ResetAllWindowPositions then ns.Theme:ResetAllWindowPositions() end
+            end)
             root:CreateButton(L["Settings"], function()
                 if ns.Settings then ns.Settings:Open() end
             end)
@@ -189,25 +274,51 @@ local function OpenContextMenu(anchor)
 end
 
 local function UpdateBadge()
-    local watchOn = ns.Watchlist and select(1, ns.Watchlist:GetStats()) or 0
-    local socialOn = ns.Social and #ns.Social:GetList("all") or 0
+    local summary = ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
+    local unreadDirect = summary and summary.totalDirect or (ns.Chat and ns.Chat:GetTotalUnread() or 0)
 
     if button and button.badge then
-        if watchOn > 0 then
-            button.badge:SetText(tostring(watchOn))
-            button.badge:SetTextColor(0.24, 0.92, 0.45)
-            button.badge:Show()
-        elseif socialOn > 0 then
-            button.badge:SetText(tostring(socialOn))
-            button.badge:SetTextColor(0.35, 0.80, 1.0)
-            button.badge:Show()
+        button.badge:Hide()
+        button.badge:SetText("")
+    end
+
+    if button and button.msgBadgeFrame then
+        button.msgBadgeFrame:Hide()
+    end
+
+    if button and button.overlayRing then
+        if unreadDirect > 0 then
+            button.overlayRing:SetVertexColor(1.0, 0.85, 0.22)
+        elseif ns.Spotter and select(1, ns.Spotter:GetCounts()) > 0 then
+            button.overlayRing:SetVertexColor(0.96, 0.28, 0.28)
         else
-            button.badge:Hide()
+            button.overlayRing:SetVertexColor(1, 1, 1)
         end
     end
 
     if ldbObject then
-        ldbObject.text = string.format("%d %s", watchOn > 0 and watchOn or socialOn, L["Online"])
+        ldbObject.text = "SocialCentral"
+    end
+end
+
+local function HandleMinimapClick(anchor, mouseButton)
+    if mouseButton == "RightButton" then
+        if GameTooltip then GameTooltip:Hide() end
+        OpenContextMenu(anchor)
+    elseif IsAltKeyDown and IsAltKeyDown() then
+        if ns.SpotterHUD and ns.SpotterHUD.Toggle then
+            ns.SpotterHUD:Toggle()
+        end
+    elseif IsControlKeyDown and IsControlKeyDown() then
+        if ns.UI and ns.UI.OpenTab then
+            ns.UI:OpenTab("chat")
+        end
+    elseif IsShiftKeyDown and IsShiftKeyDown() then
+        if ns.Watchlist then
+            ns.Watchlist:CheckNext()
+        end
+    elseif ns.UI then
+        ns.UI:Toggle()
     end
 end
 
@@ -222,13 +333,7 @@ local function RegisterBroker()
             text = "SocialCentral",
             icon = ICON_TEX,
             OnClick = function(self, mouseButton)
-                if mouseButton == "RightButton" then
-                    OpenContextMenu(self)
-                elseif IsShiftKeyDown and IsShiftKeyDown() and ns.Watchlist then
-                    ns.Watchlist:CheckNext()
-                elseif ns.UI then
-                    ns.UI:Toggle()
-                end
+                HandleMinimapClick(self, mouseButton)
             end,
             OnTooltipShow = function(tt)
                 if tt then PopulateTooltip(tt) end
@@ -268,26 +373,13 @@ local function EnsureButton()
     overlay:SetSize(50, 50)
     overlay:SetPoint("TOPLEFT")
     overlay:SetTexture(RING_TEX)
-
-    local badge = button:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
-    badge:SetPoint("BOTTOMRIGHT", 2, -2)
-    badge:Hide()
-    button.badge = badge
+    button.overlayRing = overlay
 
     button:SetScript("OnMouseDown", function() SetIconPressed(true) end)
     button:SetScript("OnMouseUp", function() SetIconPressed(false) end)
 
     button:SetScript("OnClick", function(self, mouseButton)
-        if mouseButton == "RightButton" then
-            GameTooltip:Hide()
-            OpenContextMenu(self)
-        elseif IsShiftKeyDown and IsShiftKeyDown() then
-            if ns.Watchlist then
-                ns.Watchlist:CheckNext()
-            end
-        elseif ns.UI then
-            ns.UI:Toggle()
-        end
+        HandleMinimapClick(self, mouseButton)
     end)
 
     button:SetScript("OnDragStart", function(self)
@@ -342,6 +434,6 @@ function MinimapBtn:Update()
     end
 end
 
-for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "GROUP_UPDATED", "CHAT_UPDATED" }) do
+for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "GROUP_UPDATED", "CHAT_UPDATED", "CLAN_UPDATED", "SPOTTER_UPDATED", "SETTINGS_CHANGED" }) do
     ns:On(ev, UpdateBadge)
 end

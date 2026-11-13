@@ -23,7 +23,7 @@ local function QueueEmit()
     end)
 end
 
-local function RecordSighting(rawName, guid, level, classFile, area, source)
+local function RecordSighting(rawName, guid, level, classFile, area, source, guild)
     if not rawName or Compat.IsMe(rawName, guid) then return end
     local parsed = Compat.ParseCharacterName(rawName)
     if not parsed then return end
@@ -34,7 +34,30 @@ local function RecordSighting(rawName, guid, level, classFile, area, source)
         Nearby:Prune(true)
     end
 
-    local existing = Store.nearby[parsed.lookupKey]
+    -- Upgrade any earlier first-name-only entry matching the same GUID cleanly.
+    local upgraded
+    if guid then
+        for oldKey, oldRow in pairs(Store.nearby) do
+            if oldKey ~= parsed.lookupKey and oldRow.guid == guid then
+                upgraded = oldRow
+                Store.nearby[oldKey] = nil
+                break
+            end
+        end
+    end
+    if parsed.surname and Store.nearby[parsed.firstName:lower()] then
+        local oldRow = Store.nearby[parsed.firstName:lower()]
+        if not upgraded then
+            upgraded = oldRow
+        end
+        Store.nearby[parsed.firstName:lower()] = nil
+    end
+
+    if guid and parsed and parsed.surname and Compat.CacheForeverFullName then
+        Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+    end
+
+    local existing = Store.nearby[parsed.lookupKey] or upgraded
     if not existing then
         local count = 0
         for _ in pairs(Store.nearby) do count = count + 1 end
@@ -51,16 +74,69 @@ local function RecordSighting(rawName, guid, level, classFile, area, source)
         end
     end
 
+    -- Fallback class resolution if classFile is missing (e.g. from chat sighting)
+    if not classFile or classFile == "" then
+        if existing and existing.classFile then
+            classFile = existing.classFile
+        elseif guid and Compat.ClassFileFromGuid then
+            classFile = Compat.ClassFileFromGuid(guid)
+        end
+        if (not classFile or classFile == "") and Store.social then
+            for _, sRow in pairs(Store.social) do
+                if (guid and sRow.guid == guid) or (sRow.lookupKey == parsed.lookupKey) then
+                    if sRow.classFile then
+                        classFile = sRow.classFile
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback guild resolution if guild is missing
+    if not guild or guild == "" then
+        if existing and existing.guild then
+            guild = existing.guild
+        elseif Store.social then
+            for _, sRow in pairs(Store.social) do
+                if (guid and sRow.guid == guid) or (sRow.lookupKey == parsed.lookupKey) then
+                    if sRow.guild and sRow.guild ~= "" then
+                        guild = sRow.guild
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback level resolution if level is missing
+    if not level or level <= 0 then
+        if existing and existing.level then
+            level = existing.level
+        elseif Store.social then
+            for _, sRow in pairs(Store.social) do
+                if (guid and sRow.guid == guid) or (sRow.lookupKey == parsed.lookupKey) then
+                    if sRow.level and sRow.level > 0 then
+                        level = sRow.level
+                        break
+                    end
+                end
+            end
+        end
+    end
+
     local row = existing or {
         key = parsed.lookupKey,
         displayName = parsed.displayName,
     }
+    row.key = parsed.lookupKey
 
     row.displayName = parsed.displayName
     row.guid = guid or row.guid
     if level and level > 0 then row.level = level end
     if classFile then row.classFile = classFile end
     if area and area ~= "" then row.area = area end
+    if guild and guild ~= "" then row.guild = guild end
     row.source = source or row.source
     row.lastSeen = now
     Store.nearby[parsed.lookupKey] = row
@@ -71,6 +147,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source)
         level = row.level,
         classFile = row.classFile,
         area = row.area,
+        guild = row.guild,
     })
 
     QueueEmit()
@@ -92,21 +169,32 @@ local function InspectUnit(unit, source)
         end
     end
 
-    local name = Safe.String(Safe.Call(UnitName, unit))
+    local guid = Safe.String(Safe.Call(UnitGUID, unit))
+    local existingName = nil
+    if guid then
+        for _, row in pairs(Store.nearby) do
+            if row.guid == guid and row.displayName and row.displayName:find("%s") then
+                existingName = row.displayName
+                break
+            end
+        end
+    end
+    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, guid, existingName)
+    local name = (resolved and resolved.fullName) or Safe.String(Safe.Call(UnitName, unit))
     if not name then return end
 
-    local guid = Safe.String(Safe.Call(UnitGUID, unit))
     local _, classFile = Safe.Call(UnitClass, unit)
     classFile = Safe.String(classFile)
     local level = Safe.Number(Safe.Call(UnitLevel, unit))
     local area = Compat.CurrentZoneName()
+    local guild = Safe.String(Safe.Call(GetGuildInfo, unit))
 
-    RecordSighting(name, guid, level, classFile, area, source)
+    RecordSighting(name, guid, level, classFile, area, source, guild)
 end
 
 local function ScanGroup()
-    if not (IsInGroup and IsInGroup()) then return end
-    if IsInRaid and IsInRaid() then
+    if not Compat.IsInGroup() then return end
+    if Compat.IsInRaid() then
         for i = 1, 40 do
             InspectUnit("raid" .. i, "group")
         end
@@ -117,11 +205,15 @@ local function ScanGroup()
     end
 end
 
-local function OnChat(_, _, _, sender, _, _, _, _, _, _, _, _, _, guid)
+local function OnChat(_, _, text, sender, ...)
     local cleanSender = Safe.String(sender)
+    local guid = select(10, ...)
     local cleanGuid = Safe.String(guid)
     if not cleanSender then return end
-    RecordSighting(cleanSender, cleanGuid, nil, nil, nil, "chat")
+    if cleanGuid and Compat.CacheForeverFullName then
+        Compat.CacheForeverFullName(cleanGuid, cleanSender)
+    end
+    RecordSighting(cleanSender, cleanGuid, nil, nil, nil, "chat", nil)
 end
 
 function Nearby:Prune(silent)
@@ -135,6 +227,11 @@ function Nearby:Prune(silent)
         end
     end
     if removed and not silent then ns:Emit("NEARBY_UPDATED") end
+end
+
+function Nearby:Clear()
+    wipe(Store.nearby)
+    ns:Emit("NEARBY_UPDATED")
 end
 
 function Nearby:GetList()
@@ -159,15 +256,23 @@ function Nearby:Init()
     ns.RegisterEvent(self, "PLAYER_TARGET_CHANGED", function()
         InspectUnit("target", "nearby")
     end)
-    ns.RegisterEvent(self, "GROUP_ROSTER_UPDATE", function()
-        ScanGroup()
+    ns.RegisterEvent(self, "PLAYER_FOCUS_CHANGED", function()
+        InspectUnit("focus", "nearby")
     end)
+    for _, grpEv in ipairs({ "GROUP_ROSTER_UPDATE", "PARTY_MEMBERS_CHANGED", "RAID_ROSTER_UPDATE" }) do
+        ns.RegisterEvent(self, grpEv, function()
+            ScanGroup()
+        end)
+    end
 
     for _, chatEvent in ipairs({
         "CHAT_MSG_SAY",
         "CHAT_MSG_YELL",
+        "CHAT_MSG_EMOTE",
+        "CHAT_MSG_TEXT_EMOTE",
         "CHAT_MSG_WHISPER",
         "CHAT_MSG_GUILD",
+        "CHAT_MSG_OFFICER",
         "CHAT_MSG_PARTY",
         "CHAT_MSG_PARTY_LEADER",
         "CHAT_MSG_RAID",
