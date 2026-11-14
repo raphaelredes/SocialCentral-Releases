@@ -49,6 +49,7 @@ local STATIC_CHANNEL_ORDER = {
     ["ch:raid"] = { titleKey = "Raid", kind = "RAID", slash = "/ra ", order = 3 },
     ["ch:guild"] = { titleKey = "Guild", kind = "GUILD", slash = "/g ", order = 4 },
     ["ch:officer"] = { titleKey = "Officer", kind = "OFFICER", slash = "/o ", order = 5 },
+    ["ch:alliance"] = { titleKey = "Alliance", kind = "ALLIANCE", slash = "/al ", order = 6 },
 }
 
 local function GetHistoryScopeTable()
@@ -487,12 +488,27 @@ function Chat:GetThreadsList(kindFilter)
             local room = rooms[t.roomId]
             include = room and room.joined == true
         elseif key:sub(1, 3) == "ch:" then
-            include = mirrorChannels and (#(t.messages or {}) > 0)
+            local isGuildChan = (t.kind == "GUILD" or t.kind == "OFFICER")
+            local isGroupChan = (t.kind == "PARTY" or t.kind == "RAID" or t.kind == "INSTANCE_CHAT")
+            local isAllianceChan = (t.kind == "ALLIANCE")
+            local inGuild = Compat.IsInGuild and Compat.IsInGuild()
+            local inGroup = Compat.IsInGroup and Compat.IsInGroup()
+            local isAllianceAuth = ns.Clan and ns.Clan.IsMemberAllianceAuthorized and ns.Clan:IsMemberAllianceAuthorized()
+            local forceShow = (isGuildChan and inGuild and kindFilter == "guild")
+                or (isGroupChan and inGroup and kindFilter == "group")
+                or (isAllianceChan and isAllianceAuth and (kindFilter == "alliance" or kindFilter == "channels" or not kindFilter or kindFilter == "all"))
+            include = (isAllianceChan and isAllianceAuth) or (mirrorChannels and #(t.messages or {}) > 0) or forceShow
         end
 
         if include and kindFilter and kindFilter ~= "all" then
             if kindFilter == "whispers" then
                 include = (t.kind == "WHISPER" or t.kind == "BN_WHISPER")
+            elseif kindFilter == "guild" then
+                include = (t.kind == "GUILD" or t.kind == "OFFICER")
+            elseif kindFilter == "group" then
+                include = (t.kind == "PARTY" or t.kind == "RAID" or t.kind == "INSTANCE_CHAT")
+            elseif kindFilter == "alliance" then
+                include = (t.kind == "ALLIANCE")
             elseif kindFilter == "rooms" then
                 include = (t.kind == "ROOM")
             elseif kindFilter == "channels" then
@@ -923,6 +939,52 @@ function Chat:SendRoomMessage(roomId, rawText)
     return true
 end
 
+function Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText)
+    if not msgText or msgText == "" then return end
+    if not ns.Clan or not ns.Clan:IsMemberAllianceAuthorized() then
+        return
+    end
+
+    local t = EnsureThread("ch:alliance", "ALLIANCE", L["Alliance"], { slash = "/al " })
+    if not t then return end
+
+    local gTag = (senderGuild and senderGuild ~= "") and ("<" .. senderGuild .. "> ") or ""
+    local displayName = gTag .. (authorName or "?")
+
+    local _, meKey, myFirst = GetMyInfo()
+    local isMe = (authorName == myFirst or authorName == meKey)
+    AppendMessage(t, displayName, msgText, not isMe, classFile, true, false, { viaAddon = true })
+    ns:Emit("CHAT_UPDATED")
+end
+
+function Chat:SendAllianceMessage(rawText)
+    if not rawText or rawText == "" then return false end
+    if not ns.Clan or not ns.Clan:IsMemberAllianceAuthorized() then
+        ns:Print(L["You do not have permission to use Alliance Chat."])
+        return false
+    end
+
+    local clean = Compat.CleanPayloadField(rawText, 140)
+    if clean == "" then return false end
+
+    local now = GetTime and GetTime() or time()
+    if (now - (self.lastAllianceSendAt or 0)) < 1.0 then
+        ns:Print(L["Please wait a moment before sending another alliance message."])
+        return false
+    end
+    self.lastAllianceSendAt = now
+
+    local ok = ns.Clan:SendAllianceChat(clean)
+    if ok then
+        local myName = Safe.String(Safe.Call(UnitName, "player")) or "Unknown"
+        local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+        local _, myClass = Safe.Call(UnitClass, "player")
+        self:ReceiveAllianceMessage(myGuild, myName, myClass, clean)
+        return true
+    end
+    return false
+end
+
 function Chat:IsDirectChatEnabled()
     local s = ns.db and ns.db.settings
     return not (s and s.addonDirectChat == false)
@@ -1080,6 +1142,9 @@ function Chat:GetPeerAddonState(threadKey)
     end
     if t.kind == "ROOM" then
         return { state = "room", verified = true }
+    end
+    if t.kind == "ALLIANCE" then
+        return { state = "alliance", verified = true, slash = "/al " }
     end
     if IsPublicChannelKind(t.kind) then
         local meta = STATIC_CHANNEL_ORDER[threadKey]
@@ -1606,6 +1671,9 @@ end
 
 function Chat:SendOrOpenReply(threadKey, rawText)
     if not threadKey then return false end
+    if threadKey == "ch:alliance" then
+        return self:SendAllianceMessage(rawText)
+    end
     if threadKey:sub(1, 5) == "room:" then
         return self:SendRoomMessage(threadKey:sub(6), rawText)
     end
@@ -1974,6 +2042,10 @@ function Chat:Init()
         pcall(RegisterAddonMessagePrefix, PREFIX)
     end
     self:LoadSavedHistory()
+
+    for chKey, meta in pairs(STATIC_CHANNEL_ORDER) do
+        EnsureThread(chKey, meta.kind, L[meta.titleKey], { slash = meta.slash })
+    end
 
     for _, ev in ipairs({
         "CHAT_MSG_WHISPER",

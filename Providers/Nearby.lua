@@ -47,10 +47,12 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     end
     if parsed.surname and Store.nearby[parsed.firstName:lower()] then
         local oldRow = Store.nearby[parsed.firstName:lower()]
-        if not upgraded then
-            upgraded = oldRow
+        if not (guid and oldRow.guid and oldRow.guid ~= guid) then
+            if not upgraded then
+                upgraded = oldRow
+            end
+            Store.nearby[parsed.firstName:lower()] = nil
         end
-        Store.nearby[parsed.firstName:lower()] = nil
     end
 
     if guid and parsed and parsed.surname and Compat.CacheForeverFullName then
@@ -74,6 +76,13 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         end
     end
 
+    local function MatchesSocialRow(sRow)
+        if guid and sRow.guid then
+            return sRow.guid == guid
+        end
+        return sRow.lookupKey == parsed.lookupKey
+    end
+
     -- Fallback class resolution if classFile is missing (e.g. from chat sighting)
     if not classFile or classFile == "" then
         if existing and existing.classFile then
@@ -83,7 +92,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         end
         if (not classFile or classFile == "") and Store.social then
             for _, sRow in pairs(Store.social) do
-                if (guid and sRow.guid == guid) or (sRow.lookupKey == parsed.lookupKey) then
+                if MatchesSocialRow(sRow) then
                     if sRow.classFile then
                         classFile = sRow.classFile
                         break
@@ -99,7 +108,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
             guild = existing.guild
         elseif Store.social then
             for _, sRow in pairs(Store.social) do
-                if (guid and sRow.guid == guid) or (sRow.lookupKey == parsed.lookupKey) then
+                if MatchesSocialRow(sRow) then
                     if sRow.guild and sRow.guild ~= "" then
                         guild = sRow.guild
                         break
@@ -115,7 +124,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
             level = existing.level
         elseif Store.social then
             for _, sRow in pairs(Store.social) do
-                if (guid and sRow.guid == guid) or (sRow.lookupKey == parsed.lookupKey) then
+                if MatchesSocialRow(sRow) then
                     if sRow.level and sRow.level > 0 then
                         level = sRow.level
                         break
@@ -188,6 +197,9 @@ local function InspectUnit(unit, source)
     local level = Safe.Number(Safe.Call(UnitLevel, unit))
     local area = Compat.CurrentZoneName()
     local guild = Safe.String(Safe.Call(GetGuildInfo, unit))
+    if (not guild or guild == "") and Compat.ReadUnitTooltipGuild then
+        guild = Compat.ReadUnitTooltipGuild(unit, guid)
+    end
 
     RecordSighting(name, guid, level, classFile, area, source, guild)
 end
@@ -213,7 +225,10 @@ local function OnChat(_, _, text, sender, ...)
     if cleanGuid and Compat.CacheForeverFullName then
         Compat.CacheForeverFullName(cleanGuid, cleanSender)
     end
-    RecordSighting(cleanSender, cleanGuid, nil, nil, nil, "chat", nil)
+    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanSender)
+    local bestName = (resolved and resolved.fullName) or cleanSender
+    local guild = cleanGuid and Compat.ReadUnitTooltipGuild and Compat.ReadUnitTooltipGuild(nil, cleanGuid) or nil
+    RecordSighting(bestName, cleanGuid, nil, nil, Compat.CurrentZoneName(), "chat", guild)
 end
 
 function Nearby:Prune(silent)

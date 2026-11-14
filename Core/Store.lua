@@ -34,8 +34,25 @@ function Store:GetClanScopeData()
     if not root then
         return { myTag = "NONE", myNote = "", peers = {}, events = {} }
     end
-    local guildName = self.guildInfo and self.guildInfo.inGuild and (self.guildInfo.name or "guild") or "_noguild"
-    local scope = Compat.ScopeKey() .. "::" .. Compat.Plain(guildName)
+    local inGuild = (self.guildInfo and self.guildInfo.inGuild) or (IsInGuild and ns.Safe.Value(IsInGuild()) == true)
+    local guildName = self.guildInfo and self.guildInfo.name
+    if inGuild and (not guildName or guildName == "") then
+        if GetGuildInfo then
+            guildName = ns.Safe.String(ns.Safe.Call(GetGuildInfo, "player"))
+        end
+        if (not guildName or guildName == "") and ns.db and ns.db.alts and Compat.CharacterKey then
+            local altRec = ns.db.alts[Compat.CharacterKey()]
+            if altRec and altRec.guild and altRec.guild ~= "" then
+                guildName = altRec.guild
+            end
+        end
+        if guildName and guildName ~= "" and self.guildInfo then
+            self.guildInfo.inGuild = true
+            self.guildInfo.name = guildName
+        end
+    end
+    local scopeGuild = inGuild and (guildName and guildName ~= "" and guildName or "guild") or "_noguild"
+    local scope = Compat.ScopeKey() .. "::" .. Compat.Plain(scopeGuild)
     local bucket = root[scope]
     if type(bucket) ~= "table" then
         bucket = { myTag = "NONE", myNote = "", peers = {}, events = {} }
@@ -53,6 +70,20 @@ function Store:GetClanScopeData()
     if type(bucket.diplomacy.guilds) ~= "table" then
         bucket.diplomacy.guilds = {}
     end
+    if type(bucket.alliance) ~= "table" then
+        bucket.alliance = {
+            enabled = false,
+            name = "",
+            token = "",
+            accessMode = "WHITELIST", -- "ALL" or "WHITELIST"
+            whitelist = {},           -- [lookupKey] = true
+            managers = {},            -- [lookupKey] = true
+            alliedGuilds = {},        -- [normGuildKey] = { name = ..., token = ..., leader = ... }
+        }
+    end
+    if type(bucket.alliance.whitelist) ~= "table" then bucket.alliance.whitelist = {} end
+    if type(bucket.alliance.managers) ~= "table" then bucket.alliance.managers = {} end
+    if type(bucket.alliance.alliedGuilds) ~= "table" then bucket.alliance.alliedGuilds = {} end
     if type(bucket.clanInfo) ~= "table" then
         bucket.clanInfo = {
             rev = 0,

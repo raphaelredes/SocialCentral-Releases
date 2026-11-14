@@ -12,3 +12,10 @@ ignore:
   - SECURITY_POLICY.md
   - scripts
   - Tests
+  - Instalar-SocialCentral.bat
+  - update-socialcentral.ps1
+  - "*.bat"
+  - "*.ps1"
+  - "*.cmd"
+  - "*.sh"
+  - "*.exe"

@@ -42,7 +42,18 @@ local function ScanGuild(map)
         return
     end
 
-    info.name = Safe.String(Safe.Call(GetGuildInfo, "player"))
+    local liveGuildName = Safe.String(Safe.Call(GetGuildInfo, "player"))
+    if (not liveGuildName or liveGuildName == "") and Compat.ReadUnitTooltipGuild then
+        liveGuildName = Compat.ReadUnitTooltipGuild("player")
+    end
+    if liveGuildName and liveGuildName ~= "" then
+        info.name = liveGuildName
+    elseif not info.name or info.name == "" then
+        local altRec = ns.db and ns.db.alts and Compat.CharacterKey and ns.db.alts[Compat.CharacterKey()]
+        if altRec and altRec.guild and altRec.guild ~= "" then
+            info.name = altRec.guild
+        end
+    end
     info.motd = Safe.String(Safe.Call(GetGuildRosterMOTD)) or ""
 
     local total = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
@@ -54,17 +65,17 @@ local function ScanGuild(map)
         name = Safe.String(name)
         guid = Safe.String(guid)
         local isOnline = (online == true or online == 1)
-        if isOnline and name then
-            onlineCount = onlineCount + 1
-            if not Compat.IsMe(name, guid) then
-                local parsed = Compat.ParseCharacterName(name)
-                if parsed then
-                    if guid and Compat.CacheForeverFullName then
-                        Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
-                    end
-                    if Compat.CacheGuildMember then
-                        Compat.CacheGuildMember(guid, parsed.firstName)
-                    end
+        if name and not Compat.IsMe(name, guid) then
+            local parsed = Compat.ParseCharacterName(name)
+            if parsed then
+                if guid and Compat.CacheForeverFullName then
+                    Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                end
+                if Compat.CacheGuildMember then
+                    Compat.CacheGuildMember(guid, parsed.firstName, parsed.displayName)
+                end
+                if isOnline then
+                    onlineCount = onlineCount + 1
                     local key = guid or ("char:" .. parsed.lookupKey)
                     local cleanArea = Safe.String(area) or ""
                     local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
@@ -92,6 +103,8 @@ local function ScanGuild(map)
                     })
                 end
             end
+        elseif isOnline and name then
+            onlineCount = onlineCount + 1
         end
     end
 

@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.3"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.3" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.4"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.4" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -98,7 +98,7 @@ local DEFAULTS = {
         chatSoundRooms = true,      -- chime on Addon Private Chat Room messages & invites
         chatSoundGuild = false,     -- Guild / Officer chat sound muted by default
         chatSoundGroup = false,     -- Party / Raid / Instance chat sound muted by default
-        chatMirrorChannels = false, -- opt-in: mirror native WoW Guild/Party/Raid channels inside Conversations
+        chatMirrorChannels = true,  -- mirror native WoW Guild/Party/Raid channels inside Conversations
         chatChannelUnread = false,  -- opt-in: allow mirrored WoW channels to increment unread badges
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
         chatHistoryLimit = 30,      -- local lines kept per character conversation thread
@@ -112,6 +112,8 @@ local DEFAULTS = {
         spotterPromptAnswered = false, -- first-time user choice for keeping spotter notifications
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
         spotterNameplateBadges = true, -- show subtle stance tag on non-forbidden nameplates
+        worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
+        worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
     },
     window = {
         point = nil,
@@ -127,6 +129,7 @@ local DEFAULTS = {
     chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
     chatRooms = {},                -- [scopeKey] = { [roomId] = { id, name, owner, scope, members } }
     addonPeers = {},               -- [scopeKey] = { [lookupKey] = { displayName, version, lastSeenAt } } (strictly WoW char names, zero Real ID)
+    worldBuffsDrops = {},          -- [realmPool] = { [buffId] = timestamp }
 }
 
 local function ApplyDefaults(target, defaults)
@@ -171,6 +174,19 @@ local function HandleSlash(raw)
         if ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab("group")
         end
+    elseif cmd == "buffs" or cmd == "buff" or cmd == "wbuffs" then
+        if rest == "report" or rest == "share" or rest == "chat" then
+            if ns.WorldBuffs and ns.WorldBuffs.OpenChatAnnouncement then
+                ns.WorldBuffs:OpenChatAnnouncement()
+            end
+        else
+            if ns.WorldBuffs and ns.WorldBuffs.PrintActiveBuffs then
+                ns.WorldBuffs:PrintActiveBuffs()
+            end
+            if ns.UI and ns.UI.OpenTab then
+                ns.UI:OpenTab("buffs")
+            end
+        end
     elseif cmd == "clan" or cmd == "lfg" or cmd == "diplomacy" then
         if ns.Clan and ns.Clan.SetPreferredRightView and cmd == "diplomacy" then
             ns.Clan:SetPreferredRightView("diplomacy")
@@ -195,6 +211,7 @@ local function HandleSlash(raw)
         ns:Print("  |cffffd200/sc|r — %s", L["Open SocialCentral"])
         ns:Print("  |cffffd200/sc chat|r — %s", L["Open Conversations"])
         ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"])
+        ns:Print("  |cffffd200/sc buffs|r — %s", L["World Buffs"])
         ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"])
         ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"])
         ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])

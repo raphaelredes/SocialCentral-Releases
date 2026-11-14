@@ -62,12 +62,31 @@ function Alts:Snapshot()
     end
 
     local _, classFile = Safe.Call(UnitClass, "player")
-    local level = Safe.Number(Safe.Call(UnitLevel, "player")) or 1
+    local level = Safe.Number(Safe.Call(UnitLevel, "player")) or (type(prev) == "table" and prev.level) or 1
     local xp = Safe.Number(Safe.Call(UnitXP, "player")) or 0
-    local xpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 1
+    local xpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
+    if xpMax <= 1 and type(prev) == "table" and (prev.xpMax or 0) > 1 then
+        xp = prev.xp or xp
+        xpMax = prev.xpMax
+    elseif xpMax <= 0 then
+        xpMax = 1
+    end
     local rested = Safe.Number(Safe.Call(GetXPExhaustion)) or 0
     local money = Safe.Number(Safe.Call(GetMoney)) or 0
-    local guild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+    if money == 0 and type(prev) == "table" and (prev.money or 0) > 0 then
+        money = prev.money
+    end
+    local guild = Safe.String(Safe.Call(GetGuildInfo, "player"))
+    if (not guild or guild == "") and Compat.ReadUnitTooltipGuild then
+        guild = Compat.ReadUnitTooltipGuild("player")
+    end
+    if (not guild or guild == "") and ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name then
+        guild = ns.Store.guildInfo.name
+    end
+    if (not guild or guild == "") and type(prev) == "table" and prev.guild and prev.guild ~= "" and Safe.Value(IsInGuild and IsInGuild()) == true then
+        guild = prev.guild
+    end
+    guild = guild or ""
     local faction = Compat.PlayerFaction()
 
     local avgTotal, avgEquipped
@@ -175,7 +194,6 @@ function Alts:Init()
         "PLAYER_AVG_ITEM_LEVEL_UPDATE",
         "GUILD_ROSTER_UPDATE",
         "FRIENDLIST_UPDATE",
-        "PLAYER_LOGOUT",
     }) do
         ns.RegisterEvent(self, eventName, function()
             self:Snapshot()

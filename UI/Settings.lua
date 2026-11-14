@@ -164,7 +164,7 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 2180)
+    content:SetSize(590, 2380)
     scrollFrame:SetScrollChild(content)
     scrollFrame:SetScript("OnSizeChanged", function(self)
         local w = math.max(460, (self:GetWidth() or 590) - 10)
@@ -798,9 +798,67 @@ local function BuildPanel()
         L["Uncheck for silent visual alerts only."]
     )
 
+    local buffsHeader = AddSectionHeader(
+        content,
+        L["World Buffs (Classic & Forever)"],
+        spotterSoundCb,
+        -14,
+        L["Help: World Buffs"],
+        L["Tracks active Classic World Buffs, detects city drop announcements in real time, and lets you report your current buffs to party, raid, or guild."],
+        L["Click 'Post in Chat' to pre-fill your buffs into chat, or browse the list to check sources, drop timers, and WoW Forever raid-suppression rules."]
+    )
+
+    local buffAlertCb = CreateCheckbox(
+        content,
+        L["World Buff Drop Alerts"],
+        buffsHeader,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsAlerts ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then
+                ns.db.settings.worldBuffsAlerts = checked
+            end
+        end,
+        L["Help: World Buff Drop Alerts"],
+        L["Prints a local chat notification whenever an NPC announces the turn-in of Onyxia, Nefarian, Rend Blackhand, or Hakkar heads in town."],
+        L["Alerts you ~6 to 15 seconds before the buff lands so you have time to log in or reposition."]
+    )
+
+    local buffSoundCb = CreateCheckbox(
+        content,
+        L["Play chime on World Buff drop alert"],
+        buffAlertCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSound ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then
+                ns.db.settings.worldBuffsSound = checked
+            end
+        end,
+        L["Help: World Buff Sound Chime"],
+        L["Plays an audio chime when an NPC announces an incoming world buff drop."],
+        L["Uncheck if you prefer silent chat notifications only."]
+    )
+
+    local openBuffsBtn = ns.Theme:CreateButton(content, 210, 24, L["Open World Buffs Tracker"], "default")
+    ns.Theme:AutoFitButton(openBuffsBtn, 180, 18, 300)
+    openBuffsBtn:SetPoint("TOPLEFT", buffSoundCb, "BOTTOMLEFT", 4, -8)
+    openBuffsBtn:SetScript("OnClick", function()
+        if ns.UI and ns.UI.OpenTab then
+            ns.UI:OpenTab("buffs")
+        end
+    end)
+    HelpBtn(
+        content,
+        openBuffsBtn,
+        L["Help: Open World Buffs Tracker"],
+        L["Opens the World Buffs tab in SocialCentral to view active buffs, drop timers, and classic buff sources."],
+        L["Click to review all classic world buffs and their status in WoW Forever."]
+    )
+
     local openRadarBtn = ns.Theme:CreateButton(content, 178, 24, L["Open Target Radar"], "primary")
     ns.Theme:AutoFitButton(openRadarBtn, 150, 18, 240)
-    openRadarBtn:SetPoint("TOPLEFT", spotterSoundCb, "BOTTOMLEFT", 4, -10)
+    openRadarBtn:SetPoint("TOPLEFT", openBuffsBtn, "BOTTOMLEFT", 0, -12)
     openRadarBtn:SetScript("OnClick", function()
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then
             ns.SpotterHUD:Toggle()
@@ -852,6 +910,7 @@ local function BuildPanel()
     syncFns[#syncFns + 1] = function()
         ns.Theme:StyleButton(updateLinkBtn, "default")
         ns.Theme:SetButtonActive(updateLinkBtn, false, "default")
+        ns.Theme:StyleButton(openBuffsBtn, "default")
         ns.Theme:StyleButton(openRadarBtn, "primary")
         ns.Theme:StyleButton(resetPosBtn, "default")
         ns.Theme:StyleButton(resetPromptBtn, "default")

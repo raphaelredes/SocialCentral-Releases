@@ -1085,10 +1085,13 @@ function SocialPanels:CreateChatPanel(parent)
     panel.topBar = topBar
 
     local filterDefs = {
-        { id = "all", label = L["All"], w = 54 },
-        { id = "whispers", label = L["Whispers"], w = 78 },
-        { id = "rooms", label = L["Rooms"], w = 68 },
-        { id = "channels", label = L["Channels"], w = 76 },
+        { id = "all", label = L["All"], w = 48 },
+        { id = "whispers", label = L["Whispers"], w = 72 },
+        { id = "guild", label = L["Guild"], w = 62 },
+        { id = "group", label = L["Group"], w = 62 },
+        { id = "alliance", label = L["Alliance"], w = 68 },
+        { id = "rooms", label = L["Rooms"], w = 62 },
+        { id = "channels", label = L["Channels"], w = 72 },
     }
     local fBtns = {}
     local prevF
@@ -1124,25 +1127,25 @@ function SocialPanels:CreateChatPanel(parent)
 
     local btnClear = Theme:CreateButton(topBar, 72, 22, L["Clear"], "default")
     Theme:AutoFitButton(btnClear, 60, 16, 105)
-    btnClear:SetPoint("RIGHT", helpTop, "LEFT", -6, 0)
     btnClear:SetScript("OnClick", function()
         if ns.Chat then
             ns.Chat:ClearHistory(ns.Chat.activeThreadKey)
         end
     end)
+    btnClear:Hide()
 
     local btnMarkRead = Theme:CreateButton(topBar, 82, 22, L["Mark Read"], "default")
     Theme:AutoFitButton(btnMarkRead, 72, 16, 120)
-    btnMarkRead:SetPoint("RIGHT", btnClear, "LEFT", -4, 0)
     btnMarkRead:SetScript("OnClick", function()
         if ns.Chat then
             ns.Chat:MarkAllRead()
         end
     end)
+    btnMarkRead:Hide()
 
     local btnTemp = Theme:CreateButton(topBar, 96, 22, L["Temp Channel"], "default")
     Theme:AutoFitButton(btnTemp, 88, 16, 145)
-    btnTemp:SetPoint("RIGHT", btnMarkRead, "LEFT", -4, 0)
+    btnTemp:SetPoint("RIGHT", helpTop, "LEFT", -6, 0)
     btnTemp:SetScript("OnClick", OpenTempChannelModal)
 
     local btnNewRoom = Theme:CreateButton(topBar, 88, 22, "+ " .. L["Room"], "primary")
@@ -1161,12 +1164,10 @@ function SocialPanels:CreateChatPanel(parent)
             w = 730
         end
         local rightW = (helpTop and (helpTop:GetWidth() or 18) or 18)
-            + (btnClear:GetWidth() or 72)
-            + (btnMarkRead:GetWidth() or 82)
             + (btnTemp:GetWidth() or 96)
             + (btnNewRoom:GetWidth() or 88)
             + (btnNewChat:GetWidth() or 76)
-            + 30
+            + 24
         local wrap = (leftTotalW + rightW + 12) > w
         topBar:SetHeight(wrap and 60 or 34)
         if helpTop then
@@ -1621,6 +1622,10 @@ function SocialPanels:CreateChatPanel(parent)
 
             if isRoom then
                 peerStatusText:SetText("|cff3fb950[" .. L["Addon Private Room"] .. "]|r  " .. string.format(L["%d members"], memberCount))
+            elseif activeKey == "ch:alliance" or pState.state == "alliance" then
+                local allCfg = ns.Clan and ns.Clan.GetAllianceConfig and ns.Clan:GetAllianceConfig() or {}
+                local allName = (allCfg.name and allCfg.name ~= "") and allCfg.name or L["Cross-Guild Alliance"]
+                peerStatusText:SetText("|cff3fb950[" .. L["Alliance Chat"] .. "]|r  " .. allName)
             elseif pState.verified then
                 local verTag = pState.version and ("v" .. pState.version) or "OK"
                 peerStatusText:SetText("|cff3fb950[SocialCentral " .. verTag .. "]|r  " .. L["Both players verified — in-addon direct chat active"])
@@ -1640,7 +1645,8 @@ function SocialPanels:CreateChatPanel(parent)
             end
 
             -- Dual composer vs official-destination bar
-            if isRoom or pState.verified then
+            local isAlliance = (activeKey == "ch:alliance")
+            if isRoom or pState.verified or isAlliance then
                 officialBar:Hide()
                 composer:Show()
                 if ns.Chat and ns.Chat.focusInputPending then
@@ -1652,9 +1658,10 @@ function SocialPanels:CreateChatPanel(parent)
                 Theme:SetButtonText(btnSend, L["Send"])
                 btnSend:SetEnabled(true)
                 if replyInput.SetPlaceholder then
-                    replyInput:SetPlaceholder(isRoom
-                        and L["Type message to Private Room and press Enter..."]
-                        or L["Type in-addon direct message and press Enter..."])
+                    replyInput:SetPlaceholder(isAlliance
+                        and L["Type in-addon alliance message and press Enter..."]
+                        or (isRoom and L["Type message to Private Room and press Enter..."]
+                        or L["Type in-addon direct message and press Enter..."]))
                 end
             else
                 replyInput:ClearFocus()
@@ -1730,6 +1737,329 @@ function SocialPanels:CreateChatPanel(parent)
             end
             msgFrame:AddMessage(L["Use '+ Chat' for 1-on-1 verified addon chat or '+ Room' for group rooms."], p.textMuted[1], p.textMuted[2], p.textMuted[3])
         end
+    end
+
+    panel:RefreshTheme()
+    return panel
+end
+
+function SocialPanels:CreateBuffsPanel(parent)
+    local panel = CreateFrame("Frame", nil, parent)
+    panel:SetAllPoints()
+    panel._view = "all"
+
+    local topCard = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    topCard:SetPoint("TOPLEFT", 0, 0)
+    topCard:SetPoint("TOPRIGHT", 0, 0)
+    topCard:SetHeight(64)
+    panel.topCard = topCard
+
+    local titleLbl = topCard:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    titleLbl:SetPoint("TOPLEFT", 10, -8)
+    titleLbl:SetJustifyH("LEFT")
+    titleLbl:SetWordWrap(false)
+    titleLbl:SetText(L["World Buffs (Classic & Forever)"])
+    panel.titleLbl = titleLbl
+
+    local countLbl = topCard:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    countLbl:SetPoint("BOTTOMLEFT", 10, 8)
+    countLbl:SetJustifyH("LEFT")
+    countLbl:SetWordWrap(false)
+    panel.countLbl = countLbl
+
+    local helpTop = AddHelp(
+        topCard,
+        topCard,
+        L["Help: World Buffs"],
+        L["Tracks active Classic World Buffs, detects city drop announcements in real time, and lets you report your current buffs to party, raid, or guild."],
+        L["Click 'Post in Chat' to pre-fill your buffs into chat, or browse the list to check sources, drop timers, and WoW Forever raid-suppression rules."],
+        "TOPRIGHT",
+        "TOPRIGHT",
+        -8,
+        -6
+    )
+
+    local btnAnnounce = Theme:CreateButton(topCard, 114, 22, L["Post in Chat"], "default")
+    Theme:AutoFitButton(btnAnnounce, 102, 16, 160)
+    btnAnnounce:SetPoint("RIGHT", helpTop, "LEFT", -6, 0)
+    btnAnnounce:SetScript("OnClick", function()
+        if ns.WorldBuffs then
+            ns.WorldBuffs:OpenChatAnnouncement()
+        end
+    end)
+    panel.btnAnnounce = btnAnnounce
+
+    local btnHistory = Theme:CreateButton(topCard, 104, 22, L["Drop History"], "default")
+    Theme:AutoFitButton(btnHistory, 94, 14, 150)
+    btnHistory:SetPoint("BOTTOMRIGHT", -8, 6)
+    btnHistory:SetScript("OnClick", function()
+        panel._view = "history"
+        panel:Refresh(true)
+    end)
+    panel.btnHistory = btnHistory
+
+    local btnActive = Theme:CreateButton(topCard, 90, 22, L["My Buffs"], "default")
+    Theme:AutoFitButton(btnActive, 80, 14, 130)
+    btnActive:SetPoint("RIGHT", btnHistory, "LEFT", -6, 0)
+    btnActive:SetScript("OnClick", function()
+        panel._view = "active"
+        panel:Refresh(true)
+    end)
+    panel.btnActive = btnActive
+
+    local btnAll = Theme:CreateButton(topCard, 84, 22, L["All Buffs"], "default")
+    Theme:AutoFitButton(btnAll, 74, 14, 120)
+    btnAll:SetPoint("RIGHT", btnActive, "LEFT", -6, 0)
+    btnAll:SetScript("OnClick", function()
+        panel._view = "all"
+        panel:Refresh(true)
+    end)
+    panel.btnAll = btnAll
+
+    titleLbl:SetPoint("RIGHT", btnAnnounce, "LEFT", -10, 0)
+    countLbl:SetPoint("RIGHT", btnAll, "LEFT", -10, 0)
+
+    local dropBanner = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    dropBanner:SetPoint("TOPLEFT", topCard, "BOTTOMLEFT", 0, -4)
+    dropBanner:SetPoint("TOPRIGHT", topCard, "BOTTOMRIGHT", 0, -4)
+    dropBanner:SetHeight(24)
+    dropBanner:Hide()
+    panel.dropBanner = dropBanner
+
+    local bannerText = dropBanner:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    bannerText:SetAllPoints()
+    bannerText:SetJustifyH("CENTER")
+    dropBanner.text = bannerText
+
+    local listCard = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    listCard:SetPoint("TOPLEFT", topCard, "BOTTOMLEFT", 0, -8)
+    listCard:SetPoint("BOTTOMRIGHT", 0, 0)
+    panel.listCard = listCard
+
+    local scroll = Theme:CreateScrollList(listCard, 52, function(rowParent, _, rowHeight)
+        local row = CreateFrame("Button", nil, rowParent, "BackdropTemplate")
+        row:SetHeight(rowHeight)
+        row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetSize(36, 36)
+        row.icon:SetPoint("LEFT", 8, 0)
+
+        row.btnReport = Theme:CreateButton(row, 84, 22, L["Report"], "default")
+        Theme:AutoFitButton(row.btnReport, 74, 14, 120)
+        row.btnReport:SetPoint("RIGHT", -8, 0)
+
+        row.title = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        row.title:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 8, -2)
+        row.title:SetPoint("RIGHT", row.btnReport, "LEFT", -8, 0)
+        row.title:SetJustifyH("LEFT")
+        row.title:SetWordWrap(false)
+
+        row.effect = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.effect:SetPoint("TOPLEFT", row.title, "BOTTOMLEFT", 0, -2)
+        row.effect:SetPoint("RIGHT", row.btnReport, "LEFT", -8, 0)
+        row.effect:SetJustifyH("LEFT")
+        row.effect:SetWordWrap(false)
+
+        row.source = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.source:SetPoint("TOPLEFT", row.effect, "BOTTOMLEFT", 0, -2)
+        row.source:SetPoint("RIGHT", row.btnReport, "LEFT", -8, 0)
+        row.source:SetJustifyH("LEFT")
+        row.source:SetWordWrap(false)
+
+        row.btnReport:SetScript("OnClick", function()
+            if row._item and row._item.def and ns.WorldBuffs then
+                ns.WorldBuffs:OpenIndividualBuffAnnouncement(row._item.def)
+            end
+        end)
+
+        row:SetScript("OnClick", function(self, btn)
+            if btn == "RightButton" and self._item and self._item.def and MenuUtil and MenuUtil.CreateContextMenu then
+                local item = self._item
+                MenuUtil.CreateContextMenu(self, function(_, root)
+                    root:CreateTitle(item.name or item.def.name)
+                    root:CreateButton(L["Report"], function()
+                        if ns.WorldBuffs then
+                            ns.WorldBuffs:OpenIndividualBuffAnnouncement(item.def)
+                        end
+                    end)
+                end)
+            end
+        end)
+
+        function row:RefreshTheme()
+            Theme:StyleButton(self.btnReport, "default")
+        end
+
+        return row
+    end, function(row, item, idx, pal)
+        row._item = item
+        Theme:ApplyBackdrop(row, (idx % 2 == 1) and "row" or "rowAlt", pal)
+
+        local texture = item.icon or (item.def and item.def.icon) or 132333
+        row.icon:SetTexture(texture)
+
+        local isActive = item.isActive
+        local remStr = item.remaining and ns.WorldBuffs and ns.WorldBuffs:FormatDuration(item.remaining) or ""
+
+        if isActive then
+            local activeBadge = " |cff3fb950[" .. L["Active"] .. (remStr ~= "" and (" - " .. remStr) or "") .. "]|r"
+            row.title:SetText("|cffffd200" .. item.name .. "|r" .. activeBadge)
+            row.btnReport:Show()
+            Theme:SetButtonText(row.btnReport, L["Report"])
+        else
+            local inactiveBadge = " |cff8b949e[" .. L["Inactive"] .. "]|r"
+            row.title:SetText("|cffffffff" .. item.name .. "|r" .. inactiveBadge)
+            row.btnReport:Hide()
+        end
+
+        row.effect:SetText(item.effect or (item.def and item.def.effect) or "")
+        row.effect:SetTextColor(pal.text[1], pal.text[2], pal.text[3])
+
+        local lastDrop = ns.WorldBuffs and ns.WorldBuffs:GetLastDropTime(item.id)
+        local cdStatus = ns.WorldBuffs and ns.WorldBuffs:GetDropCooldownStatus(item.def or item)
+        local dropNote = ""
+        if cdStatus then
+            if cdStatus.status == "COOLDOWN" then
+                dropNote = "|cffff9b3d[" .. cdStatus.text .. "]|r"
+                if lastDrop and lastDrop > 0 then
+                    dropNote = dropNote .. "  ·  |cff8b949e" .. L["Last drop detected: %s"]:format(Compat.FormatRelativeTime(lastDrop, L)) .. "|r"
+                end
+            elseif cdStatus.status == "READY" then
+                dropNote = "|cff3fb950[" .. cdStatus.text .. "]|r"
+                if lastDrop and lastDrop > 0 then
+                    dropNote = dropNote .. "  ·  |cff8b949e" .. L["Last drop detected: %s"]:format(Compat.FormatRelativeTime(lastDrop, L)) .. "|r"
+                end
+            elseif lastDrop and lastDrop > 0 then
+                dropNote = L["Last drop detected: %s"]:format(Compat.FormatRelativeTime(lastDrop, L))
+            end
+        elseif lastDrop and lastDrop > 0 then
+            dropNote = L["Last drop detected: %s"]:format(Compat.FormatRelativeTime(lastDrop, L))
+        end
+
+        local sourceInfo = (item.foreverStatus or (item.def and item.def.foreverStatus) or "")
+        local locInfo = (item.source or (item.def and item.def.source) or "")
+        local fullSource = sourceInfo
+        if locInfo ~= "" then
+            fullSource = fullSource .. "  ·  " .. locInfo
+        end
+        if dropNote ~= "" then
+            fullSource = fullSource .. "  ·  " .. dropNote
+        end
+
+        row.source:SetText(fullSource)
+        row.source:SetTextColor(pal.textMuted[1], pal.textMuted[2], pal.textMuted[3])
+
+        if row._scTheme ~= pal.key then
+            row._scTheme = pal.key
+            Theme:StyleButton(row.btnReport, "default")
+        end
+    end)
+    panel.scroll = scroll
+
+    function panel:RefreshTheme()
+        local pal = Theme:GetPalette()
+        Theme:ApplyBackdrop(topCard, "header", pal)
+        Theme:ApplyBackdrop(listCard, "inset", pal)
+        Theme:ApplyBackdrop(dropBanner, "surface", pal)
+        Theme:StyleButton(btnAnnounce, "default")
+        Theme:StyleButton(btnAll, panel._view == "all" and "active" or "default")
+        Theme:StyleButton(btnActive, panel._view == "active" and "active" or "default")
+        Theme:StyleButton(btnHistory, panel._view == "history" and "active" or "default")
+        scroll:Render()
+    end
+
+    function panel:Refresh(resetScroll)
+        local now = GetTime and GetTime() or 0
+        local inc = ns.WorldBuffs and ns.WorldBuffs.incomingDrop
+        if inc and inc.dropAt and inc.dropAt > now then
+            local left = math.max(1, math.ceil(inc.dropAt - now))
+            bannerText:SetText(L["[World Buff Alert] %s will drop in ~%ds!"]:format(inc.def.name, left))
+            dropBanner:Show()
+            listCard:ClearAllPoints()
+            listCard:SetPoint("TOPLEFT", dropBanner, "BOTTOMLEFT", 0, -4)
+            listCard:SetPoint("BOTTOMRIGHT", 0, 0)
+        else
+            dropBanner:Hide()
+            listCard:ClearAllPoints()
+            listCard:SetPoint("TOPLEFT", topCard, "BOTTOMLEFT", 0, -8)
+            listCard:SetPoint("BOTTOMRIGHT", 0, 0)
+        end
+
+        local allDefs = ns.WorldBuffs and ns.WorldBuffs:GetDefinitions() or {}
+        local activeList = ns.WorldBuffs and ns.WorldBuffs:GetActiveBuffs() or {}
+        local activeMap = {}
+        for _, act in ipairs(activeList) do
+            if act.def and act.def.id then
+                activeMap[act.def.id] = act
+            end
+        end
+
+        countLbl:SetText(L["%d / %d Active World Buffs · WoW Forever: Open World & Dungeons only"]:format(#activeList, #allDefs))
+
+        local displayItems = {}
+        if panel._view == "active" then
+            for _, act in ipairs(activeList) do
+                table.insert(displayItems, {
+                    id = act.def.id,
+                    name = act.name,
+                    icon = act.icon,
+                    effect = act.def.effect,
+                    source = act.def.source,
+                    foreverStatus = act.def.foreverStatus,
+                    isActive = true,
+                    remaining = act.remaining,
+                    def = act.def,
+                })
+            end
+        elseif panel._view == "history" then
+            for _, def in ipairs(allDefs) do
+                local act = activeMap[def.id]
+                local lastDrop = ns.WorldBuffs and ns.WorldBuffs:GetLastDropTime(def.id) or 0
+                table.insert(displayItems, {
+                    id = def.id,
+                    name = def.name,
+                    icon = def.icon,
+                    effect = def.effect,
+                    source = def.source,
+                    foreverStatus = def.foreverStatus,
+                    isActive = act ~= nil,
+                    remaining = act and act.remaining or nil,
+                    lastDrop = lastDrop,
+                    def = def,
+                })
+            end
+            table.sort(displayItems, function(a, b)
+                return (a.lastDrop or 0) > (b.lastDrop or 0)
+            end)
+        else
+            for _, def in ipairs(allDefs) do
+                local act = activeMap[def.id]
+                table.insert(displayItems, {
+                    id = def.id,
+                    name = def.name,
+                    icon = def.icon,
+                    effect = def.effect,
+                    source = def.source,
+                    foreverStatus = def.foreverStatus,
+                    isActive = act ~= nil,
+                    remaining = act and act.remaining or nil,
+                    def = def,
+                })
+            end
+        end
+
+        local emptyText = (panel._view == "active") and L["No active world buffs."] or L["No drop detected yet this session"]
+        scroll:SetData(displayItems, emptyText, resetScroll)
+        self:RefreshTheme()
+    end
+
+    if ns.On then
+        ns:On("WORLD_BUFFS_UPDATED", function()
+            if panel:IsShown() then
+                panel:Refresh(false)
+            end
+        end)
     end
 
     panel:RefreshTheme()

@@ -432,6 +432,218 @@ function Clan:CanEditClanManagement()
     return (info and info.editMode == "ALL") and true or false, false
 end
 
+function Clan:IsGuildLeader()
+    if not (IsInGuild and IsInGuild()) then
+        return false
+    end
+    if IsGuildLeader and Safe.Value(Safe.Call(IsGuildLeader)) == true then
+        return true
+    end
+    if C_GuildInfo and C_GuildInfo.GetGuildRankOrder and UnitGUID then
+        local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
+        if myGuid then
+            local rank = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
+            if rank and (rank == 0 or rank == 1) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function Clan:CanManageAlliance()
+    if not (IsInGuild and IsInGuild()) then
+        return false
+    end
+    if self:IsGuildLeader() then
+        return true
+    end
+    local myName = Safe.String(Safe.Call(UnitName, "player"))
+    local myParsed = myName and Compat.ParseCharacterName(myName)
+    local myKey = myParsed and myParsed.lookupKey
+    if myKey then
+        local bucket = Store:GetClanScopeData()
+        if bucket.alliance and bucket.alliance.managers and bucket.alliance.managers[myKey] == true then
+            return true
+        end
+    end
+    return false
+end
+
+function Clan:GetAllianceConfig()
+    local bucket = Store:GetClanScopeData()
+    return bucket.alliance or {}
+end
+
+function Clan:SaveAllianceConfig(enabled, name, token, accessMode)
+    if not self:CanManageAlliance() then
+        ns:Print(L["Only the Guild Leader or appointed Alliance Managers can configure the Alliance."])
+        return false
+    end
+    local bucket = Store:GetClanScopeData()
+    bucket.alliance = bucket.alliance or {}
+    bucket.alliance.enabled = enabled and true or false
+    bucket.alliance.name = Compat.CleanPayloadField(name or "", 40)
+    bucket.alliance.token = Compat.CleanPayloadField(token or "", 32)
+    bucket.alliance.accessMode = (accessMode == "ALL") and "ALL" or "WHITELIST"
+    bucket.alliance.updatedAt = time()
+    ns:Emit("CLAN_UPDATED")
+    ns:Emit("ALLIANCE_UPDATED")
+    return true
+end
+
+function Clan:SetMemberAllianceAccess(lookupKey, allowed, asManager)
+    if not self:CanManageAlliance() then
+        return false
+    end
+    if not lookupKey or lookupKey == "" then return false end
+    local bucket = Store:GetClanScopeData()
+    bucket.alliance = bucket.alliance or {}
+    bucket.alliance.whitelist = bucket.alliance.whitelist or {}
+    bucket.alliance.managers = bucket.alliance.managers or {}
+    if allowed then
+        bucket.alliance.whitelist[lookupKey] = true
+    else
+        bucket.alliance.whitelist[lookupKey] = nil
+    end
+    if self:IsGuildLeader() then
+        if asManager then
+            bucket.alliance.managers[lookupKey] = true
+        else
+            bucket.alliance.managers[lookupKey] = nil
+        end
+    end
+    ns:Emit("CLAN_UPDATED")
+    ns:Emit("ALLIANCE_UPDATED")
+    return true
+end
+
+function Clan:IsMemberAllianceAuthorized(lookupKey)
+    if not (IsInGuild and IsInGuild()) then
+        return false
+    end
+    if self:IsGuildLeader() then
+        return true
+    end
+    local bucket = Store:GetClanScopeData()
+    local all = bucket.alliance
+    if not all or not all.enabled then
+        return false
+    end
+    if all.accessMode == "ALL" then
+        return true
+    end
+    if not lookupKey then
+        local myName = Safe.String(Safe.Call(UnitName, "player"))
+        local myParsed = myName and Compat.ParseCharacterName(myName)
+        lookupKey = myParsed and myParsed.lookupKey
+    end
+    if lookupKey then
+        if all.managers and all.managers[lookupKey] == true then
+            return true
+        end
+        if all.whitelist and all.whitelist[lookupKey] == true then
+            return true
+        end
+    end
+    return false
+end
+
+function Clan:GetGuildMembersWithAllianceStatus()
+    local out = {}
+    local bucket = Store:GetClanScopeData()
+    local all = bucket.alliance or {}
+    local wl = all.whitelist or {}
+    local mgrs = all.managers or {}
+
+    local myName = Safe.String(Safe.Call(UnitName, "player"))
+    local myParsed = myName and Compat.ParseCharacterName(myName)
+    local myKey = myParsed and myParsed.lookupKey
+
+    if ns.Social then
+        local guildList = ns.Social:GetList("guild") or {}
+        for _, m in ipairs(guildList) do
+            if m.lookupKey then
+                table.insert(out, {
+                    lookupKey = m.lookupKey,
+                    displayName = m.displayName or m.name or "?",
+                    classFile = m.classFile,
+                    level = m.level or 0,
+                    rank = m.rank or "",
+                    authorized = (all.accessMode == "ALL") or (wl[m.lookupKey] == true) or (mgrs[m.lookupKey] == true),
+                    isManager = mgrs[m.lookupKey] == true,
+                    isSelf = (m.lookupKey == myKey),
+                })
+            end
+        end
+    end
+
+    table.sort(out, function(a, b)
+        if a.isManager ~= b.isManager then
+            return a.isManager
+        end
+        if a.authorized ~= b.authorized then
+            return a.authorized
+        end
+        return (a.displayName or "") < (b.displayName or "")
+    end)
+    return out
+end
+
+function Clan:SendAllianceChat(rawText)
+    if not (IsInGuild and IsInGuild()) then
+        ns:Print(L["No guild"])
+        return false
+    end
+    if not self:IsMemberAllianceAuthorized() then
+        ns:Print(L["You do not have permission to use Alliance Chat."])
+        return false
+    end
+    local cleanText = Compat.CleanPayloadField(rawText or "", 140)
+    if cleanText == "" then return false end
+
+    local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+    local myName = Safe.String(Safe.Call(UnitName, "player")) or "Unknown"
+    local _, myClass = Safe.Call(UnitClass, "player")
+
+    local payload = string.format("ALM~%s~%s~%s~%s", Compat.CleanPayloadField(myGuild, 32), Compat.CleanPayloadField(myName, 25), myClass or "", cleanText)
+    self:SendGuildSync(payload)
+    return true
+end
+
+function Clan:IsAlliedGuild(rawGuildName)
+    if not rawGuildName or rawGuildName == "" then return false end
+    local stance = self:LookupGuildStance(rawGuildName)
+    if stance == "ALLY" then return true end
+    local bucket = Store:GetClanScopeData()
+    local norm = NormalizeGuildKey(rawGuildName)
+    if bucket.alliance and bucket.alliance.alliedGuilds and bucket.alliance.alliedGuilds[norm] then
+        return true
+    end
+    return false
+end
+
+function Clan:BroadcastScoutAlert(targetName, targetGuild, level, classFile, zone, coordsText)
+    if not targetName or targetName == "" then return false end
+    local cleanName = Compat.CleanPayloadField(targetName, 32)
+    local cleanGuild = Compat.CleanPayloadField(targetGuild or "", 32)
+    local cleanZone = Compat.CleanPayloadField(zone or "", 32)
+    local cleanCoords = Compat.CleanPayloadField(coordsText or "", 16)
+    local lvl = level or 0
+
+    local guildTag = cleanGuild ~= "" and (" <" .. cleanGuild .. ">") or ""
+    local lvlTag = lvl > 0 and (" (Lv " .. lvl .. ")") or ""
+    local locTag = (cleanZone ~= "" and cleanCoords ~= "") and (" - " .. cleanZone .. " (" .. cleanCoords .. ")") or ""
+    local chatMsg = string.format("[SocialCentral Scout] %s%s%s%s!", cleanName, guildTag, lvlTag, locTag)
+
+    if IsInGuild and IsInGuild() then
+        self:SendGuildSync("SCT~" .. cleanName .. "~" .. cleanGuild .. "~" .. lvl .. "~" .. (classFile or "") .. "~" .. cleanZone .. "~" .. cleanCoords)
+    end
+
+    ns:Print("|cffff4444%s|r", chatMsg)
+    return true
+end
+
 function Clan:GetClanInfo()
     local bucket = Store:GetClanScopeData()
     local info = bucket.clanInfo or {}
@@ -2084,6 +2296,32 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     end
                 end)
             end
+        end
+
+    elseif cmd == "SCT" then
+        local targetName = Compat.CleanPayloadField(parts[2] or "", 32)
+        local targetGuild = Compat.CleanPayloadField(parts[3] or "", 32)
+        local lvl = tonumber(parts[4]) or 0
+        local classFile = parts[5]
+        local zone = Compat.CleanPayloadField(parts[6] or "", 32)
+        local coords = Compat.CleanPayloadField(parts[7] or "", 16)
+        if targetName ~= "" then
+            local guildTag = targetGuild ~= "" and (" <" .. targetGuild .. ">") or ""
+            local lvlTag = lvl > 0 and (" (Lv " .. lvl .. ")") or ""
+            local locTag = (zone ~= "" and coords ~= "") and (" - " .. zone .. " (" .. coords .. ")") or ""
+            ns:Print("|cffff4444[SocialCentral Scout] %s%s%s%s (%s)|r", targetName, guildTag, lvlTag, locTag, parsed.displayName)
+            if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then
+                pcall(PlaySound, SOUNDKIT.RAID_WARNING)
+            end
+        end
+
+    elseif cmd == "ALM" then
+        local senderGuild = Compat.CleanPayloadField(parts[2] or "", 32)
+        local authorName = Compat.CleanPayloadField(parts[3] or "", 25)
+        local classFile = parts[4]
+        local msgText = Compat.CleanPayloadField(parts[5] or "", 140)
+        if ns.Chat and ns.Chat.ReceiveAllianceMessage then
+            ns.Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText)
         end
     end
 end

@@ -18,6 +18,7 @@ local scrollList
 local clanPanel
 local groupPanel
 local chatPanel
+local buffsPanel
 local modalFrame
 local eventModalFrame
 local clanLfgModalFrame
@@ -1319,6 +1320,242 @@ function UI:OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
     OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
 end
 
+local allianceModalFrame
+
+local function OpenAllianceManagementModal()
+    if not allianceModalFrame then
+        local m = CreateFrame("Frame", "SocialCentralAllianceModal", frame, "BackdropTemplate")
+        m:SetSize(520, 440)
+        m:SetPoint("CENTER")
+        m:SetFrameStrata("DIALOG")
+        m:SetFrameLevel(110)
+        if m.SetClipsChildren then m:SetClipsChildren(false) end
+        m:EnableMouse(true)
+        Theme:MakeMovable(m, { key = "modal_alliance_mgmt" })
+        table.insert(UISpecialFrames, "SocialCentralAllianceModal")
+
+        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", 16, -14)
+        title:SetPoint("TOPRIGHT", -36, -14)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+        title:SetText(L["Alliance Management & Whitelist"])
+
+        local topCloseBtn = Theme:CreateButton(m, 22, 20, "X", "default")
+        topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
+        topCloseBtn:SetScript("OnClick", function()
+            if m.nameIn then m.nameIn:ClearFocus() end
+            if m.tokenIn then m.tokenIn:ClearFocus() end
+            m:Hide()
+        end)
+        m.topCloseBtn = topCloseBtn
+
+        local helpBtn = AddHelp(
+            m,
+            title,
+            L["Help: Cross-Guild Alliance"],
+            L["Configure private cross-guild communication, shared Alliance chat, and member permissions."],
+            L["Only Guild Leaders and appointed Alliance Managers can access this configuration. Toggle access for guild members individually or enable for all."]
+        )
+
+        -- Checkbox: Enable Alliance
+        local chkEnabled = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
+        chkEnabled:SetSize(22, 22)
+        chkEnabled:SetPoint("TOPLEFT", 16, -42)
+        local chkLabel = chkEnabled:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        chkLabel:SetPoint("LEFT", chkEnabled, "RIGHT", 4, 0)
+        chkLabel:SetText(L["Enable Cross-Guild Alliance"])
+        m.chkEnabled = chkEnabled
+
+        -- Alliance Name input
+        local nameLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        nameLbl:SetPoint("TOPLEFT", 16, -70)
+        nameLbl:SetText(L["Alliance Name:"])
+        local nameIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 40, placeholder = L["e.g. Frost Wolf Coalition"] })
+        nameIn:SetPoint("TOPLEFT", 16, -86)
+        nameIn:SetPoint("TOPRIGHT", -16, -86)
+        m.nameIn = nameIn
+
+        -- Alliance Token input
+        local tokenLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        tokenLbl:SetPoint("TOPLEFT", 16, -114)
+        tokenLbl:SetText(L["Alliance Key / Token:"])
+        local tokenIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 32, placeholder = L["e.g. FWC-SECRET-TOKEN"] })
+        tokenIn:SetPoint("TOPLEFT", 16, -130)
+        tokenIn:SetPoint("TOPRIGHT", -16, -130)
+        m.tokenIn = tokenIn
+
+        -- Access Mode buttons
+        local modeLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        modeLbl:SetPoint("TOPLEFT", 16, -158)
+        modeLbl:SetText(L["Access Mode:"])
+
+        m._accessMode = "WHITELIST"
+        local btnModeWl = Theme:CreateButton(m, 140, 22, L["Whitelist Only"], "default")
+        btnModeWl:SetPoint("TOPLEFT", 16, -174)
+        Theme:AutoFitButton(btnModeWl, 110, 14, 180)
+
+        local btnModeAll = Theme:CreateButton(m, 140, 22, L["All Guild Members"], "default")
+        btnModeAll:SetPoint("LEFT", btnModeWl, "RIGHT", 8, 0)
+        Theme:AutoFitButton(btnModeAll, 110, 14, 180)
+
+        btnModeWl:SetScript("OnClick", function()
+            m._accessMode = "WHITELIST"
+            Theme:SetButtonActive(btnModeWl, true, "default")
+            Theme:SetButtonActive(btnModeAll, false, "default")
+            m:RefreshMembers()
+        end)
+        btnModeAll:SetScript("OnClick", function()
+            m._accessMode = "ALL"
+            Theme:SetButtonActive(btnModeWl, false, "default")
+            Theme:SetButtonActive(btnModeAll, true, "default")
+            m:RefreshMembers()
+        end)
+        m.btnModeWl = btnModeWl
+        m.btnModeAll = btnModeAll
+
+        -- Member whitelist section
+        local wlTitle = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        wlTitle:SetPoint("TOPLEFT", 16, -202)
+        wlTitle:SetText(L["Guild Member Authorization:"])
+
+        local memberHolder = CreateFrame("Frame", nil, m, "BackdropTemplate")
+        memberHolder:SetPoint("TOPLEFT", 16, -218)
+        memberHolder:SetPoint("BOTTOMRIGHT", -16, 44)
+        Theme:ApplyBackdrop(memberHolder, "inset")
+
+        local function CreateMemberRow(parent, _, rHeight)
+            local row = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+            row:SetHeight(rHeight)
+
+            row.nameFs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            row.nameFs:SetPoint("LEFT", 8, 0)
+            row.nameFs:SetJustifyH("LEFT")
+            row.nameFs:SetWordWrap(false)
+
+            row.metaFs = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            row.metaFs:SetPoint("LEFT", row.nameFs, "RIGHT", 6, 0)
+            row.metaFs:SetJustifyH("LEFT")
+            row.metaFs:SetWordWrap(false)
+
+            row.btnToggle = Theme:CreateButton(row, 86, 20, L["Alliance Access"], "default")
+            Theme:AutoFitButton(row.btnToggle, 70, 12, 110)
+            row.btnToggle:SetPoint("RIGHT", -6, 0)
+
+            row.btnMgr = Theme:CreateButton(row, 76, 20, L["Manager"], "default")
+            Theme:AutoFitButton(row.btnMgr, 60, 12, 90)
+            row.btnMgr:SetPoint("RIGHT", row.btnToggle, "LEFT", -6, 0)
+
+            return row
+        end
+
+        local function UpdateMemberRow(row, item)
+            row.item = item
+            local cR, cG, cB = 1, 1, 1
+            if item.classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[item.classFile] then
+                local cc = RAID_CLASS_COLORS[item.classFile]
+                cR, cG, cB = cc.r, cc.g, cc.b
+            end
+            row.nameFs:SetTextColor(cR, cG, cB)
+            row.nameFs:SetText(item.displayName or "?")
+
+            local rankTag = (item.rank and item.rank ~= "") and (" · " .. item.rank) or ""
+            local lvlTag = item.level and item.level > 0 and ("Lv " .. item.level) or ""
+            row.metaFs:SetText(lvlTag .. rankTag)
+
+            local isAuth = (m._accessMode == "ALL") or item.authorized
+            if isAuth then
+                Theme:SetButtonText(row.btnToggle, "|cff3fb950" .. L["Alliance Access"] .. "|r")
+                Theme:SetButtonActive(row.btnToggle, true, "default")
+            else
+                Theme:SetButtonText(row.btnToggle, "|cff8b949e" .. L["Alliance Access"] .. "|r")
+                Theme:SetButtonActive(row.btnToggle, false, "default")
+            end
+            row.btnToggle:SetEnabled(m._accessMode == "WHITELIST")
+            row.btnToggle:SetScript("OnClick", function()
+                if ns.Clan then
+                    ns.Clan:SetMemberAllianceAccess(item.lookupKey, not item.authorized, item.isManager)
+                    m:RefreshMembers()
+                end
+            end)
+
+            local isGM = ns.Clan and ns.Clan.IsGuildLeader and ns.Clan:IsGuildLeader()
+            row.btnMgr:SetShown(isGM == true)
+            if item.isManager then
+                Theme:SetButtonText(row.btnMgr, "|cff58a6ff" .. L["Manager"] .. "|r")
+                Theme:SetButtonActive(row.btnMgr, true, "default")
+            else
+                Theme:SetButtonText(row.btnMgr, "|cff8b949e" .. L["Manager"] .. "|r")
+                Theme:SetButtonActive(row.btnMgr, false, "default")
+            end
+            row.btnMgr:SetScript("OnClick", function()
+                if ns.Clan and isGM then
+                    ns.Clan:SetMemberAllianceAccess(item.lookupKey, item.authorized, not item.isManager)
+                    m:RefreshMembers()
+                end
+            end)
+        end
+
+        local memberScroll = Theme:CreateScrollList(memberHolder, 26, CreateMemberRow, UpdateMemberRow)
+        memberScroll.container:SetAllPoints()
+        m.memberScroll = memberScroll
+
+        function m:RefreshMembers()
+            if ns.Clan and ns.Clan.GetGuildMembersWithAllianceStatus then
+                local list = ns.Clan:GetGuildMembersWithAllianceStatus()
+                memberScroll:SetData(list)
+            end
+        end
+
+        -- Bottom Buttons
+        local btnClose = Theme:CreateButton(m, 88, 26, L["Close"], "default")
+        btnClose:SetPoint("BOTTOMRIGHT", -16, 10)
+        btnClose:SetScript("OnClick", function()
+            if m.nameIn then m.nameIn:ClearFocus() end
+            if m.tokenIn then m.tokenIn:ClearFocus() end
+            m:Hide()
+        end)
+        m.btnClose = btnClose
+
+        local btnSave = Theme:CreateButton(m, 140, 26, L["Save Configuration"], "primary")
+        Theme:AutoFitButton(btnSave, 110, 16, 180)
+        btnSave:SetPoint("RIGHT", btnClose, "LEFT", -8, 0)
+        btnSave:SetScript("OnClick", function()
+            if not ns.Clan then return end
+            local isEnabled = m.chkEnabled:GetChecked() and true or false
+            local aName = m.nameIn:GetText() or ""
+            local aToken = m.tokenIn:GetText() or ""
+            if ns.Clan:SaveAllianceConfig(isEnabled, aName, aToken, m._accessMode) then
+                m:Hide()
+            end
+        end)
+        m.btnSave = btnSave
+
+        allianceModalFrame = m
+    end
+
+    Theme:ApplyBackdrop(allianceModalFrame, "window")
+    Theme:StyleButton(allianceModalFrame.topCloseBtn, "default")
+    Theme:StyleButton(allianceModalFrame.btnClose, "default")
+    Theme:StyleButton(allianceModalFrame.btnSave, "primary")
+
+    local cfg = ns.Clan and ns.Clan.GetAllianceConfig and ns.Clan:GetAllianceConfig() or {}
+    allianceModalFrame.chkEnabled:SetChecked(cfg.enabled == true)
+    allianceModalFrame.nameIn:SetText(cfg.name or "")
+    allianceModalFrame.tokenIn:SetText(cfg.token or "")
+    allianceModalFrame._accessMode = (cfg.accessMode == "ALL") and "ALL" or "WHITELIST"
+
+    Theme:SetButtonActive(allianceModalFrame.btnModeWl, allianceModalFrame._accessMode == "WHITELIST", "default")
+    Theme:SetButtonActive(allianceModalFrame.btnModeAll, allianceModalFrame._accessMode == "ALL", "default")
+
+    allianceModalFrame:RefreshMembers()
+    allianceModalFrame:Show()
+end
+
+function UI:OpenAllianceManagementModal()
+    OpenAllianceManagementModal()
+end
+
 local function OpenRowMenu(row, item)
     if not (MenuUtil and MenuUtil.CreateContextMenu and item) then
         return
@@ -1656,11 +1893,11 @@ local function UpdateListRow(row, item, idx, palette)
         row.nameText:SetText(star .. hex .. (item.displayName or "") .. "|r" .. levelStr .. grp .. scBadge .. warn)
         row.subText:SetText(FormatWatchlistSubline(item))
 
-        row.btnRemove:Show()
+        row.btnRemove:Hide()
         Theme:AutoFitButton(row.btnInvite, 66, 18)
         row.btnInvite:Show()
         row.btnInvite:ClearAllPoints()
-        row.btnInvite:SetPoint("RIGHT", row.btnRemove, "LEFT", -6, 0)
+        row.btnInvite:SetPoint("RIGHT", -8, 0)
 
         Theme:AutoFitButton(row.btnWhisper, 72, 18)
         row.btnWhisper:Show()
@@ -1703,24 +1940,8 @@ local function UpdateListRow(row, item, idx, palette)
             anchor = row.btnInvite
         end
 
-        local isWatched = ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(item.lookupKey or item.displayName)
-        row.btnAction:Show()
-        row.btnAction:ClearAllPoints()
-        row.btnAction:SetPoint("RIGHT", anchor, "LEFT", -6, 0)
-        row._actionVariant = "default"
-        Theme:StyleButton(row.btnAction, "default")
-        if isWatched then
-            Theme:SetButtonText(row.btnAction, L["Watched"])
-            Theme:SetButtonActive(row.btnAction, true, "default")
-            row.btnAction:SetEnabled(false)
-            Theme:AutoFitButton(row.btnAction, 78, 18)
-        else
-            Theme:SetButtonText(row.btnAction, "+ " .. L["Watchlist"])
-            Theme:SetButtonActive(row.btnAction, false, "default")
-            row.btnAction:SetEnabled(true)
-            Theme:AutoFitButton(row.btnAction, 86, 18)
-        end
-        leftMostAnchor = row.btnAction
+        row.btnAction:Hide()
+        leftMostAnchor = anchor
 
     elseif tab == "nearby" then
         Theme:ApplyStatusColor(row.dot, "nearby")
@@ -2525,6 +2746,9 @@ local function UpdateClanPanel()
             Theme:SetButtonActive(clanPanel.lfgDngOnlyBtn, clanLfgDungeonsOnly == true, "default")
         end
     end
+    if clanPanel.profToolBar then
+        clanPanel.profToolBar:SetShown(clanRightView == "prof")
+    end
     if clanPanel.dipToolBar then
         clanPanel.dipToolBar:SetShown(clanRightView == "diplomacy")
         if clanPanel.dipFilterBtn then
@@ -2782,62 +3006,6 @@ local function CreateClanPanel(parent)
         L["Click 'My Status', pick an activity tag, and optionally add a short note like '+10 tank LFG'."]
     )
 
-    local newEventBtn = Theme:CreateButton(controlsBar, 104, 22, L["+ Event Call"], "primary")
-    Theme:AutoFitButton(newEventBtn, 94, 18, 145)
-    newEventBtn:SetScript("OnClick", OpenEventModal)
-    themeTargets[#themeTargets + 1] = { btn = newEventBtn, variant = "primary" }
-
-    newEventBtn._pairedHelp = AddHelp(
-        controlsBar,
-        newEventBtn,
-        L["Help: Clan Event Calls"],
-        L["Creates guild-wide group calls for Dungeons, M+, Raids, World Bosses, or PvP where guildmates sign up as Tank, Healer, DPS, or Maybe."],
-        L["Click '+ Event Call' to post an event, click T / H / D on any row to sign up, hover for the full roster, or right-click to invite applicants or close."]
-    )
-
-    local clanLfgBtn = Theme:CreateButton(controlsBar, 102, 22, L["+ Clan LFG"], "default")
-    Theme:AutoFitButton(clanLfgBtn, 90, 16, 142)
-    clanLfgBtn:SetScript("OnClick", OpenClanLFGModal)
-    themeTargets[#themeTargets + 1] = { btn = clanLfgBtn, variant = "default" }
-
-    clanLfgBtn._pairedHelp = AddHelp(
-        controlsBar,
-        clanLfgBtn,
-        L["Help: Clan Group Finder"],
-        L["Post LFG/LFM listings inside your Clan with your role, Dungeon/Keystone level, and optional Guild Chat template."],
-        L["Click '+ Clan LFG' to announce you are looking for a Dungeon/Raid or forming a group in the Clan."]
-    )
-
-    local alertBtn = Theme:CreateButton(controlsBar, 108, 22, L["LFG Alerts: OFF"], "default")
-    Theme:AutoFitButton(alertBtn, 96, 16, 152)
-    alertBtn:SetScript("OnClick", OpenClanLfgAlertModal)
-    themeTargets[#themeTargets + 1] = { btn = alertBtn, variant = "default" }
-
-    alertBtn._pairedHelp = AddHelp(
-        controlsBar,
-        alertBtn,
-        L["Help: Clan Dungeon Alerts"],
-        L["Notifies you in chat (with optional sound and clickable Whisper/Clan links) whenever a guildmate looks for a Dungeon/M+ group."],
-        L["Click 'LFG Alerts' to enable/disable alerts, restrict to Dungeons only, or filter specific dungeon keywords."]
-    )
-
-    local profBtn = Theme:CreateButton(controlsBar, 74, 22, "+ " .. L["Prof"], "default")
-    Theme:AutoFitButton(profBtn, 68, 16, 105)
-    profBtn:SetScript("OnClick", function()
-        if ns.SocialPanels and ns.SocialPanels.OpenProfessionModal then
-            ns.SocialPanels:OpenProfessionModal()
-        end
-    end)
-    themeTargets[#themeTargets + 1] = { btn = profBtn, variant = "default" }
-
-    profBtn._pairedHelp = AddHelp(
-        controlsBar,
-        profBtn,
-        L["Help: Clan Professions"],
-        L["Share up to 2 crafting professions and a short service note (e.g. Flasks, Lariat, Enchanting) with guildmates using SocialCentral."],
-        L["Click '+ Prof' to set your professions, then view the 'Professions' subtab on the right panel to find guild crafters."]
-    )
-
     local syncBtn = Theme:CreateButton(controlsBar, 88, 22, L["Sync"], "default")
     Theme:AutoFitButton(syncBtn, 72, 18, 124)
     syncBtn:SetScript("OnClick", function()
@@ -2869,6 +3037,21 @@ local function CreateClanPanel(parent)
         L["Help: Clan Management Info"],
         L["Shared guild focus, schedule, rules, and recruitment contacts synced securely ONLY inside your active guild."],
         L["Click 'Clan Info' to view or edit your guild's shared management card and configure whether Officers or All Members can edit it."]
+    )
+
+    local allianceBtn = Theme:CreateButton(controlsBar, 92, 22, L["Alliance"], "default")
+    Theme:AutoFitButton(allianceBtn, 78, 16, 134)
+    allianceBtn:SetScript("OnClick", function()
+        OpenAllianceManagementModal()
+    end)
+    themeTargets[#themeTargets + 1] = { btn = allianceBtn, variant = "default" }
+
+    allianceBtn._pairedHelp = AddHelp(
+        controlsBar,
+        allianceBtn,
+        L["Help: Cross-Guild Alliance"],
+        L["Configure private cross-guild communication, shared Alliance chat, and member permissions."],
+        L["Only Guild Leaders and appointed Alliance Managers can access this configuration. Toggle access for guild members individually or enable for all."]
     )
 
     local radarBtn = Theme:CreateButton(controlsBar, 98, 22, L["Target Radar"], "default")
@@ -2930,9 +3113,15 @@ local function CreateClanPanel(parent)
         L["Click '+ Event Call' to post an event, or switch to 'Calendar' to see upcoming native WoW Calendar events."]
     )
 
+    local newEventBtn = Theme:CreateButton(eventsCard, 96, 20, L["+ Event Call"], "primary")
+    Theme:AutoFitButton(newEventBtn, 84, 14, 136)
+    newEventBtn:SetPoint("TOPRIGHT", eventsCard, "TOPRIGHT", -8, -5)
+    newEventBtn:SetScript("OnClick", OpenEventModal)
+    themeTargets[#themeTargets + 1] = { btn = newEventBtn, variant = "primary" }
+
     local evtFilterRow = CreateFrame("Frame", nil, eventsCard)
-    evtFilterRow:SetPoint("TOPLEFT", 8, -28)
-    evtFilterRow:SetPoint("TOPRIGHT", -8, -28)
+    evtFilterRow:SetPoint("TOPLEFT", 8, -30)
+    evtFilterRow:SetPoint("TOPRIGHT", -8, -30)
     evtFilterRow:SetHeight(24)
 
     local evtFilters = {
@@ -2977,8 +3166,8 @@ local function CreateClanPanel(parent)
     )
 
     local rightViewRow = CreateFrame("Frame", nil, peersCard)
-    rightViewRow:SetPoint("TOPLEFT", 8, -28)
-    rightViewRow:SetPoint("TOPRIGHT", -8, -28)
+    rightViewRow:SetPoint("TOPLEFT", 8, -30)
+    rightViewRow:SetPoint("TOPRIGHT", -8, -30)
     rightViewRow:SetHeight(24)
 
     local rightViews = {
@@ -3006,24 +3195,71 @@ local function CreateClanPanel(parent)
     lfgToolBar:SetPoint("TOPRIGHT", rightViewRow, "BOTTOMRIGHT", 0, -4)
     lfgToolBar:SetHeight(22)
 
-    local lfgDngOnlyBtn = Theme:CreateButton(lfgToolBar, 96, 20, L["Dungeons Only"], "default")
-    Theme:AutoFitButton(lfgDngOnlyBtn, 84, 12, 140)
-    lfgDngOnlyBtn:SetPoint("LEFT", 0, 0)
+    local clanLfgBtn = Theme:CreateButton(lfgToolBar, 94, 20, L["+ Clan LFG"], "primary")
+    Theme:AutoFitButton(clanLfgBtn, 82, 12, 134)
+    clanLfgBtn:SetScript("OnClick", OpenClanLFGModal)
+    themeTargets[#themeTargets + 1] = { btn = clanLfgBtn, variant = "primary" }
+
+    clanLfgBtn._pairedHelp = AddHelp(
+        lfgToolBar,
+        clanLfgBtn,
+        L["Help: Clan Group Finder"],
+        L["Post LFG/LFM listings inside your Clan with your role, Dungeon/Keystone level, and optional Guild Chat template."],
+        L["Click '+ Clan LFG' to announce you are looking for a Dungeon/Raid or forming a group in the Clan."]
+    )
+
+    local lfgShareBtn = Theme:CreateButton(lfgToolBar, 108, 20, L["Share Queue/Key"], "default")
+    Theme:AutoFitButton(lfgShareBtn, 92, 12, 148)
+    lfgShareBtn:SetScript("OnClick", function()
+        if ns.Clan then
+            ns.Clan:ShareQueueOrEventToClanLFG()
+        end
+    end)
+    themeTargets[#themeTargets + 1] = { btn = lfgShareBtn, variant = "default" }
+
+    local lfgDngOnlyBtn = Theme:CreateButton(lfgToolBar, 92, 20, L["Dungeons Only"], "default")
+    Theme:AutoFitButton(lfgDngOnlyBtn, 80, 12, 132)
     lfgDngOnlyBtn:SetScript("OnClick", function()
         clanLfgDungeonsOnly = not clanLfgDungeonsOnly
         UpdateClanPanel()
     end)
     themeTargets[#themeTargets + 1] = { btn = lfgDngOnlyBtn, variant = "default" }
 
-    local lfgShareBtn = Theme:CreateButton(lfgToolBar, 118, 20, L["Share Queue/Key"], "primary")
-    Theme:AutoFitButton(lfgShareBtn, 96, 12, 160)
-    lfgShareBtn:SetPoint("LEFT", lfgDngOnlyBtn, "RIGHT", 4, 0)
-    lfgShareBtn:SetScript("OnClick", function()
-        if ns.Clan then
-            ns.Clan:ShareQueueOrEventToClanLFG()
+    local alertBtn = Theme:CreateButton(lfgToolBar, 98, 20, L["LFG Alerts: OFF"], "default")
+    Theme:AutoFitButton(alertBtn, 88, 12, 142)
+    alertBtn:SetScript("OnClick", OpenClanLfgAlertModal)
+    themeTargets[#themeTargets + 1] = { btn = alertBtn, variant = "default" }
+
+    alertBtn._pairedHelp = AddHelp(
+        lfgToolBar,
+        alertBtn,
+        L["Help: Clan Dungeon Alerts"],
+        L["Notifies you in chat (with optional sound and clickable Whisper/Clan links) whenever a guildmate looks for a Dungeon/M+ group."],
+        L["Click 'LFG Alerts' to enable/disable alerts, restrict to Dungeons only, or filter specific dungeon keywords."]
+    )
+
+    local profToolBar = CreateFrame("Frame", nil, peersCard)
+    profToolBar:SetPoint("TOPLEFT", rightViewRow, "BOTTOMLEFT", 0, -4)
+    profToolBar:SetPoint("TOPRIGHT", rightViewRow, "BOTTOMRIGHT", 0, -4)
+    profToolBar:SetHeight(22)
+    profToolBar:Hide()
+
+    local profBtn = Theme:CreateButton(profToolBar, 82, 20, "+ " .. L["Prof"], "primary")
+    Theme:AutoFitButton(profBtn, 68, 12, 112)
+    profBtn:SetScript("OnClick", function()
+        if ns.SocialPanels and ns.SocialPanels.OpenProfessionModal then
+            ns.SocialPanels:OpenProfessionModal()
         end
     end)
-    themeTargets[#themeTargets + 1] = { btn = lfgShareBtn, variant = "primary" }
+    themeTargets[#themeTargets + 1] = { btn = profBtn, variant = "primary" }
+
+    profBtn._pairedHelp = AddHelp(
+        profToolBar,
+        profBtn,
+        L["Help: Clan Professions"],
+        L["Share up to 2 crafting professions and a short service note (e.g. Flasks, Lariat, Enchanting) with guildmates using SocialCentral."],
+        L["Click '+ Prof' to set your professions, then view the 'Professions' subtab on the right panel to find guild crafters."]
+    )
 
     local dipToolBar = CreateFrame("Frame", nil, peersCard)
     dipToolBar:SetPoint("TOPLEFT", rightViewRow, "BOTTOMLEFT", 0, -4)
@@ -3071,9 +3307,15 @@ local function CreateClanPanel(parent)
     local peersScroll = Theme:CreateScrollList(peersHolder, 42, CreatePeerRow, UpdatePeerRow)
     peersScroll.container:SetAllPoints()
 
-    local ctrlItems = { syncUnit, statusBtn, newEventBtn, clanLfgBtn, alertBtn, profBtn, syncBtn, clanInfoBtn, radarBtn }
+    local ctrlItems = { syncUnit, statusBtn, radarBtn, clanInfoBtn, allianceBtn, syncBtn }
+    local lfgItems = { clanLfgBtn, lfgShareBtn, lfgDngOnlyBtn, alertBtn }
+    local profItems = { profBtn }
+    local dipItems = { dipAddBtn, dipFilterBtn, dipSyncBtn }
     ReflowClanPanel = function()
         if not panel or not controlsBar then return end
+        local canManage = ns.Clan and ns.Clan.CanManageAlliance and ns.Clan:CanManageAlliance()
+        allianceBtn:SetShown(canManage == true)
+        if allianceBtn._pairedHelp then allianceBtn._pairedHelp:SetShown(canManage == true) end
         local lblW = math.ceil((cbLabel.GetUnboundedStringWidth and cbLabel:GetUnboundedStringWidth()) or cbLabel:GetStringWidth() or 60)
         syncUnit:SetWidth(22 + 4 + lblW + 6 + (syncHelp and (syncHelp:GetWidth() or 18) or 18))
         local ctrlH = FlowButtonGroup(controlsBar, ctrlItems, 6, 4, 0)
@@ -3085,9 +3327,20 @@ local function CreateClanPanel(parent)
         local rvH = FlowButtonGroup(rightViewRow, rvBtnOrder, 4, 4, 0)
         rightViewRow:SetHeight(math.max(20, rvH))
 
+        local lfgH = FlowButtonGroup(lfgToolBar, lfgItems, 4, 4, 0)
+        lfgToolBar:SetHeight(math.max(20, lfgH))
+
+        local profH = FlowButtonGroup(profToolBar, profItems, 4, 4, 0)
+        profToolBar:SetHeight(math.max(20, profH))
+
+        local dipH = FlowButtonGroup(dipToolBar, dipItems, 4, 4, 0)
+        dipToolBar:SetHeight(math.max(20, dipH))
+
         peersHolder:ClearAllPoints()
         if clanRightView == "lfg" and lfgToolBar:IsShown() then
             peersHolder:SetPoint("TOPLEFT", lfgToolBar, "BOTTOMLEFT", -2, -4)
+        elseif clanRightView == "prof" and profToolBar:IsShown() then
+            peersHolder:SetPoint("TOPLEFT", profToolBar, "BOTTOMLEFT", -2, -4)
         elseif clanRightView == "diplomacy" and dipToolBar:IsShown() then
             peersHolder:SetPoint("TOPLEFT", dipToolBar, "BOTTOMLEFT", -2, -4)
         else
@@ -3117,6 +3370,7 @@ local function CreateClanPanel(parent)
     panel.peersScroll = peersScroll
     panel.lfgToolBar = lfgToolBar
     panel.lfgDngOnlyBtn = lfgDngOnlyBtn
+    panel.profToolBar = profToolBar
     panel.dipToolBar = dipToolBar
     panel.dipFilterBtn = dipFilterBtn
     panel:Hide()
@@ -3498,6 +3752,9 @@ local function ApplyTheme()
     if chatPanel and chatPanel.RefreshTheme then
         chatPanel:RefreshTheme()
     end
+    if buffsPanel and buffsPanel.RefreshTheme then
+        buffsPanel:RefreshTheme()
+    end
     UI:Refresh()
 end
 
@@ -3666,21 +3923,23 @@ local function BuildMainFrame()
             Theme:NotifyChanged()
         end
     end)
+    themeBtn:Hide()
     frame.themeBtn = themeBtn
     themeTargets[#themeTargets + 1] = { btn = themeBtn, variant = "default" }
 
     local updateBtn = Theme:CreateButton(header, 82, 24, L["Update"], "default")
     Theme:AutoFitButton(updateBtn, 76, 16, 145)
-    updateBtn:SetPoint("RIGHT", themeBtn, "LEFT", -6, 0)
+    updateBtn:SetPoint("RIGHT", settingsBtn, "LEFT", -6, 0)
     updateBtn:SetScript("OnClick", function()
         UI:OpenUpdateModal()
     end)
+    updateBtn:Hide()
     frame.updateBtn = updateBtn
     themeTargets[#themeTargets + 1] = { btn = updateBtn, variant = "default" }
 
     local headerHelp = AddHelp(
         header,
-        updateBtn,
+        settingsBtn,
         L["Help: SocialCentral Overview"],
         L["Blizzard-safe social center integrating Friends, Guild, Battle.net, Friendly Nearby, Alts Gold, Watchlist (/who), and Clan Hub."],
         L["Use '/sc', '/sc check Name', or '/sc config', or click the Minimap button. Hover or click '?' beside any option for detailed guidance."],
@@ -3711,10 +3970,11 @@ local function BuildMainFrame()
     local tabDefs = {
         { id = "watchlist", label = L["Watchlist"], width = 108 },
         { id = "social", label = L["Social"], width = 94 },
+        { id = "chat", label = L["Chat"], width = 88 },
         { id = "clan", label = L["Clan"], width = 80 },
         { id = "group", label = L["Group"], width = 90 },
-        { id = "chat", label = L["Chat"], width = 88 },
         { id = "nearby", label = L["Nearby"], width = 98 },
+        { id = "buffs", label = L["Buffs"], width = 84 },
         { id = "alts", label = L["Alts"], width = 84 },
     }
     wipe(tabOrder)
@@ -3751,6 +4011,8 @@ local function BuildMainFrame()
                 ns.Clan:RefreshGameCalendar(false)
             elseif def.id == "group" and ns.Group then
                 ns.Group:Scan()
+            elseif def.id == "buffs" and ns.WorldBuffs then
+                ns.WorldBuffs:Scan()
             end
             UI:Refresh(true)
         end)
@@ -4173,6 +4435,8 @@ local function BuildMainFrame()
     if groupPanel then groupPanel:Hide() end
     chatPanel = ns.SocialPanels and ns.SocialPanels:CreateChatPanel(content)
     if chatPanel then chatPanel:Hide() end
+    buffsPanel = ns.SocialPanels and ns.SocialPanels:CreateBuffsPanel(content)
+    if buffsPanel then buffsPanel:Hide() end
 
     -- Resize Grip
     local grip = CreateFrame("Button", nil, frame)
@@ -4199,7 +4463,7 @@ local function BuildMainFrame()
         ticker = C_Timer.NewTicker(1, function()
             if frame and frame:IsShown() then
                 UpdateWhoButtons()
-                if activeTab ~= "clan" and activeTab ~= "group" and activeTab ~= "chat" and scrollList then
+                if activeTab ~= "clan" and activeTab ~= "group" and activeTab ~= "chat" and activeTab ~= "buffs" and scrollList then
                     scrollList:Render()
                 end
             end
@@ -4289,9 +4553,19 @@ function UI:Refresh(resetScroll)
         if hasUpdate then
             Theme:SetButtonText(frame.updateBtn, L["Update %s"]:format("v" .. remoteVer))
             Theme:SetButtonActive(frame.updateBtn, true, "primary")
+            frame.updateBtn:ClearAllPoints()
+            frame.updateBtn:SetPoint("RIGHT", frame.settingsBtn, "LEFT", -6, 0)
+            frame.updateBtn:Show()
+            if frame.headerHelp then
+                frame.headerHelp:ClearAllPoints()
+                frame.headerHelp:SetPoint("RIGHT", frame.updateBtn, "LEFT", -6, 0)
+            end
         else
-            Theme:SetButtonText(frame.updateBtn, L["Update"])
-            Theme:SetButtonActive(frame.updateBtn, false, "default")
+            frame.updateBtn:Hide()
+            if frame.headerHelp and frame.settingsBtn then
+                frame.headerHelp:ClearAllPoints()
+                frame.headerHelp:SetPoint("RIGHT", frame.settingsBtn, "LEFT", -6, 0)
+            end
         end
     end
 
@@ -4321,7 +4595,7 @@ function UI:Refresh(resetScroll)
         end
     end
 
-    local isFullPanel = (activeTab == "clan" or activeTab == "group" or activeTab == "chat")
+    local isFullPanel = (activeTab == "clan" or activeTab == "group" or activeTab == "chat" or activeTab == "buffs")
     frame.filterBar:SetShown(not isFullPanel)
     frame.socialBar:SetShown(activeTab == "social")
     frame.watchFilterBar:SetShown(activeTab == "watchlist")
@@ -4374,6 +4648,7 @@ function UI:Refresh(resetScroll)
     clanPanel:SetShown(activeTab == "clan")
     if groupPanel then groupPanel:SetShown(activeTab == "group") end
     if chatPanel then chatPanel:SetShown(activeTab == "chat") end
+    if buffsPanel then buffsPanel:SetShown(activeTab == "buffs") end
     scrollList.container:SetShown(not isFullPanel)
 
     if activeTab == "clan" then
@@ -4382,6 +4657,8 @@ function UI:Refresh(resetScroll)
         groupPanel:Refresh(resetScroll)
     elseif activeTab == "chat" and chatPanel then
         chatPanel:Refresh(resetScroll)
+    elseif activeTab == "buffs" and buffsPanel then
+        buffsPanel:Refresh(resetScroll)
     else
         local emptyText = activeTab == "watchlist" and L["Watchlist is empty."] or L["No entries match your filter."]
         scrollList:SetData(BuildFilteredRows(), emptyText, resetScroll)
