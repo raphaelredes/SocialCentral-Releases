@@ -209,12 +209,45 @@ local function ScanGroup()
     if Compat.IsInRaid() then
         for i = 1, 40 do
             InspectUnit("raid" .. i, "group")
+            InspectUnit("raid" .. i .. "target", "nearby")
         end
     else
         for i = 1, 4 do
             InspectUnit("party" .. i, "group")
+            InspectUnit("party" .. i .. "target", "nearby")
         end
     end
+end
+
+local function ScanActiveEnvironment()
+    local seenTokens = {}
+    if C_NamePlate and C_NamePlate.GetNamePlates then
+        local ok, plates = pcall(C_NamePlate.GetNamePlates)
+        if ok and type(plates) == "table" then
+            for _, plate in ipairs(plates) do
+                local token = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
+                if type(token) == "string" and token ~= "" and not seenTokens[token] then
+                    seenTokens[token] = true
+                    InspectUnit(token, "nearby")
+                    InspectUnit(token .. "target", "nearby")
+                end
+            end
+        end
+    end
+    for i = 1, 40 do
+        local token = "nameplate" .. i
+        if not seenTokens[token] and UnitExists and UnitExists(token) then
+            seenTokens[token] = true
+            InspectUnit(token, "nearby")
+            InspectUnit(token .. "target", "nearby")
+        end
+    end
+    for _, u in ipairs({ "softfriend", "softinteract", "softtarget", "target", "targettarget", "mouseover", "focus" }) do
+        if UnitExists and UnitExists(u) then
+            InspectUnit(u, "nearby")
+        end
+    end
+    ScanGroup()
 end
 
 local function OnChat(_, _, text, sender, ...)
@@ -265,6 +298,16 @@ function Nearby:Init()
     ns.RegisterEvent(self, "NAME_PLATE_UNIT_ADDED", function(_, _, unit)
         InspectUnit(unit, "nearby")
     end)
+    ns.RegisterEvent(self, "FORBIDDEN_NAME_PLATE_UNIT_ADDED", function(_, _, unit)
+        InspectUnit(unit, "nearby")
+    end)
+    ns.RegisterEvent(self, "PLAYER_SOFT_FRIEND_CHANGED", function()
+        InspectUnit("softfriend", "nearby")
+    end)
+    ns.RegisterEvent(self, "PLAYER_SOFT_INTERACT_CHANGED", function()
+        InspectUnit("softinteract", "nearby")
+        InspectUnit("softfriend", "nearby")
+    end)
     ns.RegisterEvent(self, "UPDATE_MOUSEOVER_UNIT", function()
         InspectUnit("mouseover", "nearby")
     end)
@@ -274,9 +317,25 @@ function Nearby:Init()
     ns.RegisterEvent(self, "PLAYER_FOCUS_CHANGED", function()
         InspectUnit("focus", "nearby")
     end)
+    ns.RegisterEvent(self, "UNIT_TARGET", function(_, _, unit)
+        if unit and UnitExists and UnitExists(unit .. "target") then
+            InspectUnit(unit .. "target", "nearby")
+        end
+    end)
+    for _, envEv in ipairs({ "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA", "ZONE_CHANGED_INDOORS", "ZONE_CHANGED" }) do
+        ns.RegisterEvent(self, envEv, function()
+            ScanActiveEnvironment()
+        end)
+    end
     for _, grpEv in ipairs({ "GROUP_ROSTER_UPDATE", "PARTY_MEMBERS_CHANGED", "RAID_ROSTER_UPDATE" }) do
         ns.RegisterEvent(self, grpEv, function()
             ScanGroup()
+        end)
+    end
+
+    if C_Timer and C_Timer.NewTicker then
+        C_Timer.NewTicker(1.5, function()
+            ScanActiveEnvironment()
         end)
     end
 

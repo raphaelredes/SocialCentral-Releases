@@ -124,10 +124,14 @@ function Store:GetAltsList()
     local out = {}
     local alts = ns.db and ns.db.alts or {}
     local currentKey = Compat.CharacterKey()
+    local curPool = Compat.RealmPool(Compat.Realm())
     for key, info in pairs(alts) do
         if type(info) == "table" then
-            info.key = key
-            table.insert(out, info)
+            local infoPool = info.realmPool and Compat.RealmPool(info.realmPool) or curPool
+            if key == currentKey or infoPool == curPool then
+                info.key = key
+                table.insert(out, info)
+            end
         end
     end
     table.sort(out, function(a, b)
@@ -192,20 +196,31 @@ function Store:SyncWatchlistObservation(rawName, data)
     local list = self:GetWatchlistTable()
     local now = time()
     local changed = false
+    local keysToReindex = {}
 
-    for _, entry in pairs(list) do
+    for idKey, entry in pairs(list) do
         local exactMatch = entry.id == parsed.lookupKey
-        local firstMatch = (not entry.surname) and entry.firstName:lower() == parsed.firstName:lower()
+        local firstMatch = (not entry.surname) and entry.firstName and entry.firstName:lower() == parsed.firstName:lower()
         if exactMatch or firstMatch then
             local prevStatus = entry.status
             if data.online ~= nil then
                 entry.status = data.online and "online" or "offline"
+                entry.lastChecked = now
+                entry.truncatedWarning = nil
             end
             if data.source then entry.source = data.source end
             if data.level and data.level > 0 then entry.level = data.level end
             if data.classFile then entry.classFile = data.classFile end
             if data.area and data.area ~= "" then entry.area = data.area end
             if data.guild and data.guild ~= "" then entry.guild = data.guild end
+            if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
+                entry.surname = parsed.surname
+                entry.displayName = parsed.displayName
+                entry.truncatedWarning = nil
+                if parsed.lookupKey ~= idKey and not list[parsed.lookupKey] then
+                    keysToReindex[#keysToReindex + 1] = { oldId = idKey, newId = parsed.lookupKey, entry = entry }
+                end
+            end
             if data.online then
                 entry.lastSeen = now
                 entry.lastChecked = now
@@ -215,6 +230,12 @@ function Store:SyncWatchlistObservation(rawName, data)
             end
             changed = true
         end
+    end
+
+    for _, item in ipairs(keysToReindex) do
+        item.entry.id = item.newId
+        list[item.newId] = item.entry
+        list[item.oldId] = nil
     end
 
     if changed then
@@ -240,6 +261,25 @@ function Store:GetSocialMeta(rawNameOrKey)
     return self:GetSocialMetaTable()[key]
 end
 
+function Store:GetResolvedSocialMeta(rawNameOrKey)
+    local direct = self:GetSocialMeta(rawNameOrKey)
+    if not direct then return nil end
+    if direct.flag or not direct.mainName or direct.mainName == "" then
+        return direct
+    end
+    local mainMeta = self:GetSocialMeta(direct.mainName)
+    if not mainMeta then
+        return direct
+    end
+    return {
+        folder = direct.folder or mainMeta.folder,
+        mainName = direct.mainName,
+        note = direct.note or mainMeta.note,
+        flag = direct.flag or mainMeta.flag,
+        updatedAt = direct.updatedAt or mainMeta.updatedAt,
+    }
+end
+
 function Store:SetSocialMeta(rawNameOrKey, patch)
     if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" or type(patch) ~= "table" then return nil end
     local parsed = Compat.ParseCharacterName(rawNameOrKey)
@@ -258,7 +298,14 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
         local cleanNote = Compat.CleanInput(patch.note)
         rec.note = cleanNote or nil
     end
-    if not rec.folder and not rec.mainName and not rec.note then
+    if patch.flag ~= nil then
+        if patch.flag == "AVOID" or patch.flag == "GOOD" then
+            rec.flag = patch.flag
+        else
+            rec.flag = nil
+        end
+    end
+    if not rec.folder and not rec.mainName and not rec.note and not rec.flag then
         tbl[key] = nil
     else
         rec.updatedAt = time()
@@ -266,7 +313,15 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
     end
     ns:Emit("SOCIAL_UPDATED")
     ns:Emit("GROUP_UPDATED")
+    ns:Emit("CLAN_UPDATED")
     return tbl[key]
+end
+
+function Store:SetSocialFlag(rawNameOrKey, flagVal)
+    if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" then return nil end
+    local cur = self:GetSocialMeta(rawNameOrKey)
+    local nextFlag = (cur and cur.flag == flagVal) and "" or (flagVal or "")
+    return self:SetSocialMeta(rawNameOrKey, { flag = nextFlag })
 end
 
 function Store:GetSocialFolders()
@@ -309,6 +364,13 @@ function Store:RecordCompanion(info)
         tbl[parsed.firstName:lower()] = nil
     end
     local existing = tbl[parsed.lookupKey] or {}
+    local now = time()
+    local runs = tonumber(existing.runs) or 0
+    local lastRunAt = tonumber(existing.lastRunAt) or 0
+    if runs == 0 or (now - lastRunAt) >= 1800 or (info.zone and info.zone ~= "" and existing.zone and info.zone ~= existing.zone) then
+        runs = runs + 1
+        lastRunAt = now
+    end
     tbl[parsed.lookupKey] = {
         lookupKey = parsed.lookupKey,
         displayName = parsed.displayName,
@@ -316,7 +378,9 @@ function Store:RecordCompanion(info)
         level = (info.level and info.level > 0) and info.level or existing.level,
         role = info.role or existing.role,
         zone = (info.zone and info.zone ~= "") and info.zone or existing.zone,
-        lastSeen = time(),
+        lastSeen = now,
+        runs = runs,
+        lastRunAt = lastRunAt,
     }
 
     local list = self:GetRecentCompanionsList()
@@ -325,6 +389,13 @@ function Store:RecordCompanion(info)
             tbl[list[i].lookupKey] = nil
         end
     end
+end
+
+function Store:GetRecentCompanion(rawNameOrKey)
+    if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" then return nil end
+    local parsed = Compat.ParseCharacterName(rawNameOrKey)
+    if not parsed then return nil end
+    return self:GetRecentCompanionsTable()[parsed.lookupKey]
 end
 
 function Store:GetRecentCompanionsList()

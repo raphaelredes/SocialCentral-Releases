@@ -11,6 +11,7 @@ ignore:
   - README.md
   - SECURITY_POLICY.md
   - scripts
+  - tools
   - Tests
   - Instalar-SocialCentral.bat
   - update-socialcentral.ps1

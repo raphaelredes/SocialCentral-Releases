@@ -38,7 +38,220 @@ local function ApplyAuthorSurname(author, guid)
     end
 end
 
-function Alts:Snapshot()
+local EQUIP_SLOT_COUNT = 19
+local BAG_IDS = { 0, 1, 2, 3, 4 }
+local BANK_BAG_IDS = { -1, 5, 6, 7, 8, 9, 10, 11 }
+local MAX_CONTAINER_ITEMS = 220
+
+local SECONDARY_PROF_PATTERNS = {
+    "first aid", "primeiros socorros", "primeros auxilios",
+    "cooking", "culinaria", "culinária", "cocina",
+    "fishing", "pescaria", "pesca",
+    "archaeology", "arqueologia", "arqueología",
+}
+
+local function IsSecondarySkillName(skillName)
+    if type(skillName) ~= "string" then return false end
+    local low = skillName:lower()
+    for _, pat in ipairs(SECONDARY_PROF_PATTERNS) do
+        if low:find(pat, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function SnapshotProfessions(prevProfs)
+    local out = {}
+    local seen = {}
+    if GetProfessions and GetProfessionInfo then
+        local okP, p1, p2, p3, p4, p5, p6 = pcall(GetProfessions)
+        if okP then
+            local slots = {
+                Safe.Value(p1),
+                Safe.Value(p2),
+                Safe.Value(p3),
+                Safe.Value(p4),
+                Safe.Value(p5),
+                Safe.Value(p6),
+            }
+            for idx = 1, 6 do
+                local pId = slots[idx]
+                if pId then
+                    local ok, name, icon, rank, maxRank = pcall(GetProfessionInfo, pId)
+                    name = ok and Safe.String(name) or nil
+                    if name and name ~= "" and not seen[name:lower()] then
+                        seen[name:lower()] = true
+                        out[#out + 1] = {
+                            name = name,
+                            rank = Safe.Number(rank) or 0,
+                            maxRank = Safe.Number(maxRank) or 0,
+                            icon = Safe.Value(icon),
+                            isPrimary = (idx <= 2),
+                        }
+                    end
+                end
+            end
+        end
+    end
+
+    if GetNumSkillLines and GetSkillLineInfo then
+        local count = Safe.Number(Safe.Call(GetNumSkillLines)) or 0
+        local currentHeader = ""
+        for i = 1, count do
+            local ok, sName, isHeader, _, sRank, _, _, sMaxRank, isAbandonable = pcall(GetSkillLineInfo, i)
+            if ok then
+                sName = Safe.String(sName)
+                if Safe.Value(isHeader) then
+                    currentHeader = sName and sName:lower() or ""
+                elseif sName and sName ~= "" and not seen[sName:lower()] then
+                    local inProfHeader = currentHeader:find("profiss", 1, true)
+                        or currentHeader:find("profession", 1, true)
+                        or currentHeader:find("profesion", 1, true)
+                    local abandonable = (Safe.Value(isAbandonable) == true) or (Safe.Number(isAbandonable) == 1)
+                    local secondary = IsSecondarySkillName(sName)
+                    if inProfHeader or abandonable or secondary then
+                        seen[sName:lower()] = true
+                        out[#out + 1] = {
+                            name = sName,
+                            rank = Safe.Number(sRank) or 0,
+                            maxRank = Safe.Number(sMaxRank) or 0,
+                            isPrimary = (abandonable or (inProfHeader and not secondary)) and true or false,
+                        }
+                    end
+                end
+            end
+        end
+    end
+
+    if #out == 0 and type(prevProfs) == "table" and #prevProfs > 0 then
+        return prevProfs
+    end
+    return out
+end
+
+local function ResolveItemVisuals(itemRef, icon, quality, link)
+    if itemRef and C_Item then
+        if not icon and C_Item.GetItemIconByID then
+            local ok, fileID = pcall(C_Item.GetItemIconByID, itemRef)
+            if ok and Safe.Value(fileID) then
+                icon = Safe.Value(fileID)
+            end
+        end
+        if not quality and C_Item.GetItemQualityByID then
+            local ok, itemQual = pcall(C_Item.GetItemQualityByID, itemRef)
+            if ok and Safe.Number(itemQual) then
+                quality = Safe.Number(itemQual)
+            end
+        end
+    end
+    return icon, quality or 1, link
+end
+
+local function SnapshotEquipment()
+    local equip = {}
+    for slotId = 1, EQUIP_SLOT_COUNT do
+        local itemID = Safe.Number(Safe.Call(GetInventoryItemID, "player", slotId))
+        local link = Safe.String(Safe.Call(GetInventoryItemLink, "player", slotId))
+        local icon = Safe.Value(Safe.Call(GetInventoryItemTexture, "player", slotId))
+        local quality = Safe.Number(Safe.Call(GetInventoryItemQuality, "player", slotId))
+        if itemID or link then
+            icon, quality, link = ResolveItemVisuals(link or itemID, icon, quality, link)
+            equip[slotId] = {
+                itemID = itemID,
+                link = link,
+                icon = icon,
+                quality = quality or 1,
+            }
+        end
+    end
+    return equip
+end
+
+local function SnapshotContainerRange(bagList)
+    local items = {}
+    local freeSlots = 0
+    local totalSlots = 0
+
+    local getNumSlots = (C_Container and C_Container.GetContainerNumSlots) or _G.GetContainerNumSlots
+    local getItemInfo = C_Container and C_Container.GetContainerItemInfo
+    local legacyGetItemInfo = _G.GetContainerItemInfo
+    local getLegacyLink = _G.GetContainerItemLink
+
+    if not getNumSlots then
+        return items, freeSlots, totalSlots
+    end
+
+    for _, bagId in ipairs(bagList) do
+        local okNum, numSlots = pcall(getNumSlots, bagId)
+        numSlots = okNum and Safe.Number(numSlots) or 0
+        if numSlots and numSlots > 0 then
+            totalSlots = totalSlots + numSlots
+            for slotId = 1, numSlots do
+                local icon, count, quality, link, itemID
+                if getItemInfo then
+                    local okInfo, info, r2, _, r4, _, _, r7, _, _, r10 = pcall(getItemInfo, bagId, slotId)
+                    if okInfo and type(info) == "table" then
+                        icon = Safe.Value(info.iconFileID)
+                        count = Safe.Number(info.stackCount) or 1
+                        quality = Safe.Number(info.quality)
+                        link = Safe.String(info.hyperlink)
+                        itemID = Safe.Number(info.itemID)
+                    elseif okInfo and info ~= nil and type(info) ~= "table" then
+                        icon = Safe.Value(info)
+                        count = Safe.Number(r2) or 1
+                        quality = Safe.Number(r4)
+                        link = Safe.String(r7)
+                        itemID = Safe.Number(r10)
+                    end
+                end
+                if not icon and not link and not itemID and legacyGetItemInfo then
+                    local okLegacy, lTex, lCnt, _, lQual, _, _, lLink, _, _, lId = pcall(legacyGetItemInfo, bagId, slotId)
+                    if okLegacy and (lTex or lLink or lId) then
+                        icon = Safe.Value(lTex)
+                        count = Safe.Number(lCnt) or 1
+                        quality = Safe.Number(lQual)
+                        link = Safe.String(lLink)
+                        itemID = Safe.Number(lId)
+                    end
+                end
+                if not link and getLegacyLink then
+                    link = Safe.String(Safe.Call(getLegacyLink, bagId, slotId))
+                end
+
+                if icon or link or itemID then
+                    icon, quality, link = ResolveItemVisuals(link or itemID, icon, quality, link)
+                    if #items < MAX_CONTAINER_ITEMS then
+                        items[#items + 1] = {
+                            bag = bagId,
+                            slot = slotId,
+                            itemID = itemID,
+                            link = link,
+                            icon = icon,
+                            count = (count and count > 1) and count or 1,
+                            quality = quality or 1,
+                        }
+                    end
+                else
+                    freeSlots = freeSlots + 1
+                end
+            end
+        end
+    end
+
+    return items, freeSlots, totalSlots
+end
+
+function Alts:GetArmoryURL(altEntry)
+    if not altEntry then return nil end
+    local full = altEntry.fullName or altEntry.name or ""
+    full = full:gsub("^%s+", ""):gsub("%s+$", "")
+    if full == "" then return nil end
+    local slug = full:gsub("%s+", "-")
+    return "https://armorywowforever.com/c/forever/us/pvp/" .. slug
+end
+
+function Alts:Snapshot(includeBank)
     if not (ns.db and ns.db.alts) then return end
     local name = Safe.String(Safe.Call(UnitName, "player"))
     if not name then return end
@@ -61,7 +274,15 @@ function Alts:Snapshot()
         resolved = Compat.ResolvePlayerFullName(prevFull) or Compat.ParseForeverFullName(name)
     end
 
-    local _, classFile = Safe.Call(UnitClass, "player")
+    local className, classFile = Safe.Call(UnitClass, "player")
+    local raceName, raceFile = Safe.Call(UnitRace, "player")
+    local sex = Safe.Number(Safe.Call(UnitSex, "player"))
+    local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
+    local bindLocation = Safe.String(Safe.Call(GetBindLocation))
+    if (not bindLocation or bindLocation == "") and type(prev) == "table" then
+        bindLocation = prev.bindLocation
+    end
+    local professions = SnapshotProfessions(type(prev) == "table" and prev.professions or nil)
     local level = Safe.Number(Safe.Call(UnitLevel, "player")) or (type(prev) == "table" and prev.level) or 1
     local xp = Safe.Number(Safe.Call(UnitXP, "player")) or 0
     local xpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
@@ -102,6 +323,22 @@ function Alts:Snapshot()
         or (prev and prev.itemLevel)
         or nil
 
+    local equipment = SnapshotEquipment()
+    local bags, bagFree, bagTotal = SnapshotContainerRange(BAG_IDS)
+    local bank = type(prev) == "table" and prev.bank or nil
+    local bankFree = type(prev) == "table" and prev.bankFree or 0
+    local bankTotal = type(prev) == "table" and prev.bankTotal or 0
+    local bankUpdatedAt = type(prev) == "table" and prev.bankUpdatedAt or nil
+    if includeBank then
+        local bItems, bFree, bTot = SnapshotContainerRange(BANK_BAG_IDS)
+        if bTot > 0 then
+            bank = bItems
+            bankFree = bFree
+            bankTotal = bTot
+            bankUpdatedAt = time()
+        end
+    end
+
     ns.db.alts[key] = {
         name = name,
         firstName = resolved and resolved.firstName or name,
@@ -110,7 +347,12 @@ function Alts:Snapshot()
         userSetSurname = userSet and (resolved and resolved.surname ~= nil) or false,
         realmPool = Compat.RealmPool(Compat.Realm()),
         faction = faction,
+        className = Safe.String(className) or (type(prev) == "table" and prev.className or nil),
         classFile = Safe.String(classFile),
+        raceName = Safe.String(raceName),
+        raceFile = Safe.String(raceFile),
+        sex = sex,
+        guid = myGuid or (type(prev) == "table" and prev.guid or nil),
         level = level,
         itemLevel = itemLevel,
         xp = xp,
@@ -118,16 +360,196 @@ function Alts:Snapshot()
         rested = rested,
         money = money,
         zone = Compat.CurrentZoneName(),
+        bindLocation = bindLocation or "",
+        professions = professions,
         guild = guild,
+        equipment = equipment,
+        bags = bags,
+        bagFree = bagFree,
+        bagTotal = bagTotal,
+        bank = bank,
+        bankFree = bankFree,
+        bankTotal = bankTotal,
+        bankUpdatedAt = bankUpdatedAt,
         lastActive = time(),
     }
 
     if resolved and resolved.surname and resolved.fullName and Compat.CacheForeverFullName then
-        local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
         Compat.CacheForeverFullName(myGuid, resolved.fullName, resolved.firstName)
     end
 
+    self.itemIndex = nil
     ns:Emit("ALTS_UPDATED")
+end
+
+local function ExtractItemID(item)
+    if type(item) ~= "table" then return nil end
+    local id = tonumber(item.itemID)
+    if id and id > 0 then return id end
+    if type(item.link) == "string" then
+        id = tonumber(item.link:match("item:(%d+)"))
+        if id and id > 0 then return id end
+    end
+    return nil
+end
+
+function Alts:RebuildItemIndex()
+    local index = {}
+    local alts = Store and Store.GetAltsList and Store:GetAltsList() or {}
+    for _, alt in ipairs(alts) do
+        local displayName = alt.fullName or alt.name or alt.key or "?"
+        local classFile = alt.classFile
+        local perItem = {}
+
+        local function AddBucket(list, field)
+            if type(list) ~= "table" then return end
+            for _, item in pairs(list) do
+                local itemID = ExtractItemID(item)
+                if itemID then
+                    local rec = perItem[itemID]
+                    if not rec then
+                        rec = {
+                            altKey = alt.key,
+                            displayName = displayName,
+                            classFile = classFile,
+                            equipped = 0,
+                            bags = 0,
+                            bank = 0,
+                            total = 0,
+                        }
+                        perItem[itemID] = rec
+                    end
+                    local qty = math.max(1, tonumber(item.count) or 1)
+                    rec[field] = rec[field] + qty
+                    rec.total = rec.total + qty
+                end
+            end
+        end
+
+        AddBucket(alt.equipment, "equipped")
+        AddBucket(alt.bags, "bags")
+        AddBucket(alt.bank, "bank")
+
+        for itemID, rec in pairs(perItem) do
+            index[itemID] = index[itemID] or {}
+            table.insert(index[itemID], rec)
+        end
+    end
+
+    local curKey = Compat.CharacterKey()
+    for _, owners in pairs(index) do
+        table.sort(owners, function(a, b)
+            local aCur = (a.altKey == curKey)
+            local bCur = (b.altKey == curKey)
+            if aCur ~= bCur then return aCur end
+            if a.total ~= b.total then return a.total > b.total end
+            return (a.displayName or "") < (b.displayName or "")
+        end)
+    end
+
+    self.itemIndex = index
+    return index
+end
+
+function Alts:GetItemOwners(itemID)
+    local numId = tonumber(itemID)
+    if not numId or numId <= 0 then return nil end
+    if not self.itemIndex then
+        self:RebuildItemIndex()
+    end
+    return self.itemIndex and self.itemIndex[numId]
+end
+
+local itemTooltipRegistered = false
+
+local function AppendAltItemTooltip(tooltip, data)
+    if not tooltip or (tooltip ~= GameTooltip and tooltip ~= ItemRefTooltip) then return end
+    if tooltip.IsForbidden and tooltip:IsForbidden() then return end
+    if ns.db and ns.db.settings and ns.db.settings.tooltipItemAlts == false then return end
+
+    local itemID = (type(data) == "table" and tonumber(data.id)) or nil
+    if (not itemID or itemID <= 0) and tooltip.GetItem then
+        local ok, _, link = pcall(tooltip.GetItem, tooltip)
+        if ok and link then
+            local cleanLink = Safe.String(link)
+            itemID = cleanLink and tonumber(cleanLink:match("item:(%d+)")) or nil
+        end
+    end
+    if not itemID or itemID <= 0 or tooltip._scAltItemId == itemID then
+        return
+    end
+
+    local owners = Alts:GetItemOwners(itemID)
+    if not owners or #owners == 0 then
+        return
+    end
+
+    tooltip._scAltItemId = itemID
+    tooltip:AddLine(" ")
+
+    local grandTotal = 0
+    local shown = 0
+    for _, o in ipairs(owners) do
+        grandTotal = grandTotal + (o.total or 0)
+        if shown < 8 then
+            shown = shown + 1
+            local hex = Compat.ClassHex(o.classFile)
+            local locParts = {}
+            if (o.equipped or 0) > 0 then
+                table.insert(locParts, L["Eq: %d"]:format(o.equipped))
+            end
+            if (o.bags or 0) > 0 then
+                table.insert(locParts, L["Bags: %d"]:format(o.bags))
+            end
+            if (o.bank or 0) > 0 then
+                table.insert(locParts, L["Bank: %d"]:format(o.bank))
+            end
+            local rightTxt = ("|cffffffff%d|r |cff9da7b5(%s)|r"):format(o.total or 0, table.concat(locParts, ", "))
+            tooltip:AddDoubleLine(hex .. (o.displayName or "?") .. "|r", rightTxt)
+        end
+    end
+    if #owners > 8 then
+        tooltip:AddLine("|cff9da7b5" .. L["+%d more characters..."]:format(#owners - 8) .. "|r")
+    end
+    if #owners > 1 or grandTotal > (owners[1].total or 0) then
+        tooltip:AddDoubleLine("|cff9da7b5" .. L["Total (Account)"] .. "|r", "|cffffd24d" .. grandTotal .. "|r")
+    end
+    pcall(tooltip.Show, tooltip)
+end
+
+local function RegisterItemTooltipIntegration()
+    if itemTooltipRegistered then return end
+    itemTooltipRegistered = true
+
+    local function ClearItemTip(tip)
+        if tip then
+            tip._scAltItemId = nil
+        end
+    end
+    for _, tip in ipairs({ GameTooltip, ItemRefTooltip }) do
+        if tip and tip.HookScript then
+            if tip:HasScript("OnTooltipCleared") then
+                tip:HookScript("OnTooltipCleared", ClearItemTip)
+            end
+            if tip:HasScript("OnHide") then
+                tip:HookScript("OnHide", ClearItemTip)
+            end
+        end
+    end
+
+    if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType and Enum.TooltipDataType.Item then
+        pcall(TooltipDataProcessor.AddTooltipPostCall, Enum.TooltipDataType.Item, function(tooltip, data)
+            AppendAltItemTooltip(tooltip, data)
+        end)
+    else
+        for _, tip in ipairs({ GameTooltip, ItemRefTooltip }) do
+            if tip and tip.HookScript and tip:HasScript("OnTooltipSetItem") then
+                tip:HookScript("OnTooltipSetItem", function(t)
+                    AppendAltItemTooltip(t, nil)
+                end)
+            end
+        end
+    end
 end
 
 function Alts:SetSurname(altKey, rawSurname)
@@ -176,6 +598,7 @@ function Alts:RemoveAlt(altKey)
     end
     if ns.db.alts[altKey] then
         ns.db.alts[altKey] = nil
+        self.itemIndex = nil
         ns:Emit("ALTS_UPDATED")
         return true
     end
@@ -183,8 +606,19 @@ function Alts:RemoveAlt(altKey)
 end
 
 function Alts:Init()
+    RegisterItemTooltipIntegration()
+    ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        self:Snapshot(false)
+        if C_Timer and C_Timer.After then
+            C_Timer.After(1.5, function()
+                if Alts.Snapshot then
+                    Alts:Snapshot(false)
+                end
+            end)
+        end
+    end)
+
     for _, eventName in ipairs({
-        "PLAYER_ENTERING_WORLD",
         "PLAYER_XP_UPDATE",
         "PLAYER_LEVEL_UP",
         "UPDATE_EXHAUSTION",
@@ -194,9 +628,29 @@ function Alts:Init()
         "PLAYER_AVG_ITEM_LEVEL_UPDATE",
         "GUILD_ROSTER_UPDATE",
         "FRIENDLIST_UPDATE",
+        "SKILL_LINES_CHANGED",
+        "TRADE_SKILL_UPDATE",
     }) do
         ns.RegisterEvent(self, eventName, function()
-            self:Snapshot()
+            self:Snapshot(false)
+        end)
+    end
+
+    for _, itemEvent in ipairs({
+        "PLAYER_EQUIPMENT_CHANGED",
+        "BAG_UPDATE_DELAYED",
+    }) do
+        ns.RegisterEvent(self, itemEvent, function()
+            self:Snapshot(false)
+        end)
+    end
+
+    for _, bankEvent in ipairs({
+        "BANKFRAME_OPENED",
+        "PLAYERBANKSLOTS_CHANGED",
+    }) do
+        ns.RegisterEvent(self, bankEvent, function()
+            self:Snapshot(true)
         end)
     end
 

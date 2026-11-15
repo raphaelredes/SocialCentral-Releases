@@ -164,7 +164,7 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 2380)
+    content:SetSize(590, 2670)
     scrollFrame:SetScrollChild(content)
     scrollFrame:SetScript("OnSizeChanged", function(self)
         local w = math.max(460, (self:GetWidth() or 590) - 10)
@@ -182,10 +182,90 @@ local function BuildPanel()
     subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
     subtitle:SetText(L["Unified social hub for WoW: Forever."])
 
+    local winHeader = AddSectionHeader(
+        content,
+        L["Official Game Windows (Native Tabs)"],
+        subtitle,
+        -12,
+        L["Help: Official Game Windows"],
+        L["SocialCentral features live directly inside Blizzard's native windows via side-tabs and toolbar buttons. Use this Settings window for configuration and quick shortcuts."],
+        L["Click any shortcut below to jump straight to that official game window with the SocialCentral tab active, or configure Clan Diplomacy and Preferences below."]
+    )
+
+    local function CloseSettingsBeforeJump()
+        if not ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) then
+            if HideUIPanel then
+                if _G.SettingsPanel and _G.SettingsPanel.IsShown and _G.SettingsPanel:IsShown() then
+                    pcall(HideUIPanel, _G.SettingsPanel)
+                elseif _G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown() then
+                    pcall(HideUIPanel, _G.InterfaceOptionsFrame)
+                end
+            end
+        end
+    end
+
+    local jumpGrid = CreateFrame("Frame", nil, content)
+    jumpGrid:SetPoint("TOPLEFT", winHeader, "BOTTOMLEFT", 0, -6)
+    jumpGrid:SetSize(560, 62)
+
+    local jumpSpecs = {
+        { mod = "lfg", label = L["Looking for Group (I)"], variant = "primary" },
+        { mod = "watchlist", label = L["Social & Watchlist (O)"], variant = "default" },
+        { mod = "clan", label = L["Clan Hub & Diplomacy (J)"], variant = "default" },
+        { mod = "alts", label = L["My Alts (C)"], variant = "default" },
+        { mod = "chat", label = L["Conversations (Chat)"], variant = "default" },
+        { mod = "buffs", label = L["World Buffs (M)"], variant = "default" },
+        { mod = "hub", label = L["Unified Hub (/sc hub)"], variant = "default" },
+    }
+    local jumpButtons = {}
+    for _, spec in ipairs(jumpSpecs) do
+        local jb = ns.Theme:CreateButton(jumpGrid, 150, 24, spec.label, spec.variant)
+        ns.Theme:AutoFitButton(jb, 110, 18, 250)
+        jb:SetScript("OnClick", function()
+            CloseSettingsBeforeJump()
+            if spec.mod == "hub" then
+                if ns.UI and ns.UI.ShowHub then
+                    ns.UI:ShowHub()
+                elseif ns.UI then
+                    ns.UI:Toggle()
+                end
+            elseif ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+                ns.LFGFrameTab:OpenOfficialModule(spec.mod)
+            elseif ns.UI and ns.UI.OpenTab then
+                ns.UI:OpenTab(spec.mod)
+            end
+        end)
+        jumpButtons[#jumpButtons + 1] = { btn = jb, variant = spec.variant }
+    end
+
+    local function ReflowJumpGrid()
+        local maxW = math.max(320, (content:GetWidth() or 590) - 34)
+        local x, y, rowH = 0, 0, 24
+        for _, item in ipairs(jumpButtons) do
+            local bw = math.min(maxW, math.max(96, item.btn:GetWidth() or 140))
+            if x > 0 and (x + bw) > maxW then
+                x = 0
+                y = y - (rowH + 6)
+            end
+            item.btn:ClearAllPoints()
+            item.btn:SetPoint("TOPLEFT", jumpGrid, "TOPLEFT", x, y)
+            x = x + bw + 8
+        end
+        jumpGrid:SetSize(maxW, math.abs(y) + rowH + 2)
+    end
+    ReflowJumpGrid()
+    syncFns[#syncFns + 1] = function()
+        for _, item in ipairs(jumpButtons) do
+            ns.Theme:StyleButton(item.btn, item.variant)
+            ns.Theme:SetButtonActive(item.btn, false, item.variant)
+        end
+        ReflowJumpGrid()
+    end
+
     local langHeader = AddSectionHeader(
         content,
         L["Language"],
-        subtitle,
+        jumpGrid,
         -12,
         L["Help: Language"],
         L["Choose Auto (WoW) to follow your game client language automatically, or override SocialCentral to English, Português (BR), or Español independently."],
@@ -443,10 +523,25 @@ local function BuildPanel()
         L["Enable to capture guild group requests automatically; click a sighting in the Clan tab to whisper or request invite."]
     )
 
+    local globalChatLfgCb = CreateCheckbox(
+        content,
+        L["Scan public chat channels for LFG Bulletin"],
+        guildFinderCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.globalChatLfgScan ~= false end,
+        function(checked)
+            ns.db.settings.globalChatLfgScan = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: Global Chat LFG"],
+        L["Passively captures LFG/LFM dungeon and raid messages from public chat channels into the 'Global Chat LFG' filter inside Group Finder (I)."],
+        L["Select 'Global Chat LFG' in Group Finder to browse clean server chat requests separated from your Guild and Allies."]
+    )
+
     local autoStatusCb = CreateCheckbox(
         content,
         L["Auto-tag Busy inside dungeons/raids (opt-in)"],
-        guildFinderCb,
+        globalChatLfgCb,
         -6,
         function() return ns.db and ns.db.settings.autoStatusInstance end,
         function(checked)
@@ -683,10 +778,48 @@ local function BuildPanel()
         ns:Emit("CHAT_UPDATED")
     end, 10)
 
+    local tooltipsHeader = AddSectionHeader(
+        content,
+        L["Tooltips & Item Inventory Counts"],
+        histRow,
+        -14,
+        L["Help: Tooltips Integration"],
+        L["Enhances official item and player tooltips with account-wide alt item counts and saved Social Card notes, Red Flags, and recent companions."],
+        L["Toggle either tooltip helper below at any time without affecting Blizzard performance or combat safety."]
+    )
+
+    local tooltipItemAltsCb = CreateCheckbox(
+        content,
+        L["Show Alt Item Counts in item tooltips"],
+        tooltipsHeader,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.tooltipItemAlts ~= false end,
+        function(checked)
+            ns.db.settings.tooltipItemAlts = checked
+        end,
+        L["Help: Alt Item Tooltips"],
+        L["Displays which characters on this realm pool own the hovered item across Equipped, Bags, and Bank, plus the account total."],
+        L["Hover any item in bags, chat, bank, or auction house to see alt inventory counts instantly."]
+    )
+
+    local tooltipPlayerNotesCb = CreateCheckbox(
+        content,
+        L["Show Social Notes, Red Flags & Companion history in tooltips"],
+        tooltipItemAltsCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.tooltipPlayerNotes ~= false end,
+        function(checked)
+            ns.db.settings.tooltipPlayerNotes = checked
+        end,
+        L["Help: Player Tooltip Notes"],
+        L["Displays saved Social Card notes, 'Avoid' Red Flags, Watchlist notes, and recent dungeon companions when hovering over a player."],
+        L["Right-click any player frame or chat name to quickly set Social Notes, 'Good Partner (+)', or 'Flag: Avoid'."]
+    )
+
     local spotterHeader = AddSectionHeader(
         content,
         L["Screen Clan Radar & Target Selection"],
-        histRow,
+        tooltipPlayerNotesCb,
         -14,
         L["Help: Screen Clan Radar"],
         L["Detects Enemy, Ally, and Same-Clan players appearing on your screen via nameplates, target, focus, or mouseover using guild-isolated Diplomacy lists."],
@@ -728,7 +861,7 @@ local function BuildPanel()
         L["Show Enemy/Ally/Clan badge tags above visible nameplates"],
         spotterAutoHudCb,
         -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNameplateBadges ~= false end,
+        function() return ns.db and ns.db.settings and ns.db.settings.spotterNameplateBadges == true end,
         function(checked)
             ns.db.settings.spotterNameplateBadges = checked
             ns:Emit("SETTINGS_UPDATED")
@@ -768,12 +901,42 @@ local function BuildPanel()
         L["Keep enabled to spot friendly coalition members quickly in the world."]
     )
 
+    local spotterWatchlistCb = CreateCheckbox(
+        content,
+        L["Show direction and distance for Watchlist players on Target Radar"],
+        spotterAllyCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifyWatchlist ~= false end,
+        function(checked)
+            ns.db.settings.spotterNotifyWatchlist = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Watchlist Radar"],
+        L["Automatically displays the directional arrow and distance on Target Radar whenever a player on your Watchlist appears nearby."],
+        L["Keep checked to track Watchlist targets automatically on screen without waiting for chat links."]
+    )
+
+    local spotterFriendsCb = CreateCheckbox(
+        content,
+        L["Show direction and distance for Friends on Target Radar"],
+        spotterWatchlistCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifyFriends ~= false end,
+        function(checked)
+            ns.db.settings.spotterNotifyFriends = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Friends Radar"],
+        L["Displays the directional arrow and yard distance on Target Radar when a WoW Friend or Battle.net Friend is spotted nearby."],
+        L["Combine with 'Ignore Party/Raid members' below to hide friends once you already invited them into your group."]
+    )
+
     local spotterSameCb = CreateCheckbox(
         content,
         L["Notify when a Same Clan guildmate appears on screen"],
-        spotterAllyCb,
+        spotterFriendsCb,
         -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifySameClan ~= false end,
+        function() return ns.db and ns.db.settings and ns.db.settings.spotterNotifySameClan == true end,
         function(checked)
             ns.db.settings.spotterNotifySameClan = checked
             ns:Emit("SETTINGS_UPDATED")
@@ -783,10 +946,25 @@ local function BuildPanel()
         L["Uncheck if you only want notifications for Ally or Enemy guilds."]
     )
 
+    local spotterIgnoreGroupCb = CreateCheckbox(
+        content,
+        L["Ignore current Party/Raid members on automatic Target Radar"],
+        spotterSameCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterIgnoreGroup ~= false end,
+        function(checked)
+            ns.db.settings.spotterIgnoreGroup = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Ignore Group"],
+        L["Hides automatic Target Radar popups for players who are already in your current Party or Raid group."],
+        L["Recommended to keep checked to avoid screen clutter during dungeons and raids."]
+    )
+
     local spotterSoundCb = CreateCheckbox(
         content,
         L["Play alert chime on Enemy / Ally Clan sighting"],
-        spotterSameCb,
+        spotterIgnoreGroupCb,
         -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.spotterSound ~= false end,
         function(checked)
@@ -840,12 +1018,36 @@ local function BuildPanel()
         L["Uncheck if you prefer silent chat notifications only."]
     )
 
+    local buffMapPinsCb = CreateCheckbox(
+        content,
+        L["Show World Buff pins on World Map (M)"],
+        buffSoundCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsMapPins ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then
+                ns.db.settings.worldBuffsMapPins = checked
+            end
+            if ns.LFGFrameTab and ns.LFGFrameTab.RefreshWorldMapBuffs then
+                ns.LFGFrameTab:RefreshWorldMapBuffs()
+            end
+        end,
+        L["Help: World Buffs Map Integration"],
+        L["Shows interactive World Buff pins at Classic/Forever drop zones and open-world sources directly on the World Map (M)."],
+        L["Leave checked to see buff spots directly on the map with hover tooltips, or uncheck to keep only the compact corner summary badge."]
+    )
+
     local openBuffsBtn = ns.Theme:CreateButton(content, 210, 24, L["Open World Buffs Tracker"], "default")
     ns.Theme:AutoFitButton(openBuffsBtn, 180, 18, 300)
-    openBuffsBtn:SetPoint("TOPLEFT", buffSoundCb, "BOTTOMLEFT", 4, -8)
+    openBuffsBtn:SetPoint("TOPLEFT", buffMapPinsCb, "BOTTOMLEFT", 4, -8)
     openBuffsBtn:SetScript("OnClick", function()
-        if ns.UI and ns.UI.OpenTab then
+        CloseSettingsBeforeJump()
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub("buffs")
+        elseif ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab("buffs")
+        elseif ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+            ns.LFGFrameTab:OpenOfficialModule("buffs")
         end
     end)
     HelpBtn(
@@ -931,6 +1133,16 @@ local function BuildPanel()
     end)
 end
 
+--- Refresh all Settings panel widgets from saved preferences.
+function SettingsMod:Refresh()
+    if not panel then
+        return
+    end
+    for _, sync in ipairs(syncFns) do
+        sync()
+    end
+end
+
 --- Register SocialCentral inside Blizzard Settings.
 function SettingsMod:Register()
     if panel then
@@ -960,4 +1172,28 @@ function SettingsMod:Open()
     elseif InterfaceOptionsFrame_OpenToCategory then
         InterfaceOptionsFrame_OpenToCategory(panel)
     end
+end
+
+--- Toggle Blizzard Settings directly at the SocialCentral category.
+function SettingsMod:Toggle()
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print("%s", L["In Combat"])
+        return
+    end
+    local isShown = (_G.SettingsPanel and _G.SettingsPanel.IsShown and _G.SettingsPanel:IsShown())
+        or (_G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown())
+    local panelVisible = panel and panel.IsVisible and panel:IsVisible()
+    if isShown and panelVisible then
+        if HideUIPanel then
+            if _G.SettingsPanel and _G.SettingsPanel:IsShown() then
+                pcall(HideUIPanel, _G.SettingsPanel)
+            elseif _G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame:IsShown() then
+                pcall(HideUIPanel, _G.InterfaceOptionsFrame)
+            end
+        elseif _G.SettingsPanel and _G.SettingsPanel.Close then
+            pcall(_G.SettingsPanel.Close, _G.SettingsPanel)
+        end
+        return
+    end
+    self:Open()
 end

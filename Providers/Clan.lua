@@ -17,7 +17,12 @@ local Clan = {
     MIN_SEND_INTERVAL = 5,
     VERSION_MIN_INTERVAL = 60,
     MAX_PAYLOAD_BYTES = 240,
+    MAX_EXTERNAL_LFG = 40,
+    MAX_GLOBAL_CHAT_LFG = 35,
+    MAX_ROSTER_HISTORY = 40,
     lastSyncSentAt = 0,
+    lastAlfgSentAt = 0,
+    lastAlfgRelayAt = 0,
     lastVersionSentAt = 0,
     lastReqReplyAt = 0,
     lastIntelReplyAt = 0,
@@ -29,6 +34,7 @@ local Clan = {
     notifiedVersion = nil,
     peerVersions = {},
     lfgAlertCooldowns = {},
+    externalLFG = {},
     calendarEvents = {},
     preferredRightView = nil,
     intelQueue = {},
@@ -82,6 +88,7 @@ Clan.DUNGEON_PRESETS = {
 }
 
 Clan.guildChatLFG = {}
+Clan.globalChatLFG = {}
 
 local function IsValidProfession(profId)
     for _, item in ipairs(Clan.PROFESSIONS) do
@@ -203,6 +210,22 @@ function Clan:SendGuildSync(payload)
     return TransmitAddonMessage(self, payload, "GUILD", false)
 end
 
+local VALID_WB_SYNC_IDS = {
+    dragonslayer_ony = true,
+    dragonslayer_nef = true,
+    warchief = true,
+    stormwind = true,
+    zandalar = true,
+}
+
+function Clan:SendWorldBuffSync(syncId, ts)
+    if not VALID_WB_SYNC_IDS[syncId] then return false end
+    local stamp = math.floor(tonumber(ts) or 0)
+    if stamp <= 0 then return false end
+    local payload = ("WB~%s~%d"):format(syncId, stamp)
+    return TransmitAddonMessage(self, payload, "GUILD", false)
+end
+
 local function GetActiveGroupChannel()
     if not Compat.IsInGroup() then return nil end
     if LE_PARTY_CATEGORY_INSTANCE and IsInGroup and IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
@@ -212,6 +235,108 @@ local function GetActiveGroupChannel()
         return "RAID"
     end
     return "PARTY"
+end
+
+local function SendExternalLFGPacket(self, payload, channel, target)
+    if self.isStoppedThisSession or self:IsMessagingLocked() then return false end
+    if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return false end
+    local sendFn = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
+    if not sendFn then return false end
+    if type(payload) ~= "string" or payload == "" or #payload > self.MAX_PAYLOAD_BYTES then return false end
+    if payload:find("[%c|]") then return false end
+
+    local ok, result
+    if channel == "WHISPER" then
+        if type(target) ~= "string" or target == "" then return false end
+        ok, result = pcall(sendFn, self.PREFIX, payload, "WHISPER", target)
+    else
+        ok, result = pcall(sendFn, self.PREFIX, payload, channel)
+    end
+    if not ok then return false end
+
+    if Enum and Enum.SendAddonMessageResult and type(result) == "number" then
+        for name, value in pairs(Enum.SendAddonMessageResult) do
+            if value == result and name:find("Throttle") then
+                self.throttledCount = self.throttledCount + 1
+                if self.throttledCount >= 3 then
+                    self.isStoppedThisSession = true
+                end
+                return false
+            end
+        end
+    end
+    return true
+end
+
+local function CollectExternalLFGRecipients(self, maxCount)
+    local targets = {}
+    local seen = {}
+    local limit = maxCount or 6
+
+    local function PushTarget(rawName)
+        if #targets >= limit then return end
+        local clean = Compat.CleanPayloadField and Compat.CleanPayloadField(rawName or "", 40) or Safe.String(rawName)
+        if not clean or clean == "" or Compat.IsMe(clean) then return end
+        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(clean)
+        local key = (parsed and parsed.lookupKey) or clean:lower()
+        if seen[key] then return end
+        seen[key] = true
+        table.insert(targets, clean)
+    end
+
+    if ns.Social and ns.Social.GetList then
+        for _, row in ipairs(ns.Social:GetList("friends") or {}) do
+            if row.online and not (row.sources and row.sources.guild) then
+                PushTarget(row.characterName or row.displayName)
+            end
+        end
+    end
+
+    if ns.Chat and type(ns.Chat.sessionPeers) == "table" then
+        for peerKey, peer in pairs(ns.Chat.sessionPeers) do
+            if #targets >= limit then break end
+            if type(peer) == "table" and peer.displayName and not Compat.IsGuildMember(peer.displayName, nil, peer.displayName) then
+                PushTarget(peer.targetName or peer.displayName)
+            end
+        end
+    end
+
+    if type(Store.nearby) == "table" then
+        local now = time()
+        for _, nRow in pairs(Store.nearby) do
+            if #targets >= limit then break end
+            if type(nRow) == "table" and (now - (nRow.lastSeen or 0)) <= 600 and nRow.guild and self:IsAlliedGuild(nRow.guild) then
+                PushTarget(nRow.displayName)
+            end
+        end
+    end
+
+    return targets
+end
+
+local function BroadcastExternalLFG(self, payload)
+    if self.isStoppedThisSession or self:IsMessagingLocked() then return false end
+    if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return false end
+    local now = GetTime()
+    if (now - (self.lastAlfgSentAt or 0)) < self.MIN_SEND_INTERVAL then
+        return false
+    end
+    self.lastAlfgSentAt = now
+
+    local anySent = false
+    local grpChan = GetActiveGroupChannel()
+    if grpChan then
+        if SendExternalLFGPacket(self, payload, grpChan) then
+            anySent = true
+        end
+    end
+
+    for _, recipient in ipairs(CollectExternalLFGRecipients(self, 6)) do
+        if SendExternalLFGPacket(self, payload, "WHISPER", recipient) then
+            anySent = true
+        end
+    end
+    return anySent
 end
 
 function Clan:SendVersionHello(preferChannel)
@@ -1170,6 +1295,13 @@ function Clan:GetEventsList(filterId)
     return out
 end
 
+local PROF_ID_TO_KEY = {}
+for _, item in ipairs(Clan.PROFESSIONS) do
+    if item.id ~= "NONE" and item.labelKey then
+        PROF_ID_TO_KEY[item.id] = item.labelKey
+    end
+end
+
 function Clan:GetProfessionsList(query)
     local bucket = Store:GetClanScopeData()
     local out = {}
@@ -1180,8 +1312,10 @@ function Clan:GetProfessionsList(query)
             return
         end
         if q then
-            local p1Label = (L[prof1] or prof1 or ""):lower()
-            local p2Label = (L[prof2] or prof2 or ""):lower()
+            local k1 = prof1 and PROF_ID_TO_KEY[prof1]
+            local k2 = prof2 and PROF_ID_TO_KEY[prof2]
+            local p1Label = ((k1 and L[k1]) or L[prof1] or prof1 or ""):lower()
+            local p2Label = ((k2 and L[k2]) or L[prof2] or prof2 or ""):lower()
             local hay = ((displayName or "") .. " " .. p1Label .. " " .. p2Label .. " " .. (note or "")):lower()
             if not hay:find(q, 1, true) then
                 return
@@ -1663,6 +1797,21 @@ function Clan:PostLFG(mode, role, activity, keyLvl, note)
 
     local payload = ("LFG~%s~%s~%s~%s~%d~%d~%s"):format(ns.version or "0.0.0", cleanMode, cleanRole, cleanAct, cleanKey, iLvl, cleanNote)
     local sent = self:SendGuildSync(payload)
+
+    local myGuildName = Compat.CleanPayloadField((Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or "", 24)
+    local extPayload = ("ALFG~%s~%s~%s~%s~%s~%s~%d~%d~%s"):format(
+        ns.version or "0.0.0",
+        Compat.CleanPayloadField(myParsed.displayName, 26),
+        myGuildName,
+        cleanMode,
+        cleanRole,
+        cleanAct:sub(1, 30),
+        cleanKey,
+        iLvl,
+        cleanNote:sub(1, 30)
+    )
+    BroadcastExternalLFG(self, extPayload)
+
     if (ns.db and ns.db.settings and ns.db.settings.clanSync) and not sent and IsInGuild and IsInGuild() then
         local waitRem = math.ceil(math.max(0, self.MIN_SEND_INTERVAL - (GetTime() - (self.lastSyncSentAt or 0))))
         if waitRem > 0 then
@@ -1687,10 +1836,14 @@ function Clan:ClearMyLFG()
             end
         end
     end
+    if self.externalLFG then
+        self.externalLFG[myParsed.lookupKey] = nil
+    end
     if bucket.myTag == "LFG" or bucket.myTag == "MPLUS" then
         bucket.myTag = "NONE"
     end
     self:SendGuildSync("LFX")
+    BroadcastExternalLFG(self, ("ALFX~%s"):format(Compat.CleanPayloadField(myParsed.displayName, 28)))
     ns:Emit("CLAN_UPDATED")
     return true
 end
@@ -1731,27 +1884,146 @@ function Clan:ShareQueueOrEventToClanLFG()
     return self:PostLFG("LFG", role, L["Random Heroic Dungeon"], 0, "")
 end
 
-function Clan:GetClanLFGList(query, dungeonsOnly)
+function Clan:GetPlayerRelationshipFlags(lookupKey, rawName, guid, rawGuild)
+    local key = lookupKey
+    if (not key or key == "") and rawName and rawName ~= "" and Compat.ParseCharacterName then
+        local parsed = Compat.ParseCharacterName(rawName)
+        key = parsed and parsed.lookupKey
+    end
+    local cleanGuid = Safe.String(guid)
+    local parsedName = (rawName and rawName ~= "" and Compat.ParseCharacterName) and Compat.ParseCharacterName(rawName) or nil
+    local firstName = (parsedName and parsedName.firstName) or rawName
+    local hasSurname = (parsedName and parsedName.surname ~= nil) or false
+    local isClan, isAllied, isFriend, isWatchlist = false, false, false, false
+    local resolvedGuild = (type(rawGuild) == "string" and rawGuild ~= "") and rawGuild or nil
+
+    local myGuildName = (Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+    local myNormGuild = NormalizeGuildKey(myGuildName)
+
+    if Compat.IsGuildMember and Compat.IsGuildMember(firstName, cleanGuid, rawName) then
+        isClan = true
+    end
+
+    if type(Store.social) == "table" then
+        for _, row in pairs(Store.social) do
+            if type(row) == "table" then
+                local matched = (cleanGuid and row.guid and row.guid == cleanGuid)
+                    or (key and row.lookupKey and row.lookupKey == key)
+                if matched then
+                    if row.sources and row.sources.guild == true then
+                        isClan = true
+                    end
+                    if row.sources and (row.sources.friend == true or row.sources.bnet == true) then
+                        isFriend = true
+                    end
+                    if (not resolvedGuild or resolvedGuild == "") and row.guild and row.guild ~= "" then
+                        resolvedGuild = row.guild
+                    end
+                    break
+                end
+            end
+        end
+    end
+
+    if not isFriend and cleanGuid and C_FriendList and C_FriendList.IsFriend then
+        local okF, resF = pcall(C_FriendList.IsFriend, cleanGuid)
+        if okF and Safe.Value(resF) == true then
+            isFriend = true
+        end
+    end
+
+    if Store.GetWatchlistTable and key then
+        local wl = Store:GetWatchlistTable()
+        local firstLower = (type(firstName) == "string" and firstName ~= "") and firstName:lower() or nil
+        local wRow = wl and (wl[key] or (not hasSurname and firstLower and wl[firstLower]))
+        if type(wRow) == "table" and not (cleanGuid and wRow.guid and wRow.guid ~= cleanGuid) then
+            isWatchlist = true
+            if (not resolvedGuild or resolvedGuild == "") and wRow.guild and wRow.guild ~= "" then
+                resolvedGuild = wRow.guild
+            end
+        end
+    end
+
+    if not resolvedGuild and type(Store.nearby) == "table" and key then
+        local nRow = Store.nearby[key]
+        if type(nRow) == "table" and not (cleanGuid and nRow.guid and nRow.guid ~= cleanGuid) and nRow.guild and nRow.guild ~= "" then
+            resolvedGuild = nRow.guild
+        end
+    end
+
+    if resolvedGuild and resolvedGuild ~= "" then
+        local normG = NormalizeGuildKey(resolvedGuild)
+        if myNormGuild ~= "" and normG == myNormGuild then
+            isClan = true
+        elseif self:IsAlliedGuild(resolvedGuild) then
+            isAllied = true
+        end
+    end
+
+    return isClan, isAllied, isFriend, isWatchlist, resolvedGuild
+end
+
+function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter)
     local bucket = Store:GetClanScopeData()
     local liveByLookup = {}
     if ns.Social then
-        for _, row in ipairs(ns.Social:GetList("guild")) do
-            if row.lookupKey then
+        for _, row in ipairs(ns.Social:GetList("all") or {}) do
+            if row.lookupKey and not liveByLookup[row.lookupKey] then
                 liveByLookup[row.lookupKey] = row
             end
         end
     end
 
+    local filterMode = (type(sourceFilter) == "string" and sourceFilter:upper()) or "ALL"
+    if filterMode ~= "CLAN" and filterMode ~= "ALLY" and filterMode ~= "FRIENDS" and filterMode ~= "PUBLIC_CHAT" then
+        filterMode = "ALL"
+    end
+
     local out = {}
     local seen = {}
     local q = (type(query) == "string" and query ~= "") and query:lower() or nil
+    local now = time()
 
     local function PushItem(item)
+        local isClan, isAllied, isFriend, isWatchlist, resolvedGuild = self:GetPlayerRelationshipFlags(
+            item.lookupKey,
+            item.displayName,
+            item.guid,
+            item.guild
+        )
+        if item._forceClan then isClan = true end
+        if item._forceAllied then isAllied = true end
+        item.isClan = isClan
+        item.isAllied = isAllied
+        item.isFriend = isFriend or item.isFriend == true
+        item.isWatchlist = isWatchlist or item.isWatchlist == true
+        if resolvedGuild and resolvedGuild ~= "" then
+            item.guild = resolvedGuild
+        end
+
+        if filterMode == "CLAN" and not item.isClan then
+            return
+        elseif filterMode == "ALLY" and not item.isAllied then
+            return
+        elseif filterMode == "FRIENDS" and not (item.isFriend or item.isWatchlist or item.hasFriendOrWatchlistSignup) then
+            return
+        elseif filterMode == "PUBLIC_CHAT" and item.sourceType ~= "PUBLIC_CHAT" then
+            return
+        end
+
         if dungeonsOnly and not item.isDungeon then
             return
         end
         if q then
-            local hay = ((item.displayName or "") .. " " .. (item.activity or "") .. " " .. (item.note or "") .. " " .. (item.role or "") .. " " .. (item.mode or "")):lower()
+            local hay = (
+                (item.displayName or "") .. " " ..
+                (item.guild or "") .. " " ..
+                (item.activity or "") .. " " ..
+                (item.note or "") .. " " ..
+                (item.role or "") .. " " ..
+                (item.mode or "") .. " " ..
+                (item.friendOrWatchlistNames or "")
+            ):lower()
             if not hay:find(q, 1, true) then
                 return
             end
@@ -1764,10 +2036,12 @@ function Clan:GetClanLFGList(query, dungeonsOnly)
         local item = {
             sourceType = "LFG",
             lookupKey = key,
+            guid = live and live.guid,
             displayName = (live and live.displayName) or rec.displayName or key,
             classFile = (live and live.classFile) or rec.classFile,
             level = live and live.level,
             area = live and live.area or "",
+            guild = live and live.guild,
             online = (live ~= nil) or Compat.IsMe(rec.displayName or key),
             mode = rec.mode or "LFG",
             role = rec.role or "ANY",
@@ -1778,6 +2052,7 @@ function Clan:GetClanLFGList(query, dungeonsOnly)
             isDungeon = rec.isDungeon ~= false or IsDungeonLFGText(rec.activity or "", nil),
             updatedAt = rec.updatedAt or 0,
             isSelf = Compat.IsMe(rec.displayName or key),
+            _forceClan = true,
         }
         seen[key] = true
         PushItem(item)
@@ -1791,14 +2066,29 @@ function Clan:GetClanLFGList(query, dungeonsOnly)
             local remD = math.max(0, (tonumber(evt.needD) or 0) - sum.DPS)
             local needText = string.format("Need T:%d H:%d D:%d", remT, remH, remD)
             local live = evt.creatorKey and liveByLookup[evt.creatorKey]
+
+            local hasFW = false
+            local fwNames = {}
+            for sKey, sRec in pairs(evt.signups or {}) do
+                if type(sRec) == "table" and sRec.role ~= "DECLINE" then
+                    local _, _, sFriend, sWatch = self:GetPlayerRelationshipFlags(sKey, sRec.name)
+                    if sFriend or sWatch then
+                        hasFW = true
+                        table.insert(fwNames, sRec.name or sKey)
+                    end
+                end
+            end
+
             PushItem({
                 sourceType = "EVENT",
                 eventId = evt.id,
                 lookupKey = evt.creatorKey,
+                guid = live and live.guid,
                 displayName = evt.creator or "?",
                 classFile = live and live.classFile,
                 level = live and live.level,
                 area = live and live.area or "",
+                guild = live and live.guild,
                 online = live ~= nil or Compat.IsMe(evt.creator or ""),
                 mode = "LFM",
                 role = "ANY",
@@ -1807,7 +2097,10 @@ function Clan:GetClanLFGList(query, dungeonsOnly)
                 ilvl = 0,
                 note = needText .. " | " .. (evt.whenText or L["Now"]),
                 isDungeon = IsDungeonLFGText(evt.title or "", evt.category),
+                hasFriendOrWatchlistSignup = hasFW,
+                friendOrWatchlistNames = (#fwNames > 0) and table.concat(fwNames, ", ") or "",
                 updatedAt = evt.updatedAt or evt.createdAt or 0,
+                _forceClan = true,
             })
         end
     end
@@ -1816,13 +2109,16 @@ function Clan:GetClanLFGList(query, dungeonsOnly)
         if not seen[key] and (peer.tag == "LFG" or peer.tag == "MPLUS") then
             local live = liveByLookup[key]
             local isDng = (peer.tag == "MPLUS") or IsDungeonLFGText(peer.note or "", nil)
+            seen[key] = true
             PushItem({
                 sourceType = "TAG",
                 lookupKey = key,
+                guid = live and live.guid,
                 displayName = (live and live.displayName) or peer.displayName or key,
                 classFile = (live and live.classFile) or peer.classFile,
                 level = live and live.level,
                 area = live and live.area or "",
+                guild = live and live.guild,
                 online = live ~= nil,
                 mode = "LFG",
                 role = "ANY",
@@ -1832,33 +2128,104 @@ function Clan:GetClanLFGList(query, dungeonsOnly)
                 note = peer.note or "",
                 isDungeon = isDng or (peer.tag == "LFG"),
                 updatedAt = peer.updatedAt or 0,
+                _forceClan = true,
             })
         end
     end
 
     for _, row in ipairs(self:GetGuildChatLFGList()) do
-        PushItem({
-            sourceType = "GCHAT",
-            lookupKey = row.lookupKey,
-            displayName = row.displayName,
-            classFile = liveByLookup[row.lookupKey] and liveByLookup[row.lookupKey].classFile,
-            level = liveByLookup[row.lookupKey] and liveByLookup[row.lookupKey].level,
-            area = liveByLookup[row.lookupKey] and liveByLookup[row.lookupKey].area or "",
-            online = true,
-            mode = row.text and row.text:lower():find("lfg") and "LFG" or "LFM",
-            role = "ANY",
-            activity = L["Guild Chat"],
-            keyLvl = 0,
-            ilvl = 0,
-            note = row.text or "",
-            isDungeon = row.isDungeon == true or IsDungeonLFGText(row.text or "", nil),
-            updatedAt = row.timestamp or 0,
-        })
+        if not seen[row.lookupKey] then
+            seen[row.lookupKey] = true
+            local live = liveByLookup[row.lookupKey]
+            PushItem({
+                sourceType = "GCHAT",
+                lookupKey = row.lookupKey,
+                guid = live and live.guid,
+                displayName = row.displayName,
+                classFile = live and live.classFile,
+                level = live and live.level,
+                area = live and live.area or "",
+                guild = live and live.guild,
+                online = true,
+                mode = row.text and row.text:lower():find("lfg") and "LFG" or "LFM",
+                role = "ANY",
+                activity = L["Guild Chat"],
+                keyLvl = 0,
+                ilvl = 0,
+                note = row.text or "",
+                isDungeon = row.isDungeon == true or IsDungeonLFGText(row.text or "", nil),
+                updatedAt = row.timestamp or 0,
+                _forceClan = true,
+            })
+        end
+    end
+
+    for key, ext in pairs(self.externalLFG or {}) do
+        if type(ext) == "table" and (now - (ext.updatedAt or 0)) <= 1800 and not seen[key] then
+            local live = liveByLookup[key]
+            PushItem({
+                sourceType = ext.sourceType or "ALLY_LFG",
+                lookupKey = key,
+                guid = (live and live.guid) or ext.guid,
+                displayName = (live and live.displayName) or ext.displayName or key,
+                classFile = (live and live.classFile) or ext.classFile,
+                level = live and live.level,
+                area = live and live.area or "",
+                guild = (ext.guild and ext.guild ~= "" and ext.guild) or (live and live.guild),
+                online = (live ~= nil) or ((now - (ext.updatedAt or 0)) <= 900),
+                mode = ext.mode or "LFG",
+                role = ext.role or "ANY",
+                activity = ext.activity or L["Dungeon"],
+                keyLvl = tonumber(ext.keyLvl) or 0,
+                ilvl = tonumber(ext.ilvl) or 0,
+                note = ext.note or "",
+                isDungeon = ext.isDungeon == true or IsDungeonLFGText((ext.activity or "") .. " " .. (ext.note or ""), nil),
+                updatedAt = ext.updatedAt or 0,
+                isSelf = Compat.IsMe(ext.displayName or key),
+            })
+        elseif type(ext) == "table" and (now - (ext.updatedAt or 0)) > 1800 then
+            self.externalLFG[key] = nil
+        end
+    end
+
+    if filterMode == "PUBLIC_CHAT" then
+        self.globalChatLFG = self.globalChatLFG or {}
+        for key, pub in pairs(self.globalChatLFG) do
+            if type(pub) == "table" and (now - (pub.updatedAt or 0)) <= 600 then
+                local live = liveByLookup[key]
+                PushItem({
+                    sourceType = "PUBLIC_CHAT",
+                    lookupKey = key,
+                    guid = (live and live.guid) or pub.guid,
+                    displayName = (live and live.displayName) or pub.displayName or key,
+                    classFile = (live and live.classFile) or pub.classFile,
+                    level = live and live.level,
+                    area = live and live.area or pub.channel or "",
+                    guild = (live and live.guild) or pub.guild,
+                    online = true,
+                    mode = pub.mode or "LFM",
+                    role = pub.role or "ANY",
+                    activity = pub.activity or L["Global Chat LFG"],
+                    keyLvl = 0,
+                    ilvl = 0,
+                    note = pub.note or "",
+                    isDungeon = pub.isDungeon == true or IsDungeonLFGText(pub.note or "", nil),
+                    updatedAt = pub.updatedAt or 0,
+                    isSelf = Compat.IsMe(pub.displayName or key, pub.guid),
+                })
+            elseif type(pub) == "table" and (now - (pub.updatedAt or 0)) > 600 then
+                self.globalChatLFG[key] = nil
+            end
+        end
     end
 
     table.sort(out, function(a, b)
         if a.isSelf ~= b.isSelf then return a.isSelf end
         if a.online ~= b.online then return a.online end
+        local aRel = (a.isFriend or a.isWatchlist or a.hasFriendOrWatchlistSignup) and 1 or 0
+        local bRel = (b.isFriend or b.isWatchlist or b.hasFriendOrWatchlistSignup) and 1 or 0
+        if aRel ~= bRel then return aRel > bRel end
+        if a.isClan ~= b.isClan then return a.isClan end
         return (a.updatedAt or 0) > (b.updatedAt or 0)
     end)
     return out
@@ -1973,7 +2340,7 @@ end
 
 local function OnAddonMessage(_, _, prefix, text, chatType, sender)
     if prefix ~= Clan.PREFIX then return end
-    if chatType ~= "GUILD" and chatType ~= "PARTY" and chatType ~= "RAID" and chatType ~= "INSTANCE_CHAT" then
+    if chatType ~= "GUILD" and chatType ~= "PARTY" and chatType ~= "RAID" and chatType ~= "INSTANCE_CHAT" and chatType ~= "WHISPER" then
         return
     end
 
@@ -1992,6 +2359,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
 
     -- Version discovery packets (allowed for PARTY/RAID/INSTANCE_CHAT/GUILD when versionCheck ~= false)
     if cmd == "VH" or cmd == "VR" then
+        if chatType == "WHISPER" then return end
         if not (ns.db and ns.db.settings and ns.db.settings.versionCheck ~= false) then return end
         local remoteVer = parts[2]
         ProcessPeerVersion(parsed.displayName, parsed.lookupKey, remoteVer, chatType)
@@ -2019,6 +2387,99 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         if chatType ~= "GUILD" or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return end
         local ver = cmd:match("^PING:(.*)$")
         ProcessPeerVersion(parsed.displayName, parsed.lookupKey, ver, chatType)
+        ns:Emit("CLAN_UPDATED")
+        return
+    end
+
+    -- Cross-guild Allied / Friend / Group LFG exchange (strictly opt-in via clanSync)
+    if cmd == "ALFG" or cmd == "ALFX" then
+        if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
+            return
+        end
+        if ns.Chat and ns.Chat.MarkPeerVerified then
+            ns.Chat:MarkPeerVerified(parsed.displayName, nil, nil, chatType)
+        end
+        Clan.externalLFG = Clan.externalLFG or {}
+
+        if cmd == "ALFX" then
+            local originParsed = Compat.ParseCharacterName(parts[2] ~= "" and parts[2] or parsed.displayName)
+            if originParsed and not Compat.IsMe(originParsed.displayName) then
+                Clan.externalLFG[originParsed.lookupKey] = nil
+                ns:Emit("CLAN_UPDATED")
+            end
+            return
+        end
+
+        local ver = parts[2]
+        local originRaw = Compat.CleanPayloadField(parts[3] or "", 30)
+        local originGuild = Compat.CleanPayloadField(parts[4] or "", 28)
+        local mode = (parts[5] == "LFM") and "LFM" or "LFG"
+        local role = (parts[6] == "TANK" or parts[6] == "HEALER" or parts[6] == "DPS" or parts[6] == "ANY") and parts[6] or "ANY"
+        local activity = Compat.CleanPayloadField(parts[7] or "", 40)
+        local keyLvl = math.max(0, math.min(99, tonumber(parts[8]) or 0))
+        local iLvl = math.max(0, math.min(2000, tonumber(parts[9]) or 0))
+        local note = Compat.CleanPayloadField(parts[10] or "", 40)
+
+        local originParsed = Compat.ParseCharacterName(originRaw ~= "" and originRaw or parsed.displayName)
+        if not originParsed or Compat.IsMe(originParsed.displayName) then
+            return
+        end
+        if IsSaneRemoteSemVer(ver) and chatType == "WHISPER" then
+            ProcessPeerVersion(parsed.displayName, parsed.lookupKey, ver, "WHISPER")
+        end
+
+        local _, isAllied, isFriend, isWatchlist, resolvedGuild = Clan:GetPlayerRelationshipFlags(
+            originParsed.lookupKey,
+            originParsed.displayName,
+            nil,
+            originGuild
+        )
+        local finalGuild = (originGuild ~= "" and originGuild) or resolvedGuild
+        local sig = mode .. "|" .. role .. "|" .. activity .. "|" .. keyLvl .. "|" .. note
+        local existing = Clan.externalLFG[originParsed.lookupKey]
+        local alreadyRelayed = existing and existing._sig == sig and (time() - (existing.updatedAt or 0)) < 60
+
+        Clan.externalLFG[originParsed.lookupKey] = {
+            sourceType = "ALLY_LFG",
+            lookupKey = originParsed.lookupKey,
+            displayName = originParsed.displayName,
+            guild = finalGuild,
+            mode = mode,
+            role = role,
+            activity = activity ~= "" and activity or L["Dungeon"],
+            keyLvl = keyLvl,
+            ilvl = iLvl,
+            note = note,
+            isDungeon = IsDungeonLFGText(activity .. " " .. note, keyLvl > 0 and "DUNGEON" or nil),
+            isFriend = isFriend,
+            isWatchlist = isWatchlist,
+            updatedAt = time(),
+            _sig = sig,
+        }
+
+        local count = 0
+        local oldestKey, oldestTs
+        for k, v in pairs(Clan.externalLFG) do
+            count = count + 1
+            if not oldestTs or (v.updatedAt or 0) < oldestTs then
+                oldestTs = v.updatedAt or 0
+                oldestKey = k
+            end
+        end
+        if count > (Clan.MAX_EXTERNAL_LFG or 40) and oldestKey then
+            Clan.externalLFG[oldestKey] = nil
+        end
+
+        if chatType == "WHISPER" and isAllied and not alreadyRelayed and IsInGuild and IsInGuild() and (GetTime() - (Clan.lastAlfgRelayAt or 0)) >= 15 then
+            Clan.lastAlfgRelayAt = GetTime()
+            local relayPayload = cleanText
+            local relayDelay = 1.0 + math.random() * 1.5
+            C_Timer.After(relayDelay, function()
+                if not Clan:IsMessagingLocked() then
+                    Clan:SendGuildSync(relayPayload)
+                end
+            end)
+        end
         ns:Emit("CLAN_UPDATED")
         return
     end
@@ -2315,6 +2776,13 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             end
         end
 
+    elseif cmd == "WB" then
+        local syncId = parts[2]
+        local ts = tonumber(parts[3])
+        if VALID_WB_SYNC_IDS[syncId] and ts and ts > 0 and ns.WorldBuffs and ns.WorldBuffs.ReceiveSyncedDrop then
+            ns.WorldBuffs:ReceiveSyncedDrop(syncId, ts, parsed.displayName)
+        end
+
     elseif cmd == "ALM" then
         local senderGuild = Compat.CleanPayloadField(parts[2] or "", 32)
         local authorName = Compat.CleanPayloadField(parts[3] or "", 25)
@@ -2377,6 +2845,117 @@ local function OnGuildChatPassive(_, _, text, sender)
     ns:Emit("CLAN_UPDATED")
 end
 
+local function OnExternalChatPassive(_, _, text, sender, ...)
+    if Safe.IsSecret(text) or Safe.IsSecret(sender) then return end
+    local cleanMsg = Safe.String(text)
+    local cleanSender = Safe.String(sender)
+    local cleanGuid = Safe.String(select(10, ...))
+    if not cleanMsg or not cleanSender then return end
+    cleanMsg = Compat.CleanInput(cleanMsg)
+    local parsed = Compat.ParseCharacterName(cleanSender)
+    if not cleanMsg or not parsed or Compat.IsMe(parsed.displayName, cleanGuid) then return end
+
+    local low = cleanMsg:lower()
+    local matched = false
+    for _, pat in ipairs(LFG_PATTERNS) do
+        if low:find(pat) then
+            matched = true
+            break
+        end
+    end
+    if not matched then return end
+
+    local isClan, isAllied, isFriend, isWatchlist, resolvedGuild = Clan:GetPlayerRelationshipFlags(
+        parsed.lookupKey,
+        parsed.displayName,
+        cleanGuid,
+        nil
+    )
+    local isDng = IsDungeonLFGText(cleanMsg, nil)
+    local msgMode = low:find("%flfg%f") and "LFG" or "LFM"
+    local roleHint = "ANY"
+    if low:find("%ftank%f") then
+        roleHint = "TANK"
+    elseif low:find("heal") then
+        roleHint = "HEALER"
+    elseif low:find("%fdps%f") then
+        roleHint = "DPS"
+    end
+    local nowTs = time()
+
+    local s = ns.db and ns.db.settings
+    if not s or s.globalChatLfgScan ~= false then
+        Clan.globalChatLFG = Clan.globalChatLFG or {}
+        local chRaw = Safe.String(select(2, ...)) or ""
+        local chShort = chRaw:match("^%d+%.%s*(.+)$") or chRaw
+        Clan.globalChatLFG[parsed.lookupKey] = {
+            sourceType = "PUBLIC_CHAT",
+            lookupKey = parsed.lookupKey,
+            guid = cleanGuid,
+            displayName = parsed.displayName,
+            guild = resolvedGuild,
+            channel = Compat.CleanPayloadField and Compat.CleanPayloadField(chShort, 28) or "",
+            mode = msgMode,
+            role = roleHint,
+            activity = (chShort ~= "" and ("[" .. chShort .. "] ") or "") .. cleanMsg:sub(1, 36),
+            note = cleanMsg:sub(1, 130),
+            isDungeon = isDng,
+            updatedAt = nowTs,
+        }
+        local pubCount = 0
+        local oldestPubKey, oldestPubTs
+        for k, v in pairs(Clan.globalChatLFG) do
+            pubCount = pubCount + 1
+            if not oldestPubTs or (v.updatedAt or 0) < oldestPubTs then
+                oldestPubTs = v.updatedAt or 0
+                oldestPubKey = k
+            end
+        end
+        if pubCount > (Clan.MAX_GLOBAL_CHAT_LFG or 35) and oldestPubKey then
+            Clan.globalChatLFG[oldestPubKey] = nil
+        end
+        ns:Emit("CLAN_UPDATED")
+    end
+
+    if not (isAllied or isFriend or isWatchlist or isClan) then
+        return
+    end
+
+    Clan.externalLFG = Clan.externalLFG or {}
+    Clan.externalLFG[parsed.lookupKey] = {
+        sourceType = "CHAT",
+        lookupKey = parsed.lookupKey,
+        guid = cleanGuid,
+        displayName = parsed.displayName,
+        guild = resolvedGuild,
+        mode = msgMode,
+        role = roleHint,
+        activity = cleanMsg:sub(1, 44),
+        keyLvl = 0,
+        ilvl = 0,
+        note = cleanMsg:sub(1, 120),
+        isDungeon = isDng,
+        isFriend = isFriend,
+        isWatchlist = isWatchlist,
+        updatedAt = nowTs,
+    }
+
+    local count = 0
+    local oldestKey, oldestTs
+    for k, v in pairs(Clan.externalLFG) do
+        count = count + 1
+        if not oldestTs or (v.updatedAt or 0) < oldestTs then
+            oldestTs = v.updatedAt or 0
+            oldestKey = k
+        end
+    end
+    if count > (Clan.MAX_EXTERNAL_LFG or 40) and oldestKey then
+        Clan.externalLFG[oldestKey] = nil
+    end
+
+    ns:Emit("CLAN_UPDATED")
+end
+
 function Clan:ApplyAutoInstanceStatus()
     if not (ns.db and ns.db.settings and ns.db.settings.autoStatusInstance) then return end
     if self:IsMessagingLocked() then return end
@@ -2408,6 +2987,79 @@ function Clan:ApplyAutoInstanceStatus()
     ns:Emit("CLAN_UPDATED")
 end
 
+function Clan:GetRosterHistory()
+    local bucket = Store:GetClanScopeData()
+    return bucket.rosterHistory or {}
+end
+
+local function UpdateGuildRosterHistory()
+    if not (IsInGuild and IsInGuild()) then return end
+    local gName = GetGuildInfo and Safe.String(GetGuildInfo("player"))
+    local total = GetNumGuildMembers and Safe.Number(GetNumGuildMembers()) or 0
+    if not gName or gName == "" or not total or total <= 0 then return end
+
+    local current = {}
+    local currentCount = 0
+    for i = 1, total do
+        local ok, fullName, rankName = pcall(GetGuildRosterInfo, i)
+        if ok and fullName then
+            local p = Compat.ParseCharacterName(Safe.String(fullName))
+            if p and p.lookupKey then
+                current[p.lookupKey] = {
+                    name = p.displayName,
+                    rank = Safe.String(rankName) or "",
+                }
+                currentCount = currentCount + 1
+            end
+        end
+    end
+    if currentCount == 0 then return end
+
+    local bucket = Store:GetClanScopeData()
+    local prevSnap = bucket.rosterSnapshot
+    bucket.rosterHistory = bucket.rosterHistory or {}
+    local now = time()
+
+    if type(prevSnap) == "table" and prevSnap._initialized and prevSnap._guild == gName and type(prevSnap.members) == "table" then
+        local function PushHist(kind, name, detail)
+            table.insert(bucket.rosterHistory, 1, {
+                kind = kind,
+                name = name,
+                detail = detail or "",
+                ts = now,
+            })
+        end
+        for k, cur in pairs(current) do
+            local prev = prevSnap.members[k]
+            if not prev then
+                PushHist("JOINED", cur.name, cur.rank)
+            elseif prev.rank ~= cur.rank and cur.rank ~= "" then
+                PushHist("RANK", cur.name, (prev.rank ~= "" and (prev.rank .. " -> " .. cur.rank)) or cur.rank)
+            end
+        end
+        for k, prev in pairs(prevSnap.members) do
+            if not current[k] then
+                PushHist("LEFT", prev.name, prev.rank)
+            end
+        end
+        for i = #bucket.rosterHistory, 1, -1 do
+            local h = bucket.rosterHistory[i]
+            if type(h) ~= "table" or (now - (h.ts or 0)) > (14 * 86400) then
+                table.remove(bucket.rosterHistory, i)
+            end
+        end
+        while #bucket.rosterHistory > (Clan.MAX_ROSTER_HISTORY or 40) do
+            table.remove(bucket.rosterHistory)
+        end
+    end
+
+    bucket.rosterSnapshot = {
+        _initialized = true,
+        _guild = gName,
+        members = current,
+    }
+end
+
 function Clan:Init()
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
         pcall(C_ChatInfo.RegisterAddonMessagePrefix, self.PREFIX)
@@ -2416,6 +3068,9 @@ function Clan:Init()
     end
     ns.RegisterEvent(self, "CHAT_MSG_ADDON", OnAddonMessage)
     ns.RegisterEvent(self, "CHAT_MSG_GUILD", OnGuildChatPassive)
+    ns.RegisterEvent(self, "CHAT_MSG_CHANNEL", OnExternalChatPassive)
+    ns.RegisterEvent(self, "CHAT_MSG_SAY", OnExternalChatPassive)
+    ns.RegisterEvent(self, "CHAT_MSG_YELL", OnExternalChatPassive)
     ns.RegisterEvent(self, "CALENDAR_UPDATE_EVENT_LIST", function()
         Clan:RefreshGameCalendar(false)
         ns:Emit("CLAN_UPDATED")
@@ -2433,6 +3088,7 @@ function Clan:Init()
         if Compat.SyncRosterForeverNames then
             Compat.SyncRosterForeverNames()
         end
+        UpdateGuildRosterHistory()
         ns:Emit("CLAN_UPDATED")
     end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()

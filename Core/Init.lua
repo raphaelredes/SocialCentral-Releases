@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.4"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.4" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.5"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.5" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -103,17 +103,24 @@ local DEFAULTS = {
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
         chatHistoryLimit = 30,      -- local lines kept per character conversation thread
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
-        spotterEnabled = true,      -- detect Same Clan / Ally Clan / Enemy Clan players on screen
+        spotterEnabled = true,      -- detect Same Clan / Ally Clan / Enemy Clan / Watchlist / Friend players on screen
         spotterNotifyEnemy = true,  -- chat + banner notification when Enemy Clan player appears
         spotterNotifyAlly = true,   -- chat + banner notification when Ally Clan player appears
-        spotterNotifySameClan = true, -- subtle notification when guildmate appears on screen
-        spotterSound = true,        -- subtle chime when an Enemy/Ally clan player appears
+        spotterNotifySameClan = false, -- default off to keep screen uncluttered (user can opt back in)
+        spotterNotifyWatchlist = true, -- directional radar notification when a Watchlist player appears nearby
+        spotterNotifyFriends = true,   -- directional radar notification when a Friend appears nearby
+        spotterIgnoreGroup = true,     -- ignore current party/raid members from automatic radar popups
+        spotterSound = true,        -- subtle chime when an Enemy/Ally/Watchlist player appears
         spotterAutoShowHUD = true,  -- automatically open target selection HUD out-of-combat on sighting
-        spotterPromptAnswered = false, -- first-time user choice for keeping spotter notifications
+        spotterPromptAnswered = true, -- keep HUD clutter-free without unsolicited confirmation popups
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
-        spotterNameplateBadges = true, -- show subtle stance tag on non-forbidden nameplates
+        spotterNameplateBadges = false, -- default off to keep world nameplates uncluttered (user can opt in)
         worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
         worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
+        worldBuffsMapPins = true,   -- show minimalist World Buff pins & hover summary on World Map (M)
+        tooltipItemAlts = true,     -- show alt bag/bank/equipped item counts inside item tooltips
+        tooltipPlayerNotes = true,  -- show Social Card notes, red flags & companion context inside player tooltips
+        globalChatLfgScan = true,   -- passively index dungeon/raid LFG posts from public chat channels
     },
     window = {
         point = nil,
@@ -124,12 +131,14 @@ local DEFAULTS = {
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
     clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
-    socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note } }
+    socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note, flag } }
     recentCompanions = {},         -- [scopeKey] = { [lookupKey] = { name, classFile, level, zone, role, lastSeen } }
     chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
     chatRooms = {},                -- [scopeKey] = { [roomId] = { id, name, owner, scope, members } }
     addonPeers = {},               -- [scopeKey] = { [lookupKey] = { displayName, version, lastSeenAt } } (strictly WoW char names, zero Real ID)
     worldBuffsDrops = {},          -- [realmPool] = { [buffId] = timestamp }
+    worldBuffsHistory = {},        -- [realmPool] = { [buffId] = { [hour0..23] = count } }
+    worldBuffsPersonal = {},       -- [charKey] = { saygeAt = ts, saygePlayed = playedSec }
 }
 
 local function ApplyDefaults(target, defaults)
@@ -167,12 +176,22 @@ local function HandleSlash(raw)
             ns.UI:OpenUpdateModal()
         end
     elseif cmd == "chat" or cmd == "rooms" then
-        if ns.UI and ns.UI.OpenTab then
+        if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+            ns.LFGFrameTab:OpenOfficialModule(cmd)
+        elseif ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab("chat")
         end
     elseif cmd == "group" or cmd == "instance" then
-        if ns.UI and ns.UI.OpenTab then
+        if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+            ns.LFGFrameTab:OpenOfficialModule("group")
+        elseif ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab("group")
+        end
+    elseif cmd == "watchlist" or cmd == "social" or cmd == "nearby" or cmd == "alts" then
+        if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+            ns.LFGFrameTab:OpenOfficialModule(cmd)
+        elseif ns.UI and ns.UI.OpenTab then
+            ns.UI:OpenTab(cmd)
         end
     elseif cmd == "buffs" or cmd == "buff" or cmd == "wbuffs" then
         if rest == "report" or rest == "share" or rest == "chat" then
@@ -183,7 +202,9 @@ local function HandleSlash(raw)
             if ns.WorldBuffs and ns.WorldBuffs.PrintActiveBuffs then
                 ns.WorldBuffs:PrintActiveBuffs()
             end
-            if ns.UI and ns.UI.OpenTab then
+            if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+                ns.LFGFrameTab:OpenOfficialModule("buffs")
+            elseif ns.UI and ns.UI.OpenTab then
                 ns.UI:OpenTab("buffs")
             end
         end
@@ -191,8 +212,16 @@ local function HandleSlash(raw)
         if ns.Clan and ns.Clan.SetPreferredRightView and cmd == "diplomacy" then
             ns.Clan:SetPreferredRightView("diplomacy")
         end
-        if ns.UI and ns.UI.OpenTab then
+        if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+            ns.LFGFrameTab:OpenOfficialModule(cmd)
+        elseif ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab("clan")
+        end
+    elseif cmd == "hub" or cmd == "window" then
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub()
+        elseif ns.UI and ns.UI.Toggle then
+            ns.UI:Toggle()
         end
     elseif cmd == "radar" or cmd == "spotter" or cmd == "targets" then
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then
@@ -203,23 +232,30 @@ local function HandleSlash(raw)
             ns.Theme:ResetAllWindowPositions()
         end
     elseif cmd == "config" or cmd == "settings" then
-        if ns.Settings and ns.Settings.Open then
+        if ns.Settings and ns.Settings.Toggle then
+            ns.Settings:Toggle()
+        elseif ns.Settings and ns.Settings.Open then
             ns.Settings:Open()
         end
     elseif cmd == "help" or cmd == "?" then
         ns:Print("|cff58a6ffSocialCentral|r v%s", ns.version or "0.0.0")
-        ns:Print("  |cffffd200/sc|r — %s", L["Open SocialCentral"])
+        ns:Print("  |cffffd200/sc|r — %s", L["Settings"])
+        ns:Print("  |cffffd200/sc lfg|r — %s", L["Looking for Group (I)"])
         ns:Print("  |cffffd200/sc chat|r — %s", L["Open Conversations"])
         ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"])
         ns:Print("  |cffffd200/sc buffs|r — %s", L["World Buffs"])
         ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"])
+        ns:Print("  |cffffd200/sc hub|r — %s", L["Unified Hub (/sc hub)"])
         ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"])
         ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
         ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Next"])
         ns:Print("  |cffffd200/sc resetpos|r — %s", L["Reset Window Positions"])
-        ns:Print("  |cffffd200/sc config|r — %s", L["Settings"])
     else
-        if ns.UI and ns.UI.Toggle then
+        if ns.Settings and ns.Settings.Toggle then
+            ns.Settings:Toggle()
+        elseif ns.Settings and ns.Settings.Open then
+            ns.Settings:Open()
+        elseif ns.UI and ns.UI.Toggle then
             ns.UI:Toggle()
         end
     end
@@ -230,6 +266,15 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
     SocialCentralDB = SocialCentralDB or {}
     SocialCentralCharDB = SocialCentralCharDB or {}
     ApplyDefaults(SocialCentralDB, DEFAULTS)
+    if SocialCentralDB.settings and not SocialCentralDB.settings.spotterDeclutterMigrated then
+        SocialCentralDB.settings.spotterDeclutterMigrated = true
+        SocialCentralDB.settings.spotterNotifySameClan = false
+        SocialCentralDB.settings.spotterNameplateBadges = false
+        SocialCentralDB.settings.spotterPromptAnswered = true
+        SocialCentralDB.settings.spotterIgnoreGroup = true
+        SocialCentralDB.settings.spotterNotifyWatchlist = true
+        SocialCentralDB.settings.spotterNotifyFriends = true
+    end
     ns.db = SocialCentralDB
     ns.charDb = SocialCentralCharDB
     ns.UnregisterEvent(boot, "ADDON_LOADED")
@@ -272,13 +317,19 @@ end)
 
 -- Addon Compartment integration (WoW: Forever / modern minimap menu).
 function SocialCentral_OnAddonCompartmentClick()
-    if ns.UI and ns.UI.Toggle then ns.UI:Toggle() end
+    if ns.Settings and ns.Settings.Toggle then
+        ns.Settings:Toggle()
+    elseif ns.Settings and ns.Settings.Open then
+        ns.Settings:Open()
+    elseif ns.UI and ns.UI.Toggle then
+        ns.UI:Toggle()
+    end
 end
 
 function SocialCentral_OnAddonCompartmentEnter(_, owner)
     GameTooltip:SetOwner(owner, "ANCHOR_LEFT")
     GameTooltip:SetText("|cff58a6ffSocial|rCentral")
-    GameTooltip:AddLine(L["Click to open SocialCentral."], 0.85, 0.88, 0.92, true)
+    GameTooltip:AddLine(L["Click to open SocialCentral settings."], 0.85, 0.88, 0.92, true)
     GameTooltip:Show()
 end
 
@@ -298,14 +349,18 @@ if EventRegistry and EventRegistry.RegisterCallback then
             if ns.Clan and ns.Clan.SetPreferredRightView then
                 ns.Clan:SetPreferredRightView("lfg")
             end
-            if ns.UI and ns.UI.OpenTab then
+            if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+                ns.LFGFrameTab:OpenOfficialModule("lfg")
+            elseif ns.UI and ns.UI.OpenTab then
                 ns.UI:OpenTab("clan")
             end
         elseif link:find("addon:SCentral:diplomacy", 1, true) then
             if ns.Clan and ns.Clan.SetPreferredRightView then
                 ns.Clan:SetPreferredRightView("diplomacy")
             end
-            if ns.UI and ns.UI.OpenTab then
+            if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+                ns.LFGFrameTab:OpenOfficialModule("diplomacy")
+            elseif ns.UI and ns.UI.OpenTab then
                 ns.UI:OpenTab("clan")
             end
         elseif link:find("addon:SCentral:spotter", 1, true) then
@@ -320,9 +375,13 @@ if EventRegistry and EventRegistry.RegisterCallback then
         else
             local who = link:match("addon:SCentral:w:([^|]+)")
             if who and who ~= "" then
-                if ns.Chat and ns.Chat.OpenDirectConversation and ns.UI and ns.UI.OpenTab then
+                if ns.Chat and ns.Chat.OpenDirectConversation then
                     ns.Chat:OpenDirectConversation({ targetName = who })
-                    ns.UI:OpenTab("chat")
+                    if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+                        ns.LFGFrameTab:OpenOfficialModule("chat")
+                    elseif ns.UI and ns.UI.OpenTab then
+                        ns.UI:OpenTab("chat")
+                    end
                 elseif ns.Compat and ns.Compat.Whisper then
                     ns.Compat.Whisper(who)
                 end

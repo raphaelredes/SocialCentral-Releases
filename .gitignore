@@ -3,6 +3,9 @@
 Thumbs.db
 *.zip
 *.bak
+*.pyc
+__pycache__/
+tools/local-demo/
 .vscode/
 .idea/
 Libs/

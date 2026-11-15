@@ -5,12 +5,19 @@ local Safe = ns.Safe
 local Compat = ns.Compat
 
 -- Classic World Buffs provider for World of Warcraft: Forever (Interface: 16001).
--- Tracks player auras, detects capital-city drop announcements (Onyxia, Nefarian,
--- Rend Blackhand / Might of Stormwind, Hakkar), records drop history per realm pool,
+-- Tracks player auras, detects capital-city drop announcements (Onyxia 6h, Nefarian 8h,
+-- Rend Blackhand / Might of Stormwind 3h, Hakkar, Felwood Songflower 25m, Sayge 4h),
+-- maintains per-realm peak drop hour histograms, supports opt-in Guild sync (SCentral1 WB),
 -- and prepares Blizzard-compliant chat drafts to inform group/guild members.
+
+local function NowServerTime()
+    return (GetServerTime and GetServerTime()) or time()
+end
 
 local WorldBuffs = {
     incomingDrop = nil,
+    previousAuraState = {},
+    sessionSyncSource = {},
 }
 ns.WorldBuffs = WorldBuffs
 
@@ -21,13 +28,16 @@ local BUFF_DEFINITIONS = {
         spellId = 22888,
         icon = 132333,
         duration = 7200,
-        cooldown = 7200,
+        cooldown = 21600, -- Onyxia 6h (Nefarian tracked separately as dragonslayer_nef = 28800 / 8h)
+        onyCooldown = 21600,
+        nefCooldown = 28800,
         faction = "Both",
         effect = L["+5% Spell Crit, +10% Melee/Ranged Crit, +140 Attack Power"],
-        source = L["Head of Onyxia or Nefarian turned in (Stormwind / Orgrimmar)"],
+        source = L["Head of Onyxia (6h) or Nefarian (8h) turned in (Stormwind / Orgrimmar)"],
         foreverStatus = L["Active in Open World & Dungeons; No effect inside Raid Instances"],
         yellDelay = 14,
         keywords = { "onyxia", "nefarian", "afrasiabi", "runthak", "saurfang", "mattingly", "dragonesa", "dragona", "lord of blackrock", "senhor da rocha negra", "señor de roca negra" },
+        nefKeywords = { "nefarian", "afrasiabi", "saurfang", "lord of blackrock", "senhor da rocha negra", "señor de roca negra" },
     },
     {
         id = "warchief",
@@ -63,10 +73,11 @@ local BUFF_DEFINITIONS = {
         spellId = 24425,
         icon = 136038,
         duration = 7200,
-        cooldown = 7200,
+        cooldown = 0, -- Heart of Hakkar has no realm-wide NPC cooldown in Classic / Forever
+        trackObservedDrop = true,
         faction = "Both",
         effect = L["+15% All Attributes, +10% Movement Speed"],
-        source = L["Heart of Hakkar turned in (Yojamba Isle / Booty Bay)"],
+        source = L["Heart of Hakkar turned in (Yojamba Isle / Booty Bay) — no server cooldown"],
         foreverStatus = L["Active in Open World & Dungeons; No effect inside Raid Instances"],
         yellDelay = 5,
         keywords = { "hakkar", "molthor", "soulflayer", "esfola-almas", "desollador de almas", "blood god", "deus do sangue", "dios de la sangre" },
@@ -233,7 +244,53 @@ function WorldBuffs:GetLastDropTime(buffId)
     return nil
 end
 
-function WorldBuffs:RecordDropTime(buffId, ts)
+local function RecordPeakHourSample(realmPool, buffId, ts)
+    if not (ns.db and buffId and ts and ts > 0) then return end
+    if type(ns.db.worldBuffsHistory) ~= "table" then
+        ns.db.worldBuffsHistory = {}
+    end
+    if type(ns.db.worldBuffsHistory[realmPool]) ~= "table" then
+        ns.db.worldBuffsHistory[realmPool] = {}
+    end
+    local hist = ns.db.worldBuffsHistory[realmPool][buffId]
+    if type(hist) ~= "table" then
+        hist = { _last = 0, _total = 0 }
+        ns.db.worldBuffsHistory[realmPool][buffId] = hist
+    end
+    if math.abs(ts - (hist._last or 0)) < 300 then
+        return
+    end
+    local hour = tonumber(os.date("%H", ts))
+    if hour and hour >= 0 and hour <= 23 then
+        hist[hour] = (hist[hour] or 0) + 1
+        hist._total = (hist._total or 0) + 1
+        hist._last = ts
+    end
+end
+
+function WorldBuffs:GetPeakWindowText(buffId)
+    local realmPool = Compat.RealmPool()
+    local poolHist = ns.db and ns.db.worldBuffsHistory and ns.db.worldBuffsHistory[realmPool]
+    local hist = poolHist and poolHist[buffId]
+    if type(hist) ~= "table" or (hist._total or 0) < 2 then
+        return nil
+    end
+    local bestHour, bestCount = nil, 0
+    for h = 0, 23 do
+        local c = hist[h] or 0
+        if c > bestCount then
+            bestCount = c
+            bestHour = h
+        end
+    end
+    if not bestHour or bestCount <= 0 then
+        return nil
+    end
+    local endHour = (bestHour + 2) % 24
+    return L["Peak hours: ~%02d:00-%02d:00 (%d drops)"]:format(bestHour, endHour, hist._total)
+end
+
+function WorldBuffs:RecordDropTime(buffId, ts, syncSource)
     local realmPool = Compat.RealmPool()
     if not ns.db then return end
     if type(ns.db.worldBuffsDrops) ~= "table" then
@@ -242,42 +299,216 @@ function WorldBuffs:RecordDropTime(buffId, ts)
     if type(ns.db.worldBuffsDrops[realmPool]) ~= "table" then
         ns.db.worldBuffsDrops[realmPool] = {}
     end
-    ns.db.worldBuffsDrops[realmPool][buffId] = ts or time()
+    local stamp = ts or NowServerTime()
+    local prev = ns.db.worldBuffsDrops[realmPool][buffId] or 0
+    if stamp >= prev then
+        ns.db.worldBuffsDrops[realmPool][buffId] = stamp
+        self.sessionSyncSource[buffId] = syncSource or "local"
+    end
+    RecordPeakHourSample(realmPool, buffId, stamp)
 end
 
-function WorldBuffs:GetDropCooldownStatus(def)
-    if not def or not def.cooldown or def.cooldown <= 0 then
-        return nil
-    end
-    local lastDrop = self:GetLastDropTime(def.id)
+local function BuildCooldownEntry(lastDrop, cooldownSec)
     if not lastDrop or lastDrop <= 0 then
         return {
             status = "UNKNOWN",
             text = L["No drop detected yet this session"],
         }
     end
-    local now = time()
+    local now = NowServerTime()
     local elapsed = now - lastDrop
-    local remaining = def.cooldown - elapsed
+    local remaining = cooldownSec - elapsed
     if remaining > 0 then
-        local remFormatted = self:FormatDuration(remaining)
-        local readyAt = os.date("%H:%M", lastDrop + def.cooldown)
+        local remFormatted = WorldBuffs:FormatDuration(remaining)
+        local readyAt = os.date("%H:%M", lastDrop + cooldownSec)
         return {
             status = "COOLDOWN",
             remaining = remaining,
+            lastDrop = lastDrop,
             readyAt = readyAt,
             text = L["Cooldown: ~%s left (Reset at ~%s)"]:format(remFormatted, readyAt),
         }
-    else
-        return {
-            status = "READY",
-            remaining = 0,
-            text = L["RESET / READY: Can drop at any time!"],
-        }
     end
+    return {
+        status = "READY",
+        remaining = 0,
+        lastDrop = lastDrop,
+        text = L["RESET / READY: Can drop at any time!"],
+    }
 end
 
-function WorldBuffs:HandleIncomingDrop(def, now)
+function WorldBuffs:GetDarkmoonFaireStatus()
+    local now = NowServerTime()
+    local t = os.date("*t", now)
+    if not t then return nil end
+    local d = t.day or 1
+    local wday = t.wday or 1 -- 1=Sun .. 7=Sat
+    local wday1 = ((wday - d) % 7) + 1
+    local firstSun = (wday1 == 1) and 1 or (9 - wday1)
+    local isActive = (d >= firstSun) and (d <= firstSun + 6)
+    local location = ((t.month or 1) % 2 == 1) and L["Mulgore"] or L["Elwynn Forest"]
+    if isActive then
+        return {
+            isActive = true,
+            location = location,
+            daysLeft = (firstSun + 6) - d,
+            text = L["Darkmoon Faire active (%s)"]:format(location),
+        }
+    end
+    local daysUntil = firstSun - d
+    if daysUntil < 0 then
+        local daysInMonth = tonumber(os.date("%d", os.time({ year = t.year, month = (t.month % 12) + 1, day = 0 }))) or 30
+        local nextMonthWday1 = ((wday + (daysInMonth - d)) % 7) + 1
+        local nextFirstSun = (nextMonthWday1 == 1) and 1 or (9 - nextMonthWday1)
+        daysUntil = (daysInMonth - d) + nextFirstSun
+        location = (((t.month % 12) + 1) % 2 == 1) and L["Mulgore"] or L["Elwynn Forest"]
+    end
+    return {
+        isActive = false,
+        location = location,
+        daysUntil = daysUntil,
+        text = L["Next Darkmoon Faire in ~%dd (%s)"]:format(daysUntil, location),
+    }
+end
+
+function WorldBuffs:GetDropCooldownStatus(def)
+    if not def then
+        return nil
+    end
+
+    if def.id == "dragonslayer" then
+        local onyDrop = self:GetLastDropTime("dragonslayer_ony")
+        local nefDrop = self:GetLastDropTime("dragonslayer_nef")
+        if not onyDrop and not nefDrop then
+            onyDrop = self:GetLastDropTime("dragonslayer")
+        end
+        local onyStatus = BuildCooldownEntry(onyDrop, def.onyCooldown or 21600)
+        local nefStatus = BuildCooldownEntry(nefDrop, def.nefCooldown or 28800)
+        local summaryText
+        if onyStatus.status == "COOLDOWN" or nefStatus.status == "COOLDOWN" then
+            local onyShort = onyStatus.status == "COOLDOWN" and self:FormatDuration(onyStatus.remaining) or (onyStatus.status == "READY" and L["Ready"] or "?")
+            local nefShort = nefStatus.status == "COOLDOWN" and self:FormatDuration(nefStatus.remaining) or (nefStatus.status == "READY" and L["Ready"] or "?")
+            summaryText = ("Onyxia: %s  |  Nefarian: %s"):format(onyShort, nefShort)
+        elseif onyStatus.status == "READY" or nefStatus.status == "READY" then
+            summaryText = L["RESET / READY: Can drop at any time!"]
+        else
+            summaryText = L["No drop detected yet this session"]
+        end
+        local primaryStatus = (onyStatus.status == "READY" or nefStatus.status == "READY") and "READY"
+            or ((onyStatus.status == "COOLDOWN" and nefStatus.status == "COOLDOWN") and "COOLDOWN"
+            or ((onyStatus.status == "COOLDOWN" and nefStatus.status == "UNKNOWN") and "COOLDOWN"
+            or ((nefStatus.status == "COOLDOWN" and onyStatus.status == "UNKNOWN") and "COOLDOWN" or "UNKNOWN")))
+        return {
+            status = primaryStatus,
+            text = summaryText,
+            onyStatus = onyStatus,
+            nefStatus = nefStatus,
+            peakText = self:GetPeakWindowText("dragonslayer"),
+            source = self.sessionSyncSource["dragonslayer_ony"] or self.sessionSyncSource["dragonslayer_nef"],
+        }
+    end
+
+    if def.id == "zandalar" then
+        local lastDrop = self:GetLastDropTime("zandalar")
+        local peak = self:GetPeakWindowText("zandalar")
+        if lastDrop and lastDrop > 0 then
+            local ago = self:FormatDuration(math.max(1, NowServerTime() - lastDrop))
+            return {
+                status = "NO_COOLDOWN",
+                lastDrop = lastDrop,
+                peakText = peak,
+                text = L["No server cooldown (last observed %s ago)"]:format(ago),
+            }
+        end
+        return {
+            status = "NO_COOLDOWN",
+            peakText = peak,
+            text = L["No server cooldown (can drop anytime)"],
+        }
+    end
+
+    if def.id == "songflower" then
+        local lastPicked = self:GetLastDropTime("songflower")
+        if lastPicked and lastPicked > 0 then
+            local cd = BuildCooldownEntry(lastPicked, def.cooldown or 1500)
+            if cd.status == "COOLDOWN" then
+                cd.text = L["Last Felwood pick: ~%s node respawn"]:format(self:FormatDuration(cd.remaining))
+                return cd
+            end
+        end
+        return {
+            status = "OPEN_WORLD",
+            text = L["Felwood cleansed flower (~25m node respawn)"],
+        }
+    end
+
+    if def.id == "dmf" then
+        local faire = self:GetDarkmoonFaireStatus()
+        local cKey = Compat.CharacterKey()
+        local personal = ns.db and ns.db.worldBuffsPersonal and ns.db.worldBuffsPersonal[cKey]
+        local saygeAt = personal and personal.saygeAt
+        if saygeAt and saygeAt > 0 then
+            local elapsed = NowServerTime() - saygeAt
+            local rem = (def.cooldown or 14400) - elapsed
+            if rem > 0 then
+                return {
+                    status = "COOLDOWN",
+                    remaining = rem,
+                    faire = faire,
+                    text = L["Sayge personal cooldown: >= %s (/played)"]:format(self:FormatDuration(rem)),
+                }
+            end
+        end
+        return {
+            status = faire and faire.isActive and "READY" or "SCHEDULED",
+            faire = faire,
+            text = faire and faire.text or L["Darkmoon Faire (Sayge 4h /played cooldown)"],
+        }
+    end
+
+    if not def.cooldown or def.cooldown <= 0 then
+        return nil
+    end
+    local entry = BuildCooldownEntry(self:GetLastDropTime(def.id), def.cooldown)
+    entry.peakText = self:GetPeakWindowText(def.id)
+    entry.source = self.sessionSyncSource[def.id]
+    return entry
+end
+
+local function SyncIdToDefId(syncId)
+    if syncId == "dragonslayer_ony" or syncId == "dragonslayer_nef" then
+        return "dragonslayer"
+    end
+    return syncId
+end
+
+function WorldBuffs:ReceiveSyncedDrop(syncId, ts, sender)
+    if type(syncId) ~= "string" or type(ts) ~= "number" then return end
+    local now = NowServerTime()
+    if ts <= 0 or ts > (now + 120) or ts < (now - 43200) then
+        return
+    end
+    local existing = self:GetLastDropTime(syncId) or 0
+    if math.abs(ts - existing) <= 180 or ts < existing then
+        return
+    end
+    self:RecordDropTime(syncId, ts, sender or "guild")
+    local defId = SyncIdToDefId(syncId)
+    if defId ~= syncId then
+        self:RecordDropTime(defId, ts, sender or "guild")
+    end
+    if (now - ts) <= 20 and ns.db and ns.db.settings and ns.db.settings.worldBuffsAlerts ~= false then
+        for _, def in ipairs(BUFF_DEFINITIONS) do
+            if def.id == defId then
+                ns:Print(L["[World Buff Sync] %s reported %s!"]:format(sender or L["Guild"], def.name))
+                break
+            end
+        end
+    end
+    ns:Emit("WORLD_BUFFS_UPDATED")
+end
+
+function WorldBuffs:HandleIncomingDrop(def, now, syncId)
     local dropAt = now + def.yellDelay
     self.incomingDrop = {
         def = def,
@@ -286,7 +517,16 @@ function WorldBuffs:HandleIncomingDrop(def, now)
         detectedAt = now,
     }
 
-    self:RecordDropTime(def.id, time())
+    local nowTs = NowServerTime()
+    local recordKey = syncId or def.id
+    self:RecordDropTime(recordKey, nowTs, "local")
+    if recordKey ~= def.id then
+        self:RecordDropTime(def.id, nowTs, "local")
+    end
+
+    if ns.Clan and ns.Clan.SendWorldBuffSync then
+        ns.Clan:SendWorldBuffSync(recordKey, nowTs)
+    end
 
     if ns.db and ns.db.settings and ns.db.settings.worldBuffsAlerts ~= false then
         ns:Print(L["[World Buff Alert] %s will drop in ~%ds!"]:format(def.name, def.yellDelay))
@@ -310,6 +550,16 @@ function WorldBuffs:HandleIncomingDrop(def, now)
     end
 end
 
+local function IsNefarianDrop(def, lowerMsg, lowerSender)
+    if not def or not def.nefKeywords then return false end
+    for _, kw in ipairs(def.nefKeywords) do
+        if lowerMsg:find(kw, 1, true) or lowerSender:find(kw, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 local function OnMonsterMessage(_, msg, sender)
     msg = Safe.String(msg)
     sender = Safe.String(sender)
@@ -331,7 +581,11 @@ local function OnMonsterMessage(_, msg, sender)
                 end
             end
             if matched then
-                WorldBuffs:HandleIncomingDrop(def, now)
+                local syncId = def.id
+                if def.id == "dragonslayer" then
+                    syncId = IsNefarianDrop(def, lowerMsg, lowerSender) and "dragonslayer_nef" or "dragonslayer_ony"
+                end
+                WorldBuffs:HandleIncomingDrop(def, now, syncId)
                 break
             end
         end
@@ -413,11 +667,43 @@ function WorldBuffs:OpenIndividualBuffAnnouncement(buffDef)
     return false
 end
 
+local function TrackFreshOpenWorldAuras(isInitial)
+    local nowTs = NowServerTime()
+    local songflowerDef = BUFF_DEFINITIONS[5]
+    local dmfDef = BUFF_DEFINITIONS[9]
+
+    if songflowerDef then
+        local hasSong = FindPlayerAura(songflowerDef.spellId) ~= nil
+        if hasSong and not WorldBuffs.previousAuraState.songflower and not isInitial then
+            local mapId = C_Map and C_Map.GetBestMapForUnit and Safe.Call(C_Map.GetBestMapForUnit, "player")
+            local zoneLow = (Compat.CurrentZoneName and Compat.CurrentZoneName() or ""):lower()
+            if mapId == 1448 or zoneLow:find("felwood", 1, true) or zoneLow:find("selva maleva", 1, true) or zoneLow:find("frondavil", 1, true) then
+                WorldBuffs:RecordDropTime("songflower", nowTs, "local")
+            end
+        end
+        WorldBuffs.previousAuraState.songflower = hasSong
+    end
+
+    if dmfDef then
+        local hasDmf = FindPlayerAura(dmfDef.spellId, dmfDef.altSpellIds) ~= nil
+        if hasDmf and not WorldBuffs.previousAuraState.dmf and not isInitial and ns.db then
+            if type(ns.db.worldBuffsPersonal) ~= "table" then
+                ns.db.worldBuffsPersonal = {}
+            end
+            local cKey = Compat.CharacterKey()
+            ns.db.worldBuffsPersonal[cKey] = ns.db.worldBuffsPersonal[cKey] or {}
+            ns.db.worldBuffsPersonal[cKey].saygeAt = nowTs
+        end
+        WorldBuffs.previousAuraState.dmf = hasDmf
+    end
+end
+
 function WorldBuffs:Scan()
     ns:Emit("WORLD_BUFFS_UPDATED")
 end
 
 function WorldBuffs:Init()
+    TrackFreshOpenWorldAuras(true)
     ns.RegisterEvent(self, "CHAT_MSG_MONSTER_YELL", function(_, _, msg, sender)
         OnMonsterMessage("CHAT_MSG_MONSTER_YELL", msg, sender)
     end)
@@ -426,10 +712,12 @@ function WorldBuffs:Init()
     end)
     ns.RegisterEvent(self, "UNIT_AURA", function(_, _, unit)
         if unit == "player" then
+            TrackFreshOpenWorldAuras(false)
             ns:Emit("WORLD_BUFFS_UPDATED")
         end
     end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        TrackFreshOpenWorldAuras(true)
         ns:Emit("WORLD_BUFFS_UPDATED")
     end)
 end

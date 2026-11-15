@@ -7,6 +7,10 @@ ns.Theme = Theme
 local WHITE8X8 = "Interface\\Buttons\\WHITE8X8"
 local listeners = {}
 
+local function HasAtlas(atlasName)
+    return C_Texture and C_Texture.GetAtlasInfo and atlasName and C_Texture.GetAtlasInfo(atlasName) ~= nil
+end
+
 Theme.PALETTES = {
     dark = {
         key = "dark",
@@ -195,6 +199,12 @@ function Theme:ApplyBackdrop(frame, kind, palette)
         if frame._solidOpaqueBg then
             frame._solidOpaqueBg:Hide()
         end
+        if frame._foreverRowBg then
+            frame._foreverRowBg:Hide()
+        end
+        if frame._foreverSurfaceStone then
+            frame._foreverSurfaceStone:Hide()
+        end
         return
     end
 
@@ -212,22 +222,107 @@ function Theme:ApplyBackdrop(frame, kind, palette)
         frame._solidOpaqueBg:Show()
     end
 
-    if self:IsBlizzard(p) and kind ~= "row" and kind ~= "rowAlt" then
+    if self:IsBlizzard(p) then
+        local hasListAtlas = HasAtlas("common-button-list-large")
+        local hasStoneAtlas = HasAtlas("groupfinder-Stat-StoneBG")
+
+        if (kind == "row" or kind == "rowAlt") and hasListAtlas then
+            if frame._foreverSurfaceStone then
+                frame._foreverSurfaceStone:Hide()
+            end
+            frame:SetBackdrop(FLAT_BACKDROP_SPEC)
+            frame:SetBackdropColor(0.055, 0.052, 0.050, 1.0)
+            if not frame._foreverRowBg then
+                frame._foreverRowBg = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
+                frame._foreverRowBg:SetAllPoints(frame)
+                frame._foreverRowBg:SetAtlas("common-button-list-large", false)
+            end
+            local shade = (kind == "row") and 1.0 or 0.88
+            frame._foreverRowBg:SetVertexColor(shade, shade, shade, 1.0)
+            frame._foreverRowBg:Show()
+            if frame.GetObjectType and frame:GetObjectType() == "Button" and not frame._foreverRowHl and HasAtlas("common-button-list-large-hover") then
+                local hl = frame:CreateTexture(nil, "HIGHLIGHT")
+                hl:SetAllPoints(frame)
+                hl:SetAtlas("common-button-list-large-hover", false)
+                hl:SetBlendMode("ADD")
+                hl:SetAlpha(0.55)
+                frame._foreverRowHl = hl
+            end
+            return
+        end
+
+        if kind == "surface" and frame._foreverRowBg then
+            frame:SetBackdrop(BACKDROP_SPEC)
+            frame:SetBackdropColor(0.14, 0.11, 0.06, 1.0)
+            frame:SetBackdropBorderColor(0.84, 0.66, 0.24, 1.0)
+            frame._foreverRowBg:SetVertexColor(1.0, 0.88, 0.58, 1.0)
+            frame._foreverRowBg:Show()
+            return
+        end
+
+        if frame._foreverRowBg then
+            frame._foreverRowBg:Hide()
+        end
+
         if kind == "window" then
+            if frame._foreverSurfaceStone then
+                frame._foreverSurfaceStone:Hide()
+            end
             frame:SetBackdrop(BLIZZ_DIALOG_BACKDROP)
-            frame:SetBackdropColor(0.10, 0.09, 0.08, 1.0)
+            frame:SetBackdropColor(0.08, 0.075, 0.07, 1.0)
             frame:SetBackdropBorderColor(0.86, 0.80, 0.68, 1.0)
             return
+        elseif kind == "header" then
+            frame:SetBackdrop(hasStoneAtlas and BACKDROP_SPEC or BLIZZ_SURFACE_BACKDROP)
+            frame:SetBackdropColor(0.085, 0.08, 0.07, 1.0)
+            frame:SetBackdropBorderColor(0.46, 0.38, 0.22, 1.0)
+            if hasStoneAtlas then
+                if not frame._foreverSurfaceStone then
+                    frame._foreverSurfaceStone = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
+                    frame._foreverSurfaceStone:SetAllPoints(frame)
+                    frame._foreverSurfaceStone:SetAtlas("groupfinder-Stat-StoneBG", false)
+                end
+                frame._foreverSurfaceStone:SetAlpha(0.95)
+                frame._foreverSurfaceStone:Show()
+            elseif frame._foreverSurfaceStone then
+                frame._foreverSurfaceStone:Hide()
+            end
+            return
         elseif kind == "inset" then
-            frame:SetBackdrop(BLIZZ_INSET_BACKDROP)
-            frame:SetBackdropColor(0.12, 0.11, 0.10, 1.0)
-            frame:SetBackdropBorderColor(0.58, 0.52, 0.40, 1.0)
+            if frame._foreverSurfaceStone then
+                frame._foreverSurfaceStone:Hide()
+            end
+            if hasListAtlas or hasStoneAtlas then
+                frame:SetBackdrop(BACKDROP_SPEC)
+                frame:SetBackdropColor(0.055, 0.052, 0.050, 1.0)
+                frame:SetBackdropBorderColor(0.32, 0.27, 0.18, 1.0)
+            else
+                frame:SetBackdrop(BLIZZ_INSET_BACKDROP)
+                frame:SetBackdropColor(0.12, 0.11, 0.10, 1.0)
+                frame:SetBackdropBorderColor(0.58, 0.52, 0.40, 1.0)
+            end
             return
-        elseif kind == "surface" or kind == "header" then
-            frame:SetBackdrop(BLIZZ_SURFACE_BACKDROP)
-            frame:SetBackdropColor(0.14, 0.13, 0.12, 1.0)
-            frame:SetBackdropBorderColor(0.48, 0.43, 0.34, 1.0)
+        elseif kind == "surface" then
+            if frame._foreverSurfaceStone then
+                frame._foreverSurfaceStone:Hide()
+            end
+            if hasListAtlas or hasStoneAtlas then
+                frame:SetBackdrop(BACKDROP_SPEC)
+                frame:SetBackdropColor(0.068, 0.064, 0.060, 1.0)
+                frame:SetBackdropBorderColor(0.42, 0.35, 0.22, 1.0)
+            else
+                frame:SetBackdrop(BLIZZ_SURFACE_BACKDROP)
+                frame:SetBackdropColor(0.14, 0.13, 0.12, 1.0)
+                frame:SetBackdropBorderColor(0.48, 0.43, 0.34, 1.0)
+            end
             return
+        end
+    else
+        if frame._foreverRowBg then
+            frame._foreverRowBg:Hide()
+        end
+        if frame._foreverSurfaceStone then
+            frame._foreverSurfaceStone:Hide()
         end
     end
 
@@ -474,13 +569,12 @@ local function ApplyButtonColors(btn, hovered)
                         vis:UnlockHighlight()
                     end
                     if variant == "primary" or active then
-                        TintBlizzButtonTextures(vis, false, hovered and 1.08 or 1.0, 1.0, 1.0)
+                        TintBlizzButtonTextures(vis, false, hovered and 1.12 or 1.02, hovered and 1.06 or 1.0, hovered and 1.02 or 0.96)
                     elseif variant == "danger" then
                         TintBlizzButtonTextures(vis, false, hovered and 0.96 or 0.84, 0.38, 0.36)
                     else
-                        -- Classic brushed pewter/slate bevel matching 'Sussurrar / Invite / Remover'
-                        local c = hovered and 0.78 or 0.56
-                        TintBlizzButtonTextures(vis, true, c, c, c + 0.04)
+                        -- Authentic WoW Forever red/gold UIPanelButtonTemplate look
+                        TintBlizzButtonTextures(vis, false, hovered and 1.06 or 0.94, hovered and 1.04 or 0.92, hovered and 1.04 or 0.92)
                     end
                 end
                 if btn._scPushed and btn:IsEnabled() then
@@ -495,10 +589,8 @@ local function ApplyButtonColors(btn, hovered)
                         btn.label:SetTextColor(1, 1, 1)
                     elseif variant == "danger" then
                         btn.label:SetTextColor(1.0, 0.82, 0.78)
-                    elseif variant == "primary" then
-                        btn.label:SetTextColor(1.0, 0.88, 0.35)
                     else
-                        btn.label:SetTextColor(0.88, 0.88, 0.90)
+                        btn.label:SetTextColor(1.0, 0.82, 0.0)
                     end
                 end
             end
@@ -909,7 +1001,10 @@ local function SaveWindowCenterOffset(win, posKey, opts)
 end
 
 function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
-    if not (win and posKey and ns.db and type(ns.db.windowPositions) == "table") then
+    if not win or win._scLocked then
+        return false
+    end
+    if not (posKey and ns.db and type(ns.db.windowPositions) == "table") then
         return false
     end
     local saved = ns.db.windowPositions[posKey]
@@ -1886,7 +1981,10 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     end
 
     local function EnsureRowPool()
-        local vpH = viewport:GetHeight() or 280
+        local vpH = viewport:GetHeight() or 0
+        if vpH <= 0 then
+            vpH = 280
+        end
         local needed = math.max(1, math.ceil(vpH / list.rowHeight) + 1)
         while #list.rows < needed do
             local idx = #list.rows + 1

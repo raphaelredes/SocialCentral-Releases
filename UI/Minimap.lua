@@ -185,25 +185,55 @@ local function PopulateTooltip(tt)
     end
 
     tt:AddLine(" ")
-    tt:AddLine(L["Left-click: toggle window\nAlt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+    tt:AddLine(L["Left-click: open settings\nAlt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+end
+
+local function OpenViaOfficialOrHub(modId)
+    if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+        ns.LFGFrameTab:OpenOfficialModule(modId)
+    elseif ns.UI and ns.UI.OpenTab then
+        ns.UI:OpenTab(modId)
+    end
 end
 
 local function OpenContextMenu(anchor)
     if MenuUtil and MenuUtil.CreateContextMenu then
         MenuUtil.CreateContextMenu(anchor, function(_, root)
             root:CreateTitle("SocialCentral")
-            root:CreateButton(L["Open SocialCentral"], function()
-                if ns.UI then ns.UI:Toggle() end
+            root:CreateButton(L["Settings"], function()
+                if ns.Settings and ns.Settings.Toggle then
+                    ns.Settings:Toggle()
+                elseif ns.Settings and ns.Settings.Open then
+                    ns.Settings:Open()
+                end
             end)
-            root:CreateButton(L["Open Conversations"], function()
-                if ns.UI and ns.UI.OpenTab then ns.UI:OpenTab("chat") end
+            root:CreateDivider()
+            root:CreateButton(L["Looking for Group (I)"], function()
+                OpenViaOfficialOrHub("lfg")
             end)
-            root:CreateButton(L["Open Group"], function()
-                if ns.UI and ns.UI.OpenTab then ns.UI:OpenTab("group") end
+            root:CreateButton(L["Social & Watchlist (O)"], function()
+                OpenViaOfficialOrHub("watchlist")
             end)
-            root:CreateButton(L["Open Clan"], function()
-                if ns.UI and ns.UI.OpenTab then ns.UI:OpenTab("clan") end
+            root:CreateButton(L["Clan Hub & Diplomacy (J)"], function()
+                OpenViaOfficialOrHub("clan")
             end)
+            root:CreateButton(L["My Alts (C)"], function()
+                OpenViaOfficialOrHub("alts")
+            end)
+            root:CreateButton(L["Conversations (Chat)"], function()
+                OpenViaOfficialOrHub("chat")
+            end)
+            root:CreateButton(L["World Buffs (M)"], function()
+                OpenViaOfficialOrHub("buffs")
+            end)
+            root:CreateButton(L["Open Unified Hub"], function()
+                if ns.UI and ns.UI.ShowHub then
+                    ns.UI:ShowHub()
+                elseif ns.UI then
+                    ns.UI:Toggle()
+                end
+            end)
+            root:CreateDivider()
             local radarLabel = L["Target Radar"]
             if ns.Spotter then
                 local _, _, _, totalCount = ns.Spotter:GetCounts()
@@ -264,9 +294,6 @@ local function OpenContextMenu(anchor)
             root:CreateButton(L["Reset Window Positions"], function()
                 if ns.Theme and ns.Theme.ResetAllWindowPositions then ns.Theme:ResetAllWindowPositions() end
             end)
-            root:CreateButton(L["Settings"], function()
-                if ns.Settings then ns.Settings:Open() end
-            end)
         end)
     elseif ns.Settings then
         ns.Settings:Open()
@@ -310,13 +337,15 @@ local function HandleMinimapClick(anchor, mouseButton)
             ns.SpotterHUD:Toggle()
         end
     elseif IsControlKeyDown and IsControlKeyDown() then
-        if ns.UI and ns.UI.OpenTab then
-            ns.UI:OpenTab("chat")
-        end
+        OpenViaOfficialOrHub("chat")
     elseif IsShiftKeyDown and IsShiftKeyDown() then
         if ns.Watchlist then
             ns.Watchlist:CheckNext()
         end
+    elseif ns.Settings and ns.Settings.Toggle then
+        ns.Settings:Toggle()
+    elseif ns.Settings and ns.Settings.Open then
+        ns.Settings:Open()
     elseif ns.UI then
         ns.UI:Toggle()
     end

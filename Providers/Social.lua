@@ -101,6 +101,15 @@ local function ScanGuild(map)
                         area = cleanArea,
                         guild = info.name or "",
                     })
+                else
+                    Store:SyncWatchlistObservation(parsed.displayName, {
+                        online = false,
+                        source = "guild",
+                        level = Safe.Number(level),
+                        classFile = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc)),
+                        area = Safe.String(area) or "",
+                        guild = info.name or "",
+                    })
                 end
             end
         elseif isOnline and name then
@@ -116,38 +125,49 @@ local function ScanCharacterFriends(map)
         local count = Safe.Number(Safe.Call(C_FriendList.GetNumFriends)) or 0
         for i = 1, count do
             local f = Safe.Call(C_FriendList.GetFriendInfoByIndex, i)
-            if type(f) == "table" and Safe.Value(f.connected) == true then
+            if type(f) == "table" then
                 local rawName = Safe.String(f.name)
                 local guid = Safe.String(f.guid)
+                local isOnline = Safe.Value(f.connected) == true
                 if rawName and not Compat.IsMe(rawName, guid) then
                     local parsed = Compat.ParseCharacterName(rawName)
                     if parsed then
                         if guid and Compat.CacheForeverFullName then
                             Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
                         end
-                        local key = guid or ("char:" .. parsed.lookupKey)
                         local cleanClass = Compat.ClassFileFromLocalized(Safe.String(f.className)) or (Compat.ClassFileFromGuid and Compat.ClassFileFromGuid(guid))
                         local cleanLevel = Safe.Number(f.level)
                         local cleanArea = Safe.String(f.area) or ""
-                        MergeEntry(map, key, {
-                            displayName = parsed.displayName,
-                            lookupKey = parsed.lookupKey,
-                            guid = guid,
-                            level = cleanLevel,
-                            classFile = cleanClass,
-                            area = cleanArea,
-                            note = Safe.String(f.notes),
-                            afk = Safe.Value(f.afk) == true,
-                            dnd = Safe.Value(f.dnd) == true,
-                            sources = { friend = true },
-                        })
-                        Store:SyncWatchlistObservation(parsed.displayName, {
-                            online = true,
-                            source = "friend",
-                            level = cleanLevel,
-                            classFile = cleanClass,
-                            area = cleanArea,
-                        })
+                        if isOnline then
+                            local key = guid or ("char:" .. parsed.lookupKey)
+                            MergeEntry(map, key, {
+                                displayName = parsed.displayName,
+                                lookupKey = parsed.lookupKey,
+                                guid = guid,
+                                level = cleanLevel,
+                                classFile = cleanClass,
+                                area = cleanArea,
+                                note = Safe.String(f.notes),
+                                afk = Safe.Value(f.afk) == true,
+                                dnd = Safe.Value(f.dnd) == true,
+                                sources = { friend = true },
+                            })
+                            Store:SyncWatchlistObservation(parsed.displayName, {
+                                online = true,
+                                source = "friend",
+                                level = cleanLevel,
+                                classFile = cleanClass,
+                                area = cleanArea,
+                            })
+                        else
+                            Store:SyncWatchlistObservation(parsed.displayName, {
+                                online = false,
+                                source = "friend",
+                                level = cleanLevel,
+                                classFile = cleanClass,
+                                area = cleanArea,
+                            })
+                        end
                     end
                 end
             end
@@ -158,33 +178,43 @@ local function ScanCharacterFriends(map)
             local rawName, level, classLoc, area, connected, status, notes = GetFriendInfo(i)
             rawName = Safe.String(rawName)
             local isOnline = (connected == true or connected == 1)
-            if rawName and isOnline and not Compat.IsMe(rawName, nil) then
+            if rawName and not Compat.IsMe(rawName, nil) then
                 local parsed = Compat.ParseCharacterName(rawName)
                 if parsed then
-                    local key = "char:" .. parsed.lookupKey
                     local cleanClass = Compat.ClassFileFromLocalized(Safe.String(classLoc))
                     local cleanLevel = Safe.Number(level)
                     local cleanArea = Safe.String(area) or ""
-                    local isAfk = (status == "<AFK>" or (CHAT_FLAG_AFK and status == CHAT_FLAG_AFK))
-                    local isDnd = (status == "<DND>" or (CHAT_FLAG_DND and status == CHAT_FLAG_DND))
-                    MergeEntry(map, key, {
-                        displayName = parsed.displayName,
-                        lookupKey = parsed.lookupKey,
-                        level = cleanLevel,
-                        classFile = cleanClass,
-                        area = cleanArea,
-                        note = Safe.String(notes),
-                        afk = isAfk,
-                        dnd = isDnd,
-                        sources = { friend = true },
-                    })
-                    Store:SyncWatchlistObservation(parsed.displayName, {
-                        online = true,
-                        source = "friend",
-                        level = cleanLevel,
-                        classFile = cleanClass,
-                        area = cleanArea,
-                    })
+                    if isOnline then
+                        local key = "char:" .. parsed.lookupKey
+                        local isAfk = (status == "<AFK>" or (CHAT_FLAG_AFK and status == CHAT_FLAG_AFK))
+                        local isDnd = (status == "<DND>" or (CHAT_FLAG_DND and status == CHAT_FLAG_DND))
+                        MergeEntry(map, key, {
+                            displayName = parsed.displayName,
+                            lookupKey = parsed.lookupKey,
+                            level = cleanLevel,
+                            classFile = cleanClass,
+                            area = cleanArea,
+                            note = Safe.String(notes),
+                            afk = isAfk,
+                            dnd = isDnd,
+                            sources = { friend = true },
+                        })
+                        Store:SyncWatchlistObservation(parsed.displayName, {
+                            online = true,
+                            source = "friend",
+                            level = cleanLevel,
+                            classFile = cleanClass,
+                            area = cleanArea,
+                        })
+                    else
+                        Store:SyncWatchlistObservation(parsed.displayName, {
+                            online = false,
+                            source = "friend",
+                            level = cleanLevel,
+                            classFile = cleanClass,
+                            area = cleanArea,
+                        })
+                    end
                 end
             end
         end
@@ -322,4 +352,11 @@ function Social:Init()
         self:RequestRosters(true)
         self:Scan()
     end)
+
+    if C_Timer and C_Timer.NewTicker then
+        C_Timer.NewTicker(12, function()
+            self:RequestRosters(false)
+            self:Scan()
+        end)
+    end
 end

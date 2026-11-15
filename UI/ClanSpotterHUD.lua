@@ -25,15 +25,17 @@ local SpotterHUD = {
     _combatKinElapsed = 0,
 }
 
-local HUD_WIDTH = 304
-local PILL_H = 66
-local ACTION_H = 56
+local HUD_WIDTH = 248
+local PILL_H = 48
+local ACTION_H = 52
 local ARROW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\arrow"
 
 local STANCE_RGB = {
-    ENEMY = { 0.96, 0.28, 0.28 },
-    ALLY  = { 0.25, 0.85, 0.45 },
-    SAME  = { 0.98, 0.80, 0.24 },
+    ENEMY     = { 0.96, 0.28, 0.28 },
+    WATCHLIST = { 1.00, 0.65, 0.20 },
+    FRIEND    = { 0.35, 0.78, 1.00 },
+    ALLY      = { 0.25, 0.85, 0.45 },
+    SAME      = { 0.98, 0.80, 0.24 },
 }
 
 local function GetSpotterTotalCount()
@@ -315,7 +317,7 @@ function SpotterHUD:BuildFrame()
     f:EnableMouse(true)
 
     local stanceBar = f:CreateTexture(nil, "OVERLAY")
-    stanceBar:SetWidth(4)
+    stanceBar:SetWidth(3)
     stanceBar:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -2)
     stanceBar:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 2, 2)
     stanceBar:SetColorTexture(0.98, 0.80, 0.24, 1)
@@ -323,9 +325,9 @@ function SpotterHUD:BuildFrame()
 
     -- Main clickable Arrow Pill (SecureActionButtonTemplate: selects target on screen & opens Interaction Drawer)
     local compassBar = CreateFrame("Button", "SocialCentralSpotterCompass", f, "SecureActionButtonTemplate,BackdropTemplate")
-    compassBar:SetHeight(PILL_H - 8)
-    compassBar:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -4)
-    compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
+    compassBar:SetHeight(PILL_H - 6)
+    compassBar:SetPoint("TOPLEFT", f, "TOPLEFT", 5, -3)
+    compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -3)
     if compassBar.SetClipsChildren then
         compassBar:SetClipsChildren(true)
     end
@@ -337,47 +339,44 @@ function SpotterHUD:BuildFrame()
     compassGlow:SetAllPoints()
     compassGlow:SetColorTexture(1, 1, 1, 0.08)
 
-    local arrowBox = CreateFrame("Frame", nil, compassBar, "BackdropTemplate")
-    arrowBox:SetSize(50, 50)
+    local arrowBox = CreateFrame("Frame", nil, compassBar)
+    arrowBox:SetSize(36, 36)
     arrowBox:SetPoint("LEFT", 4, 0)
     arrowBox:EnableMouse(false)
     if arrowBox.SetClipsChildren then
         arrowBox:SetClipsChildren(false)
     end
     local arrowAura = arrowBox:CreateTexture(nil, "ARTWORK")
-    arrowAura:SetSize(44, 44)
+    arrowAura:SetSize(34, 34)
     arrowAura:SetPoint("CENTER")
     arrowAura:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-    arrowAura:SetVertexColor(0.05, 0.25, 0.36, 0.45)
+    arrowAura:SetVertexColor(0.05, 0.25, 0.36, 0.40)
     arrowBox.aura = arrowAura
 
     local arrowTex = arrowBox:CreateTexture(nil, "OVERLAY")
-    arrowTex:SetSize(44, 44)
+    arrowTex:SetSize(32, 32)
     arrowTex:SetPoint("CENTER")
     arrowTex:SetTexture(ARROW_TEX)
     arrowBox.arrowTex = arrowTex
     compassBar.arrowBox = arrowBox
     compassBar.arrowTex = arrowTex
 
-    local compassNameFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    compassNameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 8, -1)
-    compassNameFs:SetPoint("TOPRIGHT", compassBar, "TOPRIGHT", -60, -1)
+    local compassNameFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    compassNameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 6, -3)
+    compassNameFs:SetPoint("TOPRIGHT", compassBar, "TOPRIGHT", -54, -3)
     compassNameFs:SetJustifyH("LEFT")
     compassNameFs:SetWordWrap(false)
     compassBar.nameFs = compassNameFs
 
-    local compassDistFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    compassDistFs:SetPoint("LEFT", arrowBox, "RIGHT", 8, 0)
-    compassDistFs:SetPoint("RIGHT", compassBar, "RIGHT", -8, 0)
+    local compassDistFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    compassDistFs:SetPoint("BOTTOMLEFT", arrowBox, "BOTTOMRIGHT", 6, 3)
+    compassDistFs:SetPoint("BOTTOMRIGHT", compassBar, "BOTTOMRIGHT", -6, 3)
     compassDistFs:SetJustifyH("LEFT")
     compassDistFs:SetWordWrap(false)
     compassBar.distFs = compassDistFs
 
     local compassSubFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    compassSubFs:SetPoint("BOTTOMLEFT", arrowBox, "BOTTOMRIGHT", 8, 1)
-    compassSubFs:SetPoint("BOTTOMRIGHT", compassBar, "BOTTOMRIGHT", -8, 1)
-    compassSubFs:SetJustifyH("LEFT")
-    compassSubFs:SetWordWrap(false)
+    compassSubFs:Hide()
     compassBar.subFs = compassSubFs
 
     compassBar:SetScript("PostClick", function(selfBtn, mouseBtn, down)
@@ -417,8 +416,8 @@ function SpotterHUD:BuildFrame()
     f.compassBar = compassBar
 
     -- Top-right micro buttons (Dismiss [X] and optional [1/2] target cycle when >1 nearby)
-    local closeBtn = Theme:CreateButton(f, 18, 18, "X", "danger")
-    closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
+    local closeBtn = Theme:CreateButton(f, 16, 16, "X", "danger")
+    closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
     closeBtn:SetFrameLevel(compassBar:GetFrameLevel() + 6)
     closeBtn:SetScript("OnClick", function()
         local entry = SpotterHUD._compassEntry
@@ -441,8 +440,8 @@ function SpotterHUD:BuildFrame()
     end)
     f.closeBtn = closeBtn
 
-    local cycleBtn = Theme:CreateButton(f, 36, 18, "1/1", "default")
-    cycleBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
+    local cycleBtn = Theme:CreateButton(f, 32, 16, "1/1", "default")
+    cycleBtn:SetPoint("RIGHT", closeBtn, "LEFT", -2, 0)
     cycleBtn:SetFrameLevel(compassBar:GetFrameLevel() + 6)
     cycleBtn:SetScript("OnClick", function()
         if InCombatLockdown and InCombatLockdown() then return end
@@ -465,23 +464,23 @@ function SpotterHUD:BuildFrame()
     -- Expandable On-Click Interaction Drawer (shown only after clicking the Arrow Pill)
     local actionPanel = CreateFrame("Frame", nil, f, "BackdropTemplate")
     actionPanel:SetHeight(ACTION_H)
-    actionPanel:SetPoint("TOPLEFT", compassBar, "BOTTOMLEFT", 0, -3)
-    actionPanel:SetPoint("TOPRIGHT", compassBar, "BOTTOMRIGHT", 0, -3)
+    actionPanel:SetPoint("TOPLEFT", compassBar, "BOTTOMLEFT", 0, -2)
+    actionPanel:SetPoint("TOPRIGHT", compassBar, "BOTTOMRIGHT", 0, -2)
     if actionPanel.SetClipsChildren then
         actionPanel:SetClipsChildren(true)
     end
     f.actionPanel = actionPanel
 
     local promptFs = actionPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    promptFs:SetPoint("TOPLEFT", 8, -5)
-    promptFs:SetPoint("TOPRIGHT", -8, -5)
+    promptFs:SetPoint("TOPLEFT", 6, -4)
+    promptFs:SetPoint("TOPRIGHT", -6, -4)
     promptFs:SetJustifyH("LEFT")
     promptFs:SetWordWrap(false)
     actionPanel.promptFs = promptFs
 
-    local btnW = 67
-    local whisperBtn = Theme:CreateButton(actionPanel, btnW, 22, L["Whisper"], "primary")
-    whisperBtn:SetPoint("BOTTOMLEFT", 6, 5)
+    local btnW = 54
+    local whisperBtn = Theme:CreateButton(actionPanel, btnW, 20, L["Whisper"], "primary")
+    whisperBtn:SetPoint("BOTTOMLEFT", 5, 4)
     whisperBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if not e then return end
@@ -503,8 +502,8 @@ function SpotterHUD:BuildFrame()
     end)
     actionPanel.whisperBtn = whisperBtn
 
-    local scoutBtn = Theme:CreateButton(actionPanel, btnW, 22, L["Scout Alert"], "danger")
-    scoutBtn:SetPoint("BOTTOMLEFT", 6, 5)
+    local scoutBtn = Theme:CreateButton(actionPanel, btnW + 10, 20, L["Scout Alert"], "danger")
+    scoutBtn:SetPoint("BOTTOMLEFT", 5, 4)
     scoutBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if not e then return end
@@ -517,8 +516,8 @@ function SpotterHUD:BuildFrame()
     scoutBtn:Hide()
     actionPanel.scoutBtn = scoutBtn
 
-    local tellBtn = Theme:CreateButton(actionPanel, btnW, 22, "/w", "default")
-    tellBtn:SetPoint("LEFT", whisperBtn, "RIGHT", 4, 0)
+    local tellBtn = Theme:CreateButton(actionPanel, 34, 20, "/w", "default")
+    tellBtn:SetPoint("LEFT", whisperBtn, "RIGHT", 3, 0)
     tellBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if e and Compat.Whisper then
@@ -529,8 +528,8 @@ function SpotterHUD:BuildFrame()
     end)
     actionPanel.tellBtn = tellBtn
 
-    local inviteBtn = Theme:CreateButton(actionPanel, btnW, 22, L["Invite"], "default")
-    inviteBtn:SetPoint("LEFT", tellBtn, "RIGHT", 4, 0)
+    local inviteBtn = Theme:CreateButton(actionPanel, btnW, 20, L["Invite"], "default")
+    inviteBtn:SetPoint("LEFT", tellBtn, "RIGHT", 3, 0)
     inviteBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if not e then return end
@@ -546,8 +545,8 @@ function SpotterHUD:BuildFrame()
     end)
     actionPanel.inviteBtn = inviteBtn
 
-    local watchBtn = Theme:CreateButton(actionPanel, btnW, 22, "+ " .. L["Watchlist"], "default")
-    watchBtn:SetPoint("LEFT", inviteBtn, "RIGHT", 4, 0)
+    local watchBtn = Theme:CreateButton(actionPanel, btnW + 24, 20, "+ " .. L["Watchlist"], "default")
+    watchBtn:SetPoint("LEFT", inviteBtn, "RIGHT", 3, 0)
     watchBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if e and ns.Watchlist and ns.Watchlist.Add then
@@ -592,52 +591,49 @@ function SpotterHUD:BuildCombatArrowFrame()
     cf:SetFrameLevel(45)
 
     local stanceBar = cf:CreateTexture(nil, "OVERLAY")
-    stanceBar:SetWidth(4)
+    stanceBar:SetWidth(3)
     stanceBar:SetPoint("TOPLEFT", cf, "TOPLEFT", 2, -2)
     stanceBar:SetPoint("BOTTOMLEFT", cf, "BOTTOMLEFT", 2, 2)
     stanceBar:SetColorTexture(0.98, 0.80, 0.24, 1)
     cf.stanceBar = stanceBar
 
-    local arrowBox = CreateFrame("Frame", nil, cf, "BackdropTemplate")
-    arrowBox:SetSize(50, 50)
-    arrowBox:SetPoint("LEFT", 10, 0)
+    local arrowBox = CreateFrame("Frame", nil, cf)
+    arrowBox:SetSize(36, 36)
+    arrowBox:SetPoint("LEFT", 8, 0)
     if arrowBox.SetClipsChildren then
         arrowBox:SetClipsChildren(false)
     end
     local arrowAura = arrowBox:CreateTexture(nil, "ARTWORK")
-    arrowAura:SetSize(44, 44)
+    arrowAura:SetSize(34, 34)
     arrowAura:SetPoint("CENTER")
     arrowAura:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-    arrowAura:SetVertexColor(0.05, 0.25, 0.36, 0.45)
+    arrowAura:SetVertexColor(0.05, 0.25, 0.36, 0.40)
     arrowBox.aura = arrowAura
 
     local arrowTex = arrowBox:CreateTexture(nil, "OVERLAY")
-    arrowTex:SetSize(44, 44)
+    arrowTex:SetSize(32, 32)
     arrowTex:SetPoint("CENTER")
     arrowTex:SetTexture(ARROW_TEX)
     arrowBox.arrowTex = arrowTex
     cf.arrowBox = arrowBox
     cf.arrowTex = arrowTex
 
-    local nameFs = cf:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    nameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 8, -1)
-    nameFs:SetPoint("TOPRIGHT", cf, "TOPRIGHT", -10, -5)
+    local nameFs = cf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    nameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 6, -4)
+    nameFs:SetPoint("TOPRIGHT", cf, "TOPRIGHT", -8, -4)
     nameFs:SetJustifyH("LEFT")
     nameFs:SetWordWrap(false)
     cf.nameFs = nameFs
 
-    local distFs = cf:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    distFs:SetPoint("LEFT", arrowBox, "RIGHT", 8, 0)
-    distFs:SetPoint("RIGHT", cf, "RIGHT", -10, 0)
+    local distFs = cf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    distFs:SetPoint("BOTTOMLEFT", arrowBox, "BOTTOMRIGHT", 6, 4)
+    distFs:SetPoint("BOTTOMRIGHT", cf, "BOTTOMRIGHT", -8, 4)
     distFs:SetJustifyH("LEFT")
     distFs:SetWordWrap(false)
     cf.distFs = distFs
 
     local subFs = cf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    subFs:SetPoint("BOTTOMLEFT", arrowBox, "BOTTOMRIGHT", 8, 1)
-    subFs:SetPoint("BOTTOMRIGHT", cf, "BOTTOMRIGHT", -10, 5)
-    subFs:SetJustifyH("LEFT")
-    subFs:SetWordWrap(false)
+    subFs:Hide()
     cf.subFs = subFs
 
     cf:SetScript("OnUpdate", function(_, elapsed)
@@ -674,6 +670,8 @@ function SpotterHUD:ShowCombatArrowFallback()
         cf.stanceBar:SetColorTexture(rgb[1], rgb[2], rgb[3], 1)
     end
     local stanceTag = entry.stance == "ENEMY" and L["ENEMY"]
+        or (entry.stance == "WATCHLIST" and L["WATCHLIST"])
+        or (entry.stance == "FRIEND" and L["FRIEND"])
         or (entry.stance == "ALLY" and L["ALLY"] or L["CLAN"])
     local colHex = ns.Spotter:GetStanceColor(entry.stance).hex
     local classHex = Compat.ClassHex and Compat.ClassHex(entry.classFile) or "|cffffffff"
@@ -687,7 +685,6 @@ function SpotterHUD:UpdateAppearance()
     local p = Theme:GetPalette()
     if self.combatArrowFrame then
         Theme:ApplyBackdrop(self.combatArrowFrame, "window", p)
-        Theme:ApplyBackdrop(self.combatArrowFrame.arrowBox, "inset", p)
         self.combatArrowFrame.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
     end
 
@@ -696,8 +693,6 @@ function SpotterHUD:UpdateAppearance()
 
     Theme:ApplyBackdrop(f, "window", p)
     if f.compassBar then
-        Theme:ApplyBackdrop(f.compassBar, "surface", p)
-        Theme:ApplyBackdrop(f.compassBar.arrowBox, "inset", p)
         f.compassBar.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
     end
     if f.actionPanel then
@@ -729,8 +724,8 @@ local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
     RotateArrowTexture(bar.arrowTex, smoothAngle)
 
     local rgb = STANCE_RGB[entry.stance] or STANCE_RGB.SAME
-    local zoneShort = (entry.subZone and entry.subZone ~= "") and entry.subZone or (entry.zone or "")
-    local locPart = (zoneShort ~= "") and ("  |cffa5d6ff· " .. zoneShort .. "|r") or ""
+    local zoneShort = (entry.subZone and entry.subZone ~= "") and entry.subZone or ""
+    local locPart = (zoneShort ~= "") and (" |cff8b949e· " .. zoneShort .. "|r") or ""
 
     if entry.dead then
         if bar.arrowBox and bar.arrowBox.aura then
@@ -740,11 +735,11 @@ local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
             bar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.65)
         end
         local bearing = kin.hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
-        bar.distFs:SetText(string.format("|cff888888%s|r  |cff8b949e· %s|r%s", L["Dead"], bearing, locPart))
+        bar.distFs:SetText(string.format("|cff888888%s|r |cff8b949e· %s|r%s", L["Dead"], bearing, locPart))
     else
         local isAhead = kin.hasAngle and math.abs(kin.angle or 0) <= 0.42
         if bar.arrowBox and bar.arrowBox.aura then
-            bar.arrowBox.aura:SetVertexColor(rgb[1], rgb[2], rgb[3], kin.hasAngle and 0.45 or 0.22)
+            bar.arrowBox.aura:SetVertexColor(rgb[1], rgb[2], rgb[3], kin.hasAngle and 0.42 or 0.20)
         end
         if bar.arrowTex and bar.arrowTex.SetVertexColor then
             if not kin.hasAngle then
@@ -756,7 +751,7 @@ local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
             end
         end
         local bearing = kin.hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
-        bar.distFs:SetText(string.format("|cff58d8ff%s|r  |cffffd100· %s|r%s", kin.distText or L["> 28m"], bearing, locPart))
+        bar.distFs:SetText(string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", kin.distText or L["> 28m"], bearing, locPart))
     end
 end
 
@@ -834,11 +829,8 @@ function SpotterHUD:UpdateTargetVisuals()
     local p = Theme:GetPalette()
     if isTargeted then
         Theme:ApplyBackdrop(f.compassBar, "primary", p)
-        f.compassBar.subFs:SetText("|cff3fb950[" .. L["Current Target"] .. "]|r  |cff8b949e· " .. L["Left-click: Target player  |  Right-click: Actions"] .. "|r")
-    else
-        Theme:ApplyBackdrop(f.compassBar, "surface", p)
-        local guildInfo = (entry.guild and entry.guild ~= "") and ("<" .. entry.guild .. "> · ") or ""
-        f.compassBar.subFs:SetText(guildInfo .. "|cff8fb8ff" .. L["Click to Target"] .. "|r")
+    elseif f.compassBar.SetBackdrop then
+        f.compassBar:SetBackdrop(nil)
     end
     self:UpdateCompassVisuals(true, 0.04)
 end
@@ -933,10 +925,10 @@ function SpotterHUD:Refresh()
     if totalCount > 1 and f.cycleBtn then
         Theme:SetButtonText(f.cycleBtn, string.format("%d/%d", activeIdx, totalCount))
         f.cycleBtn:Show()
-        f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -62, -1)
+        f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -54, -3)
     else
         if f.cycleBtn then f.cycleBtn:Hide() end
-        f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -24, -1)
+        f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -22, -3)
     end
 
     if not compassEntry then
@@ -945,12 +937,14 @@ function SpotterHUD:Refresh()
             f.stanceBar:SetColorTexture(p.accent[1], p.accent[2], p.accent[3], 1)
         end
         ApplySecureMacroAttributes(f.compassBar, nil)
+        if f.compassBar.SetBackdrop then
+            f.compassBar:SetBackdrop(nil)
+        end
         f.compassBar.entry = nil
         RotateArrowTexture(f.compassBar.arrowTex, 0)
         f.compassBar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.6)
         f.compassBar.nameFs:SetText(L["Target Radar"])
         f.compassBar.distFs:SetText("|cff8b949e" .. L["No targets currently detected."] .. "|r")
-        f.compassBar.subFs:SetText(L["Scanning players on screen, target & mouseover..."])
         f.actionPanel:Hide()
         f:SetHeight(PILL_H)
         return
@@ -966,20 +960,19 @@ function SpotterHUD:Refresh()
     ApplySecureMacroAttributes(f.compassBar, compassEntry, kin and kin.unit)
 
     local stanceTag = compassEntry.stance == "ENEMY" and L["ENEMY"]
+        or (compassEntry.stance == "WATCHLIST" and L["WATCHLIST"])
+        or (compassEntry.stance == "FRIEND" and L["FRIEND"])
         or (compassEntry.stance == "ALLY" and L["ALLY"] or L["CLAN"])
     local colHex = ns.Spotter:GetStanceColor(compassEntry.stance).hex
     local classHex = Compat.ClassHex and Compat.ClassHex(compassEntry.classFile) or "|cffffffff"
-    local lvlPart = (compassEntry.level and compassEntry.level > 0) and (" |cff8b949eLv." .. compassEntry.level .. "|r") or ""
+    local lvlPart = (compassEntry.level and compassEntry.level > 0) and (" |cff8b949e" .. compassEntry.level .. "|r") or ""
     f.compassBar.nameFs:SetText(string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, compassEntry.displayName or "?", lvlPart))
 
     local isActuallyTargeted = IsEntryCurrentlyTargeted(compassEntry, currentTargetGuid, parsedTarget)
     if isActuallyTargeted then
         Theme:ApplyBackdrop(f.compassBar, "primary", p)
-        f.compassBar.subFs:SetText("|cff3fb950[" .. L["Current Target"] .. "]|r  |cff8b949e· " .. L["Click to Target"] .. "|r")
-    else
-        Theme:ApplyBackdrop(f.compassBar, "surface", p)
-        local guildPrefix = (compassEntry.guild and compassEntry.guild ~= "") and ("<" .. compassEntry.guild .. "> · ") or ""
-        f.compassBar.subFs:SetText(guildPrefix .. "|cff8fb8ff" .. L["Click to Target"] .. "|r")
+    elseif f.compassBar.SetBackdrop then
+        f.compassBar:SetBackdrop(nil)
     end
 
     self:UpdateCompassVisuals(true, 0.04)
@@ -995,30 +988,47 @@ function SpotterHUD:Refresh()
             if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
             if f.actionPanel.tellBtn then f.actionPanel.tellBtn:Hide() end
             if f.actionPanel.scoutBtn then
+                f.actionPanel.scoutBtn:SetWidth(76)
+                f.actionPanel.scoutBtn:ClearAllPoints()
+                f.actionPanel.scoutBtn:SetPoint("BOTTOMLEFT", 5, 4)
                 f.actionPanel.scoutBtn:Show()
                 Theme:SetButtonText(f.actionPanel.scoutBtn, L["Scout Alert"])
             end
             Theme:SetButtonText(f.actionPanel.inviteBtn, L["Diplomacy"])
+            f.actionPanel.inviteBtn:SetWidth(72)
             f.actionPanel.inviteBtn:ClearAllPoints()
-            f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.scoutBtn, "RIGHT", 4, 0)
+            f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.scoutBtn, "RIGHT", 3, 0)
+            if f.actionPanel.watchBtn then
+                f.actionPanel.watchBtn:SetWidth(72)
+                f.actionPanel.watchBtn:ClearAllPoints()
+                f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
+            end
         else
             if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
             if f.actionPanel.whisperBtn then
+                f.actionPanel.whisperBtn:SetWidth(60)
                 f.actionPanel.whisperBtn:Show()
                 f.actionPanel.whisperBtn:ClearAllPoints()
-                f.actionPanel.whisperBtn:SetPoint("BOTTOMLEFT", 6, 5)
+                f.actionPanel.whisperBtn:SetPoint("BOTTOMLEFT", 5, 4)
             end
             if f.actionPanel.tellBtn then
+                f.actionPanel.tellBtn:SetWidth(28)
                 f.actionPanel.tellBtn:Show()
                 f.actionPanel.tellBtn:ClearAllPoints()
-                f.actionPanel.tellBtn:SetPoint("LEFT", f.actionPanel.whisperBtn, "RIGHT", 4, 0)
+                f.actionPanel.tellBtn:SetPoint("LEFT", f.actionPanel.whisperBtn, "RIGHT", 3, 0)
             end
             Theme:SetButtonText(f.actionPanel.inviteBtn, L["Invite"])
+            f.actionPanel.inviteBtn:SetWidth(54)
             f.actionPanel.inviteBtn:ClearAllPoints()
-            f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.tellBtn, "RIGHT", 4, 0)
+            f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.tellBtn, "RIGHT", 3, 0)
+            if f.actionPanel.watchBtn then
+                f.actionPanel.watchBtn:SetWidth(75)
+                f.actionPanel.watchBtn:ClearAllPoints()
+                f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
+            end
         end
         f.actionPanel:Show()
-        f:SetHeight(PILL_H + 3 + ACTION_H + 4)
+        f:SetHeight(PILL_H + 2 + ACTION_H + 3)
     else
         f.actionPanel:Hide()
         f:SetHeight(PILL_H)

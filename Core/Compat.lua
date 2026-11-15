@@ -123,6 +123,12 @@ function Compat.CharacterKey()
     return name .. "@" .. Compat.RealmPool(Compat.Realm())
 end
 
+-- Trim leading and trailing whitespace cleanly (always returns a string).
+function Compat.Trim(text)
+    if type(text) ~= "string" then return "" end
+    return (text:gsub("^%s*(.-)%s*$", "%1"))
+end
+
 -- Sanitize user-entered text: strip UI escape sequences, newlines, trim whitespace.
 function Compat.CleanInput(text)
     if type(text) ~= "string" then return nil end
