@@ -3512,7 +3512,7 @@ end
 
 function LFGFrameTab:RefreshWorldMapBuffs()
     local mapFrame = _G.WorldMapFrame
-    if not mapFrame then return end
+    if not (mapFrame and mapFrame.IsShown and mapFrame:IsShown()) then return end
 
     local defById, activeById, activeList = GetWorldBuffLookup()
     local playerFaction = GetPlayerFactionSafe()
@@ -3974,10 +3974,8 @@ function LFGFrameTab:Init()
     ns:On("WORLD_BUFFS_UPDATED", function()
         LFGFrameTab:RefreshWorldMapBuffs()
     end)
-    ns.RegisterEvent(self, "UNIT_AURA", function(_, _, unit)
-        if unit == "player" then
-            LFGFrameTab:SyncAllEmbeddedTabStates()
-        end
+    ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        LFGFrameTab:SyncAllEmbeddedTabStates()
     end)
 
     local function TryAttachAll()

@@ -227,6 +227,7 @@ local function ApplySecureMacroAttributes(btn, entry, liveUnit)
         btn:SetAttribute("macrotext1", nil)
         btn:SetAttribute("*macrotext1", nil)
         btn._lastMacroText = nil
+        btn._lastMacroSig = nil
         return
     end
 
@@ -412,11 +413,15 @@ function SpotterHUD:BuildFrame()
             if locTxt ~= "" then
                 l1 = (l1 ~= "") and (l1 .. "\n" .. L["Location"] .. ": " .. locTxt) or (L["Location"] .. ": " .. locTxt)
             end
+            local tipFooter = L["Left-click: Target player  |  Right-click: Actions"]
+            if selfBtn.noSignalDot and selfBtn.noSignalDot:IsShown() then
+                tipFooter = tipFooter .. "\n" .. L["Arrow requires Nameplates (Shift+V / V) or Party/Raid."]
+            end
             ShowHUDTooltip(
                 selfBtn,
                 e.displayName or "?",
                 l1,
-                L["Left-click: Target player  |  Right-click: Actions"]
+                tipFooter
             )
         end
     end)
@@ -578,7 +583,7 @@ function SpotterHUD:BuildFrame()
 
     f:SetScript("OnUpdate", function(_, elapsed)
         SpotterHUD._kinematicsElapsed = (SpotterHUD._kinematicsElapsed or 0) + elapsed
-        if SpotterHUD._kinematicsElapsed >= 0.04 then
+        if SpotterHUD._kinematicsElapsed >= 0.05 then
             local dt = SpotterHUD._kinematicsElapsed
             SpotterHUD._kinematicsElapsed = 0
             SpotterHUD:UpdateCompassVisuals(false, dt)
@@ -657,7 +662,7 @@ function SpotterHUD:BuildCombatArrowFrame()
 
     cf:SetScript("OnUpdate", function(_, elapsed)
         SpotterHUD._combatKinElapsed = (SpotterHUD._combatKinElapsed or 0) + elapsed
-        if SpotterHUD._combatKinElapsed >= 0.04 then
+        if SpotterHUD._combatKinElapsed >= 0.05 then
             local dt = SpotterHUD._combatKinElapsed
             SpotterHUD._combatKinElapsed = 0
             SpotterHUD:UpdateCompassVisuals(false, dt)
@@ -671,6 +676,10 @@ function SpotterHUD:BuildCombatArrowFrame()
 end
 
 function SpotterHUD:ShowCombatArrowFallback()
+    if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+        if self.combatArrowFrame then self.combatArrowFrame:Hide() end
+        return
+    end
     local cf = self.combatArrowFrame or self:BuildCombatArrowFrame()
     if not cf then return end
     local total = GetSpotterTotalCount()
@@ -759,6 +768,15 @@ function SpotterHUD:UpdateAppearance()
     self:Refresh()
 end
 
+local function ResetCompassBarDirtyState(bar)
+    if not bar then return end
+    bar._visHasAngle = nil
+    bar._visAngle = nil
+    bar._visDotKey = nil
+    bar._visTintKey = nil
+    bar._visDistOut = nil
+end
+
 local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
     if not bar then return end
 
@@ -768,44 +786,70 @@ local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
     local locPart = (zoneShort ~= "") and (" |cff8b949e· " .. zoneShort .. "|r") or ""
 
     if hasAngle then
-        if bar.noSignalDot then bar.noSignalDot:Hide() end
-        if bar.arrowTex then bar.arrowTex:Show() end
-        RotateArrowTexture(bar.arrowTex, smoothAngle)
+        if bar._visHasAngle ~= true then
+            bar._visHasAngle = true
+            bar._visDotKey = nil
+            if bar.noSignalDot then bar.noSignalDot:Hide() end
+            if bar.arrowTex then bar.arrowTex:Show() end
+        end
+        local angleVal = smoothAngle or 0
+        if not bar._visAngle or math.abs(bar._visAngle - angleVal) > 0.002 then
+            bar._visAngle = angleVal
+            RotateArrowTexture(bar.arrowTex, angleVal)
+        end
     else
-        if bar.arrowTex then bar.arrowTex:Hide() end
-        if bar.noSignalDot then
+        if bar._visHasAngle ~= false then
+            bar._visHasAngle = false
+            bar._visAngle = nil
+            if bar.arrowTex then bar.arrowTex:Hide() end
+            if bar.noSignalDot then bar.noSignalDot:Show() end
+        end
+        local dotKey = entry.dead and "DEAD" or (entry.stance or "SAME")
+        if bar._visDotKey ~= dotKey and bar.noSignalDot then
+            bar._visDotKey = dotKey
             if entry.dead then
                 bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.65)
             else
                 bar.noSignalDot:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.95)
             end
-            bar.noSignalDot:Show()
         end
     end
 
-    if entry.dead then
-        if bar.arrowBox and bar.arrowBox.aura then
-            bar.arrowBox.aura:SetVertexColor(0.4, 0.4, 0.4, 0.20)
-        end
-        if bar.arrowTex and bar.arrowTex.SetVertexColor then
-            bar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.65)
-        end
-        local bearing = hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
-        bar.distFs:SetText(string.format("|cff888888%s|r |cff8b949e· %s|r%s", L["Dead"], bearing, locPart))
-    else
-        local isAhead = hasAngle and math.abs(kin.angle or 0) <= 0.42
-        if bar.arrowBox and bar.arrowBox.aura then
-            bar.arrowBox.aura:SetVertexColor(rgb[1], rgb[2], rgb[3], hasAngle and 0.42 or 0.24)
-        end
-        if bar.arrowTex and bar.arrowTex.SetVertexColor then
-            if isAhead then
-                bar.arrowTex:SetVertexColor(0.35, 1.0, 0.58, 1)
-            else
-                bar.arrowTex:SetVertexColor(1, 1, 1, 1)
+    local isAhead = (not entry.dead) and hasAngle and math.abs(kin.angle or 0) <= 0.42
+    local tintKey = (entry.dead and "D" or (hasAngle and (isAhead and "A" or "N") or "O")) .. ":" .. (entry.stance or "SAME")
+    if bar._visTintKey ~= tintKey then
+        bar._visTintKey = tintKey
+        if entry.dead then
+            if bar.arrowBox and bar.arrowBox.aura then
+                bar.arrowBox.aura:SetVertexColor(0.4, 0.4, 0.4, 0.20)
+            end
+            if bar.arrowTex and bar.arrowTex.SetVertexColor then
+                bar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.65)
+            end
+        else
+            if bar.arrowBox and bar.arrowBox.aura then
+                bar.arrowBox.aura:SetVertexColor(rgb[1], rgb[2], rgb[3], hasAngle and 0.42 or 0.24)
+            end
+            if bar.arrowTex and bar.arrowTex.SetVertexColor then
+                if isAhead then
+                    bar.arrowTex:SetVertexColor(0.35, 1.0, 0.58, 1)
+                else
+                    bar.arrowTex:SetVertexColor(1, 1, 1, 1)
+                end
             end
         end
-        local bearing = hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
-        bar.distFs:SetText(string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", kin.distText or L["Nearby"], bearing, locPart))
+    end
+
+    local bearing = hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
+    local distOut
+    if entry.dead then
+        distOut = string.format("|cff888888%s|r |cff8b949e· %s|r%s", L["Dead"], bearing, locPart)
+    else
+        distOut = string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", kin.distText or L["Nearby"], bearing, locPart)
+    end
+    if bar._visDistOut ~= distOut then
+        bar._visDistOut = distOut
+        bar.distFs:SetText(distOut)
     end
 end
 
@@ -822,11 +866,15 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
     local kin = ns.Spotter:GetTargetKinematics(entry)
     if not kin then return end
 
-    -- Keep the secure target macro synced with any newly resolved live unitToken (e.g. nameplate1) outside combat
+    -- Keep the secure target macro synced only when target identity or resolved unit token changes
     if mainCompassActive and not (InCombatLockdown and InCombatLockdown()) then
-        local expectedMacro = BuildTargetMacroText(entry, kin.unit)
-        if expectedMacro ~= f.compassBar._lastMacroText then
-            ApplySecureMacroAttributes(f.compassBar, entry, kin.unit)
+        local macroSig = tostring(entry.key or "") .. "|" .. tostring(kin.unit or "") .. "|" .. tostring(entry.displayName or "") .. "|" .. tostring(entry.unitName or "")
+        if snap or macroSig ~= f.compassBar._lastMacroSig then
+            f.compassBar._lastMacroSig = macroSig
+            local expectedMacro = BuildTargetMacroText(entry, kin.unit)
+            if expectedMacro ~= f.compassBar._lastMacroText then
+                ApplySecureMacroAttributes(f.compassBar, entry, kin.unit)
+            end
         end
     end
 
@@ -836,12 +884,17 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
             self._smoothAngle = targetAngle
             self._hasSmoothAngle = true
         else
-            local step = math.min(1, (dt or 0.04) * 14)
+            local step = math.min(1, (dt or 0.05) * 14)
             self._smoothAngle = self._smoothAngle + ShortestAngleDelta(self._smoothAngle, targetAngle) * step
         end
     else
         self._hasSmoothAngle = false
         self._smoothAngle = 0
+    end
+
+    if snap then
+        ResetCompassBarDirtyState(f and f.compassBar)
+        ResetCompassBarDirtyState(cf)
     end
 
     if mainCompassActive then
@@ -913,6 +966,9 @@ function SpotterHUD:UpdateTargetVisuals()
 end
 
 function SpotterHUD:Refresh()
+    if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+        return
+    end
     if InCombatLockdown and InCombatLockdown() then
         self.pendingRefresh = true
         if not (self.frame and self.frame:IsShown()) then
@@ -1210,6 +1266,9 @@ function SpotterHUD:CreatePromptDialog()
 end
 
 function SpotterHUD:ShowFirstTimePrompt()
+    if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+        return
+    end
     local dlg = self.promptDialog or self:CreatePromptDialog()
     if dlg then
         dlg:Show()
@@ -1217,6 +1276,9 @@ function SpotterHUD:ShowFirstTimePrompt()
 end
 
 function SpotterHUD:Show(forceUser)
+    if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+        return
+    end
     local tCount = GetSpotterTotalCount()
     if forceUser then
         self.userClosed = false
@@ -1276,6 +1338,10 @@ function SpotterHUD:Hide()
 end
 
 function SpotterHUD:Toggle()
+    if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+        self:Hide()
+        return
+    end
     if (self.frame and self.frame:IsShown()) or (self.combatArrowFrame and self.combatArrowFrame:IsShown()) then
         local totalNow = GetSpotterTotalCount()
         if totalNow > 0 then
@@ -1289,6 +1355,9 @@ function SpotterHUD:Toggle()
 end
 
 function SpotterHUD:OnAlert(alert)
+    if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+        return
+    end
     if not alert then return end
     self.focusedKey = alert.key
 
@@ -1323,61 +1392,12 @@ function SpotterHUD:TrackEntry(info, forcedStance)
 end
 
 function SpotterHUD:Init()
-    self:BuildFrame()
-    self:BuildCombatArrowFrame()
-    self:CreatePromptDialog()
-
-    Theme:RegisterListener(function()
-        SpotterHUD:UpdateAppearance()
-    end)
-
-    ns:On("SPOTTER_UPDATED", function()
-        SpotterHUD:Refresh()
-    end)
-
-    ns:On("SPOTTER_ALERT", function(alert)
-        SpotterHUD:OnAlert(alert)
-    end)
-
-    ns:On("SETTINGS_UPDATED", function()
-        local s = ns.db and ns.db.settings
-        if s and s.spotterEnabled == false then
-            SpotterHUD:Hide()
-        else
-            SpotterHUD:Refresh()
-        end
-    end)
-
-    ns.RegisterEvent(self, "PLAYER_TARGET_CHANGED", function()
-        if SpotterHUD.frame and SpotterHUD.frame:IsShown() then
-            if InCombatLockdown and InCombatLockdown() then
-                SpotterHUD:UpdateTargetVisuals()
-            else
-                SpotterHUD:Refresh()
-            end
-        end
-    end)
-
-    ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
-        if not SpotterHUD.frame then
-            SpotterHUD:BuildFrame()
-        end
-        if SpotterHUD.combatArrowFrame then
-            SpotterHUD.combatArrowFrame:Hide()
-        end
-        if SpotterHUD.pendingAction == "show" then
-            SpotterHUD.pendingAction = nil
-            SpotterHUD.pendingRefresh = false
-            SpotterHUD:Show(false)
-        elseif SpotterHUD.pendingAction == "hide" then
-            SpotterHUD.pendingAction = nil
-            SpotterHUD.pendingRefresh = false
-            SpotterHUD:Hide()
-        elseif SpotterHUD.pendingRefresh then
-            SpotterHUD.pendingRefresh = false
-            SpotterHUD:Refresh()
-        end
-    end)
+    -- Target Radar HUD runtime loops & event hooks deactivated cleanly to prevent CPU spikes.
+    self.frame = nil
+    self.combatArrowFrame = nil
+    self.promptDialog = nil
+    self.pendingRefresh = false
+    self.pendingAction = nil
 end
 
 ns.SpotterHUD = SpotterHUD

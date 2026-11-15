@@ -5327,6 +5327,10 @@ function UI:IsEmbeddedFor(hostFrame, tabId)
     return true
 end
 
+function UI:IsAltsVisible()
+    return frame ~= nil and frame:IsShown() and activeTab == "alts"
+end
+
 local hiddenCharSubframes = {}
 local hiddenCommunitiesChildren = {}
 local hiddenWorldMapSubframes = {}

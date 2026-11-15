@@ -170,11 +170,36 @@ function Compat.CompareSemVer(verA, verB)
     return 0
 end
 
+local parseCharCache = {}
+local parseCharCacheCount = 0
+local parseForeverCache = {}
+local parseForeverCacheCount = 0
+
 -- Parse a character identifier into firstName, optional surname, displayName, and lookupKey.
 -- Handles Forever formats: "Name", "Name-Surname", "Name Surname", or "Name-CAMWOW...".
 function Compat.ParseCharacterName(raw)
+    if type(raw) ~= "string" or raw == "" then return nil end
+    local cached = parseCharCache[raw]
+    if cached ~= nil then
+        if cached == false then return nil end
+        return {
+            firstName = cached.firstName,
+            surname = cached.surname,
+            displayName = cached.displayName,
+            lookupKey = cached.lookupKey,
+        }
+    end
+
     local cleaned = Compat.CleanInput(raw)
-    if not cleaned then return nil end
+    if not cleaned then
+        if parseCharCacheCount >= 2000 then
+            wipe(parseCharCache)
+            parseCharCacheCount = 0
+        end
+        parseCharCache[raw] = false
+        parseCharCacheCount = parseCharCacheCount + 1
+        return nil
+    end
 
     -- Strip trailing Forever shard suffix if present (e.g. "Arthas-CAMWOWUS1Realm2PvP" or "Arthas Menethil-CAMWOW...").
     local head, tail = cleaned:match("^(.-)%-([^%-]+)$")
@@ -182,59 +207,106 @@ function Compat.ParseCharacterName(raw)
         cleaned = head
     end
 
+    local result
     -- Forever characters can have FirstName + Surname separated by "-" or space.
     local first, second = cleaned:match("^([^%s%-]+)[%s%-]+([^%s%-]+)$")
     if first and second then
         if Compat.IsForeverShardLabel(second) then
-            return {
+            result = {
                 firstName = first,
                 surname = nil,
                 displayName = first,
                 lookupKey = first:lower(),
             }
+        else
+            result = {
+                firstName = first,
+                surname = second,
+                displayName = first .. " " .. second,
+                lookupKey = (first .. "-" .. second):lower(),
+            }
         end
-        return {
-            firstName = first,
-            surname = second,
-            displayName = first .. " " .. second,
-            lookupKey = (first .. "-" .. second):lower(),
+    else
+        local single = cleaned:match("^([^%s%-]+)$") or cleaned
+        result = {
+            firstName = single,
+            surname = nil,
+            displayName = single,
+            lookupKey = single:lower(),
         }
     end
 
-    local single = cleaned:match("^([^%s%-]+)$") or cleaned
+    if parseCharCacheCount >= 2000 then
+        wipe(parseCharCache)
+        parseCharCacheCount = 0
+    end
+    parseCharCache[raw] = result
+    parseCharCacheCount = parseCharCacheCount + 1
     return {
-        firstName = single,
-        surname = nil,
-        displayName = single,
-        lookupKey = single:lower(),
+        firstName = result.firstName,
+        surname = result.surname,
+        displayName = result.displayName,
+        lookupKey = result.lookupKey,
     }
 end
 
 -- Parse a WoW Forever character name preserving space-separated "FirstName Surname".
 -- Strips any trailing Forever backend shard suffix (e.g. "-CAMWOWUS1Realm2PvP").
 function Compat.ParseForeverFullName(raw)
+    if type(raw) ~= "string" or raw == "" then return nil end
+    local cached = parseForeverCache[raw]
+    if cached ~= nil then
+        if cached == false then return nil end
+        return {
+            firstName = cached.firstName,
+            surname = cached.surname,
+            fullName = cached.fullName,
+        }
+    end
+
     local cleaned = Compat.CleanInput(raw)
-    if not cleaned then return nil end
+    if not cleaned then
+        if parseForeverCacheCount >= 2000 then
+            wipe(parseForeverCache)
+            parseForeverCacheCount = 0
+        end
+        parseForeverCache[raw] = false
+        parseForeverCacheCount = parseForeverCacheCount + 1
+        return nil
+    end
 
     local head, tail = cleaned:match("^(.-)%-([^%-]+)$")
     if head and tail and Compat.IsForeverShardLabel(tail) then
         cleaned = head
     end
 
+    local result
     local first, second = cleaned:match("^([^%s%-]+)[%s%-]+([^%s%-]+)$")
     if first and second and not Compat.IsForeverShardLabel(second) then
-        return {
+        result = {
             firstName = first,
             surname = second,
             fullName = first .. " " .. second,
         }
+    else
+        local single = cleaned:match("^([^%s%-]+)$") or cleaned
+        result = {
+            firstName = single,
+            surname = nil,
+            fullName = single,
+        }
     end
 
-    local single = cleaned:match("^([^%s%-]+)$") or cleaned
+    if parseForeverCacheCount >= 2000 then
+        wipe(parseForeverCache)
+        parseForeverCacheCount = 0
+    end
+    parseForeverCache[raw] = result
+    parseForeverCacheCount = parseForeverCacheCount + 1
     return {
-        firstName = single,
-        surname = nil,
-        fullName = single,
+        firstName = result.firstName,
+        surname = result.surname,
+        fullName = result.fullName,
     }
 end
 
@@ -323,6 +395,10 @@ local guildMemberByGuid = {}
 local guildMemberByFirst = {}
 local guildMemberByKey = {}
 local unitGuildByGuid = {}
+local unitGuildMissAt = {}
+local tooltipTitleMissAt = {}
+local foreverLookupMissAt = {}
+local lastRosterSyncAt = 0
 local scanTooltip
 
 local TITLE_PARTICLES = {
@@ -369,38 +445,28 @@ local function ExtractForeverNameFromLine(lineText, firstName)
     return nil
 end
 
-local function ReadUnitTooltipTitle(unit, guid)
-    if C_TooltipInfo then
-        if unit and C_TooltipInfo.GetUnit then
-            local ok, data = pcall(C_TooltipInfo.GetUnit, unit)
-            if ok and type(data) == "table" and type(data.lines) == "table" and data.lines[1] then
-                local txt = Safe.String(data.lines[1].leftText)
-                if txt then return txt end
-            end
-        end
-        if not unit and guid and C_TooltipInfo.GetHyperlink and not (InCombatLockdown and InCombatLockdown()) then
-            local ok, data = pcall(C_TooltipInfo.GetHyperlink, "unit:" .. guid)
-            if ok and type(data) == "table" and type(data.lines) == "table" and data.lines[1] then
-                local txt = Safe.String(data.lines[1].leftText)
-                if txt then return txt end
-            end
-        end
+local function ReadShownGameTooltipUnit(unit)
+    local gt = _G.GameTooltip
+    if not (unit and gt and gt.IsShown and gt:IsShown() and gt.GetUnit) then
+        return false
     end
+    local okU, _, gtUnit = pcall(gt.GetUnit, gt)
+    gtUnit = okU and Safe.String(gtUnit) or nil
+    if not gtUnit then
+        return false
+    end
+    return UnitIsUnit and Safe.Bool(Safe.Call(UnitIsUnit, gtUnit, unit)) == true or false
+end
 
-    if unit and not (InCombatLockdown and InCombatLockdown()) and CreateFrame and UIParent then
-        if not scanTooltip then
-            scanTooltip = CreateFrame("GameTooltip", "SocialCentralUnitScanTooltip", UIParent, "GameTooltipTemplate")
-        end
-        if scanTooltip and scanTooltip.SetUnit then
-            scanTooltip:SetOwner(UIParent, "ANCHOR_NONE")
-            scanTooltip:ClearLines()
-            local ok = pcall(scanTooltip.SetUnit, scanTooltip, unit)
-            if ok and _G["SocialCentralUnitScanTooltipTextLeft1"] then
-                local txt = Safe.String(_G["SocialCentralUnitScanTooltipTextLeft1"]:GetText())
-                scanTooltip:ClearLines()
-                if txt then return txt end
-            end
-            scanTooltip:ClearLines()
+local function ReadUnitTooltipTitle(unit, guid)
+    if not unit then
+        return nil
+    end
+    if ReadShownGameTooltipUnit(unit) and _G["GameTooltipTextLeft1"] then
+        local txt = Safe.String(_G["GameTooltipTextLeft1"]:GetText())
+        if txt then
+            if guid then tooltipTitleMissAt[guid] = nil end
+            return txt
         end
     end
     return nil
@@ -423,19 +489,24 @@ local function IsLikelyTooltipMetaLine(lineText)
     return false
 end
 
-local function ExtractGuildFromTooltipLines(line2, line3)
-    for _, ln in ipairs({ line2, line3 }) do
-        local s = Safe.String(ln)
-        if s and s ~= "" then
-            local bracketed = s:match("^%s*<([^<>]+)>%s*$")
-            if bracketed then
-                local cleaned = Compat.CleanInput(bracketed)
-                if cleaned and cleaned ~= "" then
-                    return cleaned
-                end
+local function MatchBracketedGuildLine(ln)
+    local s = Safe.String(ln)
+    if s and s ~= "" then
+        local bracketed = s:match("^%s*<([^<>]+)>%s*$")
+        if bracketed then
+            local cleaned = Compat.CleanInput(bracketed)
+            if cleaned and cleaned ~= "" then
+                return cleaned
             end
         end
     end
+    return nil
+end
+
+local function ExtractGuildFromTooltipLines(line2, line3)
+    local b = MatchBracketedGuildLine(line2) or MatchBracketedGuildLine(line3)
+    if b then return b end
+
     local s2 = Safe.String(line2)
     local s3 = Safe.String(line3)
     if s2 and s2 ~= "" and not IsLikelyTooltipMetaLine(s2) and s3 and IsLikelyTooltipMetaLine(s3) then
@@ -447,51 +518,25 @@ local function ExtractGuildFromTooltipLines(line2, line3)
     return nil
 end
 
-function Compat.ReadUnitTooltipGuild(unit, guid)
+function Compat.ReadUnitTooltipGuild(unit, guid, cacheOnly)
     local cleanGuid = Safe.String(guid) or (unit and Safe.String(Safe.Call(UnitGUID, unit)))
     if cleanGuid and unitGuildByGuid[cleanGuid] then
         return unitGuildByGuid[cleanGuid]
     end
-
-    local foundGuild
-    if C_TooltipInfo then
-        if unit and C_TooltipInfo.GetUnit then
-            local ok, data = pcall(C_TooltipInfo.GetUnit, unit)
-            if ok and type(data) == "table" and type(data.lines) == "table" then
-                local l2 = data.lines[2] and data.lines[2].leftText
-                local l3 = data.lines[3] and data.lines[3].leftText
-                foundGuild = ExtractGuildFromTooltipLines(l2, l3)
-            end
-        end
-        if not foundGuild and not unit and cleanGuid and C_TooltipInfo.GetHyperlink and not (InCombatLockdown and InCombatLockdown()) then
-            local ok, data = pcall(C_TooltipInfo.GetHyperlink, "unit:" .. cleanGuid)
-            if ok and type(data) == "table" and type(data.lines) == "table" then
-                local l2 = data.lines[2] and data.lines[2].leftText
-                local l3 = data.lines[3] and data.lines[3].leftText
-                foundGuild = ExtractGuildFromTooltipLines(l2, l3)
-            end
-        end
+    if cacheOnly or not unit then
+        return nil
     end
 
-    if not foundGuild and unit and not (InCombatLockdown and InCombatLockdown()) and CreateFrame and UIParent then
-        if not scanTooltip then
-            scanTooltip = CreateFrame("GameTooltip", "SocialCentralUnitScanTooltip", UIParent, "GameTooltipTemplate")
-        end
-        if scanTooltip and scanTooltip.SetUnit then
-            scanTooltip:SetOwner(UIParent, "ANCHOR_NONE")
-            scanTooltip:ClearLines()
-            local ok = pcall(scanTooltip.SetUnit, scanTooltip, unit)
-            if ok then
-                local l2 = _G["SocialCentralUnitScanTooltipTextLeft2"] and _G["SocialCentralUnitScanTooltipTextLeft2"]:GetText()
-                local l3 = _G["SocialCentralUnitScanTooltipTextLeft3"] and _G["SocialCentralUnitScanTooltipTextLeft3"]:GetText()
-                foundGuild = ExtractGuildFromTooltipLines(l2, l3)
-            end
-            scanTooltip:ClearLines()
-        end
+    local foundGuild
+    if ReadShownGameTooltipUnit(unit) then
+        local l2 = _G["GameTooltipTextLeft2"] and _G["GameTooltipTextLeft2"]:GetText()
+        local l3 = _G["GameTooltipTextLeft3"] and _G["GameTooltipTextLeft3"]:GetText()
+        foundGuild = ExtractGuildFromTooltipLines(l2, l3)
     end
 
     if foundGuild and cleanGuid then
         unitGuildByGuid[cleanGuid] = foundGuild
+        unitGuildMissAt[cleanGuid] = nil
     end
     return foundGuild
 end
@@ -536,6 +581,8 @@ function Compat.CacheForeverFullName(guid, fullName, firstNameHint)
         if cleanGuid then
             parsed.guid = cleanGuid
             foreverNameByGuid[cleanGuid] = parsed
+            foreverLookupMissAt[cleanGuid] = nil
+            tooltipTitleMissAt[cleanGuid] = nil
         end
         if parsed.firstName then
             StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
@@ -598,7 +645,31 @@ function Compat.IsGuildMember(firstName, guid, fullName)
     return false
 end
 
-function Compat.LookupForeverFullName(guid, firstName)
+local function IsGuidLike(v)
+    return type(v) == "string" and (v:find("^Player%-") ~= nil or v:find("^0x") ~= nil)
+end
+
+local function SafeGetGuildRosterNameAndGuid(index)
+    local ok, gName, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, r17 = pcall(GetGuildRosterInfo, index)
+    if not ok then return nil, nil end
+    local cleanName = Safe.String(gName)
+    if not cleanName then return nil, nil end
+    if IsGuidLike(r17) then
+        return cleanName, Safe.String(r17)
+    end
+    -- Fallback only if client build exposes GUID at a different index.
+    local ret = { pcall(GetGuildRosterInfo, index) }
+    if ret[1] then
+        for rIdx = 3, #ret do
+            if IsGuidLike(ret[rIdx]) then
+                return cleanName, Safe.String(ret[rIdx])
+            end
+        end
+    end
+    return cleanName, nil
+end
+
+function Compat.LookupForeverFullName(guid, firstName, allowRosterSync)
     local cleanGuid = Safe.String(guid)
     local firstLower = (firstName and firstName ~= "") and firstName:lower() or nil
 
@@ -610,48 +681,18 @@ function Compat.LookupForeverFullName(guid, firstName)
     end
 
     if cleanGuid then
-        local numGuild = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
-        if numGuild > 0 and GetGuildRosterInfo then
-            for i = 1, numGuild do
-                local ret = { pcall(GetGuildRosterInfo, i) }
-                if ret[1] then
-                    local rosterName = Safe.String(ret[2])
-                    local foundGuid = nil
-                    for rIdx = 3, #ret do
-                        local v = ret[rIdx]
-                        if type(v) == "string" and (v:find("^Player%-") or v:find("^0x")) then
-                            foundGuid = Safe.String(v)
-                            break
-                        end
-                    end
-                    if foundGuid and foundGuid == cleanGuid then
-                        local parsed = rosterName and Compat.ParseForeverFullName(rosterName)
-                        if parsed and parsed.surname and (not firstLower or parsed.firstName:lower() == firstLower) then
-                            parsed.guid = cleanGuid
-                            foreverNameByGuid[cleanGuid] = parsed
-                            StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
-                            return parsed
-                        end
-                    end
+        local nowClock = (GetTime and GetTime()) or 0
+        if allowRosterSync ~= false and (not foreverLookupMissAt[cleanGuid] or (nowClock - foreverLookupMissAt[cleanGuid]) >= 20) then
+            if (nowClock - lastRosterSyncAt) >= 15 and Compat.SyncRosterForeverNames then
+                Compat.SyncRosterForeverNames()
+            end
+            if foreverNameByGuid[cleanGuid] then
+                local c = foreverNameByGuid[cleanGuid]
+                if not firstLower or c.firstName:lower() == firstLower then
+                    return c
                 end
             end
-        end
-
-        if C_FriendList and C_FriendList.GetNumFriends and C_FriendList.GetFriendInfoByIndex then
-            local numFriends = Safe.Number(Safe.Call(C_FriendList.GetNumFriends)) or 0
-            for i = 1, numFriends do
-                local info = Safe.Call(C_FriendList.GetFriendInfoByIndex, i)
-                if type(info) == "table" and Safe.String(info.guid) == cleanGuid then
-                    local fName = Safe.String(info.name)
-                    local parsed = fName and Compat.ParseForeverFullName(fName)
-                    if parsed and parsed.surname and (not firstLower or parsed.firstName:lower() == firstLower) then
-                        parsed.guid = cleanGuid
-                        foreverNameByGuid[cleanGuid] = parsed
-                        StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
-                        return parsed
-                    end
-                end
-            end
+            foreverLookupMissAt[cleanGuid] = nowClock
         end
     end
 
@@ -666,32 +707,28 @@ function Compat.LookupForeverFullName(guid, firstName)
     return nil
 end
 
-function Compat.SyncRosterForeverNames()
+function Compat.SyncRosterForeverNames(force)
+    local nowClock = (GetTime and GetTime()) or 0
+    if not force and lastRosterSyncAt > 0 and (nowClock - lastRosterSyncAt) < 15 then
+        return
+    end
+    lastRosterSyncAt = nowClock
+    wipe(foreverLookupMissAt)
+
     local numGuild = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
     if numGuild > 0 and GetGuildRosterInfo then
         for i = 1, numGuild do
-            local ret = { pcall(GetGuildRosterInfo, i) }
-            if ret[1] then
-                local gName = Safe.String(ret[2])
-                local cleanGuid = nil
-                for rIdx = 3, #ret do
-                    local v = ret[rIdx]
-                    if type(v) == "string" and (v:find("^Player%-") or v:find("^0x")) then
-                        cleanGuid = Safe.String(v)
-                        break
+            local gName, cleanGuid = SafeGetGuildRosterNameAndGuid(i)
+            local parsed = gName and Compat.ParseForeverFullName(gName)
+            if parsed then
+                Compat.CacheGuildMember(cleanGuid, parsed.firstName, parsed.fullName)
+                if parsed.surname then
+                    if cleanGuid then
+                        parsed.guid = cleanGuid
+                        foreverNameByGuid[cleanGuid] = parsed
                     end
-                end
-                local parsed = gName and Compat.ParseForeverFullName(gName)
-                if parsed then
-                    Compat.CacheGuildMember(cleanGuid, parsed.firstName, parsed.fullName)
-                    if parsed.surname then
-                        if cleanGuid then
-                            parsed.guid = cleanGuid
-                            foreverNameByGuid[cleanGuid] = parsed
-                        end
-                        if parsed.firstName then
-                            StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
-                        end
+                    if parsed.firstName then
+                        StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
                     end
                 end
             end
@@ -721,7 +758,7 @@ function Compat.SyncRosterForeverNames()
 end
 
 -- Resolve full WoW Forever "FirstName Surname" for any unit token ("target", "mouseover", "nameplate1", "party1", etc.).
-function Compat.ResolveUnitFullName(unit, guidHint, existingFullName)
+function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
     if not unit or Safe.IsSecret(unit) then return nil, nil end
 
     local rawName, rawRealm
@@ -745,6 +782,7 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName)
         if guid then
             parsed.guid = guid
             foreverNameByGuid[guid] = parsed
+            foreverLookupMissAt[guid] = nil
         end
         if parsed.firstName then
             StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, guid)
@@ -774,27 +812,29 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName)
         end
     end
 
-    if UnitPVPName then
-        local okPvp, pvpName = pcall(UnitPVPName, unit)
-        if okPvp and type(pvpName) == "string" and pvpName ~= "" then
-            local pParsed = ExtractForeverNameFromLine(pvpName, baseParsed.firstName)
-            if pParsed and pParsed.surname then
-                SaveResolved(pParsed)
-                return pParsed, rawRealm
+    if not fastOnly then
+        if UnitPVPName then
+            local okPvp, pvpName = pcall(UnitPVPName, unit)
+            if okPvp and type(pvpName) == "string" and pvpName ~= "" then
+                local pParsed = ExtractForeverNameFromLine(pvpName, baseParsed.firstName)
+                if pParsed and pParsed.surname then
+                    SaveResolved(pParsed)
+                    return pParsed, rawRealm
+                end
+            end
+        end
+
+        local tooltipTitle = ReadUnitTooltipTitle(unit, guid)
+        if tooltipTitle then
+            local tipParsed = ExtractForeverNameFromLine(tooltipTitle, baseParsed.firstName)
+            if tipParsed then
+                SaveResolved(tipParsed)
+                return tipParsed, rawRealm
             end
         end
     end
 
-    local tooltipTitle = ReadUnitTooltipTitle(unit, guid)
-    if tooltipTitle then
-        local tipParsed = ExtractForeverNameFromLine(tooltipTitle, baseParsed.firstName)
-        if tipParsed then
-            SaveResolved(tipParsed)
-            return tipParsed, rawRealm
-        end
-    end
-
-    local rosterMatch = Compat.LookupForeverFullName(guid, baseParsed.firstName)
+    local rosterMatch = Compat.LookupForeverFullName(guid, baseParsed.firstName, not fastOnly)
     if rosterMatch then
         return rosterMatch, rawRealm
     end

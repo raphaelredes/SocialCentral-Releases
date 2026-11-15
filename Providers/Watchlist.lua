@@ -790,8 +790,10 @@ local function AppendPlayerTooltipLines(tooltip)
         return
     end
 
-    local fullName, parsed = Compat.ResolveUnitFullName(unit)
     local unitGuid = UnitGUID and Safe.String(Safe.Call(UnitGUID, unit))
+    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, unitGuid, nil, true)
+    local fullName = (resolved and resolved.fullName) or (UnitName and Safe.String(Safe.Call(UnitName, unit)))
+    local parsed = fullName and Compat.ParseCharacterName and Compat.ParseCharacterName(fullName)
     if not fullName or fullName == "" or Compat.IsMe(fullName, unitGuid) then
         return
     end
@@ -916,8 +918,11 @@ local function RegisterUnitContextMenus()
         local rawName = Safe.String(contextData.name)
         local resolvedName, parsed
 
+        local rawGuid = rawUnit and UnitGUID and Safe.String(Safe.Call(UnitGUID, rawUnit))
         if rawUnit and UnitIsPlayer and Safe.Bool(Safe.Call(UnitIsPlayer, rawUnit)) == true then
-            resolvedName, parsed = Compat.ResolveUnitFullName(rawUnit)
+            local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(rawUnit, rawGuid, rawName, true)
+            resolvedName = (resolved and resolved.fullName) or rawName or (UnitName and Safe.String(Safe.Call(UnitName, rawUnit)))
+            parsed = resolvedName and Compat.ParseCharacterName and Compat.ParseCharacterName(resolvedName)
         elseif rawName and rawName ~= "" then
             if rawUnit and UnitIsPlayer and Safe.Bool(Safe.Call(UnitIsPlayer, rawUnit)) == false then
                 return

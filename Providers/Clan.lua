@@ -2994,9 +2994,14 @@ end
 
 local function UpdateGuildRosterHistory()
     if not (IsInGuild and IsInGuild()) then return end
+    local nowClock = (GetTime and GetTime()) or 0
+    if Clan._lastRosterHistoryAt and (nowClock - Clan._lastRosterHistoryAt) < 60 then
+        return
+    end
     local gName = GetGuildInfo and Safe.String(GetGuildInfo("player"))
     local total = GetNumGuildMembers and Safe.Number(GetNumGuildMembers()) or 0
     if not gName or gName == "" or not total or total <= 0 then return end
+    Clan._lastRosterHistoryAt = nowClock
 
     local current = {}
     local currentCount = 0
@@ -3089,7 +3094,18 @@ function Clan:Init()
             Compat.SyncRosterForeverNames()
         end
         UpdateGuildRosterHistory()
-        ns:Emit("CLAN_UPDATED")
+        if not Clan._rosterEmitQueued then
+            Clan._rosterEmitQueued = true
+            if C_Timer and C_Timer.After then
+                C_Timer.After(1.5, function()
+                    Clan._rosterEmitQueued = false
+                    ns:Emit("CLAN_UPDATED")
+                end)
+            else
+                Clan._rosterEmitQueued = false
+                ns:Emit("CLAN_UPDATED")
+            end
+        end
     end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
         C_Timer.After(6, function()

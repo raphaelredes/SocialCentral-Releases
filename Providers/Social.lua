@@ -43,9 +43,6 @@ local function ScanGuild(map)
     end
 
     local liveGuildName = Safe.String(Safe.Call(GetGuildInfo, "player"))
-    if (not liveGuildName or liveGuildName == "") and Compat.ReadUnitTooltipGuild then
-        liveGuildName = Compat.ReadUnitTooltipGuild("player")
-    end
     if liveGuildName and liveGuildName ~= "" then
         info.name = liveGuildName
     elseif not info.name or info.name == "" then
@@ -59,6 +56,8 @@ local function ScanGuild(map)
     local total = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
     info.totalCount = total
     local onlineCount = 0
+    local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
+    local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
 
     for i = 1, total do
         local name, rankName, rankIndex, level, classLoc, area, note, officerNote, online, status, classFile, _, _, _, _, _, guid = GetGuildRosterInfo(i)
@@ -93,15 +92,17 @@ local function ScanGuild(map)
                         statusFlag = Safe.Number(status) or 0,
                         sources = { guild = true },
                     })
-                    Store:SyncWatchlistObservation(parsed.displayName, {
-                        online = true,
-                        source = "guild",
-                        level = cleanLevel,
-                        classFile = cleanClass,
-                        area = cleanArea,
-                        guild = info.name or "",
-                    })
-                else
+                    if hasWatchlist then
+                        Store:SyncWatchlistObservation(parsed.displayName, {
+                            online = true,
+                            source = "guild",
+                            level = cleanLevel,
+                            classFile = cleanClass,
+                            area = cleanArea,
+                            guild = info.name or "",
+                        })
+                    end
+                elseif hasWatchlist then
                     Store:SyncWatchlistObservation(parsed.displayName, {
                         online = false,
                         source = "guild",
@@ -281,7 +282,10 @@ local function ScanBattleNet(map)
     end
 end
 
+local lastScanAt = 0
+
 function Social:Scan()
+    lastScanAt = (GetTime and GetTime()) or 0
     if Compat.SyncRosterForeverNames then
         Compat.SyncRosterForeverNames()
     end
@@ -326,10 +330,15 @@ function Social:GetList(filterSource)
     return out
 end
 
-local function QueueScan()
+function Social:QueueScan(delay)
     if scanQueued then return end
     scanQueued = true
-    C_Timer.After(0.4, function()
+    local minWait = math.max(2.0, tonumber(delay) or 2.0)
+    local now = (GetTime and GetTime()) or 0
+    if lastScanAt > 0 and (now - lastScanAt) < 5.0 then
+        minWait = math.max(minWait, 5.0 - (now - lastScanAt))
+    end
+    C_Timer.After(minWait, function()
         scanQueued = false
         Social:Scan()
     end)
@@ -345,7 +354,9 @@ function Social:Init()
         "BN_FRIEND_ACCOUNT_ONLINE",
         "BN_FRIEND_ACCOUNT_OFFLINE",
     }) do
-        ns.RegisterEvent(self, eventName, QueueScan)
+        ns.RegisterEvent(self, eventName, function()
+            Social:QueueScan()
+        end)
     end
 
     C_Timer.After(2, function()
@@ -354,7 +365,7 @@ function Social:Init()
     end)
 
     if C_Timer and C_Timer.NewTicker then
-        C_Timer.NewTicker(12, function()
+        C_Timer.NewTicker(60, function()
             self:RequestRosters(false)
             self:Scan()
         end)

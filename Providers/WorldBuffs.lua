@@ -672,9 +672,13 @@ local function TrackFreshOpenWorldAuras(isInitial)
     local nowTs = NowServerTime()
     local songflowerDef = BUFF_DEFINITIONS[5]
     local dmfDef = BUFF_DEFINITIONS[9]
+    local changed = false
 
     if songflowerDef then
         local hasSong = FindPlayerAura(songflowerDef.spellId) ~= nil
+        if hasSong ~= WorldBuffs.previousAuraState.songflower then
+            changed = true
+        end
         if hasSong and not WorldBuffs.previousAuraState.songflower and not isInitial then
             local mapId = C_Map and C_Map.GetBestMapForUnit and Safe.Call(C_Map.GetBestMapForUnit, "player")
             local zoneLow = (Compat.CurrentZoneName and Compat.CurrentZoneName() or ""):lower()
@@ -687,6 +691,9 @@ local function TrackFreshOpenWorldAuras(isInitial)
 
     if dmfDef then
         local hasDmf = FindPlayerAura(dmfDef.spellId, dmfDef.altSpellIds) ~= nil
+        if hasDmf ~= WorldBuffs.previousAuraState.dmf then
+            changed = true
+        end
         if hasDmf and not WorldBuffs.previousAuraState.dmf and not isInitial and ns.db then
             if type(ns.db.worldBuffsPersonal) ~= "table" then
                 ns.db.worldBuffsPersonal = {}
@@ -697,6 +704,8 @@ local function TrackFreshOpenWorldAuras(isInitial)
         end
         WorldBuffs.previousAuraState.dmf = hasDmf
     end
+
+    return changed
 end
 
 function WorldBuffs:Scan()
@@ -713,8 +722,17 @@ function WorldBuffs:Init()
     end)
     ns.RegisterEvent(self, "UNIT_AURA", function(_, _, unit)
         if unit == "player" then
-            TrackFreshOpenWorldAuras(false)
-            ns:Emit("WORLD_BUFFS_UPDATED")
+            local nowClock = (GetTime and GetTime()) or 0
+            if self._lastAuraAt and (nowClock - self._lastAuraAt) < 2.0 then
+                return
+            end
+            self._lastAuraAt = nowClock
+            local changed = TrackFreshOpenWorldAuras(false)
+            local mapShown = _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()
+            local scShown = _G.SocialCentralFrame and _G.SocialCentralFrame.IsShown and _G.SocialCentralFrame:IsShown()
+            if changed or mapShown or scShown then
+                ns:Emit("WORLD_BUFFS_UPDATED")
+            end
         end
     end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()

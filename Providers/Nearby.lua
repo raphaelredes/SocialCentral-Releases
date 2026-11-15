@@ -13,6 +13,9 @@ table.insert(ns.modules, Nearby)
 local emitQueued = false
 local lastAutoPrune = 0
 local MAX_NEARBY_ENTRIES = 400
+local NEARBY_PROBE_UNITS = { "target", "targettarget", "focus", "mouseover", "softfriend", "softinteract", "softtarget" }
+local nearbyByGuid = {}
+local nearbyInspectCooldown = {}
 
 local function QueueEmit()
     if emitQueued then return end
@@ -83,52 +86,35 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         return sRow.lookupKey == parsed.lookupKey
     end
 
-    -- Fallback class resolution if classFile is missing (e.g. from chat sighting)
-    if not classFile or classFile == "" then
+    -- Fallback class, guild, and level resolution from existing row or a single Store.social pass
+    if (not classFile or classFile == "") then
         if existing and existing.classFile then
             classFile = existing.classFile
         elseif guid and Compat.ClassFileFromGuid then
             classFile = Compat.ClassFileFromGuid(guid)
         end
-        if (not classFile or classFile == "") and Store.social then
-            for _, sRow in pairs(Store.social) do
-                if MatchesSocialRow(sRow) then
-                    if sRow.classFile then
-                        classFile = sRow.classFile
-                        break
-                    end
-                end
-            end
-        end
+    end
+    if (not guild or guild == "") and existing and existing.guild then
+        guild = existing.guild
+    end
+    if (not level or level <= 0) and existing and existing.level then
+        level = existing.level
     end
 
-    -- Fallback guild resolution if guild is missing
-    if not guild or guild == "" then
-        if existing and existing.guild then
-            guild = existing.guild
-        elseif Store.social then
-            for _, sRow in pairs(Store.social) do
-                if MatchesSocialRow(sRow) then
-                    if sRow.guild and sRow.guild ~= "" then
-                        guild = sRow.guild
-                        break
-                    end
+    if Store.social and ((not classFile or classFile == "") or (not guild or guild == "") or (not level or level <= 0)) then
+        for _, sRow in pairs(Store.social) do
+            if MatchesSocialRow(sRow) then
+                if (not classFile or classFile == "") and sRow.classFile then
+                    classFile = sRow.classFile
                 end
-            end
-        end
-    end
-
-    -- Fallback level resolution if level is missing
-    if not level or level <= 0 then
-        if existing and existing.level then
-            level = existing.level
-        elseif Store.social then
-            for _, sRow in pairs(Store.social) do
-                if MatchesSocialRow(sRow) then
-                    if sRow.level and sRow.level > 0 then
-                        level = sRow.level
-                        break
-                    end
+                if (not guild or guild == "") and sRow.guild and sRow.guild ~= "" then
+                    guild = sRow.guild
+                end
+                if (not level or level <= 0) and sRow.level and sRow.level > 0 then
+                    level = sRow.level
+                end
+                if classFile and classFile ~= "" and guild and guild ~= "" and level and level > 0 then
+                    break
                 end
             end
         end
@@ -149,6 +135,9 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     row.source = source or row.source
     row.lastSeen = now
     Store.nearby[parsed.lookupKey] = row
+    if row.guid then
+        nearbyByGuid[row.guid] = row
+    end
 
     Store:SyncWatchlistObservation(parsed.displayName, {
         online = true,
@@ -162,7 +151,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     QueueEmit()
 end
 
-local function InspectUnit(unit, source)
+local function InspectUnit(unit, source, fromTicker)
     if not unit then return end
     local exists = Safe.Value(Safe.Call(UnitExists, unit))
     if exists ~= true then return end
@@ -179,16 +168,32 @@ local function InspectUnit(unit, source)
     end
 
     local guid = Safe.String(Safe.Call(UnitGUID, unit))
+    local nowClock = (GetTime and GetTime()) or time()
+    if fromTicker and guid and nearbyInspectCooldown[guid] and nowClock < nearbyInspectCooldown[guid] then
+        return
+    end
+    if guid then
+        nearbyInspectCooldown[guid] = nowClock + 3.5
+    end
+
     local existingName = nil
     if guid then
-        for _, row in pairs(Store.nearby) do
-            if row.guid == guid and row.displayName and row.displayName:find("%s") then
-                existingName = row.displayName
-                break
+        local cachedRow = nearbyByGuid[guid]
+        if cachedRow and cachedRow.displayName and cachedRow.displayName:find("%s") then
+            existingName = cachedRow.displayName
+        elseif not cachedRow then
+            for _, row in pairs(Store.nearby) do
+                if row.guid == guid then
+                    nearbyByGuid[guid] = row
+                    if row.displayName and row.displayName:find("%s") then
+                        existingName = row.displayName
+                    end
+                    break
+                end
             end
         end
     end
-    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, guid, existingName)
+    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, guid, existingName, fromTicker and existingName ~= nil)
     local name = (resolved and resolved.fullName) or Safe.String(Safe.Call(UnitName, unit))
     if not name then return end
 
@@ -204,50 +209,59 @@ local function InspectUnit(unit, source)
     RecordSighting(name, guid, level, classFile, area, source, guild)
 end
 
-local function ScanGroup()
+local function ScanGroup(fromTicker)
     if not Compat.IsInGroup() then return end
     if Compat.IsInRaid() then
         for i = 1, 40 do
-            InspectUnit("raid" .. i, "group")
-            InspectUnit("raid" .. i .. "target", "nearby")
+            InspectUnit("raid" .. i, "group", fromTicker)
+            InspectUnit("raid" .. i .. "target", "nearby", fromTicker)
         end
     else
         for i = 1, 4 do
-            InspectUnit("party" .. i, "group")
-            InspectUnit("party" .. i .. "target", "nearby")
+            InspectUnit("party" .. i, "group", fromTicker)
+            InspectUnit("party" .. i .. "target", "nearby", fromTicker)
         end
     end
 end
 
-local function ScanActiveEnvironment()
-    local seenTokens = {}
-    if C_NamePlate and C_NamePlate.GetNamePlates then
-        local ok, plates = pcall(C_NamePlate.GetNamePlates)
-        if ok and type(plates) == "table" then
-            for _, plate in ipairs(plates) do
-                local token = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
-                if type(token) == "string" and token ~= "" and not seenTokens[token] then
-                    seenTokens[token] = true
-                    InspectUnit(token, "nearby")
-                    InspectUnit(token .. "target", "nearby")
+local function IsMainWindowOpen()
+    local f = _G.SocialCentralFrame
+    return f ~= nil and f.IsShown ~= nil and f:IsShown() == true
+end
+
+local function ScanActiveEnvironment(fromTicker)
+    local skipNameplates = (InCombatLockdown and InCombatLockdown()) or not IsMainWindowOpen()
+    if not skipNameplates then
+        local hasPlatesApi = false
+        if C_NamePlate and C_NamePlate.GetNamePlates then
+            local ok, plates = pcall(C_NamePlate.GetNamePlates)
+            if ok and type(plates) == "table" then
+                hasPlatesApi = true
+                for _, plate in ipairs(plates) do
+                    local token = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
+                    if type(token) == "string" and token ~= "" then
+                        InspectUnit(token, "nearby", fromTicker)
+                        InspectUnit(token .. "target", "nearby", fromTicker)
+                    end
+                end
+            end
+        end
+        if not hasPlatesApi then
+            for i = 1, 20 do
+                local token = "nameplate" .. i
+                if UnitExists and UnitExists(token) then
+                    InspectUnit(token, "nearby", fromTicker)
+                    InspectUnit(token .. "target", "nearby", fromTicker)
                 end
             end
         end
     end
-    for i = 1, 40 do
-        local token = "nameplate" .. i
-        if not seenTokens[token] and UnitExists and UnitExists(token) then
-            seenTokens[token] = true
-            InspectUnit(token, "nearby")
-            InspectUnit(token .. "target", "nearby")
-        end
-    end
-    for _, u in ipairs({ "softfriend", "softinteract", "softtarget", "target", "targettarget", "mouseover", "focus" }) do
+    for _, u in ipairs(NEARBY_PROBE_UNITS) do
         if UnitExists and UnitExists(u) then
-            InspectUnit(u, "nearby")
+            InspectUnit(u, "nearby", fromTicker)
         end
     end
-    ScanGroup()
+    ScanGroup(fromTicker)
 end
 
 local function OnChat(_, _, text, sender, ...)
@@ -270,6 +284,9 @@ function Nearby:Prune(silent)
     local removed = false
     for key, row in pairs(Store.nearby) do
         if (row.lastSeen or 0) < cutoff then
+            if row.guid then
+                nearbyByGuid[row.guid] = nil
+            end
             Store.nearby[key] = nil
             removed = true
         end
@@ -279,6 +296,8 @@ end
 
 function Nearby:Clear()
     wipe(Store.nearby)
+    wipe(nearbyByGuid)
+    wipe(nearbyInspectCooldown)
     ns:Emit("NEARBY_UPDATED")
 end
 
@@ -334,8 +353,8 @@ function Nearby:Init()
     end
 
     if C_Timer and C_Timer.NewTicker then
-        C_Timer.NewTicker(1.5, function()
-            ScanActiveEnvironment()
+        C_Timer.NewTicker(8.0, function()
+            ScanActiveEnvironment(true)
         end)
     end
 

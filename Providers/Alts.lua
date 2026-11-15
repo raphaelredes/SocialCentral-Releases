@@ -298,9 +298,6 @@ function Alts:Snapshot(includeBank)
         money = prev.money
     end
     local guild = Safe.String(Safe.Call(GetGuildInfo, "player"))
-    if (not guild or guild == "") and Compat.ReadUnitTooltipGuild then
-        guild = Compat.ReadUnitTooltipGuild("player")
-    end
     if (not guild or guild == "") and ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name then
         guild = ns.Store.guildInfo.name
     end
@@ -380,6 +377,57 @@ function Alts:Snapshot(includeBank)
 
     self.itemIndex = nil
     ns:Emit("ALTS_UPDATED")
+end
+
+--- Lightweight O(1) update for currency, XP, level, and zone without scanning containers or skills.
+function Alts:UpdateScalars()
+    if not (ns.db and ns.db.alts) then return end
+    local key = Compat.CharacterKey()
+    local rec = ns.db.alts[key]
+    if type(rec) ~= "table" then
+        self:QueueSnapshot(false, 0.5)
+        return
+    end
+
+    local level = Safe.Number(Safe.Call(UnitLevel, "player"))
+    if level and level > 0 then rec.level = level end
+    local xp = Safe.Number(Safe.Call(UnitXP, "player"))
+    local xpMax = Safe.Number(Safe.Call(UnitXPMax, "player"))
+    if xp then rec.xp = xp end
+    if xpMax and xpMax > 0 then rec.xpMax = xpMax end
+    local rested = Safe.Number(Safe.Call(GetXPExhaustion))
+    if rested ~= nil then rec.rested = rested end
+    local money = Safe.Number(Safe.Call(GetMoney))
+    if money and money > 0 then rec.money = money end
+    rec.zone = Compat.CurrentZoneName()
+    rec.lastActive = time()
+
+    if ns.UI and ns.UI.IsAltsVisible and ns.UI:IsAltsVisible() then
+        ns:Emit("ALTS_UPDATED")
+    end
+end
+
+--- Debounced full alt snapshot so rapid bag/equipment/skill events coalesce cleanly.
+function Alts:QueueSnapshot(includeBank, delay)
+    if includeBank then
+        self._pendingIncludeBank = true
+    end
+    if self._snapshotQueued then return end
+    self._snapshotQueued = true
+    local waitSec = tonumber(delay) or 1.5
+    if C_Timer and C_Timer.After then
+        C_Timer.After(waitSec, function()
+            Alts._snapshotQueued = false
+            local doBank = Alts._pendingIncludeBank == true
+            Alts._pendingIncludeBank = false
+            Alts:Snapshot(doBank)
+        end)
+    else
+        self._snapshotQueued = false
+        local doBank = self._pendingIncludeBank == true
+        self._pendingIncludeBank = false
+        self:Snapshot(doBank)
+    end
 end
 
 local function ExtractItemID(item)
@@ -475,9 +523,12 @@ local function AppendAltItemTooltip(tooltip, data)
             itemID = cleanLink and tonumber(cleanLink:match("item:(%d+)")) or nil
         end
     end
-    if not itemID or itemID <= 0 or tooltip._scAltItemId == itemID then
+    local nowT = GetTime and GetTime() or 0
+    if not itemID or itemID <= 0 or tooltip._scAltItemId == itemID or (tooltip._scAltLastId == itemID and (nowT - (tooltip._scAltLastAt or 0)) < 0.05) then
         return
     end
+    tooltip._scAltLastId = itemID
+    tooltip._scAltLastAt = nowT
 
     local owners = Alts:GetItemOwners(itemID)
     if not owners or #owners == 0 then
@@ -608,40 +659,43 @@ end
 function Alts:Init()
     RegisterItemTooltipIntegration()
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
-        self:Snapshot(false)
-        if C_Timer and C_Timer.After then
-            C_Timer.After(1.5, function()
-                if Alts.Snapshot then
-                    Alts:Snapshot(false)
-                end
-            end)
+        if ns.db and ns.db.alts and not ns.db.alts[Compat.CharacterKey()] then
+            self:Snapshot(false)
+        else
+            self:QueueSnapshot(false, 1.5)
         end
     end)
 
-    for _, eventName in ipairs({
+    for _, scalarEvent in ipairs({
         "PLAYER_XP_UPDATE",
-        "PLAYER_LEVEL_UP",
         "UPDATE_EXHAUSTION",
         "PLAYER_MONEY",
         "ZONE_CHANGED_NEW_AREA",
-        "PLAYER_GUILD_UPDATE",
-        "PLAYER_AVG_ITEM_LEVEL_UPDATE",
-        "GUILD_ROSTER_UPDATE",
-        "FRIENDLIST_UPDATE",
-        "SKILL_LINES_CHANGED",
-        "TRADE_SKILL_UPDATE",
     }) do
-        ns.RegisterEvent(self, eventName, function()
-            self:Snapshot(false)
+        ns.RegisterEvent(self, scalarEvent, function()
+            self:UpdateScalars()
         end)
     end
+
+    ns.RegisterEvent(self, "PLAYER_LEVEL_UP", function()
+        self:QueueSnapshot(false, 1.0)
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_GUILD_UPDATE", function(_, _, unit)
+        if not unit or unit == "player" then
+            self:QueueSnapshot(false, 1.5)
+        end
+    end)
 
     for _, itemEvent in ipairs({
         "PLAYER_EQUIPMENT_CHANGED",
         "BAG_UPDATE_DELAYED",
+        "SKILL_LINES_CHANGED",
+        "TRADE_SKILL_UPDATE",
+        "PLAYER_AVG_ITEM_LEVEL_UPDATE",
     }) do
         ns.RegisterEvent(self, itemEvent, function()
-            self:Snapshot(false)
+            self:QueueSnapshot(false, 1.5)
         end)
     end
 
@@ -650,7 +704,7 @@ function Alts:Init()
         "PLAYERBANKSLOTS_CHANGED",
     }) do
         ns.RegisterEvent(self, bankEvent, function()
-            self:Snapshot(true)
+            self:QueueSnapshot(true, 0.4)
         end)
     end
 
