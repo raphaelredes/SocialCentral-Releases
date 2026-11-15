@@ -86,6 +86,9 @@ function Compat.Realm()
     return ""
 end
 
+local realmPoolCache = {}
+local realmPoolCacheCount = 0
+
 -- Collapse numbered Forever shard realms into a single ruleset pool key:
 -- "CAMWOWUS1Realm2PvP" and "CAMWOWUS1Realm9PvP" -> "camwowus1realmpvp".
 function Compat.RealmPool(realmName)
@@ -93,8 +96,15 @@ function Compat.RealmPool(realmName)
         realmName = Compat.Realm()
     end
     if realmName == "" then return "default" end
-    local key = Plain(realmName)
-    key = key:gsub("realm%d+", "realm")
+    local cached = realmPoolCache[realmName]
+    if cached then return cached end
+    local key = Plain(realmName):gsub("realm%d+", "realm")
+    if realmPoolCacheCount >= 64 then
+        wipe(realmPoolCache)
+        realmPoolCacheCount = 0
+    end
+    realmPoolCache[realmName] = key
+    realmPoolCacheCount = realmPoolCacheCount + 1
     return key
 end
 
@@ -106,13 +116,20 @@ function Compat.IsForeverShardLabel(label)
     return own ~= "" and Compat.RealmPool(p) == Compat.RealmPool(own)
 end
 
+local cachedEngFaction, cachedLocFaction
+
 function Compat.PlayerFaction()
+    if cachedEngFaction then
+        return cachedEngFaction, cachedLocFaction
+    end
     if UnitFactionGroup then
         local ok, eng, loc = pcall(UnitFactionGroup, "player")
         if ok then
             eng = Safe.String(eng)
             loc = Safe.String(loc)
             if eng == "Horde" or eng == "Alliance" then
+                cachedEngFaction = eng
+                cachedLocFaction = loc
                 return eng, loc
             end
         end
@@ -124,9 +141,18 @@ function Compat.ScopeKey()
     return Compat.RealmPool(Compat.Realm()) .. ":" .. Compat.PlayerFaction()
 end
 
+local cachedCharacterKey
+
 function Compat.CharacterKey()
-    local name = Safe.String(Safe.Call(UnitName, "player")) or "Unknown"
-    return name .. "@" .. Compat.RealmPool(Compat.Realm())
+    if cachedCharacterKey then
+        return cachedCharacterKey
+    end
+    local name = Safe.String(Safe.Call(UnitName, "player"))
+    if name and name ~= "" and name ~= "Unknown" then
+        cachedCharacterKey = name .. "@" .. Compat.RealmPool(Compat.Realm())
+        return cachedCharacterKey
+    end
+    return "Unknown@" .. Compat.RealmPool(Compat.Realm())
 end
 
 -- Trim leading and trailing whitespace cleanly (always returns a string).
@@ -174,25 +200,37 @@ local parseCharCache = {}
 local parseCharCacheCount = 0
 local parseForeverCache = {}
 local parseForeverCacheCount = 0
+local PARSE_CACHE_LIMIT = 1500
 
--- Parse a character identifier into firstName, optional surname, displayName, and lookupKey.
--- Handles Forever formats: "Name", "Name-Surname", "Name Surname", or "Name-CAMWOW...".
-function Compat.ParseCharacterName(raw)
+local function CopyCharParsed(entry)
+    return {
+        firstName = entry.firstName,
+        surname = entry.surname,
+        displayName = entry.displayName,
+        lookupKey = entry.lookupKey,
+    }
+end
+
+local function CopyForeverParsed(entry)
+    return {
+        firstName = entry.firstName,
+        surname = entry.surname,
+        fullName = entry.fullName,
+    }
+end
+
+-- Internal read-only memoized lookup (callers MUST NOT mutate returned tables).
+local function ParseCharInternal(raw)
     if type(raw) ~= "string" or raw == "" then return nil end
     local cached = parseCharCache[raw]
     if cached ~= nil then
         if cached == false then return nil end
-        return {
-            firstName = cached.firstName,
-            surname = cached.surname,
-            displayName = cached.displayName,
-            lookupKey = cached.lookupKey,
-        }
+        return cached
     end
 
     local cleaned = Compat.CleanInput(raw)
     if not cleaned then
-        if parseCharCacheCount >= 2000 then
+        if parseCharCacheCount >= PARSE_CACHE_LIMIT then
             wipe(parseCharCache)
             parseCharCacheCount = 0
         end
@@ -236,37 +274,41 @@ function Compat.ParseCharacterName(raw)
         }
     end
 
-    if parseCharCacheCount >= 2000 then
+    if parseCharCacheCount >= PARSE_CACHE_LIMIT then
         wipe(parseCharCache)
         parseCharCacheCount = 0
     end
     parseCharCache[raw] = result
     parseCharCacheCount = parseCharCacheCount + 1
-    return {
-        firstName = result.firstName,
-        surname = result.surname,
-        displayName = result.displayName,
-        lookupKey = result.lookupKey,
-    }
+    return result
 end
 
--- Parse a WoW Forever character name preserving space-separated "FirstName Surname".
--- Strips any trailing Forever backend shard suffix (e.g. "-CAMWOWUS1Realm2PvP").
-function Compat.ParseForeverFullName(raw)
+-- Parse a character identifier into firstName, optional surname, displayName, and lookupKey.
+-- Handles Forever formats: "Name", "Name-Surname", "Name Surname", or "Name-CAMWOW...".
+function Compat.ParseCharacterName(raw)
+    local cached = ParseCharInternal(raw)
+    return cached and CopyCharParsed(cached) or nil
+end
+
+-- Allocation-free read-only accessor over the internal ParseCharacterName memo cache.
+function Compat.ParseCharacterFields(raw)
+    local cached = ParseCharInternal(raw)
+    if not cached then return nil, nil, nil, nil end
+    return cached.lookupKey, cached.firstName, cached.displayName, cached.surname
+end
+
+-- Internal read-only memoized Forever parser (callers MUST NOT mutate returned tables).
+local function ParseForeverInternal(raw)
     if type(raw) ~= "string" or raw == "" then return nil end
     local cached = parseForeverCache[raw]
     if cached ~= nil then
         if cached == false then return nil end
-        return {
-            firstName = cached.firstName,
-            surname = cached.surname,
-            fullName = cached.fullName,
-        }
+        return cached
     end
 
     local cleaned = Compat.CleanInput(raw)
     if not cleaned then
-        if parseForeverCacheCount >= 2000 then
+        if parseForeverCacheCount >= PARSE_CACHE_LIMIT then
             wipe(parseForeverCache)
             parseForeverCacheCount = 0
         end
@@ -297,17 +339,20 @@ function Compat.ParseForeverFullName(raw)
         }
     end
 
-    if parseForeverCacheCount >= 2000 then
+    if parseForeverCacheCount >= PARSE_CACHE_LIMIT then
         wipe(parseForeverCache)
         parseForeverCacheCount = 0
     end
     parseForeverCache[raw] = result
     parseForeverCacheCount = parseForeverCacheCount + 1
-    return {
-        firstName = result.firstName,
-        surname = result.surname,
-        fullName = result.fullName,
-    }
+    return result
+end
+
+-- Parse a WoW Forever character name preserving space-separated "FirstName Surname".
+-- Strips any trailing Forever backend shard suffix (e.g. "-CAMWOWUS1Realm2PvP").
+function Compat.ParseForeverFullName(raw)
+    local cached = ParseForeverInternal(raw)
+    return cached and CopyForeverParsed(cached) or nil
 end
 
 -- Resolve the active WoW Forever character's full "FirstName Surname" name using
@@ -390,16 +435,42 @@ function Compat.ResolvePlayerFullName(existingFullName)
 end
 
 local foreverNameByGuid = {}
+local foreverNameByGuidCount = 0
 local foreverNameByFirst = {}
+local foreverNameByFirstCount = 0
 local guildMemberByGuid = {}
 local guildMemberByFirst = {}
 local guildMemberByKey = {}
 local unitGuildByGuid = {}
+local unitGuildByGuidCount = 0
 local unitGuildMissAt = {}
 local tooltipTitleMissAt = {}
 local foreverLookupMissAt = {}
+local foreverLookupMissCount = 0
+local GUID_CACHE_LIMIT = 800
 local lastRosterSyncAt = 0
 local scanTooltip
+
+local function PutBoundedMap(tbl, curCount, maxCount, key, val)
+    if tbl[key] == nil then
+        if curCount >= maxCount then
+            wipe(tbl)
+            curCount = 0
+        end
+        curCount = curCount + 1
+    end
+    tbl[key] = val
+    return curCount
+end
+
+local function MakeForeverRecord(parsed, cleanGuid)
+    return {
+        firstName = parsed.firstName,
+        surname = parsed.surname,
+        fullName = parsed.fullName,
+        guid = cleanGuid,
+    }
+end
 
 local TITLE_PARTICLES = {
     ["the"] = true,
@@ -535,7 +606,7 @@ function Compat.ReadUnitTooltipGuild(unit, guid, cacheOnly)
     end
 
     if foundGuild and cleanGuid then
-        unitGuildByGuid[cleanGuid] = foundGuild
+        unitGuildByGuidCount = PutBoundedMap(unitGuildByGuid, unitGuildByGuidCount, GUID_CACHE_LIMIT, cleanGuid, foundGuild)
         unitGuildMissAt[cleanGuid] = nil
     end
     return foundGuild
@@ -558,17 +629,15 @@ local function StoreFirstNameSurnameCandidate(firstLower, parsed, cleanGuid)
             return
         end
     end
-    if cleanGuid and not parsed.guid then
-        parsed.guid = cleanGuid
-    end
-    foreverNameByFirst[firstLower] = parsed
+    local rec = (cleanGuid and not parsed.guid) and MakeForeverRecord(parsed, cleanGuid) or parsed
+    foreverNameByFirstCount = PutBoundedMap(foreverNameByFirst, foreverNameByFirstCount, GUID_CACHE_LIMIT, firstLower, rec)
 end
 
 function Compat.CacheForeverFullName(guid, fullName, firstNameHint)
     local cleanGuid = Safe.String(guid)
-    local parsed = Compat.ParseForeverFullName(fullName)
+    local parsed = ParseForeverInternal(fullName)
     if not parsed or not parsed.surname then
-        local alt = Compat.ParseCharacterName(fullName)
+        local alt = ParseCharInternal(fullName)
         if alt and alt.surname then
             parsed = {
                 firstName = alt.firstName,
@@ -578,17 +647,17 @@ function Compat.CacheForeverFullName(guid, fullName, firstNameHint)
         end
     end
     if parsed and parsed.surname then
+        local stored = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
         if cleanGuid then
-            parsed.guid = cleanGuid
-            foreverNameByGuid[cleanGuid] = parsed
+            foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, stored)
             foreverLookupMissAt[cleanGuid] = nil
             tooltipTitleMissAt[cleanGuid] = nil
         end
-        if parsed.firstName then
-            StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
+        if stored.firstName then
+            StoreFirstNameSurnameCandidate(stored.firstName:lower(), stored, cleanGuid)
         end
         if firstNameHint and firstNameHint ~= "" then
-            StoreFirstNameSurnameCandidate(firstNameHint:lower(), parsed, cleanGuid)
+            StoreFirstNameSurnameCandidate(firstNameHint:lower(), stored, cleanGuid)
         end
     end
 end
@@ -602,7 +671,7 @@ function Compat.CacheGuildMember(guid, firstName, fullName)
     -- rather than indexing their firstName alone, which would collide with non-guild players sharing a firstName.
     local canonical = (fullName and fullName ~= "") and fullName or firstName
     if canonical and canonical ~= "" then
-        local parsed = Compat.ParseCharacterName(canonical)
+        local parsed = ParseCharInternal(canonical)
         if parsed and parsed.lookupKey and parsed.lookupKey ~= "" then
             guildMemberByKey[parsed.lookupKey] = true
             if not parsed.surname and parsed.firstName then
@@ -634,7 +703,7 @@ function Compat.IsGuildMember(firstName, guid, fullName)
     end
     local canonical = (fullName and fullName ~= "") and fullName or firstName
     if canonical and canonical ~= "" then
-        local parsed = Compat.ParseCharacterName(canonical)
+        local parsed = ParseCharInternal(canonical)
         if parsed and parsed.lookupKey and guildMemberByKey[parsed.lookupKey] then
             return true
         end
@@ -649,24 +718,43 @@ local function IsGuidLike(v)
     return type(v) == "string" and (v:find("^Player%-") ~= nil or v:find("^0x") ~= nil)
 end
 
-local function SafeGetGuildRosterNameAndGuid(index)
-    local ok, gName, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, r17 = pcall(GetGuildRosterInfo, index)
+local detectedGuildGuidArgIdx
+
+local function ExtractRosterNameAndGuid(ok, gName, ...)
     if not ok then return nil, nil end
     local cleanName = Safe.String(gName)
     if not cleanName then return nil, nil end
+    if detectedGuildGuidArgIdx then
+        local cachedRaw = select(detectedGuildGuidArgIdx, ...)
+        if cachedRaw == nil then
+            return cleanName, nil
+        end
+        local cached = Safe.String(cachedRaw)
+        if IsGuidLike(cached) then
+            return cleanName, cached
+        end
+    end
+    local r17 = Safe.String((select(16, ...)))
     if IsGuidLike(r17) then
-        return cleanName, Safe.String(r17)
+        detectedGuildGuidArgIdx = 16
+        return cleanName, r17
     end
     -- Fallback only if client build exposes GUID at a different index.
-    local ret = { pcall(GetGuildRosterInfo, index) }
-    if ret[1] then
-        for rIdx = 3, #ret do
-            if IsGuidLike(ret[rIdx]) then
-                return cleanName, Safe.String(ret[rIdx])
+    local n = select("#", ...)
+    for idx = n, 1, -1 do
+        if idx ~= 16 then
+            local cand = Safe.String((select(idx, ...)))
+            if IsGuidLike(cand) then
+                detectedGuildGuidArgIdx = idx
+                return cleanName, cand
             end
         end
     end
     return cleanName, nil
+end
+
+local function SafeGetGuildRosterNameAndGuid(index)
+    return ExtractRosterNameAndGuid(pcall(GetGuildRosterInfo, index))
 end
 
 function Compat.LookupForeverFullName(guid, firstName, allowRosterSync)
@@ -692,7 +780,7 @@ function Compat.LookupForeverFullName(guid, firstName, allowRosterSync)
                     return c
                 end
             end
-            foreverLookupMissAt[cleanGuid] = nowClock
+            foreverLookupMissCount = PutBoundedMap(foreverLookupMissAt, foreverLookupMissCount, GUID_CACHE_LIMIT, cleanGuid, nowClock)
         end
     end
 
@@ -714,21 +802,22 @@ function Compat.SyncRosterForeverNames(force)
     end
     lastRosterSyncAt = nowClock
     wipe(foreverLookupMissAt)
+    foreverLookupMissCount = 0
 
     local numGuild = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
     if numGuild > 0 and GetGuildRosterInfo then
         for i = 1, numGuild do
             local gName, cleanGuid = SafeGetGuildRosterNameAndGuid(i)
-            local parsed = gName and Compat.ParseForeverFullName(gName)
+            local parsed = gName and ParseForeverInternal(gName)
             if parsed then
                 Compat.CacheGuildMember(cleanGuid, parsed.firstName, parsed.fullName)
                 if parsed.surname then
+                    local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
                     if cleanGuid then
-                        parsed.guid = cleanGuid
-                        foreverNameByGuid[cleanGuid] = parsed
+                        foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
                     end
-                    if parsed.firstName then
-                        StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
+                    if rec.firstName then
+                        StoreFirstNameSurnameCandidate(rec.firstName:lower(), rec, cleanGuid)
                     end
                 end
             end
@@ -742,14 +831,14 @@ function Compat.SyncRosterForeverNames(force)
             if type(info) == "table" and info.name then
                 local cleanGuid = Safe.String(info.guid)
                 local fName = Safe.String(info.name)
-                local parsed = fName and Compat.ParseForeverFullName(fName)
+                local parsed = fName and ParseForeverInternal(fName)
                 if parsed and parsed.surname then
+                    local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
                     if cleanGuid then
-                        parsed.guid = cleanGuid
-                        foreverNameByGuid[cleanGuid] = parsed
+                        foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
                     end
-                    if parsed.firstName then
-                        StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, cleanGuid)
+                    if rec.firstName then
+                        StoreFirstNameSurnameCandidate(rec.firstName:lower(), rec, cleanGuid)
                     end
                 end
             end
@@ -778,30 +867,29 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
 
     local guid = Safe.String(guidHint) or Safe.String(Safe.Call(UnitGUID, unit))
     local function SaveResolved(parsed)
-        if not parsed or not parsed.surname then return end
+        if not parsed or not parsed.surname then return parsed end
+        local rec = guid and MakeForeverRecord(parsed, guid) or parsed
         if guid then
-            parsed.guid = guid
-            foreverNameByGuid[guid] = parsed
+            foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, guid, rec)
             foreverLookupMissAt[guid] = nil
         end
-        if parsed.firstName then
-            StoreFirstNameSurnameCandidate(parsed.firstName:lower(), parsed, guid)
+        if rec.firstName then
+            StoreFirstNameSurnameCandidate(rec.firstName:lower(), rec, guid)
         end
+        return rec
     end
 
-    local baseParsed = Compat.ParseForeverFullName(rawName)
+    local baseParsed = ParseForeverInternal(rawName)
     if not baseParsed then return nil, rawRealm end
     if baseParsed.surname then
-        SaveResolved(baseParsed)
-        return baseParsed, rawRealm
+        return SaveResolved(baseParsed), rawRealm
     end
 
     local getUnitFull = Safe.String(Safe.Call(GetUnitName, unit, false))
     if getUnitFull then
-        local gParsed = Compat.ParseForeverFullName(getUnitFull)
+        local gParsed = ParseForeverInternal(getUnitFull)
         if gParsed and gParsed.surname and gParsed.firstName:lower() == baseParsed.firstName:lower() then
-            SaveResolved(gParsed)
-            return gParsed, rawRealm
+            return SaveResolved(gParsed), rawRealm
         end
     end
 
@@ -818,8 +906,7 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
             if okPvp and type(pvpName) == "string" and pvpName ~= "" then
                 local pParsed = ExtractForeverNameFromLine(pvpName, baseParsed.firstName)
                 if pParsed and pParsed.surname then
-                    SaveResolved(pParsed)
-                    return pParsed, rawRealm
+                    return SaveResolved(pParsed), rawRealm
                 end
             end
         end
@@ -828,8 +915,7 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
         if tooltipTitle then
             local tipParsed = ExtractForeverNameFromLine(tooltipTitle, baseParsed.firstName)
             if tipParsed then
-                SaveResolved(tipParsed)
-                return tipParsed, rawRealm
+                return SaveResolved(tipParsed), rawRealm
             end
         end
     end
@@ -840,28 +926,37 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
     end
 
     if existingFullName and existingFullName ~= "" then
-        local prevParsed = Compat.ParseForeverFullName(existingFullName)
+        local prevParsed = ParseForeverInternal(existingFullName)
         if prevParsed and prevParsed.surname and prevParsed.firstName:lower() == baseParsed.firstName:lower() then
-            SaveResolved(prevParsed)
-            return prevParsed, rawRealm
+            return SaveResolved(prevParsed), rawRealm
         end
     end
 
     return baseParsed, rawRealm
 end
 
+local cachedMyGuid
+local cachedMyName
+local cachedMyParsed
+
 function Compat.IsMe(rawName, guid)
-    local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
-    if myGuid and guid then
-        return guid == myGuid
+    if not cachedMyGuid then
+        cachedMyGuid = Safe.String(Safe.Call(UnitGUID, "player"))
     end
-    local parsed = Compat.ParseCharacterName(rawName)
-    local myName = Safe.String(Safe.Call(UnitName, "player"))
-    if not parsed or not myName then return false end
-    local myParsed = Compat.ParseCharacterName(myName)
-    if not myParsed then return false end
-    if parsed.lookupKey == myParsed.lookupKey then return true end
-    if not parsed.surname and parsed.firstName:lower() == myParsed.firstName:lower() then
+    if cachedMyGuid and guid then
+        return guid == cachedMyGuid
+    end
+    local parsed = ParseCharInternal(rawName)
+    if not cachedMyName or cachedMyName == "Unknown" then
+        local liveName = Safe.String(Safe.Call(UnitName, "player"))
+        if liveName and liveName ~= "" and liveName ~= "Unknown" then
+            cachedMyName = liveName
+            cachedMyParsed = ParseCharInternal(liveName)
+        end
+    end
+    if not parsed or not cachedMyParsed then return false end
+    if parsed.lookupKey == cachedMyParsed.lookupKey then return true end
+    if not parsed.surname and parsed.firstName:lower() == cachedMyParsed.firstName:lower() then
         return true
     end
     return false
@@ -881,9 +976,20 @@ function Compat.ClassColor(classFile)
     return 0.85, 0.88, 0.92
 end
 
+local classHexCache = {}
+
 function Compat.ClassHex(classFile)
+    local cacheKey = type(classFile) == "string" and classFile ~= "" and classFile or "__DEFAULT__"
+    local cached = classHexCache[cacheKey]
+    if cached then return cached end
     local r, g, b = Compat.ClassColor(classFile)
-    return ("|cff%02x%02x%02x"):format(math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+    local hex = ("|cff%02x%02x%02x"):format(math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+    if classFile and classFile ~= "" then
+        classHexCache[cacheKey] = hex
+    elseif (r ~= 0.85 or g ~= 0.88 or b ~= 0.92) or (RAID_CLASS_COLORS or C_ClassColor) then
+        classHexCache[cacheKey] = hex
+    end
+    return hex
 end
 
 local classByLocalized
@@ -907,32 +1013,54 @@ function Compat.ClassFileFromGuid(guid)
             if clean then return clean end
         end
     end
-    if ns.Store and ns.Store.social then
-        for _, sRow in pairs(ns.Store.social) do
-            if sRow.guid == cleanGuid and sRow.classFile and sRow.classFile ~= "" then
+    if ns.Store then
+        local byGuid = ns.Store.socialByGuid
+        if byGuid then
+            local sRow = byGuid[cleanGuid]
+            if sRow and sRow.classFile and sRow.classFile ~= "" then
                 return sRow.classFile
+            end
+        elseif ns.Store.social then
+            for _, sRow in pairs(ns.Store.social) do
+                if sRow.guid == cleanGuid and sRow.classFile and sRow.classFile ~= "" then
+                    return sRow.classFile
+                end
             end
         end
     end
     return nil
 end
 
+local cachedZoneName
+local cachedZoneAt
+
 function Compat.CurrentZoneName()
+    local nowClock = (GetTime and GetTime()) or 0
+    if cachedZoneName and cachedZoneName ~= "" and cachedZoneAt and (nowClock - cachedZoneAt) < 1.0 then
+        return cachedZoneName
+    end
     local mapID = Safe.Number(Safe.Call(C_Map and C_Map.GetBestMapForUnit, "player"))
     if mapID and C_Map and C_Map.GetMapInfo then
         local info = Safe.Call(C_Map.GetMapInfo, mapID)
         if type(info) == "table" and Safe.String(info.name) then
-            return info.name
+            cachedZoneName = info.name
+            cachedZoneAt = nowClock
+            return cachedZoneName
         end
     end
-    return Safe.String(Safe.Call(GetRealZoneText)) or Safe.String(Safe.Call(GetZoneText)) or ""
+    local txt = Safe.String(Safe.Call(GetRealZoneText)) or Safe.String(Safe.Call(GetZoneText)) or ""
+    if txt ~= "" then
+        cachedZoneName = txt
+        cachedZoneAt = nowClock
+    end
+    return txt
 end
 
 -- Return ordered WoW Forever whisper/addon target candidates for a character name.
 -- Forever exposes two-word names ("FirstName Surname") in chat/roster, while
 -- some internal tables store "FirstName-Surname" or "FirstName".
 function Compat.BuildForeverTargetCandidates(raw)
-    local parsed = Compat.ParseCharacterName(raw)
+    local parsed = ParseCharInternal(raw)
     if not parsed then return {} end
 
     local out, seen = {}, {}
@@ -955,7 +1083,7 @@ end
 -- In WoW C-engine, character units are primarily addressed by their core firstName,
 -- with full display name or hyphenated names as secondary candidates.
 function Compat.GetForeverTargetVariants(raw)
-    local parsed = Compat.ParseCharacterName(raw)
+    local parsed = ParseCharInternal(raw)
     if not parsed then
         local clean = Compat.CleanInput(raw)
         return (clean and clean ~= "") and { clean } or {}
@@ -978,7 +1106,7 @@ function Compat.GetForeverTargetVariants(raw)
 end
 
 function Compat.FormatForeverTarget(raw)
-    local parsed = Compat.ParseCharacterName(raw)
+    local parsed = ParseCharInternal(raw)
     if not parsed then return Compat.CleanInput(raw) end
     if parsed.surname and parsed.surname ~= "" then
         return parsed.firstName .. " " .. parsed.surname

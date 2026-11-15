@@ -12,10 +12,42 @@ table.insert(ns.modules, Nearby)
 
 local emitQueued = false
 local lastAutoPrune = 0
+local lastRaidGroupScan = 0
+local groupScanQueued = false
+local nearbyCount = 0
+local nearbyCountSynced = false
+local nearbyCooldownCount = 0
 local MAX_NEARBY_ENTRIES = 400
 local NEARBY_PROBE_UNITS = { "target", "targettarget", "focus", "mouseover", "softfriend", "softinteract", "softtarget" }
 local nearbyByGuid = {}
 local nearbyInspectCooldown = {}
+
+local function IsMainWindowOpen()
+    local f = _G.SocialCentralFrame
+    return f ~= nil and f.IsShown ~= nil and f:IsShown() == true
+end
+
+local function SyncNearbyCount()
+    local c = 0
+    for _ in pairs(Store.nearby) do
+        c = c + 1
+    end
+    nearbyCount = c
+    nearbyCountSynced = true
+    return c
+end
+
+local function RecordCooldown(key, expiresAt)
+    if not key then return end
+    if nearbyInspectCooldown[key] == nil then
+        if nearbyCooldownCount >= 500 then
+            wipe(nearbyInspectCooldown)
+            nearbyCooldownCount = 0
+        end
+        nearbyCooldownCount = nearbyCooldownCount + 1
+    end
+    nearbyInspectCooldown[key] = expiresAt
+end
 
 local function QueueEmit()
     if emitQueued then return end
@@ -37,24 +69,29 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         Nearby:Prune(true)
     end
 
-    -- Upgrade any earlier first-name-only entry matching the same GUID cleanly.
+    -- Upgrade any earlier first-name-only entry matching the same GUID in O(1).
     local upgraded
     if guid then
-        for oldKey, oldRow in pairs(Store.nearby) do
-            if oldKey ~= parsed.lookupKey and oldRow.guid == guid then
-                upgraded = oldRow
-                Store.nearby[oldKey] = nil
-                break
+        local prevRow = nearbyByGuid[guid]
+        if prevRow and prevRow.key and prevRow.key ~= parsed.lookupKey and Store.nearby[prevRow.key] == prevRow then
+            upgraded = prevRow
+            Store.nearby[prevRow.key] = nil
+            if nearbyCountSynced then
+                nearbyCount = math.max(0, nearbyCount - 1)
             end
         end
     end
-    if parsed.surname and Store.nearby[parsed.firstName:lower()] then
-        local oldRow = Store.nearby[parsed.firstName:lower()]
+    local firstLowerKey = parsed.surname and parsed.firstName and parsed.firstName:lower() or nil
+    if firstLowerKey and Store.nearby[firstLowerKey] then
+        local oldRow = Store.nearby[firstLowerKey]
         if not (guid and oldRow.guid and oldRow.guid ~= guid) then
             if not upgraded then
                 upgraded = oldRow
             end
-            Store.nearby[parsed.firstName:lower()] = nil
+            Store.nearby[firstLowerKey] = nil
+            if nearbyCountSynced then
+                nearbyCount = math.max(0, nearbyCount - 1)
+            end
         end
     end
 
@@ -64,18 +101,48 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
 
     local existing = Store.nearby[parsed.lookupKey] or upgraded
     if not existing then
-        local count = 0
-        for _ in pairs(Store.nearby) do count = count + 1 end
-        if count >= MAX_NEARBY_ENTRIES then
-            Nearby:Prune(true)
-            -- Drop oldest entry if still at cap after time-based prune.
+        if not nearbyCountSynced then
+            SyncNearbyCount()
+        end
+        if nearbyCount >= MAX_NEARBY_ENTRIES then
+            local retentionSec = ((ns.db and ns.db.settings and ns.db.settings.nearbyRetentionMin) or 15) * 60
+            local cutoff = now - retentionSec
             local oldestKey, oldestSeen
+            local prunedAny = false
             for k, r in pairs(Store.nearby) do
-                if not oldestSeen or (r.lastSeen or 0) < oldestSeen then
-                    oldestKey, oldestSeen = k, (r.lastSeen or 0)
+                local seen = r.lastSeen or 0
+                if seen < cutoff then
+                    if r.guid and nearbyByGuid[r.guid] == r then
+                        nearbyByGuid[r.guid] = nil
+                    end
+                    Store.nearby[k] = nil
+                    nearbyCount = math.max(0, nearbyCount - 1)
+                    prunedAny = true
+                elseif (not oldestSeen) or seen < oldestSeen then
+                    oldestKey, oldestSeen = k, seen
                 end
             end
-            if oldestKey then Store.nearby[oldestKey] = nil end
+            -- Evict an 8-entry cushion around oldestSeen in one pass so burst crowds stay O(1).
+            if nearbyCount >= MAX_NEARBY_ENTRIES and oldestKey then
+                local cushionCutoff = oldestSeen + 15
+                local evicted = 0
+                for k, r in pairs(Store.nearby) do
+                    if k == oldestKey or ((r.lastSeen or 0) <= cushionCutoff and evicted < 8) then
+                        if r.guid and nearbyByGuid[r.guid] == r then
+                            nearbyByGuid[r.guid] = nil
+                        end
+                        Store.nearby[k] = nil
+                        nearbyCount = math.max(0, nearbyCount - 1)
+                        evicted = evicted + 1
+                        if nearbyCount <= (MAX_NEARBY_ENTRIES - 8) then
+                            break
+                        end
+                    end
+                end
+            end
+            if prunedAny then
+                lastAutoPrune = now
+            end
         end
     end
 
@@ -102,18 +169,33 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     end
 
     if Store.social and ((not classFile or classFile == "") or (not guild or guild == "") or (not level or level <= 0)) then
-        for _, sRow in pairs(Store.social) do
-            if MatchesSocialRow(sRow) then
-                if (not classFile or classFile == "") and sRow.classFile then
-                    classFile = sRow.classFile
+        local function ApplySocialRow(sRow)
+            if not sRow or not MatchesSocialRow(sRow) then
+                return false
+            end
+            if (not classFile or classFile == "") and sRow.classFile then
+                classFile = sRow.classFile
+            end
+            if (not guild or guild == "") and sRow.guild and sRow.guild ~= "" then
+                guild = sRow.guild
+            end
+            if (not level or level <= 0) and sRow.level and sRow.level > 0 then
+                level = sRow.level
+            end
+            return classFile and classFile ~= "" and guild and guild ~= "" and level and level > 0
+        end
+
+        if Store.socialByGuid or Store.socialByLookup then
+            local matchedGuid = guid and Store.socialByGuid and Store.socialByGuid[guid]
+            if not ApplySocialRow(matchedGuid) then
+                local matchedKey = Store.socialByLookup and Store.socialByLookup[parsed.lookupKey]
+                if matchedKey ~= matchedGuid then
+                    ApplySocialRow(matchedKey)
                 end
-                if (not guild or guild == "") and sRow.guild and sRow.guild ~= "" then
-                    guild = sRow.guild
-                end
-                if (not level or level <= 0) and sRow.level and sRow.level > 0 then
-                    level = sRow.level
-                end
-                if classFile and classFile ~= "" and guild and guild ~= "" and level and level > 0 then
+            end
+        else
+            for _, sRow in pairs(Store.social) do
+                if ApplySocialRow(sRow) then
                     break
                 end
             end
@@ -134,6 +216,9 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     if guild and guild ~= "" then row.guild = guild end
     row.source = source or row.source
     row.lastSeen = now
+    if nearbyCountSynced and Store.nearby[parsed.lookupKey] == nil then
+        nearbyCount = nearbyCount + 1
+    end
     Store.nearby[parsed.lookupKey] = row
     if row.guid then
         nearbyByGuid[row.guid] = row
@@ -169,11 +254,16 @@ local function InspectUnit(unit, source, fromTicker)
 
     local guid = Safe.String(Safe.Call(UnitGUID, unit))
     local nowClock = (GetTime and GetTime()) or time()
-    if fromTicker and guid and nearbyInspectCooldown[guid] and nowClock < nearbyInspectCooldown[guid] then
-        return
+    local isDirectFocus = (unit == "target" or unit == "focus")
+    local minCooldown = fromTicker and 3.5 or (isDirectFocus and 0.75 or 2.0)
+    if guid and nearbyInspectCooldown[guid] and nowClock < nearbyInspectCooldown[guid] then
+        -- Allow first-time explicit target/focus selection immediately while throttling repeats.
+        if not (isDirectFocus and not nearbyByGuid[guid]) then
+            return
+        end
     end
     if guid then
-        nearbyInspectCooldown[guid] = nowClock + 3.5
+        RecordCooldown(guid, nowClock + minCooldown)
     end
 
     local existingName = nil
@@ -203,7 +293,8 @@ local function InspectUnit(unit, source, fromTicker)
     local area = Compat.CurrentZoneName()
     local guild = Safe.String(Safe.Call(GetGuildInfo, unit))
     if (not guild or guild == "") and Compat.ReadUnitTooltipGuild then
-        guild = Compat.ReadUnitTooltipGuild(unit, guid)
+        local cacheOnly = not (unit == "target" or unit == "focus" or unit == "mouseover")
+        guild = Compat.ReadUnitTooltipGuild(unit, guid, cacheOnly)
     end
 
     RecordSighting(name, guid, level, classFile, area, source, guild)
@@ -211,22 +302,36 @@ end
 
 local function ScanGroup(fromTicker)
     if not Compat.IsInGroup() then return end
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or false
+    if fromTicker and inCombat then return end
+    local uiOpen = IsMainWindowOpen()
     if Compat.IsInRaid() then
+        local nowClock = (GetTime and GetTime()) or time()
+        if inCombat then return end
+        if not uiOpen then
+            if fromTicker and (nowClock - lastRaidGroupScan) < 30.0 then
+                return
+            end
+        elseif fromTicker and (nowClock - lastRaidGroupScan) < 12.0 then
+            return
+        end
+        lastRaidGroupScan = nowClock
+        local includeTargets = uiOpen and not fromTicker
         for i = 1, 40 do
             InspectUnit("raid" .. i, "group", fromTicker)
-            InspectUnit("raid" .. i .. "target", "nearby", fromTicker)
+            if includeTargets then
+                InspectUnit("raid" .. i .. "target", "nearby", fromTicker)
+            end
         end
     else
+        local includeTargets = not fromTicker
         for i = 1, 4 do
             InspectUnit("party" .. i, "group", fromTicker)
-            InspectUnit("party" .. i .. "target", "nearby", fromTicker)
+            if includeTargets then
+                InspectUnit("party" .. i .. "target", "nearby", fromTicker)
+            end
         end
     end
-end
-
-local function IsMainWindowOpen()
-    local f = _G.SocialCentralFrame
-    return f ~= nil and f.IsShown ~= nil and f:IsShown() == true
 end
 
 local function ScanActiveEnvironment(fromTicker)
@@ -266,15 +371,27 @@ end
 
 local function OnChat(_, _, text, sender, ...)
     local cleanSender = Safe.String(sender)
+    if not cleanSender then return end
     local guid = select(10, ...)
     local cleanGuid = Safe.String(guid)
-    if not cleanSender then return end
+    local throttleKey = cleanGuid or ("chat:" .. cleanSender:lower())
+    local nowClock = (GetTime and GetTime()) or time()
+    if nearbyInspectCooldown[throttleKey] and nowClock < nearbyInspectCooldown[throttleKey] then
+        return
+    end
+    RecordCooldown(throttleKey, nowClock + 3.5)
+
     if cleanGuid and Compat.CacheForeverFullName then
         Compat.CacheForeverFullName(cleanGuid, cleanSender)
     end
-    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanSender)
-    local bestName = (resolved and resolved.fullName) or cleanSender
-    local guild = cleanGuid and Compat.ReadUnitTooltipGuild and Compat.ReadUnitTooltipGuild(nil, cleanGuid) or nil
+    local bestName = cleanSender
+    if not cleanSender:find("%s") and cleanGuid and Compat.LookupForeverFullName then
+        local resolved = Compat.LookupForeverFullName(cleanGuid, cleanSender, false)
+        if resolved and resolved.fullName then
+            bestName = resolved.fullName
+        end
+    end
+    local guild = cleanGuid and Compat.ReadUnitTooltipGuild and Compat.ReadUnitTooltipGuild(nil, cleanGuid, true) or nil
     RecordSighting(bestName, cleanGuid, nil, nil, Compat.CurrentZoneName(), "chat", guild)
 end
 
@@ -282,14 +399,36 @@ function Nearby:Prune(silent)
     local retentionSec = ((ns.db and ns.db.settings and ns.db.settings.nearbyRetentionMin) or 15) * 60
     local cutoff = time() - retentionSec
     local removed = false
+    local remaining = 0
     for key, row in pairs(Store.nearby) do
         if (row.lastSeen or 0) < cutoff then
-            if row.guid then
+            if row.guid and nearbyByGuid[row.guid] == row then
                 nearbyByGuid[row.guid] = nil
             end
             Store.nearby[key] = nil
             removed = true
+        else
+            remaining = remaining + 1
         end
+    end
+    nearbyCount = remaining
+    nearbyCountSynced = true
+
+    local nowClock = (GetTime and GetTime()) or time()
+    if nearbyCooldownCount >= 400 or not silent then
+        local cdCount = 0
+        for cdKey, expiresAt in pairs(nearbyInspectCooldown) do
+            if nowClock >= expiresAt then
+                nearbyInspectCooldown[cdKey] = nil
+            else
+                cdCount = cdCount + 1
+            end
+        end
+        if cdCount > 600 then
+            wipe(nearbyInspectCooldown)
+            cdCount = 0
+        end
+        nearbyCooldownCount = cdCount
     end
     if removed and not silent then ns:Emit("NEARBY_UPDATED") end
 end
@@ -298,7 +437,15 @@ function Nearby:Clear()
     wipe(Store.nearby)
     wipe(nearbyByGuid)
     wipe(nearbyInspectCooldown)
+    nearbyCount = 0
+    nearbyCountSynced = true
+    nearbyCooldownCount = 0
     ns:Emit("NEARBY_UPDATED")
+end
+
+function Nearby:GetCount()
+    self:Prune(true)
+    return nearbyCount
 end
 
 function Nearby:GetList()
@@ -313,11 +460,30 @@ function Nearby:GetList()
     return out
 end
 
+local function ScheduleGroupScan()
+    if groupScanQueued then return end
+    if C_Timer and C_Timer.After then
+        groupScanQueued = true
+        C_Timer.After(0.60, function()
+            groupScanQueued = false
+            ScanGroup(true)
+        end)
+    else
+        ScanGroup(true)
+    end
+end
+
 function Nearby:Init()
     ns.RegisterEvent(self, "NAME_PLATE_UNIT_ADDED", function(_, _, unit)
+        if (InCombatLockdown and InCombatLockdown()) or (Compat.IsInRaid() and not IsMainWindowOpen()) then
+            return
+        end
         InspectUnit(unit, "nearby")
     end)
     ns.RegisterEvent(self, "FORBIDDEN_NAME_PLATE_UNIT_ADDED", function(_, _, unit)
+        if (InCombatLockdown and InCombatLockdown()) or (Compat.IsInRaid() and not IsMainWindowOpen()) then
+            return
+        end
         InspectUnit(unit, "nearby")
     end)
     ns.RegisterEvent(self, "PLAYER_SOFT_FRIEND_CHANGED", function()
@@ -337,7 +503,12 @@ function Nearby:Init()
         InspectUnit("focus", "nearby")
     end)
     ns.RegisterEvent(self, "UNIT_TARGET", function(_, _, unit)
-        if unit and UnitExists and UnitExists(unit .. "target") then
+        if not unit then return end
+        local isCore = (unit == "player" or unit == "target" or unit == "focus")
+        if not isCore and not IsMainWindowOpen() then
+            return
+        end
+        if UnitExists and UnitExists(unit .. "target") then
             InspectUnit(unit .. "target", "nearby")
         end
     end)
@@ -348,7 +519,7 @@ function Nearby:Init()
     end
     for _, grpEv in ipairs({ "GROUP_ROSTER_UPDATE", "PARTY_MEMBERS_CHANGED", "RAID_ROSTER_UPDATE" }) do
         ns.RegisterEvent(self, grpEv, function()
-            ScanGroup()
+            ScheduleGroupScan()
         end)
     end
 

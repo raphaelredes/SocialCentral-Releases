@@ -13,6 +13,18 @@ table.insert(ns.modules, Social)
 local LAST_ROSTER_ASK = 0
 local ROSTER_MIN_GAP = 30
 local scanQueued = false
+local guildObsScratch = { source = "guild" }
+local friendObsScratch = { source = "friend" }
+local bnetObsScratch = { source = "bnet" }
+
+local function PopulateAndSyncWatchlist(scratch, displayName, online, level, classFile, area, guildName)
+    scratch.online = online
+    scratch.level = level
+    scratch.classFile = classFile
+    scratch.area = area
+    scratch.guild = guildName
+    Store:SyncWatchlistObservation(displayName, scratch)
+end
 
 local function MergeEntry(map, key, patch)
     local row = map[key]
@@ -60,61 +72,58 @@ local function ScanGuild(map)
     local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
 
     for i = 1, total do
-        local name, rankName, rankIndex, level, classLoc, area, note, officerNote, online, status, classFile, _, _, _, _, _, guid = GetGuildRosterInfo(i)
-        name = Safe.String(name)
-        guid = Safe.String(guid)
-        local isOnline = (online == true or online == 1)
-        if name and not Compat.IsMe(name, guid) then
-            local parsed = Compat.ParseCharacterName(name)
-            if parsed then
-                if guid and Compat.CacheForeverFullName then
-                    Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
-                end
-                if Compat.CacheGuildMember then
-                    Compat.CacheGuildMember(guid, parsed.firstName, parsed.displayName)
-                end
-                if isOnline then
-                    onlineCount = onlineCount + 1
-                    local key = guid or ("char:" .. parsed.lookupKey)
-                    local cleanArea = Safe.String(area) or ""
-                    local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
-                    local cleanLevel = Safe.Number(level)
-                    MergeEntry(map, key, {
-                        displayName = parsed.displayName,
-                        lookupKey = parsed.lookupKey,
-                        guid = guid,
-                        level = cleanLevel,
-                        classFile = cleanClass,
-                        area = cleanArea,
-                        guild = info.name,
-                        rankName = Safe.String(rankName),
-                        note = Safe.String(note),
-                        statusFlag = Safe.Number(status) or 0,
-                        sources = { guild = true },
-                    })
-                    if hasWatchlist then
-                        Store:SyncWatchlistObservation(parsed.displayName, {
-                            online = true,
-                            source = "guild",
+        local okG, name, rankName, rankIndex, level, classLoc, area, note, officerNote, online, status, classFile, _, _, _, _, _, guid = pcall(GetGuildRosterInfo, i)
+        if okG then
+            name = Safe.String(name)
+            guid = Safe.String(guid)
+            local isOnline = (online == true or online == 1)
+            if name and not Compat.IsMe(name, guid) then
+                local parsed = Compat.ParseCharacterName(name)
+                if parsed then
+                    if guid and Compat.CacheForeverFullName then
+                        Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                    end
+                    if Compat.CacheGuildMember then
+                        Compat.CacheGuildMember(guid, parsed.firstName, parsed.displayName)
+                    end
+                    if isOnline then
+                        onlineCount = onlineCount + 1
+                        local key = guid or ("char:" .. parsed.lookupKey)
+                        local cleanArea = Safe.String(area) or ""
+                        local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
+                        local cleanLevel = Safe.Number(level)
+                        MergeEntry(map, key, {
+                            displayName = parsed.displayName,
+                            lookupKey = parsed.lookupKey,
+                            guid = guid,
                             level = cleanLevel,
                             classFile = cleanClass,
                             area = cleanArea,
-                            guild = info.name or "",
+                            guild = info.name,
+                            rankName = Safe.String(rankName),
+                            note = Safe.String(note),
+                            statusFlag = Safe.Number(status) or 0,
+                            online = true,
+                            sources = { guild = true },
                         })
+                        if hasWatchlist then
+                            PopulateAndSyncWatchlist(guildObsScratch, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, info.name or "")
+                        end
+                    elseif hasWatchlist then
+                        PopulateAndSyncWatchlist(
+                            guildObsScratch,
+                            parsed.displayName,
+                            false,
+                            Safe.Number(level),
+                            Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc)),
+                            Safe.String(area) or "",
+                            info.name or ""
+                        )
                     end
-                elseif hasWatchlist then
-                    Store:SyncWatchlistObservation(parsed.displayName, {
-                        online = false,
-                        source = "guild",
-                        level = Safe.Number(level),
-                        classFile = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc)),
-                        area = Safe.String(area) or "",
-                        guild = info.name or "",
-                    })
                 end
+            elseif isOnline and name then
+                onlineCount = onlineCount + 1
             end
-        elseif isOnline and name then
-            onlineCount = onlineCount + 1
         end
     end
 
@@ -122,6 +131,8 @@ local function ScanGuild(map)
 end
 
 local function ScanCharacterFriends(map)
+    local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
+    local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
     if C_FriendList and C_FriendList.GetNumFriends and C_FriendList.GetFriendInfoByIndex then
         local count = Safe.Number(Safe.Call(C_FriendList.GetNumFriends)) or 0
         for i = 1, count do
@@ -151,23 +162,14 @@ local function ScanCharacterFriends(map)
                                 note = Safe.String(f.notes),
                                 afk = Safe.Value(f.afk) == true,
                                 dnd = Safe.Value(f.dnd) == true,
+                                online = true,
                                 sources = { friend = true },
                             })
-                            Store:SyncWatchlistObservation(parsed.displayName, {
-                                online = true,
-                                source = "friend",
-                                level = cleanLevel,
-                                classFile = cleanClass,
-                                area = cleanArea,
-                            })
-                        else
-                            Store:SyncWatchlistObservation(parsed.displayName, {
-                                online = false,
-                                source = "friend",
-                                level = cleanLevel,
-                                classFile = cleanClass,
-                                area = cleanArea,
-                            })
+                            if hasWatchlist then
+                                PopulateAndSyncWatchlist(friendObsScratch, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, nil)
+                            end
+                        elseif hasWatchlist then
+                            PopulateAndSyncWatchlist(friendObsScratch, parsed.displayName, false, cleanLevel, cleanClass, cleanArea, nil)
                         end
                     end
                 end
@@ -176,45 +178,39 @@ local function ScanCharacterFriends(map)
     elseif GetNumFriends and GetFriendInfo then
         local count = Safe.Number(Safe.Call(GetNumFriends)) or 0
         for i = 1, count do
-            local rawName, level, classLoc, area, connected, status, notes = GetFriendInfo(i)
-            rawName = Safe.String(rawName)
-            local isOnline = (connected == true or connected == 1)
-            if rawName and not Compat.IsMe(rawName, nil) then
-                local parsed = Compat.ParseCharacterName(rawName)
-                if parsed then
-                    local cleanClass = Compat.ClassFileFromLocalized(Safe.String(classLoc))
-                    local cleanLevel = Safe.Number(level)
-                    local cleanArea = Safe.String(area) or ""
-                    if isOnline then
-                        local key = "char:" .. parsed.lookupKey
-                        local isAfk = (status == "<AFK>" or (CHAT_FLAG_AFK and status == CHAT_FLAG_AFK))
-                        local isDnd = (status == "<DND>" or (CHAT_FLAG_DND and status == CHAT_FLAG_DND))
-                        MergeEntry(map, key, {
-                            displayName = parsed.displayName,
-                            lookupKey = parsed.lookupKey,
-                            level = cleanLevel,
-                            classFile = cleanClass,
-                            area = cleanArea,
-                            note = Safe.String(notes),
-                            afk = isAfk,
-                            dnd = isDnd,
-                            sources = { friend = true },
-                        })
-                        Store:SyncWatchlistObservation(parsed.displayName, {
-                            online = true,
-                            source = "friend",
-                            level = cleanLevel,
-                            classFile = cleanClass,
-                            area = cleanArea,
-                        })
-                    else
-                        Store:SyncWatchlistObservation(parsed.displayName, {
-                            online = false,
-                            source = "friend",
-                            level = cleanLevel,
-                            classFile = cleanClass,
-                            area = cleanArea,
-                        })
+            local okF, rawName, level, classLoc, area, connected, status, notes = pcall(GetFriendInfo, i)
+            if okF then
+                rawName = Safe.String(rawName)
+                local isOnline = (connected == true or connected == 1)
+                if rawName and not Compat.IsMe(rawName, nil) then
+                    local parsed = Compat.ParseCharacterName(rawName)
+                    if parsed then
+                        local cleanClass = Compat.ClassFileFromLocalized(Safe.String(classLoc))
+                        local cleanLevel = Safe.Number(level)
+                        local cleanArea = Safe.String(area) or ""
+                        if isOnline then
+                            local key = "char:" .. parsed.lookupKey
+                            local cleanStatus = Safe.String(status)
+                            local isAfk = (cleanStatus == "<AFK>" or (CHAT_FLAG_AFK and cleanStatus == CHAT_FLAG_AFK))
+                            local isDnd = (cleanStatus == "<DND>" or (CHAT_FLAG_DND and cleanStatus == CHAT_FLAG_DND))
+                            MergeEntry(map, key, {
+                                displayName = parsed.displayName,
+                                lookupKey = parsed.lookupKey,
+                                level = cleanLevel,
+                                classFile = cleanClass,
+                                area = cleanArea,
+                                note = Safe.String(notes),
+                                afk = isAfk,
+                                dnd = isDnd,
+                                online = true,
+                                sources = { friend = true },
+                            })
+                            if hasWatchlist then
+                                PopulateAndSyncWatchlist(friendObsScratch, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, nil)
+                            end
+                        elseif hasWatchlist then
+                            PopulateAndSyncWatchlist(friendObsScratch, parsed.displayName, false, cleanLevel, cleanClass, cleanArea, nil)
+                        end
                     end
                 end
             end
@@ -224,6 +220,8 @@ end
 
 local function ScanBattleNet(map)
     if not (BNGetNumFriends and C_BattleNet and C_BattleNet.GetFriendAccountInfo) then return end
+    local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
+    local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
     local count = Safe.Number(Safe.Call(BNGetNumFriends)) or 0
     for i = 1, count do
         local account = Safe.Call(C_BattleNet.GetFriendAccountInfo, i)
@@ -257,24 +255,19 @@ local function ScanBattleNet(map)
                         lookupKey = parsed.lookupKey,
                         guid = guid,
                         bnetName = accountName,
-                        bnetAccountID = Safe.Number(g.gameAccountID),
+                        bnetAccountID = Safe.Number(account.bnetAccountID) or Safe.Number(g.gameAccountID),
                         level = cleanLevel,
                         classFile = cleanClass,
                         area = cleanArea,
                         faction = cleanFaction,
                         samePool = samePool,
                         sameFaction = sameFaction,
+                        online = true,
                         sources = { bnet = true },
                     })
 
-                    if samePool and sameFaction then
-                        Store:SyncWatchlistObservation(parsed.displayName, {
-                            online = true,
-                            source = "bnet",
-                            level = cleanLevel,
-                            classFile = cleanClass,
-                            area = cleanArea,
-                        })
+                    if hasWatchlist and samePool and sameFaction then
+                        PopulateAndSyncWatchlist(bnetObsScratch, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, nil)
                     end
                 end
             end
@@ -283,6 +276,7 @@ local function ScanBattleNet(map)
 end
 
 local lastScanAt = 0
+local SCANNERS = { ScanGuild, ScanCharacterFriends, ScanBattleNet }
 
 function Social:Scan()
     lastScanAt = (GetTime and GetTime()) or 0
@@ -290,11 +284,34 @@ function Social:Scan()
         Compat.SyncRosterForeverNames()
     end
     local nextMap = {}
-    for _, scanner in ipairs({ ScanGuild, ScanCharacterFriends, ScanBattleNet }) do
+    for _, scanner in ipairs(SCANNERS) do
         local ok, err = pcall(scanner, nextMap)
         if not ok and geterrorhandler then geterrorhandler()(err) end
     end
     Store.social = nextMap
+    local byLookup, byGuid, counts = {}, {}, { all = 0 }
+    for _, row in pairs(nextMap) do
+        counts.all = counts.all + 1
+        if row.sources then
+            for s, enabled in pairs(row.sources) do
+                if enabled then
+                    counts[s] = (counts[s] or 0) + 1
+                end
+            end
+        end
+        if row.guid and row.guid ~= "" then
+            byGuid[row.guid] = row
+        end
+        if row.lookupKey and row.lookupKey ~= "" then
+            local prev = byLookup[row.lookupKey]
+            if not prev or (row.samePool ~= false and prev.samePool == false) then
+                byLookup[row.lookupKey] = row
+            end
+        end
+    end
+    self._counts = counts
+    Store.socialByLookup = byLookup
+    Store.socialByGuid = byGuid
     ns:Emit("SOCIAL_UPDATED")
 end
 
@@ -328,6 +345,14 @@ function Social:GetList(filterSource)
         return (a.displayName or "") < (b.displayName or "")
     end)
     return out
+end
+
+function Social:GetCount(filterSource)
+    if not self._counts then return 0 end
+    if not filterSource or filterSource == "all" then
+        return self._counts.all or 0
+    end
+    return self._counts[filterSource] or 0
 end
 
 function Social:QueueScan(delay)

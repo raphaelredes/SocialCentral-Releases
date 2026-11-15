@@ -7,8 +7,12 @@ ns.Theme = Theme
 local WHITE8X8 = "Interface\\Buttons\\WHITE8X8"
 local listeners = {}
 
-local function HasAtlas(atlasName)
+function Theme:HasAtlas(atlasName)
     return C_Texture and C_Texture.GetAtlasInfo and atlasName and C_Texture.GetAtlasInfo(atlasName) ~= nil
+end
+
+local function HasAtlas(atlasName)
+    return Theme:HasAtlas(atlasName)
 end
 
 Theme.PALETTES = {
@@ -188,14 +192,38 @@ function Theme:NotifyChanged()
     end
 end
 
+local function ApplyBackdropSpec(frame, spec, bg, border, forceOpaque)
+    if frame._scAppliedBackdrop ~= spec then
+        frame:SetBackdrop(spec)
+        frame._scAppliedBackdrop = spec
+    end
+    if bg then
+        local a = forceOpaque and 1.0 or (bg[4] or 1.0)
+        frame:SetBackdropColor(bg[1], bg[2], bg[3], a)
+    end
+    if border then
+        local ba = forceOpaque and 1.0 or (border[4] or 1.0)
+        frame:SetBackdropBorderColor(border[1], border[2], border[3], ba)
+    end
+end
+
 --- Apply a flat, bordered, or Blizzard-official backdrop to a frame created with BackdropTemplate.
 function Theme:ApplyBackdrop(frame, kind, palette)
     if not frame or not frame.SetBackdrop then
         return
     end
     local p = palette or self:GetPalette()
-    if kind == "none" then
-        frame:SetBackdrop(nil)
+    local resolvedKind = kind or "surface"
+    local sig = resolvedKind .. ":" .. tostring(p and p.key or "dark")
+    if frame._scBackdropSig == sig then
+        return
+    end
+    frame._scBackdropSig = sig
+    if resolvedKind == "none" then
+        if frame._scAppliedBackdrop ~= nil then
+            frame:SetBackdrop(nil)
+            frame._scAppliedBackdrop = nil
+        end
         if frame._solidOpaqueBg then
             frame._solidOpaqueBg:Hide()
         end
@@ -230,8 +258,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            frame:SetBackdrop(FLAT_BACKDROP_SPEC)
-            frame:SetBackdropColor(0.055, 0.052, 0.050, 1.0)
+            ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, { 0.055, 0.052, 0.050 }, nil, true)
             if not frame._foreverRowBg then
                 frame._foreverRowBg = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
                 frame._foreverRowBg:SetAllPoints(frame)
@@ -252,9 +279,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
         end
 
         if kind == "surface" and frame._foreverRowBg then
-            frame:SetBackdrop(BACKDROP_SPEC)
-            frame:SetBackdropColor(0.14, 0.11, 0.06, 1.0)
-            frame:SetBackdropBorderColor(0.84, 0.66, 0.24, 1.0)
+            ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.14, 0.11, 0.06 }, { 0.84, 0.66, 0.24 }, true)
             frame._foreverRowBg:SetVertexColor(1.0, 0.88, 0.58, 1.0)
             frame._foreverRowBg:Show()
             return
@@ -268,14 +293,10 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            frame:SetBackdrop(BLIZZ_DIALOG_BACKDROP)
-            frame:SetBackdropColor(0.08, 0.075, 0.07, 1.0)
-            frame:SetBackdropBorderColor(0.86, 0.80, 0.68, 1.0)
+            ApplyBackdropSpec(frame, BLIZZ_DIALOG_BACKDROP, { 0.08, 0.075, 0.07 }, { 0.86, 0.80, 0.68 }, true)
             return
         elseif kind == "header" then
-            frame:SetBackdrop(hasStoneAtlas and BACKDROP_SPEC or BLIZZ_SURFACE_BACKDROP)
-            frame:SetBackdropColor(0.085, 0.08, 0.07, 1.0)
-            frame:SetBackdropBorderColor(0.46, 0.38, 0.22, 1.0)
+            ApplyBackdropSpec(frame, hasStoneAtlas and BACKDROP_SPEC or BLIZZ_SURFACE_BACKDROP, { 0.085, 0.08, 0.07 }, { 0.46, 0.38, 0.22 }, true)
             if hasStoneAtlas then
                 if not frame._foreverSurfaceStone then
                     frame._foreverSurfaceStone = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
@@ -293,13 +314,9 @@ function Theme:ApplyBackdrop(frame, kind, palette)
                 frame._foreverSurfaceStone:Hide()
             end
             if hasListAtlas or hasStoneAtlas then
-                frame:SetBackdrop(BACKDROP_SPEC)
-                frame:SetBackdropColor(0.055, 0.052, 0.050, 1.0)
-                frame:SetBackdropBorderColor(0.32, 0.27, 0.18, 1.0)
+                ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.055, 0.052, 0.050 }, { 0.32, 0.27, 0.18 }, true)
             else
-                frame:SetBackdrop(BLIZZ_INSET_BACKDROP)
-                frame:SetBackdropColor(0.12, 0.11, 0.10, 1.0)
-                frame:SetBackdropBorderColor(0.58, 0.52, 0.40, 1.0)
+                ApplyBackdropSpec(frame, BLIZZ_INSET_BACKDROP, { 0.12, 0.11, 0.10 }, { 0.58, 0.52, 0.40 }, true)
             end
             return
         elseif kind == "surface" then
@@ -307,13 +324,9 @@ function Theme:ApplyBackdrop(frame, kind, palette)
                 frame._foreverSurfaceStone:Hide()
             end
             if hasListAtlas or hasStoneAtlas then
-                frame:SetBackdrop(BACKDROP_SPEC)
-                frame:SetBackdropColor(0.068, 0.064, 0.060, 1.0)
-                frame:SetBackdropBorderColor(0.42, 0.35, 0.22, 1.0)
+                ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.068, 0.064, 0.060 }, { 0.42, 0.35, 0.22 }, true)
             else
-                frame:SetBackdrop(BLIZZ_SURFACE_BACKDROP)
-                frame:SetBackdropColor(0.14, 0.13, 0.12, 1.0)
-                frame:SetBackdropBorderColor(0.48, 0.43, 0.34, 1.0)
+                ApplyBackdropSpec(frame, BLIZZ_SURFACE_BACKDROP, { 0.14, 0.13, 0.12 }, { 0.48, 0.43, 0.34 }, true)
             end
             return
         end
@@ -354,14 +367,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
         bg, border = p.surfaceBg, p.surfaceBorder
     end
 
-    if border then
-        frame:SetBackdrop(BACKDROP_SPEC)
-        frame:SetBackdropColor(bg[1], bg[2], bg[3], 1.0)
-        frame:SetBackdropBorderColor(border[1], border[2], border[3], 1.0)
-    else
-        frame:SetBackdrop(FLAT_BACKDROP_SPEC)
-        frame:SetBackdropColor(bg[1], bg[2], bg[3], 1.0)
-    end
+    ApplyBackdropSpec(frame, border and BACKDROP_SPEC or FLAT_BACKDROP_SPEC, bg, border, true)
 end
 
 local function SyncBlizzTextOffset(btn, xOff, yOff)
@@ -397,25 +403,36 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
     end
 end
 
+local sharedMeasureProbe
+
 local function MeasureLabelWidth(btn)
     if not btn or not btn.label then
         return 0
     end
     local prevText = btn.label:GetText() or ""
+    local fontObj = (btn.label.GetFontObject and btn.label:GetFontObject()) or GameFontHighlightSmall
+    if btn._scMeasuredText == prevText and btn._scMeasuredFont == fontObj and btn._scMeasuredW then
+        return btn._scMeasuredW
+    end
     local directW = 0
     if btn.label.GetUnboundedStringWidth then
         directW = math.ceil(btn.label:GetUnboundedStringWidth() or 0)
     end
-    local probe = btn._measureProbe
-    if not probe then
-        probe = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        probe:Hide()
-        btn._measureProbe = probe
+    if not sharedMeasureProbe and UIParent and UIParent.CreateFontString then
+        sharedMeasureProbe = UIParent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        sharedMeasureProbe:Hide()
     end
-    probe:SetFontObject(btn.label:GetFontObject() or GameFontHighlightSmall)
-    probe:SetText(prevText)
-    local probeW = math.ceil(probe:GetStringWidth() or 0)
-    return math.max(directW, probeW)
+    local probeW = 0
+    if sharedMeasureProbe then
+        sharedMeasureProbe:SetFontObject(fontObj)
+        sharedMeasureProbe:SetText(prevText)
+        probeW = math.ceil(sharedMeasureProbe:GetStringWidth() or 0)
+    end
+    local measured = math.max(directW, probeW)
+    btn._scMeasuredText = prevText
+    btn._scMeasuredFont = fontObj
+    btn._scMeasuredW = measured
+    return measured
 end
 
 function Theme:MeasureTextWidth(btn)
@@ -509,12 +526,18 @@ local function ApplyButtonColors(btn, hovered)
     if isBlizz and variant ~= "ghost" and (variant == "tab" or w >= 26) then
         local vis, kind = EnsureBlizzButtonVisual(btn, variant == "tab")
         if vis then
-            btn:SetBackdrop(nil)
+            if btn._scAppliedBackdrop ~= nil then
+                btn:SetBackdrop(nil)
+                btn._scAppliedBackdrop = nil
+            end
             vis:SetFrameLevel(math.max(0, btn:GetFrameLevel() + 1))
             vis:ClearAllPoints()
             if kind == "tab" then
                 vis:SetAllPoints(btn)
-                vis:SetBackdrop(BACKDROP_SPEC)
+                if vis._scAppliedBackdrop ~= BACKDROP_SPEC then
+                    vis:SetBackdrop(BACKDROP_SPEC)
+                    vis._scAppliedBackdrop = BACKDROP_SPEC
+                end
                 if active then
                     vis:SetBackdropColor(0.14, 0.12, 0.09, 0.98)
                     vis:SetBackdropBorderColor(0.84, 0.66, 0.24, 1)
@@ -630,9 +653,7 @@ local function ApplyButtonColors(btn, hovered)
         textColor = p.text
     end
 
-    btn:SetBackdrop(BACKDROP_SPEC)
-    btn:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
-    btn:SetBackdropBorderColor(border[1], border[2], border[3], border[4] or 1)
+    ApplyBackdropSpec(btn, BACKDROP_SPEC, bg, border, false)
     if btn.label then
         btn.label:SetTextColor(textColor[1], textColor[2], textColor[3])
     end
@@ -738,7 +759,14 @@ end
 --- Update button text while preserving padding/variant.
 function Theme:SetButtonText(btn, text)
     if btn and btn.label then
-        btn.label:SetText(text or "")
+        local cleanText = text or ""
+        local p = self:GetPalette()
+        if btn._scLastBtnText == cleanText and btn._scThemeKey == p.key and btn.label:GetText() == cleanText then
+            return
+        end
+        btn._scLastBtnText = cleanText
+        btn._scMeasuredText = nil
+        btn.label:SetText(cleanText)
         if btn._scAutoFit then
             self:AutoFitButton(btn)
         else
@@ -752,7 +780,13 @@ function Theme:SetButtonActive(btn, active, variant)
     if not btn then
         return
     end
-    btn._scActive = active and true or false
+    local nextActive = active and true or false
+    local nextVariant = variant or btn._scVariant
+    local p = self:GetPalette()
+    if btn._scActive == nextActive and btn._scVariant == nextVariant and btn._scThemeKey == p.key then
+        return
+    end
+    btn._scActive = nextActive
     if variant then
         btn._scVariant = variant
     end
@@ -832,7 +866,8 @@ function Theme:CreateEditBox(parent, opts)
     box:SetSize(opts.width or 180, opts.height or 24)
     box:SetAutoFocus(opts.autoFocus == true)
     box:SetFontObject(opts.font or GameFontHighlight)
-    box:SetTextInsets(9, 9, 2, 2)
+    local rightInset = opts.clearButton and 22 or 9
+    box:SetTextInsets(9, rightInset, 2, 2)
     box:SetJustifyH("LEFT")
     if opts.maxLetters then
         box:SetMaxLetters(opts.maxLetters)
@@ -843,11 +878,41 @@ function Theme:CreateEditBox(parent, opts)
 
     local placeholder = box:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     placeholder:SetPoint("LEFT", box, "LEFT", 9, 0)
-    placeholder:SetPoint("RIGHT", box, "RIGHT", -9, 0)
+    placeholder:SetPoint("RIGHT", box, "RIGHT", -rightInset, 0)
     placeholder:SetJustifyH("LEFT")
     placeholder:SetWordWrap(false)
     placeholder:SetText(opts.placeholder or "")
     box.placeholder = placeholder
+
+    if opts.clearButton then
+        local clearBtn = CreateFrame("Button", nil, box)
+        clearBtn:SetSize(16, 16)
+        clearBtn:SetPoint("RIGHT", box, "RIGHT", -4, 0)
+        clearBtn:SetFrameLevel((box:GetFrameLevel() or 1) + 4)
+        local xText = clearBtn:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        xText:SetPoint("CENTER", 0, 0)
+        xText:SetText("x")
+        clearBtn.label = xText
+        clearBtn:SetScript("OnEnter", function()
+            xText:SetFontObject(GameFontHighlightSmall)
+        end)
+        clearBtn:SetScript("OnLeave", function()
+            xText:SetFontObject(GameFontDisableSmall)
+        end)
+        clearBtn:SetScript("OnClick", function()
+            box:SetText("")
+        end)
+        clearBtn:Hide()
+        box._scClearBtn = clearBtn
+    end
+
+    function box:UpdateClearButton()
+        if not self._scClearBtn then
+            return
+        end
+        local txt = self:GetText() or ""
+        self._scClearBtn:SetShown(txt ~= "")
+    end
 
     function box:UpdatePlaceholder()
         if not self.placeholder then
@@ -877,6 +942,7 @@ function Theme:CreateEditBox(parent, opts)
     end)
     box:SetScript("OnTextChanged", function(self)
         self:UpdatePlaceholder()
+        self:UpdateClearButton()
     end)
     box:SetScript("OnEnter", function(self)
         self._scHovered = true
@@ -1263,7 +1329,11 @@ function Theme:CreateHelpButton(parent, title, whatText, howText, size)
         Theme:ShowHelpPopup(title, whatText, howText)
     end)
     self:RegisterListener(function()
-        self:StyleButton(btn, "default")
+        if btn:IsVisible() then
+            self:StyleButton(btn, "default")
+        else
+            btn._scThemeKey = nil
+        end
     end)
     return btn
 end
@@ -2033,14 +2103,21 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
             local item = self.items[dataIdx]
             if item then
                 local y = -((poolIdx - 1) * self.rowHeight) + subOffset
-                row:ClearAllPoints()
-                row:SetPoint("TOPLEFT", viewport, "TOPLEFT", 0, y)
-                row:SetPoint("TOPRIGHT", viewport, "TOPRIGHT", 0, y)
+                if row._scRenderedY ~= y then
+                    row._scRenderedY = y
+                    row:ClearAllPoints()
+                    row:SetPoint("TOPLEFT", viewport, "TOPLEFT", 0, y)
+                    row:SetPoint("TOPRIGHT", viewport, "TOPRIGHT", 0, y)
+                end
                 Theme:ApplyBackdrop(row, (dataIdx % 2 == 1) and "row" or "rowAlt", p)
                 updateRowFn(row, item, dataIdx, p)
-                row:Show()
+                if not row:IsShown() then
+                    row:Show()
+                end
             else
-                row:Hide()
+                if row:IsShown() then
+                    row:Hide()
+                end
             end
         end
 
@@ -2095,25 +2172,10 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     local dragging = false
     local dragStartY = 0
     local dragStartOffset = 0
-    thumb:SetScript("OnMouseDown", function(_, button)
-        if button ~= "LeftButton" then
-            return
-        end
-        dragging = true
-        local _, cursorY = GetCursorPosition()
-        local scale = thumb:GetEffectiveScale() or 1
-        dragStartY = cursorY / scale
-        dragStartOffset = list.offset
-    end)
-    thumb:SetScript("OnMouseUp", function()
-        dragging = false
-    end)
-    thumb:SetScript("OnUpdate", function()
-        if not dragging then
-            return
-        end
-        if not IsMouseButtonDown("LeftButton") then
+    local function OnThumbUpdate()
+        if not dragging or not IsMouseButtonDown("LeftButton") then
             dragging = false
+            thumb:SetScript("OnUpdate", nil)
             return
         end
         local maxOffset = GetMaxOffset()
@@ -2125,7 +2187,24 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
         local dy = dragStartY - (cursorY / scale)
         list.offset = math.max(0, math.min(maxOffset, dragStartOffset + (dy / travel) * maxOffset))
         list:Render()
+    end
+    local function StopThumbDrag()
+        dragging = false
+        thumb:SetScript("OnUpdate", nil)
+    end
+    thumb:SetScript("OnMouseDown", function(_, button)
+        if button ~= "LeftButton" then
+            return
+        end
+        dragging = true
+        local _, cursorY = GetCursorPosition()
+        local scale = thumb:GetEffectiveScale() or 1
+        dragStartY = cursorY / scale
+        dragStartOffset = list.offset
+        thumb:SetScript("OnUpdate", OnThumbUpdate)
     end)
+    thumb:SetScript("OnMouseUp", StopThumbDrag)
+    thumb:SetScript("OnHide", StopThumbDrag)
 
     UpdateTrackColors(false)
     return list

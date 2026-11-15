@@ -259,7 +259,7 @@ local function MatchesCategoryFilter(item, catId)
 end
 
 local function HasAtlas(name)
-    return name and C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(name) ~= nil
+    return ns.Theme and ns.Theme.HasAtlas and ns.Theme:HasAtlas(name)
 end
 
 local function MaxHierarchyLevel(root, depth)
@@ -672,8 +672,10 @@ local function ApplyTexSpec(tex, spec, fallbackAtlas, fallbackTex, l, r, t, b)
 end
 
 local function HarvestLfgListingArt(forceRefresh)
-    if lfgArtCache and not forceRefresh and next(lfgArtCache.banners) ~= nil then
-        return lfgArtCache
+    if lfgArtCache and next(lfgArtCache.banners) ~= nil then
+        if not forceRefresh or next(lfgArtCache.roles) ~= nil then
+            return lfgArtCache
+        end
     end
     local cache = lfgArtCache or { roles = {}, banners = {} }
     if forceRefresh then
@@ -935,8 +937,8 @@ function LFGFrameTab:GetFilteredCategoryActivities(catId, showAll)
         end
         return out
     end
-    local lvl = (UnitLevel and UnitLevel("player")) or 60
-    if type(lvl) ~= "number" or lvl <= 0 then lvl = 60 end
+    local lvl = ns.Safe and ns.Safe.Number(UnitLevel and UnitLevel("player")) or 60
+    if lvl <= 0 then lvl = 60 end
     for i = 1, #source do
         local act = source[i]
         if lvl >= (act.minLvl or 1) and lvl <= (act.maxLvl or 60) then
@@ -1114,14 +1116,14 @@ function LFGFrameTab:UpdateViewLayout()
     end
 
     self:UpdateRoleControls()
-    self:UpdateBottomButtons()
+    self:UpdateBottomButtons(hasListing)
 end
 
 function LFGFrameTab:UpdateComposerLayout()
     self:UpdateViewLayout()
 end
 
-function LFGFrameTab:UpdateBottomButtons()
+function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     local c = self.controls
     if not c then return end
     local combat = IsCombatLocked()
@@ -1140,7 +1142,7 @@ function LFGFrameTab:UpdateBottomButtons()
     if c.listSelfBtn and c.listSelfBtn.SetEnabled then
         c.listSelfBtn:SetEnabled(canList)
     end
-    local hasListing = self:HasSelfActiveListing()
+    local hasListing = (hasSelfListingOverride ~= nil) and hasSelfListingOverride or self:HasSelfActiveListing()
     if c.unlistBtn and c.unlistBtn.SetEnabled then
         c.unlistBtn:SetEnabled(hasListing and not combat)
     end
@@ -1594,12 +1596,15 @@ local function UpdateLfgRow(row, item, _, palette)
     end
 
     local isLeaderOrGroup = (item.mode == "LFM" or item.sourceType == "EVENT")
-    row.partyIcon:SetShown(isLeaderOrGroup)
-    row.nameFs:ClearAllPoints()
-    if isLeaderOrGroup then
-        row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 28, -9)
-    else
-        row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 12, -9)
+    if row._lastLeaderMode ~= isLeaderOrGroup then
+        row._lastLeaderMode = isLeaderOrGroup
+        row.partyIcon:SetShown(isLeaderOrGroup)
+        row.nameFs:ClearAllPoints()
+        if isLeaderOrGroup then
+            row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 28, -9)
+        else
+            row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 12, -9)
+        end
     end
 
     local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or item.displayName) or Store:GetSocialMeta(item.lookupKey or item.displayName))
@@ -2872,6 +2877,19 @@ end
 -- ============================================================================
 -- Official Game Window Transition #3: CommunitiesFrame / GuildFrame ('J')
 -- ============================================================================
+local COMMUNITIES_NATIVE_TABS = {
+    "ChatTab",
+    "RosterTab",
+    "GuildBenefitsTab",
+    "GuildInfoTab",
+    "GuildPreferredPlaySettingsTab",
+    "PerkRewardsTab",
+    "Tab1",
+    "Tab2",
+    "Tab3",
+    "Tab4",
+}
+
 function LFGFrameTab:EnsureGuildSideTab()
     local parent = _G.CommunitiesFrame or _G.GuildFrame
     if not parent then return end
@@ -2879,7 +2897,7 @@ function LFGFrameTab:EnsureGuildSideTab()
     local nativeTabs = DiscoverRightSideTabs(
         parent,
         self.guildTab,
-        { "ChatTab", "RosterTab", "GuildBenefitsTab", "GuildInfoTab", "GuildPreferredPlaySettingsTab" }
+        COMMUNITIES_NATIVE_TABS
     )
     local lastNative = nativeTabs[#nativeTabs]
 
@@ -2905,14 +2923,14 @@ function LFGFrameTab:EnsureGuildSideTab()
         local defaultGap = (self.guildTab:GetWidth() or 32) < 44 and -20 or -2
         local gapY = MeasureTabGap(nativeTabs, defaultGap)
         self.guildTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
-        if not self.guildTab._nativeTabsHooked then
-            self.guildTab._nativeTabsHooked = true
-            for _, nt in ipairs(nativeTabs) do
-                if nt.HasScript and nt:HasScript("OnClick") then
-                    nt:HookScript("OnClick", function()
-                        if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                    end)
-                end
+        -- Hook every native tab individually as guild-only tabs can appear dynamically when switching clubs.
+        for _, nt in ipairs(nativeTabs) do
+            if nt.HasScript and nt:HasScript("OnClick") and not nt._scGuildCloseHooked then
+                nt._scGuildCloseHooked = true
+                nt:HookScript("OnClick", function(clickedTab)
+                    parent._scLastNativeTab = clickedTab
+                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                end)
             end
         end
     else
@@ -2935,13 +2953,22 @@ function LFGFrameTab:AttachCommunitiesUI()
         end
     end)
 
-    if hooksecurefunc and type(parent.SetDisplayMode) == "function" then
-        hooksecurefunc(parent, "SetDisplayMode", function()
-            if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-            if C_Timer and C_Timer.After then
-                C_Timer.After(0, function() LFGFrameTab:EnsureGuildSideTab() end)
-            end
-        end)
+    if hooksecurefunc then
+        if type(parent.SetDisplayMode) == "function" then
+            hooksecurefunc(parent, "SetDisplayMode", function()
+                if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                if C_Timer and C_Timer.After then
+                    C_Timer.After(0, function() LFGFrameTab:EnsureGuildSideTab() end)
+                end
+            end)
+        end
+        if type(parent.OnClubSelected) == "function" then
+            hooksecurefunc(parent, "OnClubSelected", function()
+                if C_Timer and C_Timer.After then
+                    C_Timer.After(0, function() LFGFrameTab:EnsureGuildSideTab() end)
+                end
+            end)
+        end
     end
 
     if parent.IsShown and parent:IsShown() then
@@ -3163,11 +3190,9 @@ local WORLD_BUFF_MAP_PINS = {
 }
 
 local function GetPlayerFactionSafe()
-    if UnitFactionGroup then
-        local f = Safe and Safe.Value and Safe.Value(UnitFactionGroup("player")) or UnitFactionGroup("player")
-        if f == "Alliance" or f == "Horde" then
-            return f
-        end
+    local f = ns.Compat and ns.Compat.PlayerFaction and ns.Compat.PlayerFaction()
+    if f == "Alliance" or f == "Horde" then
+        return f
     end
     return "Both"
 end
@@ -3204,27 +3229,45 @@ local function ProjectWorldMapCoord(pinDef, targetMapID)
     if pinDef.mapID == targetMapID then
         return pinDef.x, pinDef.y
     end
+    local cache = pinDef._projCache
+    if cache then
+        local hit = cache[targetMapID]
+        if hit ~= nil then
+            if hit == false then return nil, nil end
+            return hit[1], hit[2]
+        end
+    else
+        cache = {}
+        pinDef._projCache = cache
+    end
+    local px, py
     if C_Map and C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D then
         local ok1, inst, worldPos = pcall(C_Map.GetWorldPosFromMapPos, pinDef.mapID, CreateVector2D(pinDef.x, pinDef.y))
         if ok1 and inst and worldPos then
             local ok2, outMapID, outPos = pcall(C_Map.GetMapPosFromWorldPos, inst, worldPos, targetMapID)
             if ok2 and outMapID == targetMapID and outPos then
-                local px, py
                 if outPos.GetXY then
                     px, py = outPos:GetXY()
                 else
                     px, py = outPos.x, outPos.y
                 end
-                if type(px) == "number" and type(py) == "number" and px >= 0.01 and px <= 0.99 and py >= 0.01 and py <= 0.99 then
-                    return px, py
+                if not (type(px) == "number" and type(py) == "number" and px >= 0.01 and px <= 0.99 and py >= 0.01 and py <= 0.99) then
+                    px, py = nil, nil
                 end
             end
         end
     end
-    local fallback = pinDef.continent and pinDef.continent[targetMapID]
-    if fallback then
-        return fallback[1], fallback[2]
+    if not px then
+        local fallback = pinDef.continent and pinDef.continent[targetMapID]
+        if fallback then
+            px, py = fallback[1], fallback[2]
+        end
     end
+    if px and py then
+        cache[targetMapID] = { px, py }
+        return px, py
+    end
+    cache[targetMapID] = false
     return nil, nil
 end
 
@@ -3710,12 +3753,25 @@ function LFGFrameTab:AttachWorldMapButton()
         end
     end)
 
+    local mapBuffRefreshPending = false
     local function ScheduleMapBuffRefresh()
-        LFGFrameTab:RefreshWorldMapBuffs()
+        if not (_G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()) then
+            return
+        end
+        if mapBuffRefreshPending then
+            return
+        end
+        mapBuffRefreshPending = true
         if C_Timer and C_Timer.After then
             C_Timer.After(0, function()
-                LFGFrameTab:RefreshWorldMapBuffs()
+                mapBuffRefreshPending = false
+                if _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
+                    LFGFrameTab:RefreshWorldMapBuffs()
+                end
             end)
+        else
+            mapBuffRefreshPending = false
+            LFGFrameTab:RefreshWorldMapBuffs()
         end
     end
 
@@ -3812,23 +3868,38 @@ end
 function LFGFrameTab:SyncAllEmbeddedTabStates()
     if self.socialTab then
         local socialHost = _G.SocialUIFrame or _G.FriendsFrame
+        local shown = socialHost and socialHost.IsShown and socialHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(socialHost)
-        UpdateSideTabVisual(self.socialTab, active)
-        SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
+        if shown or active then
+            UpdateSideTabVisual(self.socialTab, active)
+            if shown then
+                SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
+            end
+        end
     end
     if self.guildTab then
         local guildHost = _G.CommunitiesFrame or _G.GuildFrame
+        local shown = guildHost and guildHost.IsShown and guildHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(guildHost)
-        UpdateSideTabVisual(self.guildTab, active)
-        SyncHostNativeTabs(guildHost, self.guildTab, active, { "RosterTab", "ChatTab", "PerkRewardsTab", "GuildInfoTab", "Tab1", "Tab2", "Tab3", "Tab4" })
+        if shown or active then
+            UpdateSideTabVisual(self.guildTab, active)
+            if shown then
+                SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
+            end
+        end
     end
     if self.charTab then
         local charHost = _G.CharacterFrame
+        local shown = charHost and charHost.IsShown and charHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(charHost)
-        UpdateSideTabVisual(self.charTab, active)
-        SyncHostNativeTabs(charHost, self.charTab, active, { "Tab1", "Tab2", "Tab3", "Tab4" })
+        if shown or active then
+            UpdateSideTabVisual(self.charTab, active)
+            if shown then
+                SyncHostNativeTabs(charHost, self.charTab, active, { "Tab1", "Tab2", "Tab3", "Tab4" })
+            end
+        end
     end
-    if self.mapPill then
+    if self.mapPill and _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
         self:RefreshWorldMapBuffs()
     end
 end
@@ -3965,25 +4036,45 @@ function LFGFrameTab:Init()
     ns:On("CLAN_DIPLOMACY_UPDATED", RefreshIfOpen)
     ns:On("SOCIAL_UPDATED", RefreshIfOpen)
     ns:On("WATCHLIST_UPDATED", RefreshIfOpen)
-    ns:On("CHAT_UPDATED", function()
-        LFGFrameTab:SyncAllEmbeddedTabStates()
-    end)
-    ns:On("BUFFS_UPDATED", function()
-        LFGFrameTab:SyncAllEmbeddedTabStates()
-    end)
+    local function SyncEmbeddedIfAnyHostShown()
+        local socialHost = _G.SocialUIFrame or _G.FriendsFrame
+        local guildHost = _G.CommunitiesFrame or _G.GuildFrame
+        local charHost = _G.CharacterFrame
+        local mapHost = _G.WorldMapFrame
+        if (socialHost and socialHost.IsShown and socialHost:IsShown())
+            or (guildHost and guildHost.IsShown and guildHost:IsShown())
+            or (charHost and charHost.IsShown and charHost:IsShown())
+            or (mapHost and mapHost.IsShown and mapHost:IsShown())
+        then
+            LFGFrameTab:SyncAllEmbeddedTabStates()
+        end
+    end
+
+    ns:On("CHAT_UPDATED", SyncEmbeddedIfAnyHostShown)
+    ns:On("BUFFS_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("WORLD_BUFFS_UPDATED", function()
-        LFGFrameTab:RefreshWorldMapBuffs()
-    end)
-    ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
-        LFGFrameTab:SyncAllEmbeddedTabStates()
+        if _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
+            LFGFrameTab:RefreshWorldMapBuffs()
+        end
     end)
 
+    local tryAttachPending = false
     local function TryAttachAll()
+        tryAttachPending = false
         LFGFrameTab:AttachHooks()
         LFGFrameTab:AttachSocialUI()
         LFGFrameTab:AttachCommunitiesUI()
         LFGFrameTab:AttachCharacterUI()
         LFGFrameTab:AttachWorldMapButton()
+    end
+    local function QueueTryAttachAll()
+        if tryAttachPending then return end
+        tryAttachPending = true
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0, TryAttachAll)
+        else
+            TryAttachAll()
+        end
     end
 
     ns.RegisterEvent(self, "ADDON_LOADED", function(_, _, loadedName)
@@ -3996,15 +4087,12 @@ function LFGFrameTab:Init()
             or loadedName == "Blizzard_UIPanels_Game"
             or loadedName == "Blizzard_WorldMap"
         then
-            if C_Timer and C_Timer.After then
-                C_Timer.After(0, TryAttachAll)
-            else
-                TryAttachAll()
-            end
+            QueueTryAttachAll()
         end
     end)
 
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        LFGFrameTab:SyncAllEmbeddedTabStates()
         if C_Timer and C_Timer.After then
             C_Timer.After(0.5, TryAttachAll)
         else
@@ -4018,13 +4106,7 @@ function LFGFrameTab:Init()
         "ToggleCharacter", "ToggleWorldMap",
     }) do
         if hooksecurefunc and type(_G[fnName]) == "function" then
-            hooksecurefunc(fnName, function()
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0, TryAttachAll)
-                else
-                    TryAttachAll()
-                end
-            end)
+            hooksecurefunc(fnName, QueueTryAttachAll)
         end
     end
 

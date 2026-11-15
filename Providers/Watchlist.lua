@@ -261,6 +261,8 @@ function Watchlist:Add(rawName, note)
     }
 
     ns:Print(L["Added %s to your Watchlist."]:format(parsed.displayName))
+    Watchlist._wlIndexDirty = true
+    if Store and Store.InvalidateWatchlistIndex then Store:InvalidateWatchlistIndex() end
     ns:Emit("WATCHLIST_UPDATED")
     return true, list[parsed.lookupKey]
 end
@@ -306,6 +308,31 @@ function Watchlist:AddTarget()
     return ok
 end
 
+local function EnsureWatchlistFastIndex(list)
+    local idx = Watchlist._wlFastIndex
+    if Watchlist._wlIndexDirty or Watchlist._wlIndexedTbl ~= list or type(idx) ~= "table" then
+        idx = {}
+        for _, e in pairs(list) do
+            if type(e) == "table" then
+                if e.id and not idx[e.id] then idx[e.id] = e end
+                if e.lookupKey and not idx[e.lookupKey] then idx[e.lookupKey] = e end
+                if e.displayName then
+                    local dl = e.displayName:lower()
+                    if not idx[dl] then idx[dl] = e end
+                end
+                if e.firstName then
+                    local fl = e.firstName:lower()
+                    if not idx[fl] then idx[fl] = e end
+                end
+            end
+        end
+        Watchlist._wlFastIndex = idx
+        Watchlist._wlIndexedTbl = list
+        Watchlist._wlIndexDirty = false
+    end
+    return idx
+end
+
 function Watchlist:GetEntry(nameOrKey)
     if not nameOrKey then return nil end
     local list = Store:GetWatchlistTable()
@@ -315,11 +342,17 @@ function Watchlist:GetEntry(nameOrKey)
         return list[parsed.lookupKey]
     end
     local low = tostring(nameOrKey):lower()
-    for _, e in pairs(list) do
-        if e.id == low or (e.lookupKey and e.lookupKey == low)
-            or (e.displayName and e.displayName:lower() == low)
-            or (e.firstName and e.firstName:lower() == low) then
-            return e
+    if list[low] then return list[low] end
+    local idx = EnsureWatchlistFastIndex(list)
+    local hit = idx[low]
+    if hit and hit.id and list[hit.id] == hit then
+        return hit
+    elseif hit then
+        Watchlist._wlIndexDirty = true
+        idx = EnsureWatchlistFastIndex(list)
+        local retry = idx[low]
+        if retry and retry.id and list[retry.id] == retry then
+            return retry
         end
     end
     return nil
@@ -337,6 +370,8 @@ function Watchlist:Remove(id)
     local displayName = entry.displayName or realId
     list[realId] = nil
     list[id] = nil
+    Watchlist._wlIndexDirty = true
+    if Store and Store.InvalidateWatchlistIndex then Store:InvalidateWatchlistIndex() end
     ns:Print(L["Removed %s from your Watchlist."]:format(displayName))
     ns:Emit("WATCHLIST_UPDATED")
     return true
@@ -461,43 +496,72 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
     local list = Store:GetWatchlistTable()
     local now = time()
     local matchedTarget = false
+    local toRekey
 
-    for _, m in ipairs(matches) do
-        local parsed = m.parsed
-        if parsed then
-            for _, entry in pairs(list) do
-                if MatchEntry(entry, parsed) then
-                    local prevStatus = entry.status
-                    entry.status = "online"
-                    entry.source = "who"
-                    entry.lastChecked = now
-                    entry.lastSeen = now
-                    entry.truncatedWarning = nil
-                    if m.level and m.level > 0 then entry.level = m.level end
-                    if m.classFile then entry.classFile = m.classFile end
-                    if m.area and m.area ~= "" then entry.area = m.area end
-                    if m.guild and m.guild ~= "" then entry.guild = m.guild end
-                    if parsed.surname and parsed.surname ~= "" and not entry.surname then
-                        local oldId = entry.id
-                        entry.surname = parsed.surname
-                        entry.displayName = parsed.displayName
-                        entry.id = parsed.lookupKey
-                        if oldId ~= entry.id then
-                            list[entry.id] = entry
-                            list[oldId] = nil
-                        end
-                        if Compat.CacheForeverFullName then
-                            Compat.CacheForeverFullName(nil, parsed.displayName, parsed.firstName)
-                        end
+    for listKey, entry in pairs(list) do
+        for _, m in ipairs(matches) do
+            local parsed = m.parsed
+            if parsed and MatchEntry(entry, parsed) then
+                local prevStatus = entry.status
+                local isPendingTarget = (entry.id == pending.id or listKey == pending.id)
+                entry.status = "online"
+                entry.source = "who"
+                entry.lastChecked = now
+                entry.lastSeen = now
+                entry.truncatedWarning = nil
+                if m.level and m.level > 0 then entry.level = m.level end
+                if m.classFile then entry.classFile = m.classFile end
+                if m.area and m.area ~= "" then entry.area = m.area end
+                if m.guild and m.guild ~= "" then entry.guild = m.guild end
+                if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
+                    local oldId = entry.id or listKey
+                    entry.surname = parsed.surname
+                    entry.displayName = parsed.displayName
+                    entry.id = parsed.lookupKey
+                    if oldId ~= entry.id then
+                        toRekey = toRekey or {}
+                        toRekey[#toRekey + 1] = { oldId = oldId, listKey = listKey, newId = entry.id, entry = entry }
                     end
-                    if prevStatus ~= "online" then
-                        Store:NotifyWatchlistOnline(entry)
-                    end
-                    if entry.id == pending.id then
-                        matchedTarget = true
+                    if Compat.CacheForeverFullName then
+                        Compat.CacheForeverFullName(nil, parsed.displayName, parsed.firstName)
                     end
                 end
+                if prevStatus ~= "online" then
+                    Store:NotifyWatchlistOnline(entry)
+                end
+                if isPendingTarget then
+                    matchedTarget = true
+                end
             end
+        end
+    end
+
+    if toRekey then
+        for _, item in ipairs(toRekey) do
+            local existing = list[item.newId]
+            local src = item.entry
+            if existing and existing ~= src then
+                existing.favorite = existing.favorite or src.favorite
+                if (not existing.note or existing.note == "") and src.note and src.note ~= "" then
+                    existing.note = src.note
+                end
+                existing.status = src.status or existing.status
+                existing.source = src.source or existing.source
+                existing.lastChecked = src.lastChecked or existing.lastChecked
+                existing.lastSeen = src.lastSeen or existing.lastSeen
+                if src.level and src.level > 0 then existing.level = src.level end
+                if src.classFile then existing.classFile = src.classFile end
+                if src.area and src.area ~= "" then existing.area = src.area end
+                if src.guild and src.guild ~= "" then existing.guild = src.guild end
+            else
+                list[item.newId] = src
+            end
+            if item.oldId ~= item.newId then list[item.oldId] = nil end
+            if item.listKey ~= item.newId then list[item.listKey] = nil end
+        end
+        Watchlist._wlIndexDirty = true
+        if Store and Store.InvalidateWatchlistIndex then
+            Store:InvalidateWatchlistIndex()
         end
     end
 
@@ -724,9 +788,15 @@ local function OnWhoListUpdate()
 
     local numResults, totalCount
     if C_FriendList and C_FriendList.GetNumWhoResults then
-        numResults, totalCount = C_FriendList.GetNumWhoResults()
+        local ok, n, t = pcall(C_FriendList.GetNumWhoResults)
+        if ok then
+            numResults, totalCount = n, t
+        end
     elseif GetNumWhoResults then
-        numResults, totalCount = GetNumWhoResults()
+        local ok, n, t = pcall(GetNumWhoResults)
+        if ok then
+            numResults, totalCount = n, t
+        end
     else
         CleanupPending()
         return
@@ -753,8 +823,8 @@ local function OnWhoListUpdate()
                 end
             end
         elseif GetWhoInfo then
-            local name, guild, level, _, classLoc, zone, classFileName = GetWhoInfo(i)
-            name = Safe.String(name)
+            local ok, name, guild, level, _, classLoc, zone, classFileName = pcall(GetWhoInfo, i)
+            name = ok and Safe.String(name) or nil
             local parsed = name and Compat.ParseCharacterName(name)
             if parsed then
                 table.insert(matches, {
@@ -931,17 +1001,16 @@ local function RegisterUnitContextMenus()
             resolvedName = parsed and parsed.displayName or rawName
         end
 
-        if not parsed or not resolvedName or Compat.IsMe(resolvedName) then
+        if not parsed or not resolvedName or Compat.IsMe(resolvedName, rawGuid) then
             return
         end
 
-        local curMeta = Store and Store.GetSocialMeta and Store:GetSocialMeta(parsed.displayName)
-        local isWatched = Watchlist:IsWatched(parsed.displayName)
-        local existingEntry = isWatched and Watchlist:GetEntry(parsed.displayName) or nil
+        local curMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(parsed.lookupKey or parsed.displayName) or (Store.GetSocialMeta and Store:GetSocialMeta(parsed.displayName)))
+        local existingEntry = Watchlist:GetEntry(parsed.displayName)
         if existingEntry and parsed.surname and existingEntry.surname and existingEntry.surname:lower() ~= parsed.surname:lower() then
-            isWatched = false
             existingEntry = nil
         end
+        local isWatched = existingEntry ~= nil
 
         rootDescription:CreateDivider()
         rootDescription:CreateTitle("SocialCentral")

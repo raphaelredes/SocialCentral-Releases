@@ -28,8 +28,9 @@ end
 
 local CLAN_PEER_TTL = 12 * 3600
 local CLAN_EVENT_TTL = 24 * 3600
+local normalizedClanBuckets = setmetatable({}, { __mode = "k" })
 
-function Store:GetClanScopeData()
+function Store:GetClanScopeData(forcePrune)
     local root = ns.db and ns.db.clan
     if not root then
         return { myTag = "NONE", myNote = "", peers = {}, events = {} }
@@ -52,68 +53,86 @@ function Store:GetClanScopeData()
         end
     end
     local scopeGuild = inGuild and (guildName and guildName ~= "" and guildName or "guild") or "_noguild"
-    local scope = Compat.ScopeKey() .. "::" .. Compat.Plain(scopeGuild)
+    local scope
+    if self._clanScopeGuild == scopeGuild and self._clanScopeCached then
+        scope = self._clanScopeCached
+    else
+        scope = Compat.ScopeKey() .. "::" .. Compat.Plain(scopeGuild)
+        self._clanScopeGuild = scopeGuild
+        self._clanScopeCached = scope
+    end
     local bucket = root[scope]
     if type(bucket) ~= "table" then
         bucket = { myTag = "NONE", myNote = "", peers = {}, events = {} }
         root[scope] = bucket
     end
-    if type(bucket.peers) ~= "table" then bucket.peers = {} end
-    if type(bucket.events) ~= "table" then bucket.events = {} end
-    if type(bucket.lfg) ~= "table" then bucket.lfg = {} end
-    if type(bucket.myProf1) ~= "string" then bucket.myProf1 = "" end
-    if type(bucket.myProf2) ~= "string" then bucket.myProf2 = "" end
-    if type(bucket.myCraftNote) ~= "string" then bucket.myCraftNote = "" end
-    if type(bucket.diplomacy) ~= "table" then
-        bucket.diplomacy = { rev = 0, updatedAt = 0, updatedBy = "", guilds = {} }
-    end
-    if type(bucket.diplomacy.guilds) ~= "table" then
-        bucket.diplomacy.guilds = {}
-    end
-    if type(bucket.alliance) ~= "table" then
-        bucket.alliance = {
-            enabled = false,
-            name = "",
-            token = "",
-            accessMode = "WHITELIST", -- "ALL" or "WHITELIST"
-            whitelist = {},           -- [lookupKey] = true
-            managers = {},            -- [lookupKey] = true
-            alliedGuilds = {},        -- [normGuildKey] = { name = ..., token = ..., leader = ... }
-        }
-    end
-    if type(bucket.alliance.whitelist) ~= "table" then bucket.alliance.whitelist = {} end
-    if type(bucket.alliance.managers) ~= "table" then bucket.alliance.managers = {} end
-    if type(bucket.alliance.alliedGuilds) ~= "table" then bucket.alliance.alliedGuilds = {} end
-    if type(bucket.clanInfo) ~= "table" then
-        bucket.clanInfo = {
-            rev = 0,
-            updatedAt = 0,
-            updatedBy = "",
-            editMode = "OFFICERS",
-            summary = "",
-            rules = "",
-            schedule = "",
-            contacts = "",
-        }
-    end
-    if bucket.clanInfo.editMode ~= "ALL" and bucket.clanInfo.editMode ~= "OFFICERS" then
-        bucket.clanInfo.editMode = "OFFICERS"
+    if not normalizedClanBuckets[bucket] then
+        if type(bucket.peers) ~= "table" then bucket.peers = {} end
+        if type(bucket.events) ~= "table" then bucket.events = {} end
+        if type(bucket.lfg) ~= "table" then bucket.lfg = {} end
+        if type(bucket.myProf1) ~= "string" or bucket.myProf1 == "" then bucket.myProf1 = "NONE" end
+        if type(bucket.myProf2) ~= "string" or bucket.myProf2 == "" then bucket.myProf2 = "NONE" end
+        if type(bucket.myProf1Rank) ~= "string" then bucket.myProf1Rank = "" end
+        if type(bucket.myProf2Rank) ~= "string" then bucket.myProf2Rank = "" end
+        if type(bucket.myCraftNote) ~= "string" then bucket.myCraftNote = "" end
+        if type(bucket.diplomacy) ~= "table" then
+            bucket.diplomacy = { rev = 0, updatedAt = 0, updatedBy = "", guilds = {} }
+        end
+        if type(bucket.diplomacy.guilds) ~= "table" then
+            bucket.diplomacy.guilds = {}
+        end
+        if type(bucket.alliance) ~= "table" then
+            bucket.alliance = {
+                enabled = false,
+                name = "",
+                token = "",
+                accessMode = "WHITELIST", -- "ALL" or "WHITELIST"
+                whitelist = {},           -- [lookupKey] = true
+                managers = {},            -- [lookupKey] = true
+                alliedGuilds = {},        -- [normGuildKey] = { name = ..., token = ..., leader = ... }
+            }
+        end
+        if type(bucket.alliance.whitelist) ~= "table" then bucket.alliance.whitelist = {} end
+        if type(bucket.alliance.managers) ~= "table" then bucket.alliance.managers = {} end
+        if type(bucket.alliance.alliedGuilds) ~= "table" then bucket.alliance.alliedGuilds = {} end
+        if type(bucket.clanInfo) ~= "table" then
+            bucket.clanInfo = {
+                rev = 0,
+                updatedAt = 0,
+                updatedBy = "",
+                editMode = "OFFICERS",
+                summary = "",
+                rules = "",
+                schedule = "",
+                contacts = "",
+            }
+        end
+        if bucket.clanInfo.editMode ~= "ALL" and bucket.clanInfo.editMode ~= "OFFICERS" then
+            bucket.clanInfo.editMode = "OFFICERS"
+        end
+        normalizedClanBuckets[bucket] = true
     end
 
-    local now = time()
-    for k, p in pairs(bucket.peers) do
-        if type(p) ~= "table" or (p.updatedAt and (now - p.updatedAt) > CLAN_PEER_TTL) then
-            bucket.peers[k] = nil
+    self._clanPruneAt = self._clanPruneAt or {}
+    local nowClock = (GetTime and GetTime()) or 0
+    local lastPruneAt = self._clanPruneAt[scope]
+    if forcePrune or not lastPruneAt or (nowClock - lastPruneAt) >= 20 then
+        self._clanPruneAt[scope] = nowClock
+        local now = time()
+        for k, p in pairs(bucket.peers) do
+            if type(p) ~= "table" or (p.updatedAt and (now - p.updatedAt) > CLAN_PEER_TTL) then
+                bucket.peers[k] = nil
+            end
         end
-    end
-    for id, evt in pairs(bucket.events) do
-        if type(evt) ~= "table" or (evt.updatedAt and (now - evt.updatedAt) > CLAN_EVENT_TTL) then
-            bucket.events[id] = nil
+        for id, evt in pairs(bucket.events) do
+            if type(evt) ~= "table" or (evt.updatedAt and (now - evt.updatedAt) > CLAN_EVENT_TTL) then
+                bucket.events[id] = nil
+            end
         end
-    end
-    for k, lfg in pairs(bucket.lfg) do
-        if type(lfg) ~= "table" or (lfg.updatedAt and (now - lfg.updatedAt) > 1800) then
-            bucket.lfg[k] = nil
+        for k, lfg in pairs(bucket.lfg) do
+            if type(lfg) ~= "table" or (lfg.updatedAt and (now - lfg.updatedAt) > 1800) then
+                bucket.lfg[k] = nil
+            end
         end
     end
 
@@ -143,6 +162,23 @@ function Store:GetAltsList()
         return (a.lastActive or 0) > (b.lastActive or 0)
     end)
     return out
+end
+
+function Store:GetAltsCount()
+    local alts = ns.db and ns.db.alts
+    if not alts then return 0 end
+    local count = 0
+    local currentKey = Compat.CharacterKey()
+    local curPool = Compat.RealmPool(Compat.Realm())
+    for key, info in pairs(alts) do
+        if type(info) == "table" then
+            local infoPool = info.realmPool and Compat.RealmPool(info.realmPool) or curPool
+            if key == currentKey or infoPool == curPool then
+                count = count + 1
+            end
+        end
+    end
+    return count
 end
 
 function Store:GetTotalAltsGold(poolOnly)
@@ -189,53 +225,121 @@ function Store:NotifyWatchlistOnline(entry)
     end
 end
 
+function Store:InvalidateWatchlistIndex()
+    self._wlIndexDirty = true
+end
+
 -- Cross-pollinate Watchlist rows whenever live Social or Nearby detects a watched player.
 function Store:SyncWatchlistObservation(rawName, data)
+    local list = self:GetWatchlistTable()
+    if next(list) == nil then return end
     local parsed = Compat.ParseCharacterName(rawName)
     if not parsed then return end
-    local list = self:GetWatchlistTable()
+
+    if self._wlIndexDirty or self._wlIndexedRef ~= list or type(self._wlNoSurnameByFirst) ~= "table" then
+        local byFirst = {}
+        local idIndex = {}
+        for idKey, entry in pairs(list) do
+            if type(entry) == "table" then
+                if entry.id and entry.id ~= idKey then
+                    local bucket = idIndex[entry.id]
+                    if not bucket then
+                        bucket = {}
+                        idIndex[entry.id] = bucket
+                    end
+                    bucket[#bucket + 1] = idKey
+                end
+                if not entry.surname and entry.firstName and entry.firstName ~= "" then
+                    local fl = entry.firstName:lower()
+                    local fBucket = byFirst[fl]
+                    if not fBucket then
+                        fBucket = {}
+                        byFirst[fl] = fBucket
+                    end
+                    fBucket[#fBucket + 1] = idKey
+                end
+            end
+        end
+        self._wlNoSurnameByFirst = byFirst
+        self._wlIdMatches = idIndex
+        self._wlIndexedRef = list
+        self._wlIndexDirty = false
+    end
+
+    local firstLower = parsed.firstName and parsed.firstName:lower() or nil
+    local directEntry = list[parsed.lookupKey]
+    local idMatches = self._wlIdMatches and self._wlIdMatches[parsed.lookupKey]
+    local firstMatches = firstLower and self._wlNoSurnameByFirst and self._wlNoSurnameByFirst[firstLower]
+    if not (directEntry and directEntry.id == parsed.lookupKey) and not idMatches and not firstMatches then
+        return
+    end
+
     local now = time()
     local changed = false
-    local keysToReindex = {}
+    local keysToReindex
 
-    for idKey, entry in pairs(list) do
+    local function ApplyObservation(idKey, entry)
+        if type(entry) ~= "table" then return end
         local exactMatch = entry.id == parsed.lookupKey
-        local firstMatch = (not entry.surname) and entry.firstName and entry.firstName:lower() == parsed.firstName:lower()
-        if exactMatch or firstMatch then
-            local prevStatus = entry.status
-            if data.online ~= nil then
-                entry.status = data.online and "online" or "offline"
-                entry.lastChecked = now
-                entry.truncatedWarning = nil
+        local firstMatch = firstLower and (not entry.surname) and entry.firstName and entry.firstName:lower() == firstLower
+        if not (exactMatch or firstMatch) then return end
+
+        local prevStatus = entry.status
+        if data.online ~= nil then
+            entry.status = data.online and "online" or "offline"
+            entry.lastChecked = now
+            entry.truncatedWarning = nil
+        end
+        if data.source then entry.source = data.source end
+        if data.level and data.level > 0 then entry.level = data.level end
+        if data.classFile then entry.classFile = data.classFile end
+        if data.area and data.area ~= "" then entry.area = data.area end
+        if data.guild and data.guild ~= "" then entry.guild = data.guild end
+        if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
+            entry.surname = parsed.surname
+            entry.displayName = parsed.displayName
+            entry.truncatedWarning = nil
+            self._wlIndexDirty = true
+            if parsed.lookupKey ~= idKey and not list[parsed.lookupKey] then
+                keysToReindex = keysToReindex or {}
+                keysToReindex[#keysToReindex + 1] = { oldId = idKey, newId = parsed.lookupKey, entry = entry }
             end
-            if data.source then entry.source = data.source end
-            if data.level and data.level > 0 then entry.level = data.level end
-            if data.classFile then entry.classFile = data.classFile end
-            if data.area and data.area ~= "" then entry.area = data.area end
-            if data.guild and data.guild ~= "" then entry.guild = data.guild end
-            if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
-                entry.surname = parsed.surname
-                entry.displayName = parsed.displayName
-                entry.truncatedWarning = nil
-                if parsed.lookupKey ~= idKey and not list[parsed.lookupKey] then
-                    keysToReindex[#keysToReindex + 1] = { oldId = idKey, newId = parsed.lookupKey, entry = entry }
-                end
+        end
+        if data.online then
+            entry.lastSeen = now
+            entry.lastChecked = now
+            if prevStatus == "offline" then
+                self:NotifyWatchlistOnline(entry)
             end
-            if data.online then
-                entry.lastSeen = now
-                entry.lastChecked = now
-                if prevStatus == "offline" then
-                    self:NotifyWatchlistOnline(entry)
-                end
+        end
+        changed = true
+    end
+
+    if directEntry then
+        ApplyObservation(parsed.lookupKey, directEntry)
+    end
+    if idMatches then
+        for _, idKey in ipairs(idMatches) do
+            if idKey ~= parsed.lookupKey then
+                ApplyObservation(idKey, list[idKey])
             end
-            changed = true
+        end
+    end
+    if firstMatches then
+        for _, idKey in ipairs(firstMatches) do
+            if idKey ~= parsed.lookupKey then
+                ApplyObservation(idKey, list[idKey])
+            end
         end
     end
 
-    for _, item in ipairs(keysToReindex) do
-        item.entry.id = item.newId
-        list[item.newId] = item.entry
-        list[item.oldId] = nil
+    if keysToReindex then
+        for _, item in ipairs(keysToReindex) do
+            item.entry.id = item.newId
+            list[item.newId] = item.entry
+            list[item.oldId] = nil
+        end
+        self._wlIndexDirty = true
     end
 
     if changed then
@@ -336,16 +440,22 @@ function Store:GetSocialFolders()
     return out
 end
 
-function Store:GetRecentCompanionsTable()
+function Store:GetRecentCompanionsTable(forcePrune)
     local root = ns.db and ns.db.recentCompanions
     if not root then return {} end
     local scope = Compat.ScopeKey()
     if type(root[scope]) ~= "table" then root[scope] = {} end
     local tbl = root[scope]
-    local now = time()
-    for k, rec in pairs(tbl) do
-        if type(rec) ~= "table" or (rec.lastSeen and (now - rec.lastSeen) > COMPANION_TTL) then
-            tbl[k] = nil
+    self._companionPruneAt = self._companionPruneAt or {}
+    local nowT = GetTime and GetTime() or 0
+    local lastAt = self._companionPruneAt[scope]
+    if forcePrune or not lastAt or (nowT - lastAt) >= 60 then
+        self._companionPruneAt[scope] = nowT
+        local now = time()
+        for k, rec in pairs(tbl) do
+            if type(rec) ~= "table" or (rec.lastSeen and (now - rec.lastSeen) > COMPANION_TTL) then
+                tbl[k] = nil
+            end
         end
     end
     return tbl
@@ -383,10 +493,24 @@ function Store:RecordCompanion(info)
         lastRunAt = lastRunAt,
     }
 
-    local list = self:GetRecentCompanionsList()
-    if #list > MAX_RECENT_COMPANIONS then
-        for i = MAX_RECENT_COMPANIONS + 1, #list do
-            tbl[list[i].lookupKey] = nil
+    local count, oldestKey, oldestSeen = 0, nil, nil
+    for k, rec in pairs(tbl) do
+        if type(rec) == "table" then
+            count = count + 1
+            local seen = rec.lastSeen or 0
+            if not oldestSeen or seen < oldestSeen then
+                oldestKey, oldestSeen = k, seen
+            end
+        end
+    end
+    if count == MAX_RECENT_COMPANIONS + 1 and oldestKey then
+        tbl[oldestKey] = nil
+    elseif count > MAX_RECENT_COMPANIONS + 1 then
+        local list = self:GetRecentCompanionsList()
+        if #list > MAX_RECENT_COMPANIONS then
+            for i = MAX_RECENT_COMPANIONS + 1, #list do
+                tbl[list[i].lookupKey] = nil
+            end
         end
     end
 end

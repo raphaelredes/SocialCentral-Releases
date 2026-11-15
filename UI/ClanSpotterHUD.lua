@@ -32,6 +32,7 @@ local ARROW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\arrow"
 
 local STANCE_RGB = {
     ENEMY     = { 0.96, 0.28, 0.28 },
+    BLOCKED   = { 0.88, 0.22, 0.56 },
     WATCHLIST = { 1.00, 0.65, 0.20 },
     FRIEND    = { 0.35, 0.78, 1.00 },
     ALLY      = { 0.25, 0.85, 0.45 },
@@ -95,29 +96,29 @@ local function OpenTargetContextMenu(anchor, entry)
     MenuUtil.CreateContextMenu(anchor, function(_, root)
         root:CreateTitle(entry.displayName or "?")
 
-        root:CreateButton(L["Whisper in SocialCentral"], function()
-            if ns.Chat and ns.Chat.OpenDirectConversation then
-                ns.Chat:OpenDirectConversation({
-                    targetName = entry.targetName or entry.displayName,
-                    classFile = entry.classFile,
-                    autoProbe = true,
-                    openUI = true,
-                })
-                if ns.UI and ns.UI.OpenTab then
-                    ns.UI:OpenTab("chat")
+        if entry.stance ~= "ENEMY" and entry.stance ~= "BLOCKED" then
+            root:CreateButton(L["Whisper in SocialCentral"], function()
+                if ns.Chat and ns.Chat.OpenDirectConversation then
+                    ns.Chat:OpenDirectConversation({
+                        targetName = entry.targetName or entry.displayName,
+                        classFile = entry.classFile,
+                        autoProbe = true,
+                        openUI = true,
+                    })
+                    if ns.UI and ns.UI.OpenTab then
+                        ns.UI:OpenTab("chat")
+                    end
+                elseif Compat.Whisper then
+                    Compat.Whisper(entry.targetName or entry.displayName)
                 end
-            elseif Compat.Whisper then
-                Compat.Whisper(entry.targetName or entry.displayName)
-            end
-        end)
+            end)
 
-        root:CreateButton(L["Official Whisper"], function()
-            if Compat.Whisper then
-                Compat.Whisper(entry.targetName or entry.displayName)
-            end
-        end)
+            root:CreateButton(L["Official Whisper"], function()
+                if Compat.Whisper then
+                    Compat.Whisper(entry.targetName or entry.displayName)
+                end
+            end)
 
-        if entry.stance ~= "ENEMY" then
             root:CreateButton(L["Invite"], function()
                 if Compat.Invite then
                     Compat.Invite(entry.targetName or entry.displayName)
@@ -213,12 +214,15 @@ local function ApplySecureMacroAttributes(btn, entry, liveUnit)
         SpotterHUD.pendingRefresh = true
         return
     end
-    btn:SetAttribute("useOnKeyDown", false)
-    btn:SetAttribute("type2", nil)
-    btn:SetAttribute("*type2", nil)
-    btn:SetAttribute("macrotext2", nil)
-    btn:SetAttribute("*macrotext2", nil)
     if not entry then
+        if btn._lastMacroCleared then
+            return
+        end
+        btn:SetAttribute("useOnKeyDown", false)
+        btn:SetAttribute("type2", nil)
+        btn:SetAttribute("*type2", nil)
+        btn:SetAttribute("macrotext2", nil)
+        btn:SetAttribute("*macrotext2", nil)
         btn:SetAttribute("type", nil)
         btn:SetAttribute("type1", nil)
         btn:SetAttribute("*type1", nil)
@@ -228,11 +232,20 @@ local function ApplySecureMacroAttributes(btn, entry, liveUnit)
         btn:SetAttribute("*macrotext1", nil)
         btn._lastMacroText = nil
         btn._lastMacroSig = nil
+        btn._lastMacroCleared = true
         return
     end
 
     local entryTable = (type(entry) == "table") and entry or nil
     local mText = entryTable and BuildTargetMacroText(entryTable, liveUnit) or tostring(entry)
+    if btn._lastMacroCleared == false and btn._lastMacroText == mText then
+        return
+    end
+    btn:SetAttribute("useOnKeyDown", false)
+    btn:SetAttribute("type2", nil)
+    btn:SetAttribute("*type2", nil)
+    btn:SetAttribute("macrotext2", nil)
+    btn:SetAttribute("*macrotext2", nil)
     btn:SetAttribute("type", "macro")
     btn:SetAttribute("type1", "macro")
     btn:SetAttribute("*type1", "macro")
@@ -241,25 +254,43 @@ local function ApplySecureMacroAttributes(btn, entry, liveUnit)
     btn:SetAttribute("macrotext1", mText)
     btn:SetAttribute("*macrotext1", mText)
     btn._lastMacroText = mText
+    btn._lastMacroCleared = false
 end
 
-local function IsEntryCurrentlyTargeted(entry, currentTargetGuid, parsedTarget)
+local function IsEntryCurrentlyTargeted(entry, currentTargetGuid, tLookupKey, tFirstName, tSurname)
     if not entry then return false end
     if currentTargetGuid and entry.guid then
         return currentTargetGuid == entry.guid
     end
-    if parsedTarget then
-        if parsedTarget.lookupKey == entry.key then
+    if tLookupKey then
+        if tLookupKey == entry.key then
             return true
         end
         local entryHasSurname = type(entry.displayName) == "string" and entry.displayName:find("%s") ~= nil
-        if (not parsedTarget.surname or not entryHasSurname)
-            and entry.firstName and parsedTarget.firstName
-            and parsedTarget.firstName:lower() == entry.firstName:lower() then
+        if (not tSurname or not entryHasSurname)
+            and entry.firstName and tFirstName
+            and tFirstName:lower() == entry.firstName:lower() then
             return true
         end
     end
     return false
+end
+
+local function ReadCurrentTargetIdentity()
+    local tGuid = Safe.String(Safe.Call(UnitGUID, "target"))
+    local tName = Safe.String(Safe.Call(UnitName, "target"))
+    local tLookupKey, tFirstName, _, tSurname
+    if tName then
+        if Compat.ParseCharacterFields then
+            tLookupKey, tFirstName, _, tSurname = Compat.ParseCharacterFields(tName)
+        elseif Compat.ParseCharacterName then
+            local p = Compat.ParseCharacterName(tName)
+            if p then
+                tLookupKey, tFirstName, tSurname = p.lookupKey, p.firstName, p.surname
+            end
+        end
+    end
+    return tGuid, tLookupKey, tFirstName, tSurname
 end
 
 local function HandleTargetClick(entry)
@@ -299,6 +330,77 @@ local function ShortestAngleDelta(fromA, toA)
         diff = diff - 2 * math.pi
     end
     return diff
+end
+
+local WHITE8X8 = "Interface\\Buttons\\WHITE8X8"
+local PORTRAIT_MASK = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
+local CLASS_SPRITE_TEX = "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES"
+local RADAR_FALLBACK_ICON = "Interface\\AddOns\\SocialCentral\\Media\\icon"
+
+local function ApplyCircleMask(parent, tex, size)
+    if not (parent and parent.CreateMaskTexture and tex) then return end
+    local mask = parent:CreateMaskTexture()
+    mask:SetTexture(PORTRAIT_MASK, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    mask:SetSize(size, size)
+    mask:SetPoint("CENTER", tex, "CENTER", 0, 0)
+    tex:AddMaskTexture(mask)
+end
+
+local function CreateRadarArrowBox(parentFrame, leftOffset)
+    local arrowBox = CreateFrame("Frame", nil, parentFrame)
+    arrowBox:SetSize(36, 36)
+    arrowBox:SetPoint("LEFT", leftOffset or 4, 0)
+    arrowBox:EnableMouse(false)
+    if arrowBox.SetClipsChildren then
+        arrowBox:SetClipsChildren(false)
+    end
+
+    -- Thin stance-colored outer circular border (clean white-masked ring, never black-on-black)
+    local outerRing = arrowBox:CreateTexture(nil, "ARTWORK", nil, 0)
+    outerRing:SetSize(34, 34)
+    outerRing:SetPoint("CENTER")
+    outerRing:SetTexture(WHITE8X8)
+    outerRing:SetVertexColor(0.98, 0.80, 0.24, 0.90)
+    ApplyCircleMask(arrowBox, outerRing, 34)
+    arrowBox.outerRing = outerRing
+
+    local arrowAura = arrowBox:CreateTexture(nil, "ARTWORK", nil, 1)
+    arrowAura:SetSize(30, 30)
+    arrowAura:SetPoint("CENTER")
+    arrowAura:SetTexture(WHITE8X8)
+    arrowAura:SetVertexColor(0.08, 0.11, 0.16, 0.96)
+    ApplyCircleMask(arrowBox, arrowAura, 30)
+    arrowBox.aura = arrowAura
+
+    local arrowTex = arrowBox:CreateTexture(nil, "OVERLAY", nil, 2)
+    arrowTex:SetSize(28, 28)
+    arrowTex:SetPoint("CENTER")
+    arrowTex:SetTexture(ARROW_TEX)
+    arrowBox.arrowTex = arrowTex
+
+    local noSignalDot = arrowBox:CreateTexture(nil, "OVERLAY", nil, 1)
+    noSignalDot:SetSize(26, 26)
+    noSignalDot:SetPoint("CENTER")
+    noSignalDot:SetTexture(RADAR_FALLBACK_ICON)
+    noSignalDot:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    ApplyCircleMask(arrowBox, noSignalDot, 26)
+    noSignalDot:Hide()
+    arrowBox.noSignalDot = noSignalDot
+
+    local noSignalBlip = arrowBox:CreateTexture(nil, "OVERLAY", nil, 3)
+    noSignalBlip:SetSize(10, 10)
+    noSignalBlip:SetPoint("BOTTOMRIGHT", arrowBox, "BOTTOMRIGHT", -1, 1)
+    noSignalBlip:SetTexture(WHITE8X8)
+    noSignalBlip:SetVertexColor(0.98, 0.80, 0.24, 1.0)
+    ApplyCircleMask(arrowBox, noSignalBlip, 10)
+    noSignalBlip:Hide()
+    arrowBox.noSignalBlip = noSignalBlip
+
+    parentFrame.arrowBox = arrowBox
+    parentFrame.arrowTex = arrowTex
+    parentFrame.noSignalDot = noSignalDot
+    parentFrame.noSignalBlip = noSignalBlip
+    return arrowBox
 end
 
 function SpotterHUD:BuildFrame()
@@ -341,36 +443,7 @@ function SpotterHUD:BuildFrame()
     compassGlow:SetAllPoints()
     compassGlow:SetColorTexture(1, 1, 1, 0.08)
 
-    local arrowBox = CreateFrame("Frame", nil, compassBar)
-    arrowBox:SetSize(36, 36)
-    arrowBox:SetPoint("LEFT", 4, 0)
-    arrowBox:EnableMouse(false)
-    if arrowBox.SetClipsChildren then
-        arrowBox:SetClipsChildren(false)
-    end
-    local arrowAura = arrowBox:CreateTexture(nil, "ARTWORK")
-    arrowAura:SetSize(34, 34)
-    arrowAura:SetPoint("CENTER")
-    arrowAura:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-    arrowAura:SetVertexColor(0.05, 0.25, 0.36, 0.40)
-    arrowBox.aura = arrowAura
-
-    local arrowTex = arrowBox:CreateTexture(nil, "OVERLAY")
-    arrowTex:SetSize(32, 32)
-    arrowTex:SetPoint("CENTER")
-    arrowTex:SetTexture(ARROW_TEX)
-    arrowBox.arrowTex = arrowTex
-    compassBar.arrowBox = arrowBox
-    compassBar.arrowTex = arrowTex
-
-    local noSignalDot = arrowBox:CreateTexture(nil, "OVERLAY")
-    noSignalDot:SetSize(14, 14)
-    noSignalDot:SetPoint("CENTER")
-    noSignalDot:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-    noSignalDot:SetVertexColor(0.95, 0.78, 0.25, 0.92)
-    noSignalDot:Hide()
-    arrowBox.noSignalDot = noSignalDot
-    compassBar.noSignalDot = noSignalDot
+    local arrowBox = CreateRadarArrowBox(compassBar, 4)
 
     local compassNameFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     compassNameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 6, -3)
@@ -552,6 +625,10 @@ function SpotterHUD:BuildFrame()
             if ns.UI and ns.UI.OpenDiplomacyModal and e.guild and e.guild ~= "" then
                 ns.UI:OpenDiplomacyModal(e.guild, e.stance, nil)
             end
+        elseif e.stance == "BLOCKED" then
+            if ns.Spotter and ns.Spotter.DismissTarget then
+                ns.Spotter:DismissTarget(e.key)
+            end
         elseif Compat.Invite then
             Compat.Invite(e.targetName or e.displayName)
         end
@@ -581,13 +658,8 @@ function SpotterHUD:BuildFrame()
         handles = { f, actionPanel },
     })
 
-    f:SetScript("OnUpdate", function(_, elapsed)
-        SpotterHUD._kinematicsElapsed = (SpotterHUD._kinematicsElapsed or 0) + elapsed
-        if SpotterHUD._kinematicsElapsed >= 0.05 then
-            local dt = SpotterHUD._kinematicsElapsed
-            SpotterHUD._kinematicsElapsed = 0
-            SpotterHUD:UpdateCompassVisuals(false, dt)
-        end
+    f:HookScript("OnHide", function()
+        SpotterHUD:SyncTickerState(nil)
     end)
 
     self.frame = f
@@ -595,6 +667,67 @@ function SpotterHUD:BuildFrame()
     self:UpdateAppearance()
     f:Hide()
     return f
+end
+
+function SpotterHUD:SyncTickerState(kin)
+    local interval = 1.0
+    if kin and kin.hasAngle then
+        interval = 0.066
+    elseif kin and kin.unit then
+        interval = 0.25
+    end
+    self._tickerInterval = interval
+
+    if not self._mainOnUpdateFn then
+        self._mainOnUpdateFn = function(_, elapsed)
+            local stepInterval = SpotterHUD._tickerInterval or 0.25
+            SpotterHUD._kinematicsElapsed = (SpotterHUD._kinematicsElapsed or 0) + elapsed
+            if SpotterHUD._kinematicsElapsed >= stepInterval then
+                local dt = SpotterHUD._kinematicsElapsed
+                SpotterHUD._kinematicsElapsed = 0
+                SpotterHUD:UpdateCompassVisuals(false, dt)
+            end
+        end
+    end
+    if not self._combatOnUpdateFn then
+        self._combatOnUpdateFn = function(_, elapsed)
+            local stepInterval = SpotterHUD._tickerInterval or 0.25
+            SpotterHUD._combatKinElapsed = (SpotterHUD._combatKinElapsed or 0) + elapsed
+            if SpotterHUD._combatKinElapsed >= stepInterval then
+                local dt = SpotterHUD._combatKinElapsed
+                SpotterHUD._combatKinElapsed = 0
+                SpotterHUD:UpdateCompassVisuals(false, dt)
+            end
+        end
+    end
+
+    local f = self.frame
+    if f then
+        local mainActive = f:IsShown() and self._compassEntry ~= nil
+        if mainActive then
+            if not f._scOnUpdateAttached then
+                f._scOnUpdateAttached = true
+                f:SetScript("OnUpdate", self._mainOnUpdateFn)
+            end
+        elseif f._scOnUpdateAttached then
+            f._scOnUpdateAttached = false
+            f:SetScript("OnUpdate", nil)
+        end
+    end
+
+    local cf = self.combatArrowFrame
+    if cf then
+        local combatActive = cf:IsShown() and self._compassEntry ~= nil
+        if combatActive then
+            if not cf._scOnUpdateAttached then
+                cf._scOnUpdateAttached = true
+                cf:SetScript("OnUpdate", self._combatOnUpdateFn)
+            end
+        elseif cf._scOnUpdateAttached then
+            cf._scOnUpdateAttached = false
+            cf:SetScript("OnUpdate", nil)
+        end
+    end
 end
 
 function SpotterHUD:BuildCombatArrowFrame()
@@ -612,35 +745,7 @@ function SpotterHUD:BuildCombatArrowFrame()
     stanceBar:SetColorTexture(0.98, 0.80, 0.24, 1)
     cf.stanceBar = stanceBar
 
-    local arrowBox = CreateFrame("Frame", nil, cf)
-    arrowBox:SetSize(36, 36)
-    arrowBox:SetPoint("LEFT", 8, 0)
-    if arrowBox.SetClipsChildren then
-        arrowBox:SetClipsChildren(false)
-    end
-    local arrowAura = arrowBox:CreateTexture(nil, "ARTWORK")
-    arrowAura:SetSize(34, 34)
-    arrowAura:SetPoint("CENTER")
-    arrowAura:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-    arrowAura:SetVertexColor(0.05, 0.25, 0.36, 0.40)
-    arrowBox.aura = arrowAura
-
-    local arrowTex = arrowBox:CreateTexture(nil, "OVERLAY")
-    arrowTex:SetSize(32, 32)
-    arrowTex:SetPoint("CENTER")
-    arrowTex:SetTexture(ARROW_TEX)
-    arrowBox.arrowTex = arrowTex
-    cf.arrowBox = arrowBox
-    cf.arrowTex = arrowTex
-
-    local noSignalDot = arrowBox:CreateTexture(nil, "OVERLAY")
-    noSignalDot:SetSize(14, 14)
-    noSignalDot:SetPoint("CENTER")
-    noSignalDot:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
-    noSignalDot:SetVertexColor(0.95, 0.78, 0.25, 0.92)
-    noSignalDot:Hide()
-    arrowBox.noSignalDot = noSignalDot
-    cf.noSignalDot = noSignalDot
+    local arrowBox = CreateRadarArrowBox(cf, 8)
 
     local nameFs = cf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     nameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 6, -4)
@@ -660,13 +765,8 @@ function SpotterHUD:BuildCombatArrowFrame()
     subFs:Hide()
     cf.subFs = subFs
 
-    cf:SetScript("OnUpdate", function(_, elapsed)
-        SpotterHUD._combatKinElapsed = (SpotterHUD._combatKinElapsed or 0) + elapsed
-        if SpotterHUD._combatKinElapsed >= 0.05 then
-            local dt = SpotterHUD._combatKinElapsed
-            SpotterHUD._combatKinElapsed = 0
-            SpotterHUD:UpdateCompassVisuals(false, dt)
-        end
+    cf:HookScript("OnHide", function()
+        SpotterHUD:SyncTickerState(nil)
     end)
 
     cf:Hide()
@@ -682,6 +782,14 @@ function SpotterHUD:ShowCombatArrowFallback()
     end
     local cf = self.combatArrowFrame or self:BuildCombatArrowFrame()
     if not cf then return end
+    if cf._dirtyTheme then
+        cf._dirtyTheme = nil
+        local p = Theme:GetPalette()
+        Theme:ApplyBackdrop(cf, "window", p)
+        if cf.subFs then
+            cf.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        end
+    end
     local total = GetSpotterTotalCount()
     if total == 0 or self.userClosed then
         cf:Hide()
@@ -698,11 +806,9 @@ function SpotterHUD:ShowCombatArrowFallback()
         end
     end
     if not entry then
-        local currentTargetGuid = Safe.String(Safe.Call(UnitGUID, "target"))
-        local currentTargetName = Safe.String(Safe.Call(UnitName, "target"))
-        local parsedTarget = currentTargetName and Compat.ParseCharacterName(currentTargetName)
+        local currentTargetGuid, tLookupKey, tFirstName, tSurname = ReadCurrentTargetIdentity()
         for _, cand in ipairs(allTargets) do
-            if IsEntryCurrentlyTargeted(cand, currentTargetGuid, parsedTarget) then
+            if IsEntryCurrentlyTargeted(cand, currentTargetGuid, tLookupKey, tFirstName, tSurname) then
                 entry = cand
                 break
             end
@@ -719,6 +825,7 @@ function SpotterHUD:ShowCombatArrowFallback()
         cf.stanceBar:SetColorTexture(rgb[1], rgb[2], rgb[3], 1)
     end
     local stanceTag = entry.stance == "ENEMY" and L["ENEMY"]
+        or (entry.stance == "BLOCKED" and L["BLOCKED"])
         or (entry.stance == "WATCHLIST" and L["WATCHLIST"])
         or (entry.stance == "FRIEND" and L["FRIEND"])
         or (entry.stance == "ALLY" and L["ALLY"] or L["CLAN"])
@@ -730,37 +837,73 @@ function SpotterHUD:ShowCombatArrowFallback()
     self:UpdateCompassVisuals(true, 0.04)
 end
 
+local function ApplyPromptDialogTheme(dlg, p)
+    if not dlg then return end
+    Theme:ApplyBackdrop(dlg, "window", p)
+    dlg.titleFs:SetTextColor(p.accent[1], p.accent[2], p.accent[3])
+    dlg.bodyFs:SetTextColor(p.text[1], p.text[2], p.text[3])
+    dlg.tipFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+    Theme:StyleButton(dlg.closeBtn, "default")
+    Theme:StyleButton(dlg.keepBtn, "primary")
+    Theme:StyleButton(dlg.disableBtn, "danger")
+    dlg._dirtyTheme = nil
+end
+
+local function ApplyActionPanelTheme(actionPanel, p)
+    if not actionPanel then return end
+    Theme:ApplyBackdrop(actionPanel, "inset", p)
+    actionPanel.promptFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+    Theme:StyleButton(actionPanel.whisperBtn, "primary")
+    Theme:StyleButton(actionPanel.tellBtn, "default")
+    Theme:StyleButton(actionPanel.inviteBtn, "default")
+    Theme:StyleButton(actionPanel.watchBtn, "default")
+    actionPanel._dirtyTheme = nil
+end
+
 function SpotterHUD:UpdateAppearance()
     local p = Theme:GetPalette()
     if self.combatArrowFrame then
-        Theme:ApplyBackdrop(self.combatArrowFrame, "window", p)
-        self.combatArrowFrame.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        if self.combatArrowFrame:IsShown() then
+            self.combatArrowFrame._dirtyTheme = nil
+            Theme:ApplyBackdrop(self.combatArrowFrame, "window", p)
+            self.combatArrowFrame.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        else
+            self.combatArrowFrame._dirtyTheme = true
+        end
+    end
+
+    if self.promptDialog then
+        if self.promptDialog:IsShown() then
+            ApplyPromptDialogTheme(self.promptDialog, p)
+        else
+            self.promptDialog._dirtyTheme = true
+        end
     end
 
     local f = self.frame
     if not f then return end
 
+    if f._dirtyTheme then
+        f._dirtyTheme = nil
+    end
     Theme:ApplyBackdrop(f, "window", p)
     if f.compassBar then
         f.compassBar.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
     end
     if f.actionPanel then
-        Theme:ApplyBackdrop(f.actionPanel, "inset", p)
-        f.actionPanel.promptFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-        Theme:StyleButton(f.actionPanel.whisperBtn, "primary")
-        Theme:StyleButton(f.actionPanel.tellBtn, "default")
-        Theme:StyleButton(f.actionPanel.inviteBtn, "default")
-        Theme:StyleButton(f.actionPanel.watchBtn, "default")
-    end
-
-    if self.promptDialog then
-        Theme:ApplyBackdrop(self.promptDialog, "window", p)
-        self.promptDialog.titleFs:SetTextColor(p.accent[1], p.accent[2], p.accent[3])
-        self.promptDialog.bodyFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-        self.promptDialog.tipFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-        Theme:StyleButton(self.promptDialog.closeBtn, "default")
-        Theme:StyleButton(self.promptDialog.keepBtn, "primary")
-        Theme:StyleButton(self.promptDialog.disableBtn, "danger")
+        if not f.actionPanel._scOnShowHooked then
+            f.actionPanel._scOnShowHooked = true
+            f.actionPanel:HookScript("OnShow", function(selfPanel)
+                if selfPanel._dirtyTheme then
+                    ApplyActionPanelTheme(selfPanel, Theme:GetPalette())
+                end
+            end)
+        end
+        if f.actionPanel:IsShown() then
+            ApplyActionPanelTheme(f.actionPanel, p)
+        else
+            f.actionPanel._dirtyTheme = true
+        end
     end
 
     Theme:StyleButton(f.closeBtn, "danger")
@@ -772,24 +915,37 @@ local function ResetCompassBarDirtyState(bar)
     if not bar then return end
     bar._visHasAngle = nil
     bar._visAngle = nil
-    bar._visDotKey = nil
-    bar._visTintKey = nil
-    bar._visDistOut = nil
+    bar._visDead = nil
+    bar._visClassFile = nil
+    bar._visBlipDead = nil
+    bar._visBlipStance = nil
+    bar._visTintDead = nil
+    bar._visTintHasAngle = nil
+    bar._visTintAhead = nil
+    bar._visTintStance = nil
+    bar._visDistText = nil
+    bar._visBearing = nil
+    bar._visSubZone = nil
+    bar._visDistDead = nil
 end
 
 local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
     if not bar then return end
 
-    local rgb = STANCE_RGB[entry.stance] or STANCE_RGB.SAME
+    local stanceVal = entry.stance or "SAME"
+    local isDead = entry.dead == true
+    local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
     local hasAngle = kin and kin.hasAngle == true
-    local zoneShort = (entry.subZone and entry.subZone ~= "") and entry.subZone or ""
-    local locPart = (zoneShort ~= "") and (" |cff8b949e· " .. zoneShort .. "|r") or ""
 
     if hasAngle then
         if bar._visHasAngle ~= true then
             bar._visHasAngle = true
-            bar._visDotKey = nil
+            bar._visDead = nil
+            bar._visClassFile = nil
+            bar._visBlipDead = nil
+            bar._visBlipStance = nil
             if bar.noSignalDot then bar.noSignalDot:Hide() end
+            if bar.noSignalBlip then bar.noSignalBlip:Hide() end
             if bar.arrowTex then bar.arrowTex:Show() end
         end
         local angleVal = smoothAngle or 0
@@ -803,32 +959,68 @@ local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
             bar._visAngle = nil
             if bar.arrowTex then bar.arrowTex:Hide() end
             if bar.noSignalDot then bar.noSignalDot:Show() end
+            if bar.noSignalBlip then bar.noSignalBlip:Show() end
         end
-        local dotKey = entry.dead and "DEAD" or (entry.stance or "SAME")
-        if bar._visDotKey ~= dotKey and bar.noSignalDot then
-            bar._visDotKey = dotKey
-            if entry.dead then
-                bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.65)
+        local classFileVal = entry.classFile or false
+        if (bar._visDead ~= isDead or bar._visClassFile ~= classFileVal) and bar.noSignalDot then
+            bar._visDead = isDead
+            bar._visClassFile = classFileVal
+            local coords = classFileVal and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFileVal]
+            if coords then
+                bar.noSignalDot:SetTexture(CLASS_SPRITE_TEX)
+                bar.noSignalDot:SetTexCoord(coords[1] + 0.015, coords[2] - 0.015, coords[3] + 0.015, coords[4] - 0.015)
+                if isDead then
+                    bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.70)
+                else
+                    bar.noSignalDot:SetVertexColor(1, 1, 1, 1)
+                end
             else
-                bar.noSignalDot:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.95)
+                bar.noSignalDot:SetTexture(RADAR_FALLBACK_ICON)
+                bar.noSignalDot:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                if isDead then
+                    bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.70)
+                else
+                    bar.noSignalDot:SetVertexColor(1, 1, 1, 0.95)
+                end
+            end
+        end
+        if bar.noSignalBlip and (bar._visBlipDead ~= isDead or bar._visBlipStance ~= stanceVal) then
+            bar._visBlipDead = isDead
+            bar._visBlipStance = stanceVal
+            if isDead then
+                bar.noSignalBlip:SetVertexColor(0.50, 0.50, 0.50, 0.70)
+            else
+                bar.noSignalBlip:SetVertexColor(rgb[1], rgb[2], rgb[3], 1.0)
             end
         end
     end
 
-    local isAhead = (not entry.dead) and hasAngle and math.abs(kin.angle or 0) <= 0.42
-    local tintKey = (entry.dead and "D" or (hasAngle and (isAhead and "A" or "N") or "O")) .. ":" .. (entry.stance or "SAME")
-    if bar._visTintKey ~= tintKey then
-        bar._visTintKey = tintKey
-        if entry.dead then
+    local isAhead = (not isDead) and hasAngle and math.abs(kin.angle or 0) <= 0.42
+    if bar._visTintDead ~= isDead
+        or bar._visTintHasAngle ~= hasAngle
+        or bar._visTintAhead ~= isAhead
+        or bar._visTintStance ~= stanceVal
+    then
+        bar._visTintDead = isDead
+        bar._visTintHasAngle = hasAngle
+        bar._visTintAhead = isAhead
+        bar._visTintStance = stanceVal
+        if isDead then
+            if bar.arrowBox and bar.arrowBox.outerRing then
+                bar.arrowBox.outerRing:SetVertexColor(0.45, 0.45, 0.45, 0.75)
+            end
             if bar.arrowBox and bar.arrowBox.aura then
-                bar.arrowBox.aura:SetVertexColor(0.4, 0.4, 0.4, 0.20)
+                bar.arrowBox.aura:SetVertexColor(0.08, 0.09, 0.12, 0.95)
             end
             if bar.arrowTex and bar.arrowTex.SetVertexColor then
                 bar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.65)
             end
         else
+            if bar.arrowBox and bar.arrowBox.outerRing then
+                bar.arrowBox.outerRing:SetVertexColor(rgb[1], rgb[2], rgb[3], hasAngle and 0.95 or 0.90)
+            end
             if bar.arrowBox and bar.arrowBox.aura then
-                bar.arrowBox.aura:SetVertexColor(rgb[1], rgb[2], rgb[3], hasAngle and 0.42 or 0.24)
+                bar.arrowBox.aura:SetVertexColor(0.07, 0.09, 0.14, 0.96)
             end
             if bar.arrowTex and bar.arrowTex.SetVertexColor then
                 if isAhead then
@@ -840,15 +1032,25 @@ local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
         end
     end
 
+    local distTextVal = kin.distText or L["Nearby"]
     local bearing = hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
-    local distOut
-    if entry.dead then
-        distOut = string.format("|cff888888%s|r |cff8b949e· %s|r%s", L["Dead"], bearing, locPart)
-    else
-        distOut = string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", kin.distText or L["Nearby"], bearing, locPart)
-    end
-    if bar._visDistOut ~= distOut then
-        bar._visDistOut = distOut
+    local zoneShort = (entry.subZone and entry.subZone ~= "") and entry.subZone or ""
+    if bar._visDistText ~= distTextVal
+        or bar._visBearing ~= bearing
+        or bar._visSubZone ~= zoneShort
+        or bar._visDistDead ~= isDead
+    then
+        bar._visDistText = distTextVal
+        bar._visBearing = bearing
+        bar._visSubZone = zoneShort
+        bar._visDistDead = isDead
+        local locPart = (zoneShort ~= "") and (" |cff8b949e· " .. zoneShort .. "|r") or ""
+        local distOut
+        if isDead then
+            distOut = string.format("|cff888888%s|r |cff8b949e· %s|r%s", L["Dead"], bearing, locPart)
+        else
+            distOut = string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", distTextVal, bearing, locPart)
+        end
         bar.distFs:SetText(distOut)
     end
 end
@@ -858,19 +1060,38 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
     local cf = self.combatArrowFrame
     local mainCompassActive = f and f:IsShown() and f.compassBar and f.compassBar:IsShown()
     local combatCompassActive = cf and cf:IsShown()
-    if not (mainCompassActive or combatCompassActive) then return end
+    if not (mainCompassActive or combatCompassActive) then
+        self:SyncTickerState(nil)
+        return
+    end
 
     local entry = self._compassEntry
-    if not (entry and ns.Spotter and ns.Spotter.GetTargetKinematics) then return end
+    if not (entry and ns.Spotter and ns.Spotter.GetTargetKinematics) then
+        self:SyncTickerState(nil)
+        return
+    end
 
     local kin = ns.Spotter:GetTargetKinematics(entry)
-    if not kin then return end
+    if not kin then
+        self:SyncTickerState(nil)
+        return
+    end
 
     -- Keep the secure target macro synced only when target identity or resolved unit token changes
     if mainCompassActive and not (InCombatLockdown and InCombatLockdown()) then
-        local macroSig = tostring(entry.key or "") .. "|" .. tostring(kin.unit or "") .. "|" .. tostring(entry.displayName or "") .. "|" .. tostring(entry.unitName or "")
-        if snap or macroSig ~= f.compassBar._lastMacroSig then
-            f.compassBar._lastMacroSig = macroSig
+        local curUnit = kin.unit or ""
+        local curDisp = entry.displayName or ""
+        local curUName = entry.unitName or ""
+        if snap
+            or f.compassBar._sigKey ~= entry.key
+            or f.compassBar._sigUnit ~= curUnit
+            or f.compassBar._sigDisp ~= curDisp
+            or f.compassBar._sigUName ~= curUName
+        then
+            f.compassBar._sigKey = entry.key
+            f.compassBar._sigUnit = curUnit
+            f.compassBar._sigDisp = curDisp
+            f.compassBar._sigUName = curUName
             local expectedMacro = BuildTargetMacroText(entry, kin.unit)
             if expectedMacro ~= f.compassBar._lastMacroText then
                 ApplySecureMacroAttributes(f.compassBar, entry, kin.unit)
@@ -892,7 +1113,8 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
         self._smoothAngle = 0
     end
 
-    if snap then
+    if entry and entry.key ~= self._lastCompassEntryKey then
+        self._lastCompassEntryKey = entry.key
         ResetCompassBarDirtyState(f and f.compassBar)
         ResetCompassBarDirtyState(cf)
     end
@@ -924,45 +1146,41 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
             end
         end
     end
+
+    self:SyncTickerState(kin)
 end
 
 function SpotterHUD:UpdateTargetVisuals()
     local f = self.frame
     if not (f and f:IsShown() and f.compassBar) then return end
 
-    local allTargets = ns.Spotter and ns.Spotter:GetActiveTargets("ALL") or {}
+    local spotter = ns.Spotter
+    local entriesMap = spotter and spotter.entries
+    local prevKey = self._compassEntry and self._compassEntry.key
     local entry = self._compassEntry
-    if entry then
-        local stillActive = false
-        for _, cand in ipairs(allTargets) do
-            if cand.key == entry.key then
-                entry = cand
-                stillActive = true
-                break
-            end
-        end
-        if not stillActive then
-            entry = allTargets[1]
-            self._compassEntry = entry
-        end
+    if entry and entriesMap and entriesMap[entry.key] then
+        entry = entriesMap[entry.key]
     else
+        local allTargets = spotter and spotter:GetActiveTargets("ALL") or {}
         entry = allTargets[1]
         self._compassEntry = entry
     end
     if not entry then return end
 
-    local currentTargetGuid = Safe.String(Safe.Call(UnitGUID, "target"))
-    local currentTargetName = Safe.String(Safe.Call(UnitName, "target"))
-    local parsedTarget = currentTargetName and Compat.ParseCharacterName(currentTargetName)
-    local isTargeted = IsEntryCurrentlyTargeted(entry, currentTargetGuid, parsedTarget)
+    local currentTargetGuid, tLookupKey, tFirstName, tSurname = ReadCurrentTargetIdentity()
+    local isTargeted = IsEntryCurrentlyTargeted(entry, currentTargetGuid, tLookupKey, tFirstName, tSurname)
 
-    local p = Theme:GetPalette()
-    if isTargeted then
-        Theme:ApplyBackdrop(f.compassBar, "primary", p)
-    elseif f.compassBar.SetBackdrop then
-        f.compassBar:SetBackdrop(nil)
+    if f.compassBar._isTargetedBackdrop ~= isTargeted then
+        f.compassBar._isTargetedBackdrop = isTargeted
+        local p = Theme:GetPalette()
+        if isTargeted then
+            Theme:ApplyBackdrop(f.compassBar, "primary", p)
+        elseif f.compassBar.SetBackdrop then
+            f.compassBar:SetBackdrop(nil)
+        end
     end
-    self:UpdateCompassVisuals(true, 0.04)
+    local entryChanged = (prevKey ~= entry.key)
+    self:UpdateCompassVisuals(entryChanged, 0.04)
 end
 
 function SpotterHUD:Refresh()
@@ -999,6 +1217,7 @@ function SpotterHUD:Refresh()
         self.interactionOpen = false
         self.interactionKey = nil
         self._compassEntry = nil
+        self._lastCompassEntryKey = nil
         self._hasSmoothAngle = false
         self.userClosed = false
         if self.combatArrowFrame then
@@ -1020,9 +1239,7 @@ function SpotterHUD:Refresh()
         self.combatArrowFrame:Hide()
     end
 
-    local currentTargetGuid = Safe.String(Safe.Call(UnitGUID, "target"))
-    local currentTargetName = Safe.String(Safe.Call(UnitName, "target"))
-    local parsedTarget = currentTargetName and Compat.ParseCharacterName(currentTargetName)
+    local currentTargetGuid, tLookupKey, tFirstName, tSurname = ReadCurrentTargetIdentity()
 
     -- Pick active target for the Minimalist Arrow Pill:
     -- 1. Manually focused target -> 2. Currently targeted player -> 3. Top priority target
@@ -1040,7 +1257,7 @@ function SpotterHUD:Refresh()
         end
         if not compassEntry then
             for idx, cand in ipairs(allTargets) do
-                if IsEntryCurrentlyTargeted(cand, currentTargetGuid, parsedTarget) then
+                if IsEntryCurrentlyTargeted(cand, currentTargetGuid, tLookupKey, tFirstName, tSurname) then
                     compassEntry = cand
                     activeIdx = idx
                     break
@@ -1055,13 +1272,24 @@ function SpotterHUD:Refresh()
     self.cycleIndex = activeIdx
     self._compassEntry = compassEntry
 
-    if totalCount > 1 and f.cycleBtn then
-        Theme:SetButtonText(f.cycleBtn, string.format("%d/%d", activeIdx, totalCount))
-        f.cycleBtn:Show()
-        f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -54, -3)
+    local showCycle = (totalCount > 1 and f.cycleBtn ~= nil)
+    if showCycle then
+        if f._lastCycleIdx ~= activeIdx or f._lastCycleTotal ~= totalCount then
+            f._lastCycleIdx = activeIdx
+            f._lastCycleTotal = totalCount
+            Theme:SetButtonText(f.cycleBtn, string.format("%d/%d", activeIdx, totalCount))
+        end
+        if f._lastCycleShown ~= true then
+            f._lastCycleShown = true
+            f.cycleBtn:Show()
+            f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -54, -3)
+        end
     else
-        if f.cycleBtn then f.cycleBtn:Hide() end
-        f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -22, -3)
+        if f._lastCycleShown ~= false then
+            f._lastCycleShown = false
+            if f.cycleBtn then f.cycleBtn:Hide() end
+            f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -22, -3)
+        end
     end
 
     if not compassEntry then
@@ -1070,47 +1298,82 @@ function SpotterHUD:Refresh()
             f.stanceBar:SetColorTexture(p.accent[1], p.accent[2], p.accent[3], 1)
         end
         ApplySecureMacroAttributes(f.compassBar, nil)
+        f.compassBar._sigKey = nil
+        f.compassBar._sigUnit = nil
+        f.compassBar._sigDisp = nil
+        f.compassBar._sigUName = nil
+        f.compassBar._isTargetedBackdrop = false
         if f.compassBar.SetBackdrop then
             f.compassBar:SetBackdrop(nil)
         end
+        self._lastCompassEntryKey = nil
         f.compassBar.entry = nil
         if f.compassBar.arrowTex then
             f.compassBar.arrowTex:Hide()
         end
+        if f.compassBar.arrowBox and f.compassBar.arrowBox.outerRing then
+            f.compassBar.arrowBox.outerRing:SetVertexColor(p.accent[1], p.accent[2], p.accent[3], 0.70)
+        end
+        if f.compassBar.noSignalBlip then
+            f.compassBar.noSignalBlip:Hide()
+        end
         if f.compassBar.noSignalDot then
-            f.compassBar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.65)
+            f.compassBar.noSignalDot:SetTexture(RADAR_FALLBACK_ICON)
+            f.compassBar.noSignalDot:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            f.compassBar.noSignalDot:SetVertexColor(0.85, 0.90, 0.96, 0.85)
             f.compassBar.noSignalDot:Show()
         end
+        ResetCompassBarDirtyState(f.compassBar)
         f.compassBar.nameFs:SetText(L["Target Radar"])
+        f._lastStanceBar = nil
+        f._lastNameStance = nil
+        f._lastNameText = nil
+        f._lastNameClass = nil
+        f._lastNameLvl = nil
         f.compassBar.distFs:SetText("|cff8b949e" .. L["No targets currently detected."] .. "|r")
+        f._lastActionOpen = false
         f.actionPanel:Hide()
         f:SetHeight(PILL_H)
+        self:SyncTickerState(nil)
         return
     end
 
-    local rgb = STANCE_RGB[compassEntry.stance] or STANCE_RGB.SAME
-    if f.stanceBar then
+    local stanceVal = compassEntry.stance or "SAME"
+    local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
+    if f.stanceBar and f._lastStanceBar ~= stanceVal then
+        f._lastStanceBar = stanceVal
         f.stanceBar:SetColorTexture(rgb[1], rgb[2], rgb[3], 1)
     end
 
-    local kin = spotter and spotter.GetTargetKinematics and spotter:GetTargetKinematics(compassEntry)
     f.compassBar.entry = compassEntry
-    ApplySecureMacroAttributes(f.compassBar, compassEntry, kin and kin.unit)
 
-    local stanceTag = compassEntry.stance == "ENEMY" and L["ENEMY"]
-        or (compassEntry.stance == "WATCHLIST" and L["WATCHLIST"])
-        or (compassEntry.stance == "FRIEND" and L["FRIEND"])
-        or (compassEntry.stance == "ALLY" and L["ALLY"] or L["CLAN"])
-    local colHex = ns.Spotter:GetStanceColor(compassEntry.stance).hex
-    local classHex = Compat.ClassHex and Compat.ClassHex(compassEntry.classFile) or "|cffffffff"
-    local lvlPart = (compassEntry.level and compassEntry.level > 0) and (" |cff8b949e" .. compassEntry.level .. "|r") or ""
-    f.compassBar.nameFs:SetText(string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, compassEntry.displayName or "?", lvlPart))
+    local dispName = compassEntry.displayName or "?"
+    local classVal = compassEntry.classFile or false
+    local lvlVal = (compassEntry.level and compassEntry.level > 0) and compassEntry.level or 0
+    if f._lastNameStance ~= stanceVal or f._lastNameText ~= dispName or f._lastNameClass ~= classVal or f._lastNameLvl ~= lvlVal then
+        f._lastNameStance = stanceVal
+        f._lastNameText = dispName
+        f._lastNameClass = classVal
+        f._lastNameLvl = lvlVal
+        local stanceTag = stanceVal == "ENEMY" and L["ENEMY"]
+            or (stanceVal == "BLOCKED" and L["BLOCKED"])
+            or (stanceVal == "WATCHLIST" and L["WATCHLIST"])
+            or (stanceVal == "FRIEND" and L["FRIEND"])
+            or (stanceVal == "ALLY" and L["ALLY"] or L["CLAN"])
+        local colHex = ns.Spotter:GetStanceColor(stanceVal).hex
+        local classHex = Compat.ClassHex and Compat.ClassHex(compassEntry.classFile) or "|cffffffff"
+        local lvlPart = (lvlVal > 0) and (" |cff8b949e" .. lvlVal .. "|r") or ""
+        f.compassBar.nameFs:SetText(string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, dispName, lvlPart))
+    end
 
-    local isActuallyTargeted = IsEntryCurrentlyTargeted(compassEntry, currentTargetGuid, parsedTarget)
-    if isActuallyTargeted then
-        Theme:ApplyBackdrop(f.compassBar, "primary", p)
-    elseif f.compassBar.SetBackdrop then
-        f.compassBar:SetBackdrop(nil)
+    local isActuallyTargeted = IsEntryCurrentlyTargeted(compassEntry, currentTargetGuid, tLookupKey, tFirstName, tSurname)
+    if f.compassBar._isTargetedBackdrop ~= isActuallyTargeted then
+        f.compassBar._isTargetedBackdrop = isActuallyTargeted
+        if isActuallyTargeted then
+            Theme:ApplyBackdrop(f.compassBar, "primary", p)
+        elseif f.compassBar.SetBackdrop then
+            f.compassBar:SetBackdrop(nil)
+        end
     end
 
     self:UpdateCompassVisuals(true, 0.04)
@@ -1121,55 +1384,82 @@ function SpotterHUD:Refresh()
         if compassEntry.locationText and compassEntry.locationText ~= "" then
             guildAndLoc = (guildAndLoc ~= "") and (guildAndLoc .. " · " .. compassEntry.locationText) or compassEntry.locationText
         end
-        f.actionPanel.promptFs:SetText(guildAndLoc ~= "" and guildAndLoc or (compassEntry.displayName or "?"))
-        if compassEntry.stance == "ENEMY" then
-            if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
-            if f.actionPanel.tellBtn then f.actionPanel.tellBtn:Hide() end
-            if f.actionPanel.scoutBtn then
-                f.actionPanel.scoutBtn:SetWidth(76)
-                f.actionPanel.scoutBtn:ClearAllPoints()
-                f.actionPanel.scoutBtn:SetPoint("BOTTOMLEFT", 5, 4)
-                f.actionPanel.scoutBtn:Show()
-                Theme:SetButtonText(f.actionPanel.scoutBtn, L["Scout Alert"])
-            end
-            Theme:SetButtonText(f.actionPanel.inviteBtn, L["Diplomacy"])
-            f.actionPanel.inviteBtn:SetWidth(72)
-            f.actionPanel.inviteBtn:ClearAllPoints()
-            f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.scoutBtn, "RIGHT", 3, 0)
-            if f.actionPanel.watchBtn then
-                f.actionPanel.watchBtn:SetWidth(72)
-                f.actionPanel.watchBtn:ClearAllPoints()
-                f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
-            end
-        else
-            if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
-            if f.actionPanel.whisperBtn then
-                f.actionPanel.whisperBtn:SetWidth(60)
-                f.actionPanel.whisperBtn:Show()
-                f.actionPanel.whisperBtn:ClearAllPoints()
-                f.actionPanel.whisperBtn:SetPoint("BOTTOMLEFT", 5, 4)
-            end
-            if f.actionPanel.tellBtn then
-                f.actionPanel.tellBtn:SetWidth(28)
-                f.actionPanel.tellBtn:Show()
-                f.actionPanel.tellBtn:ClearAllPoints()
-                f.actionPanel.tellBtn:SetPoint("LEFT", f.actionPanel.whisperBtn, "RIGHT", 3, 0)
-            end
-            Theme:SetButtonText(f.actionPanel.inviteBtn, L["Invite"])
-            f.actionPanel.inviteBtn:SetWidth(54)
-            f.actionPanel.inviteBtn:ClearAllPoints()
-            f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.tellBtn, "RIGHT", 3, 0)
-            if f.actionPanel.watchBtn then
-                f.actionPanel.watchBtn:SetWidth(75)
-                f.actionPanel.watchBtn:ClearAllPoints()
-                f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
+        local desiredPrompt = guildAndLoc ~= "" and guildAndLoc or dispName
+        if f.actionPanel._lastPromptText ~= desiredPrompt then
+            f.actionPanel._lastPromptText = desiredPrompt
+            f.actionPanel.promptFs:SetText(desiredPrompt)
+        end
+        local layoutKey = (stanceVal == "ENEMY" and "ENEMY") or (stanceVal == "BLOCKED" and "BLOCKED") or "DEFAULT"
+        if f.actionPanel._lastLayoutStance ~= layoutKey then
+            f.actionPanel._lastLayoutStance = layoutKey
+            if layoutKey == "ENEMY" then
+                if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
+                if f.actionPanel.tellBtn then f.actionPanel.tellBtn:Hide() end
+                if f.actionPanel.scoutBtn then
+                    f.actionPanel.scoutBtn:SetWidth(76)
+                    f.actionPanel.scoutBtn:ClearAllPoints()
+                    f.actionPanel.scoutBtn:SetPoint("BOTTOMLEFT", 5, 4)
+                    f.actionPanel.scoutBtn:Show()
+                    Theme:SetButtonText(f.actionPanel.scoutBtn, L["Scout Alert"])
+                end
+                Theme:SetButtonText(f.actionPanel.inviteBtn, L["Diplomacy"])
+                f.actionPanel.inviteBtn:SetWidth(72)
+                f.actionPanel.inviteBtn:ClearAllPoints()
+                f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.scoutBtn, "RIGHT", 3, 0)
+                if f.actionPanel.watchBtn then
+                    f.actionPanel.watchBtn:SetWidth(72)
+                    f.actionPanel.watchBtn:ClearAllPoints()
+                    f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
+                end
+            elseif layoutKey == "BLOCKED" then
+                if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
+                if f.actionPanel.tellBtn then f.actionPanel.tellBtn:Hide() end
+                if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
+                Theme:SetButtonText(f.actionPanel.inviteBtn, L["Dismiss Target"])
+                f.actionPanel.inviteBtn:SetWidth(108)
+                f.actionPanel.inviteBtn:ClearAllPoints()
+                f.actionPanel.inviteBtn:SetPoint("BOTTOMLEFT", 5, 4)
+                if f.actionPanel.watchBtn then
+                    f.actionPanel.watchBtn:SetWidth(108)
+                    f.actionPanel.watchBtn:ClearAllPoints()
+                    f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 4, 0)
+                end
+            else
+                if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
+                if f.actionPanel.whisperBtn then
+                    f.actionPanel.whisperBtn:SetWidth(60)
+                    f.actionPanel.whisperBtn:Show()
+                    f.actionPanel.whisperBtn:ClearAllPoints()
+                    f.actionPanel.whisperBtn:SetPoint("BOTTOMLEFT", 5, 4)
+                end
+                if f.actionPanel.tellBtn then
+                    f.actionPanel.tellBtn:SetWidth(28)
+                    f.actionPanel.tellBtn:Show()
+                    f.actionPanel.tellBtn:ClearAllPoints()
+                    f.actionPanel.tellBtn:SetPoint("LEFT", f.actionPanel.whisperBtn, "RIGHT", 3, 0)
+                end
+                Theme:SetButtonText(f.actionPanel.inviteBtn, L["Invite"])
+                f.actionPanel.inviteBtn:SetWidth(54)
+                f.actionPanel.inviteBtn:ClearAllPoints()
+                f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.tellBtn, "RIGHT", 3, 0)
+                if f.actionPanel.watchBtn then
+                    f.actionPanel.watchBtn:SetWidth(75)
+                    f.actionPanel.watchBtn:ClearAllPoints()
+                    f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
+                end
             end
         end
-        f.actionPanel:Show()
-        f:SetHeight(PILL_H + 2 + ACTION_H + 3)
+        if f._lastActionOpen ~= true then
+            f._lastActionOpen = true
+            f.actionPanel:Show()
+            f:SetHeight(PILL_H + 2 + ACTION_H + 3)
+        end
     else
-        f.actionPanel:Hide()
-        f:SetHeight(PILL_H)
+        if f._lastActionOpen ~= false then
+            f._lastActionOpen = false
+            f.actionPanel:Hide()
+            f:SetHeight(PILL_H)
+        end
     end
 end
 
@@ -1271,13 +1561,22 @@ function SpotterHUD:ShowFirstTimePrompt()
     end
     local dlg = self.promptDialog or self:CreatePromptDialog()
     if dlg then
+        if dlg._dirtyTheme then
+            ApplyPromptDialogTheme(dlg, Theme:GetPalette())
+        end
         dlg:Show()
     end
 end
 
 function SpotterHUD:Show(forceUser)
     if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+        if forceUser and ns.Print then
+            ns:Print(L["Clan Radar notifications disabled. Re-enable anytime in Settings."])
+        end
         return
+    end
+    if forceUser and ns.Spotter.RefreshVisibleNameplates and not (InCombatLockdown and InCombatLockdown()) then
+        ns.Spotter:RefreshVisibleNameplates(false)
     end
     local tCount = GetSpotterTotalCount()
     if forceUser then
@@ -1326,20 +1625,29 @@ function SpotterHUD:Hide()
     if self.combatArrowFrame then
         self.combatArrowFrame:Hide()
     end
-    if not self.frame then return end
+    if not self.frame then
+        self:SyncTickerState(nil)
+        return
+    end
     self.manualPinnedEmpty = false
     self.interactionOpen = false
     self.interactionKey = nil
+    self.frame._lastActionOpen = false
     if InCombatLockdown and InCombatLockdown() then
         self.pendingAction = "hide"
+        self:SyncTickerState(nil)
         return
     end
     self.frame:Hide()
+    self:SyncTickerState(nil)
 end
 
 function SpotterHUD:Toggle()
     if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
         self:Hide()
+        if ns.Print then
+            ns:Print(L["Clan Radar notifications disabled. Re-enable anytime in Settings."])
+        end
         return
     end
     if (self.frame and self.frame:IsShown()) or (self.combatArrowFrame and self.combatArrowFrame:IsShown()) then
@@ -1385,19 +1693,67 @@ function SpotterHUD:TrackEntry(info, forcedStance)
     local level = type(info) == "table" and info.level or nil
     local guid = type(info) == "table" and info.guid or nil
     local stanceArg = forcedStance
-    if stanceArg ~= "ENEMY" and stanceArg ~= "ALLY" and stanceArg ~= "SAME" and stanceArg ~= "WATCHLIST" and stanceArg ~= "FRIEND" then
+    if stanceArg ~= "ENEMY" and stanceArg ~= "BLOCKED" and stanceArg ~= "ALLY" and stanceArg ~= "SAME" and stanceArg ~= "WATCHLIST" and stanceArg ~= "FRIEND" then
         stanceArg = nil
     end
     return ns.Spotter:TrackPlayer(name, guild, classFile, level, guid, stanceArg)
 end
 
 function SpotterHUD:Init()
-    -- Target Radar HUD runtime loops & event hooks deactivated cleanly to prevent CPU spikes.
-    self.frame = nil
-    self.combatArrowFrame = nil
-    self.promptDialog = nil
     self.pendingRefresh = false
     self.pendingAction = nil
+
+    if not self._eventFrame then
+        local ef = CreateFrame("Frame")
+        ef:SetScript("OnEvent", function(_, event)
+            if event == "PLAYER_TARGET_CHANGED" then
+                if (SpotterHUD.frame and SpotterHUD.frame:IsShown()) or (SpotterHUD.combatArrowFrame and SpotterHUD.combatArrowFrame:IsShown()) then
+                    SpotterHUD:UpdateTargetVisuals()
+                end
+            elseif event == "PLAYER_REGEN_ENABLED" then
+                local act = SpotterHUD.pendingAction
+                local doRefresh = SpotterHUD.pendingRefresh
+                SpotterHUD.pendingAction = nil
+                SpotterHUD.pendingRefresh = false
+                if act == "hide" then
+                    SpotterHUD:Hide()
+                elseif act == "show" then
+                    SpotterHUD:Show(false)
+                elseif doRefresh then
+                    SpotterHUD:Refresh()
+                end
+            end
+        end)
+        pcall(ef.RegisterEvent, ef, "PLAYER_TARGET_CHANGED")
+        pcall(ef.RegisterEvent, ef, "PLAYER_REGEN_ENABLED")
+        self._eventFrame = ef
+    end
+
+    if not self._hooksInitialized then
+        self._hooksInitialized = true
+        ns:On("SPOTTER_UPDATED", function()
+            if (SpotterHUD.frame and SpotterHUD.frame:IsShown()) or (SpotterHUD.combatArrowFrame and SpotterHUD.combatArrowFrame:IsShown()) or GetSpotterTotalCount() > 0 then
+                SpotterHUD:Refresh()
+            end
+        end)
+        ns:On("SPOTTER_ALERT", function(alert)
+            SpotterHUD:OnAlert(alert)
+        end)
+        ns:On("SETTINGS_UPDATED", function()
+            if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+                SpotterHUD:Hide()
+            elseif SpotterHUD.frame then
+                SpotterHUD:UpdateAppearance()
+            end
+        end)
+        if Theme and Theme.RegisterListener then
+            Theme:RegisterListener(function()
+                if SpotterHUD.frame then
+                    SpotterHUD:UpdateAppearance()
+                end
+            end)
+        end
+    end
 end
 
 ns.SpotterHUD = SpotterHUD

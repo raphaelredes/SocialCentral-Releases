@@ -9,12 +9,19 @@ local Alts = {}
 ns.Alts = Alts
 table.insert(ns.modules, Alts)
 
+local cachedMyGuid
+local mySurnameConfirmed = false
+
 local function ApplyAuthorSurname(author, guid)
+    if mySurnameConfirmed then return end
     if not (ns.db and ns.db.alts) then return end
-    local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
+    if not cachedMyGuid then
+        cachedMyGuid = Safe.String(Safe.Call(UnitGUID, "player"))
+    end
     local cleanGuid = Safe.String(guid)
+    if not (cachedMyGuid and cleanGuid and cleanGuid == cachedMyGuid) then return end
     local cleanAuthor = Safe.String(author)
-    if not (myGuid and cleanGuid and cleanGuid == myGuid and cleanAuthor) then return end
+    if not cleanAuthor then return end
 
     local key = Compat.CharacterKey()
     local rec = ns.db.alts[key]
@@ -22,7 +29,11 @@ local function ApplyAuthorSurname(author, guid)
         Alts:Snapshot()
         rec = ns.db.alts[key]
     end
-    if not rec or rec.userSetSurname then return end
+    if not rec then return end
+    if rec.userSetSurname then
+        mySurnameConfirmed = true
+        return
+    end
 
     local parsed = Compat.ParseForeverFullName(cleanAuthor)
     if parsed and parsed.surname and parsed.firstName:lower() == (rec.firstName or rec.name or ""):lower() then
@@ -31,10 +42,11 @@ local function ApplyAuthorSurname(author, guid)
             rec.surname = parsed.surname
             rec.fullName = parsed.fullName
             if Compat.CacheForeverFullName then
-                Compat.CacheForeverFullName(myGuid, rec.fullName, rec.firstName)
+                Compat.CacheForeverFullName(cachedMyGuid, rec.fullName, rec.firstName)
             end
             ns:Emit("ALTS_UPDATED")
         end
+        mySurnameConfirmed = true
     end
 end
 
@@ -126,6 +138,45 @@ local function SnapshotProfessions(prevProfs)
 
     if #out == 0 and type(prevProfs) == "table" and #prevProfs > 0 then
         return prevProfs
+    end
+    return out
+end
+
+local function SnapshotLockouts(prevLockouts)
+    local out = {}
+    local now = time()
+    if GetNumSavedInstances and GetSavedInstanceInfo then
+        local count = Safe.Number(Safe.Call(GetNumSavedInstances)) or 0
+        for i = 1, count do
+            local ok, name, id, reset, _, locked, extended, _, isRaid, _, difficultyName, numEncounters, encounterProgress = pcall(GetSavedInstanceInfo, i)
+            if ok then
+                name = Safe.String(name)
+                local cleanReset = Safe.Number(reset) or 0
+                local isLocked = Safe.Value(locked) == true
+                local isExt = Safe.Value(extended) == true
+                if name and name ~= "" and (isLocked or isExt or cleanReset > 0) then
+                    out[#out + 1] = {
+                        name = name,
+                        id = Safe.Number(id) or 0,
+                        reset = cleanReset,
+                        expiresAt = (cleanReset > 0) and (now + cleanReset) or 0,
+                        locked = isLocked,
+                        extended = isExt,
+                        isRaid = Safe.Value(isRaid) == true,
+                        difficultyName = Safe.String(difficultyName) or "",
+                        numEncounters = Safe.Number(numEncounters) or 0,
+                        encounterProgress = Safe.Number(encounterProgress) or 0,
+                    }
+                end
+            end
+        end
+    end
+    if #out == 0 and not Alts._instanceInfoReady and type(prevLockouts) == "table" then
+        for _, lk in ipairs(prevLockouts) do
+            if type(lk) == "table" and (lk.expiresAt or 0) > now then
+                out[#out + 1] = lk
+            end
+        end
     end
     return out
 end
@@ -336,6 +387,11 @@ function Alts:Snapshot(includeBank)
         end
     end
 
+    local currentZone = Compat.CurrentZoneName()
+    if (not currentZone or currentZone == "") and type(prev) == "table" and prev.zone and prev.zone ~= "" then
+        currentZone = prev.zone
+    end
+    local lockouts = SnapshotLockouts(prev and prev.lockouts)
     ns.db.alts[key] = {
         name = name,
         firstName = resolved and resolved.firstName or name,
@@ -356,9 +412,10 @@ function Alts:Snapshot(includeBank)
         xpMax = xpMax,
         rested = rested,
         money = money,
-        zone = Compat.CurrentZoneName(),
+        zone = currentZone or "",
         bindLocation = bindLocation or "",
         professions = professions,
+        lockouts = lockouts,
         guild = guild,
         equipment = equipment,
         bags = bags,
@@ -398,8 +455,11 @@ function Alts:UpdateScalars()
     local rested = Safe.Number(Safe.Call(GetXPExhaustion))
     if rested ~= nil then rec.rested = rested end
     local money = Safe.Number(Safe.Call(GetMoney))
-    if money and money > 0 then rec.money = money end
-    rec.zone = Compat.CurrentZoneName()
+    if money and money >= 0 then rec.money = money end
+    local currentZone = Compat.CurrentZoneName()
+    if currentZone and currentZone ~= "" then
+        rec.zone = currentZone
+    end
     rec.lastActive = time()
 
     if ns.UI and ns.UI.IsAltsVisible and ns.UI:IsAltsVisible() then
@@ -441,58 +501,96 @@ local function ExtractItemID(item)
     return nil
 end
 
+local function CompareAltOwners(a, b)
+    local curKey = Compat.CharacterKey()
+    local aCur = (a.altKey == curKey)
+    local bCur = (b.altKey == curKey)
+    if aCur ~= bCur then return aCur end
+    if a.total ~= b.total then return a.total > b.total end
+    return (a.displayName or "") < (b.displayName or "")
+end
+
 function Alts:RebuildItemIndex()
     local index = {}
     local alts = Store and Store.GetAltsList and Store:GetAltsList() or {}
+    local curKey = Compat.CharacterKey()
+    local buckets = self._altBuckets
+    if type(buckets) ~= "table" then
+        buckets = {}
+        self._altBuckets = buckets
+    end
+
+    local liveKeys = {}
     for _, alt in ipairs(alts) do
+        liveKeys[alt.key] = true
         local displayName = alt.fullName or alt.name or alt.key or "?"
         local classFile = alt.classFile
-        local perItem = {}
+        local stamp = alt.lastActive or alt.updatedAt or 0
+        local cached = (alt.key ~= curKey) and buckets[alt.key]
+        local perItem
 
-        local function AddBucket(list, field)
-            if type(list) ~= "table" then return end
-            for _, item in pairs(list) do
-                local itemID = ExtractItemID(item)
-                if itemID then
-                    local rec = perItem[itemID]
-                    if not rec then
-                        rec = {
-                            altKey = alt.key,
-                            displayName = displayName,
-                            classFile = classFile,
-                            equipped = 0,
-                            bags = 0,
-                            bank = 0,
-                            total = 0,
-                        }
-                        perItem[itemID] = rec
+        if cached and cached.updatedAt == stamp and cached.displayName == displayName and cached.classFile == classFile then
+            perItem = cached.perItem
+        else
+            perItem = {}
+
+            local function AddBucket(list, field)
+                if type(list) ~= "table" then return end
+                for _, item in pairs(list) do
+                    local itemID = ExtractItemID(item)
+                    if itemID then
+                        local rec = perItem[itemID]
+                        if not rec then
+                            rec = {
+                                altKey = alt.key,
+                                displayName = displayName,
+                                classFile = classFile,
+                                equipped = 0,
+                                bags = 0,
+                                bank = 0,
+                                total = 0,
+                            }
+                            perItem[itemID] = rec
+                        end
+                        local qty = math.max(1, tonumber(item.count) or 1)
+                        rec[field] = rec[field] + qty
+                        rec.total = rec.total + qty
                     end
-                    local qty = math.max(1, tonumber(item.count) or 1)
-                    rec[field] = rec[field] + qty
-                    rec.total = rec.total + qty
                 end
             end
+
+            AddBucket(alt.equipment, "equipped")
+            AddBucket(alt.bags, "bags")
+            AddBucket(alt.bank, "bank")
+
+            buckets[alt.key] = {
+                updatedAt = stamp,
+                displayName = displayName,
+                classFile = classFile,
+                perItem = perItem,
+            }
         end
 
-        AddBucket(alt.equipment, "equipped")
-        AddBucket(alt.bags, "bags")
-        AddBucket(alt.bank, "bank")
-
         for itemID, rec in pairs(perItem) do
-            index[itemID] = index[itemID] or {}
-            table.insert(index[itemID], rec)
+            local owners = index[itemID]
+            if not owners then
+                owners = {}
+                index[itemID] = owners
+            end
+            owners[#owners + 1] = rec
         end
     end
 
-    local curKey = Compat.CharacterKey()
+    for k in pairs(buckets) do
+        if not liveKeys[k] then
+            buckets[k] = nil
+        end
+    end
+
     for _, owners in pairs(index) do
-        table.sort(owners, function(a, b)
-            local aCur = (a.altKey == curKey)
-            local bCur = (b.altKey == curKey)
-            if aCur ~= bCur then return aCur end
-            if a.total ~= b.total then return a.total > b.total end
-            return (a.displayName or "") < (b.displayName or "")
-        end)
+        if #owners > 1 then
+            table.sort(owners, CompareAltOwners)
+        end
     end
 
     self.itemIndex = index
@@ -649,6 +747,9 @@ function Alts:RemoveAlt(altKey)
     end
     if ns.db.alts[altKey] then
         ns.db.alts[altKey] = nil
+        if self._altBuckets then
+            self._altBuckets[altKey] = nil
+        end
         self.itemIndex = nil
         ns:Emit("ALTS_UPDATED")
         return true
@@ -698,6 +799,11 @@ function Alts:Init()
             self:QueueSnapshot(false, 1.5)
         end)
     end
+
+    ns.RegisterEvent(self, "UPDATE_INSTANCE_INFO", function()
+        self._instanceInfoReady = true
+        self:QueueSnapshot(false, 0.8)
+    end)
 
     for _, bankEvent in ipairs({
         "BANKFRAME_OPENED",

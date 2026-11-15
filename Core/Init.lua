@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.7"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.7" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.8"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.8" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -103,18 +103,20 @@ local DEFAULTS = {
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
         chatHistoryLimit = 30,      -- local lines kept per character conversation thread
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
-        spotterEnabled = false,     -- deactivated by default to prevent CPU spikes / frame stutters
+        spotterEnabled = true,      -- lightweight event-driven radar (0ms idle CPU)
         spotterNotifyEnemy = true,  -- chat + banner notification when Enemy Clan player appears
         spotterNotifyAlly = true,   -- chat + banner notification when Ally Clan player appears
         spotterNotifySameClan = false, -- default off to keep screen uncluttered (user can opt back in)
         spotterNotifyWatchlist = true, -- directional radar notification when a Watchlist player appears nearby
         spotterNotifyFriends = true,   -- directional radar notification when a Friend appears nearby
+        spotterNotifyBlocked = true,   -- alert when a Blocked/Ignore or Avoid-flagged player appears nearby
         spotterIgnoreGroup = true,     -- ignore current party/raid members from automatic radar popups
         spotterSound = true,        -- subtle chime when an Enemy/Ally/Watchlist player appears
-        spotterAutoShowHUD = false, -- disabled while Target Radar polling is deactivated
+        spotterAutoShowHUD = true,  -- auto-open floating HUD pill on flagged sighting (out of combat)
         spotterPromptAnswered = true, -- keep HUD clutter-free without unsolicited confirmation popups
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
         spotterNameplateBadges = false, -- default off to keep world nameplates uncluttered (user can opt in)
+        spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
         worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
         worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
         worldBuffsMapPins = true,   -- show minimalist World Buff pins & hover summary on World Map (M)
@@ -266,11 +268,12 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
     SocialCentralDB = SocialCentralDB or {}
     SocialCentralCharDB = SocialCentralCharDB or {}
     ApplyDefaults(SocialCentralDB, DEFAULTS)
-    if SocialCentralDB.settings then
-        -- Force Target Radar off on login/reload so stale SavedVariables cannot revive background polling.
-        SocialCentralDB.settings.spotterEnabled = false
-        SocialCentralDB.settings.spotterAutoShowHUD = false
+    if SocialCentralDB.settings and SocialCentralDB.settings.spotterV2Migrated ~= true then
+        -- One-time upgrade from previously deactivated 0.2.7 Target Radar defaults; user toggles persist afterwards.
+        SocialCentralDB.settings.spotterEnabled = true
+        SocialCentralDB.settings.spotterAutoShowHUD = true
         SocialCentralDB.settings.spotterPromptAnswered = true
+        SocialCentralDB.settings.spotterV2Migrated = true
     end
     ns.db = SocialCentralDB
     ns.charDb = SocialCentralCharDB

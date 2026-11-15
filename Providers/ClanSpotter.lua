@@ -16,8 +16,11 @@ local Spotter = {
     lastAlert = nil,
     lastScopeToken = nil,
     plateBadges = setmetatable({}, { __mode = "k" }), -- [plateFrame] = badgeFrame
-    _pruneElapsed = 0,
-    _platePollElapsed = 0,
+    _pruneTimerActive = false,
+    _batchFlushQueued = false,
+    _batchEmitDirty = false,
+    _eventsRegistered = false,
+    _hooksInitialized = false,
 }
 
 local LIVE_TOKEN_LIST = {
@@ -29,30 +32,167 @@ local LIVE_TOKEN_LIST = {
 local socialByGuid = {}
 local socialByKey = {}
 local socialCacheDirty = true
-local bystanderCooldown = {}
 
-local function RebuildSocialLookupCache()
-    wipe(socialByGuid)
-    wipe(socialByKey)
-    socialCacheDirty = false
-    local store = ns.Store
-    if not (store and type(store.social) == "table") then return end
-    for _, row in pairs(store.social) do
-        if type(row) == "table" then
-            if row.guid and row.guid ~= "" then
-                socialByGuid[row.guid] = row
-            elseif row.lookupKey and row.lookupKey ~= "" and not socialByKey[row.lookupKey] then
-                socialByKey[row.lookupKey] = row
-            end
-        end
+local posGuidSet = {}
+local posKeySet = {}
+local posFirstSet = {}
+local posAvoidKeys = {}
+local posAvoidFirsts = {}
+local posIgnoreKeys = {}
+local posIgnoreFirsts = {}
+local posGuildRawCache = {}
+local posGuildRawCacheCount = 0
+local coldGuildRetryUsed = {}
+local guildPosGuidSet = {}
+local guildPosKeySet = {}
+local guildPosFirstSet = {}
+local guildPosIndexDirty = true
+local guildPosLastAllowSame = false
+local posIndexDirty = true
+local hasAnyPosPeople = false
+local hasAnyPosGuilds = false
+
+local bystanderCooldown = {}
+local bystanderCooldownCount = 0
+local chatCooldown = {}
+local chatCooldownCount = 0
+local activePlatesByUnit = {}
+local activePlateUnitByGuid = {}
+local activePlateCount = 0
+local groupMemberByGuid = {}
+local groupMemberByKey = {}
+local groupCacheDirty = true
+
+local onScreenCounts = {}
+local unknownRetryUnits = {}
+local unknownRetryCount = 0
+local inspectQueue = {}
+local inspectQueuedSet = {}
+local inspectQueueHead = 1
+local inspectQueueTail = 0
+local inspectQueueTimerActive = false
+local sliceInspectCount = 0
+local sliceWindowStart = 0
+local lastMouseoverGuid = nil
+local lastMouseoverAt = 0
+
+local inInstanceCached = nil
+local uiCenterX, uiCenterY, uiScaleCached, uiHalfW, uiHalfH
+local uiMetricsValid = false
+
+local ITEM_IN_RANGE_FN = (C_Item and C_Item.IsItemInRange) or IsItemInRange
+local ITEM_REQUEST_FN = C_Item and C_Item.RequestLoadItemDataByID
+local requestedRangeItems = {}
+
+local function EnsureRangeItemRequested(itemId)
+    if ITEM_REQUEST_FN and itemId and not requestedRangeItems[itemId] then
+        requestedRangeItems[itemId] = true
+        pcall(ITEM_REQUEST_FN, itemId)
     end
 end
 
+local function InvalidateUiMetrics()
+    uiMetricsValid = false
+end
+
+local function RecordPosGuildRawCache(rawGuild, value)
+    if not rawGuild then return end
+    if posGuildRawCache[rawGuild] == nil then
+        if posGuildRawCacheCount >= 400 then
+            wipe(posGuildRawCache)
+            posGuildRawCacheCount = 0
+        end
+        posGuildRawCacheCount = posGuildRawCacheCount + 1
+    end
+    posGuildRawCache[rawGuild] = value
+end
+
+local function InvalidateBystanderCache()
+    wipe(bystanderCooldown)
+    bystanderCooldownCount = 0
+    wipe(coldGuildRetryUsed)
+    wipe(posGuildRawCache)
+    posGuildRawCacheCount = 0
+end
+
+local function MarkPositiveIndexDirty()
+    posIndexDirty = true
+    socialCacheDirty = true
+    wipe(posGuildRawCache)
+    posGuildRawCacheCount = 0
+end
+
+local function MarkGuildPositiveDirty()
+    guildPosIndexDirty = true
+    MarkPositiveIndexDirty()
+end
+
+local function RecordBystanderCooldown(guid, expiresAt)
+    if not guid then return end
+    if bystanderCooldown[guid] == nil then
+        if bystanderCooldownCount >= 400 then
+            wipe(bystanderCooldown)
+            bystanderCooldownCount = 0
+            wipe(coldGuildRetryUsed)
+        end
+        bystanderCooldownCount = bystanderCooldownCount + 1
+    end
+    bystanderCooldown[guid] = expiresAt
+end
+
+local function RecordGateMissCooldown(guid, confirmedNoMatch, nowClock)
+    if not guid then return end
+    local cdSec
+    if confirmedNoMatch or coldGuildRetryUsed[guid] then
+        cdSec = GetBystanderCooldownSeconds()
+    else
+        coldGuildRetryUsed[guid] = true
+        cdSec = IsCrowdMode() and 8.0 or 4.0
+    end
+    RecordBystanderCooldown(guid, nowClock + cdSec)
+end
+
+local function RecordChatCooldown(cacheKey, expiresAt)
+    if not cacheKey then return end
+    if chatCooldown[cacheKey] == nil then
+        if chatCooldownCount >= 300 then
+            wipe(chatCooldown)
+            chatCooldownCount = 0
+        end
+        chatCooldownCount = chatCooldownCount + 1
+    end
+    chatCooldown[cacheKey] = expiresAt
+end
+
+local function IsInInstanceFast()
+    if inInstanceCached ~= nil then
+        return inInstanceCached
+    end
+    if IsInInstance then
+        local ok, inInst = pcall(IsInInstance)
+        if ok then
+            inInstanceCached = (Safe.Value(inInst) == true)
+            return inInstanceCached
+        end
+    end
+    return false
+end
+
+local function IsGroupUnitToken(unit)
+    if not unit then return false end
+    return unit == "player" or unit:match("^party%d+$") ~= nil or unit:match("^raid%d+$") ~= nil
+end
+
 local MAX_TARGETS = 24
-local RETENTION_SECONDS = 7
-local MANUAL_RETENTION_SECONDS = 45
+local RETENTION_SECONDS = 12
+local MANUAL_RETENTION_SECONDS = 60
 local DISMISS_COOLDOWN_SECONDS = 180
-local PRUNE_INTERVAL = 0.5
+local PRUNE_INTERVAL = 3.0
+local BYSTANDER_COOLDOWN_SECONDS = 25.0
+local BYSTANDER_CROWD_COOLDOWN_SECONDS = 60.0
+local CHAT_SIGHTING_COOLDOWN = 12.0
+local INSPECT_BATCH_LIMIT = 6
+local INSPECT_SLICE_INTERVAL = 0.15
 local ENEMY_ALERT_COOLDOWN = 120
 local FRIENDLY_ALERT_COOLDOWN = 180
 local MAP_COORD_PER_YARD = 0.00035
@@ -71,25 +211,305 @@ local ITEM_RANGES = {
 
 local STANCE_PRIORITY = {
     ENEMY = 1,
-    WATCHLIST = 2,
-    FRIEND = 3,
-    ALLY = 4,
-    SAME = 5,
+    BLOCKED = 2,
+    WATCHLIST = 3,
+    FRIEND = 4,
+    ALLY = 5,
+    SAME = 6,
 }
 
 local STANCE_COLORS = {
     ENEMY     = { r = 0.96, g = 0.28, b = 0.28, hex = "|cfff54747" },
+    BLOCKED   = { r = 0.88, g = 0.22, b = 0.56, hex = "|cffe0388f" },
     WATCHLIST = { r = 1.00, g = 0.65, b = 0.20, hex = "|cffffa633" },
     FRIEND    = { r = 0.35, g = 0.78, b = 1.00, hex = "|cff59c7ff" },
     ALLY      = { r = 0.25, g = 0.85, b = 0.45, hex = "|cff40d973" },
     SAME      = { r = 0.98, g = 0.80, b = 0.24, hex = "|cfffacc3d" },
 }
 
+local function IsCrowdMode()
+    if activePlateCount >= 18 then
+        return true
+    end
+    if IsInRaid and Safe.Value(Safe.Call(IsInRaid)) == true then
+        return true
+    end
+    return false
+end
+
+local function GetBystanderCooldownSeconds()
+    return IsCrowdMode() and BYSTANDER_CROWD_COOLDOWN_SECONDS or BYSTANDER_COOLDOWN_SECONDS
+end
+
 local function NormalizeKeyPart(value)
     local s = Safe.String(value)
     if not s or s == "" then return "" end
     s = s:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
     return s:lower()
+end
+
+local function ExtractFastFirstLower(raw)
+    if type(raw) ~= "string" or raw == "" then return nil end
+    local s = raw:match("^%s*(.-)%s*$")
+    if not s or s == "" then return nil end
+    local dash = s:find("-", 1, true)
+    if dash then
+        s = s:sub(1, dash - 1)
+    end
+    local sp = s:find(" ", 1, true)
+    if sp then
+        s = s:sub(1, sp - 1)
+    end
+    if s == "" then return nil end
+    return s:lower()
+end
+
+local function AddPositiveCandidate(rawNameOrKey, guid, extraKeyMap, extraFirstMap, includeInGate, knownLookupKey)
+    local addGate = (includeInGate ~= false)
+    local cleanGuid = Safe.String(guid)
+    if cleanGuid and cleanGuid ~= "" and addGate then
+        posGuidSet[cleanGuid] = true
+        hasAnyPosPeople = true
+    end
+    if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" then
+        return
+    end
+    local lKey, pFirst
+    if knownLookupKey and knownLookupKey ~= "" then
+        lKey = knownLookupKey
+    elseif Compat.ParseCharacterFields then
+        lKey, pFirst = Compat.ParseCharacterFields(rawNameOrKey)
+    else
+        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(rawNameOrKey)
+        lKey = parsed and parsed.lookupKey
+        pFirst = parsed and parsed.firstName
+    end
+    lKey = (lKey and lKey ~= "" and lKey) or NormalizeKeyPart(rawNameOrKey)
+    local fLower = (pFirst and pFirst ~= "" and pFirst:lower()) or ExtractFastFirstLower(rawNameOrKey)
+    if lKey and lKey ~= "" then
+        if extraKeyMap then extraKeyMap[lKey] = true end
+        if addGate then
+            posKeySet[lKey] = true
+            hasAnyPosPeople = true
+        end
+    end
+    if fLower and fLower ~= "" then
+        if extraFirstMap then extraFirstMap[fLower] = true end
+        if addGate then
+            posFirstSet[fLower] = true
+            hasAnyPosPeople = true
+        end
+    end
+end
+
+local function RebuildPositiveIndex()
+    wipe(socialByGuid)
+    wipe(socialByKey)
+    wipe(posGuidSet)
+    wipe(posKeySet)
+    wipe(posFirstSet)
+    wipe(posAvoidKeys)
+    wipe(posAvoidFirsts)
+    wipe(posIgnoreKeys)
+    wipe(posIgnoreFirsts)
+    wipe(posGuildRawCache)
+    posGuildRawCacheCount = 0
+    socialCacheDirty = false
+    posIndexDirty = false
+    hasAnyPosPeople = false
+    hasAnyPosGuilds = false
+
+    local s = ns.db and ns.db.settings
+    local allowFriends = (not s) or s.spotterNotifyFriends ~= false
+    local allowWatch = (not s) or s.spotterNotifyWatchlist ~= false
+    local allowBlocked = (not s) or s.spotterNotifyBlocked ~= false
+    local allowEnemy = (not s) or s.spotterNotifyEnemy ~= false
+    local allowAlly = (not s) or s.spotterNotifyAlly ~= false
+    local allowSame = (s ~= nil and s.spotterNotifySameClan == true)
+
+    local store = ns.Store
+    local hasStoreIndex = store and type(store.socialByGuid) == "table" and type(store.socialByLookup) == "table"
+    if store and type(store.social) == "table" and (allowFriends or not hasStoreIndex) then
+        for _, row in pairs(store.social) do
+            if type(row) == "table" then
+                if not hasStoreIndex then
+                    if row.guid and row.guid ~= "" then
+                        socialByGuid[row.guid] = row
+                    elseif row.lookupKey and row.lookupKey ~= "" and not socialByKey[row.lookupKey] then
+                        socialByKey[row.lookupKey] = row
+                    end
+                end
+                local src = row.sources
+                if src and allowFriends and (src.friend == true or src.bnet == true) then
+                    AddPositiveCandidate(row.fullName or row.name or row.lookupKey, row.guid, nil, nil, true, row.lookupKey)
+                end
+            end
+        end
+    end
+
+    if allowFriends then
+        if C_FriendList and C_FriendList.GetNumFriends and C_FriendList.GetFriendInfoByIndex then
+            local nf = Safe.Number(Safe.Call(C_FriendList.GetNumFriends)) or 0
+            for i = 1, nf do
+                local info = Safe.Call(C_FriendList.GetFriendInfoByIndex, i)
+                if type(info) == "table" then
+                    AddPositiveCandidate(Safe.String(info.name), Safe.String(info.guid))
+                end
+            end
+        elseif GetNumFriends and GetFriendInfo then
+            local nf = Safe.Number(Safe.Call(GetNumFriends)) or 0
+            for i = 1, nf do
+                local name = Safe.String(Safe.Call(GetFriendInfo, i))
+                if name and name ~= "" then
+                    AddPositiveCandidate(name, nil)
+                end
+            end
+        end
+
+        if BNGetNumFriends and C_BattleNet and C_BattleNet.GetFriendAccountInfo then
+            local nb = Safe.Number(Safe.Call(BNGetNumFriends)) or 0
+            for i = 1, nb do
+                local acct = Safe.Call(C_BattleNet.GetFriendAccountInfo, i)
+                local ga = type(acct) == "table" and acct.gameAccountInfo or nil
+                if type(ga) == "table" and Safe.Value(ga.isOnline) == true then
+                    local client = Safe.String(ga.clientProgram)
+                    if not client or client == (BNET_CLIENT_WOW or "WoW") then
+                        local charName = Safe.String(ga.characterName)
+                        if charName and charName ~= "" then
+                            AddPositiveCandidate(charName, Safe.String(ga.playerGuid))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if allowWatch and store and store.GetWatchlistTable then
+        local wl = store:GetWatchlistTable()
+        if type(wl) == "table" then
+            for k, wRow in pairs(wl) do
+                if type(wRow) == "table" then
+                    AddPositiveCandidate(wRow.name or k, wRow.guid, nil, nil, true, k)
+                else
+                    AddPositiveCandidate(k, nil, nil, nil, true, k)
+                end
+            end
+        end
+    end
+
+    if store and store.GetSocialMetaTable then
+        local metaTbl = store:GetSocialMetaTable()
+        if type(metaTbl) == "table" then
+            for k, rec in pairs(metaTbl) do
+                if type(rec) == "table" then
+                    local isAvoid = (rec.flag == "AVOID")
+                    if (not isAvoid) and (not rec.flag) and rec.mainName and rec.mainName ~= "" then
+                        local mainKey
+                        if Compat.ParseCharacterFields then
+                            mainKey = Compat.ParseCharacterFields(rec.mainName)
+                        end
+                        if not mainKey or mainKey == "" then
+                            mainKey = NormalizeKeyPart(rec.mainName)
+                        end
+                        local mainRec = mainKey and metaTbl[mainKey]
+                        if type(mainRec) == "table" and mainRec.flag == "AVOID" then
+                            isAvoid = true
+                        end
+                    end
+                    if isAvoid then
+                        AddPositiveCandidate(k, nil, posAvoidKeys, posAvoidFirsts, allowBlocked, k)
+                    end
+                end
+            end
+        end
+    end
+
+    local getNumIg = (C_FriendList and C_FriendList.GetNumIgnores) or GetNumIgnores
+    local getIgnName = (C_FriendList and C_FriendList.GetIgnoreName) or GetIgnoreName
+    if getNumIg and getIgnName then
+        local ni = Safe.Number(Safe.Call(getNumIg)) or 0
+        for i = 1, ni do
+            local ignName = Safe.String(Safe.Call(getIgnName, i))
+            if ignName and ignName ~= "" then
+                AddPositiveCandidate(ignName, nil, posIgnoreKeys, posIgnoreFirsts, allowBlocked)
+            end
+        end
+    end
+
+    if allowSame and Safe.Value(Safe.Call(IsInGuild)) == true and GetNumGuildMembers and GetGuildRosterInfo then
+        if guildPosIndexDirty or not guildPosLastAllowSame then
+            wipe(guildPosGuidSet)
+            wipe(guildPosKeySet)
+            wipe(guildPosFirstSet)
+            local ng = math.min(1000, Safe.Number(Safe.Call(GetNumGuildMembers)) or 0)
+            for i = 1, ng do
+                local okG, gFullName, _, _, _, _, _, _, _, gOnline, _, _, _, _, _, _, _, gGuid = pcall(GetGuildRosterInfo, i)
+                if okG and Safe.Value(gOnline) == true then
+                    local cleanGName = Safe.String(gFullName)
+                    local cleanGGuid = Safe.String(gGuid)
+                    if cleanGGuid and cleanGGuid ~= "" then
+                        guildPosGuidSet[cleanGGuid] = true
+                    end
+                    if cleanGName and cleanGName ~= "" then
+                        local lKey, pFirst
+                        if Compat.ParseCharacterFields then
+                            lKey, pFirst = Compat.ParseCharacterFields(cleanGName)
+                        end
+                        lKey = (lKey and lKey ~= "" and lKey) or NormalizeKeyPart(cleanGName)
+                        local fLower = (pFirst and pFirst ~= "" and pFirst:lower()) or ExtractFastFirstLower(cleanGName)
+                        if lKey and lKey ~= "" then guildPosKeySet[lKey] = true end
+                        if fLower and fLower ~= "" then guildPosFirstSet[fLower] = true end
+                    end
+                end
+            end
+            if ng > 0 then
+                guildPosIndexDirty = false
+            end
+            guildPosLastAllowSame = true
+        end
+        for gGuid in pairs(guildPosGuidSet) do
+            posGuidSet[gGuid] = true
+            hasAnyPosPeople = true
+        end
+        for lKey in pairs(guildPosKeySet) do
+            posKeySet[lKey] = true
+            hasAnyPosPeople = true
+        end
+        for fLower in pairs(guildPosFirstSet) do
+            posFirstSet[fLower] = true
+            hasAnyPosPeople = true
+        end
+    elseif not allowSame then
+        guildPosLastAllowSame = false
+    end
+
+    if Spotter.manualTracked then
+        for mKey, flagged in pairs(Spotter.manualTracked) do
+            if flagged then
+                local mEntry = Spotter.entries and Spotter.entries[mKey]
+                AddPositiveCandidate(mKey, mEntry and mEntry.guid, nil, nil, true)
+            end
+        end
+    end
+
+    local hasDipGuilds = false
+    if (allowEnemy or allowAlly) and store and store.GetClanScopeData then
+        local bucket = store:GetClanScopeData()
+        local dipGuilds = bucket and bucket.diplomacy and bucket.diplomacy.guilds
+        if type(dipGuilds) == "table" then
+            for _, dRec in pairs(dipGuilds) do
+                if type(dRec) == "table" and ((allowEnemy and dRec.stance == "ENEMY") or (allowAlly and dRec.stance == "ALLY")) then
+                    hasDipGuilds = true
+                    break
+                end
+            end
+        end
+    end
+    hasAnyPosGuilds = allowSame or hasDipGuilds
+end
+
+local function RebuildSocialLookupCache()
+    RebuildPositiveIndex()
 end
 
 local function SanitizeMacroTargetName(rawName, rawRealm)
@@ -115,7 +535,7 @@ local function SanitizeMacroTargetName(rawName, rawRealm)
     return clean
 end
 
-local function GetUnitSafeGuild(unit, guidHint)
+local function GetUnitSafeGuild(unit, guidHint, cacheOnlyTooltip)
     if GetGuildInfo and unit then
         local ok, gName, gRank, _, gRealm = pcall(GetGuildInfo, unit)
         if ok then
@@ -131,7 +551,7 @@ local function GetUnitSafeGuild(unit, guidHint)
         end
     end
     if Compat.ReadUnitTooltipGuild then
-        local tipGuild = Compat.ReadUnitTooltipGuild(unit, guidHint)
+        local tipGuild = Compat.ReadUnitTooltipGuild(unit, guidHint, cacheOnlyTooltip)
         if tipGuild and tipGuild ~= "" then
             return tipGuild, nil, nil
         end
@@ -141,6 +561,14 @@ end
 
 local function GetPlayerNormalizedGuild()
     local inGuild = Safe.Value(IsInGuild and IsInGuild()) == true
+    if not inGuild then
+        Spotter._cachedPlayerGuild = nil
+        Spotter._cachedPlayerGuildNorm = nil
+        return nil, nil
+    end
+    if Spotter._cachedPlayerGuildNorm and Spotter._cachedPlayerGuild then
+        return Spotter._cachedPlayerGuildNorm, Spotter._cachedPlayerGuild
+    end
     local gName = GetUnitSafeGuild("player")
     if not gName or gName == "" then
         local info = ns.Store and ns.Store.guildInfo
@@ -148,18 +576,22 @@ local function GetPlayerNormalizedGuild()
             gName = info.name
         end
     end
-    if (not gName or gName == "") and inGuild and ns.db and ns.db.alts and Compat.CharacterKey then
+    if (not gName or gName == "") and ns.db and ns.db.alts and Compat.CharacterKey then
         local altRec = ns.db.alts[Compat.CharacterKey()]
         if altRec and altRec.guild and altRec.guild ~= "" then
             gName = altRec.guild
         end
     end
     if gName and gName ~= "" then
+        local norm = NormalizeKeyPart(gName)
         Spotter._cachedPlayerGuild = gName
-        return NormalizeKeyPart(gName), gName
+        Spotter._cachedPlayerGuildNorm = norm
+        return norm, gName
     end
-    if inGuild and Spotter._cachedPlayerGuild and Spotter._cachedPlayerGuild ~= "" then
-        return NormalizeKeyPart(Spotter._cachedPlayerGuild), Spotter._cachedPlayerGuild
+    if Spotter._cachedPlayerGuild and Spotter._cachedPlayerGuild ~= "" then
+        local norm = Spotter._cachedPlayerGuildNorm or NormalizeKeyPart(Spotter._cachedPlayerGuild)
+        Spotter._cachedPlayerGuildNorm = norm
+        return norm, Spotter._cachedPlayerGuild
     end
     return nil, nil
 end
@@ -167,13 +599,27 @@ end
 local function LookupKnownPlayerGuildOrMembership(firstName, fullName, guid)
     local cleanGuid = Safe.String(guid)
     local firstLower = (firstName and firstName ~= "") and firstName:lower() or nil
-    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(fullName or firstName)
-    local lookupKey = parsed and parsed.lookupKey or firstLower
-    local hasSurname = parsed and parsed.surname ~= nil
+    local lookupKey, parsedSurname
+    if Compat.ParseCharacterFields then
+        local lk, _, _, pSur = Compat.ParseCharacterFields(fullName or firstName)
+        lookupKey = lk
+        parsedSurname = pSur
+    elseif Compat.ParseCharacterName then
+        local parsed = Compat.ParseCharacterName(fullName or firstName)
+        lookupKey = parsed and parsed.lookupKey
+        parsedSurname = parsed and parsed.surname
+    end
+    lookupKey = lookupKey or firstLower
+    local hasSurname = parsedSurname ~= nil
+
+    if posIndexDirty or socialCacheDirty then
+        RebuildPositiveIndex()
+    end
 
     local isMyGuild = false
     local isWatched = false
     local isFriend = false
+    local isBlocked = false
     local knownGuild, knownClass, knownLevel, watchNote
 
     if Compat.IsGuildMember and Compat.IsGuildMember(firstName, cleanGuid, fullName) then
@@ -181,12 +627,11 @@ local function LookupKnownPlayerGuildOrMembership(firstName, fullName, guid)
     end
 
     local store = ns.Store
-    if socialCacheDirty then
-        RebuildSocialLookupCache()
-    end
-    local sRow = (cleanGuid and socialByGuid[cleanGuid])
-        or ((not cleanGuid) and lookupKey and socialByKey[lookupKey])
-        or (not cleanGuid and firstLower and socialByKey[firstLower])
+    local sByGuid = (store and type(store.socialByGuid) == "table" and store.socialByGuid) or socialByGuid
+    local sByKey = (store and type(store.socialByLookup) == "table" and store.socialByLookup) or socialByKey
+    local sRow = (cleanGuid and sByGuid[cleanGuid])
+        or ((not cleanGuid) and lookupKey and sByKey[lookupKey])
+        or (not cleanGuid and firstLower and sByKey[firstLower])
     if sRow then
         if sRow.sources and sRow.sources.guild == true then
             isMyGuild = true
@@ -209,7 +654,7 @@ local function LookupKnownPlayerGuildOrMembership(firstName, fullName, guid)
     end
 
     if not isMyGuild and not cleanGuid and lookupKey and Safe.Value(IsInGuild and IsInGuild()) == true then
-        if ns.Clan and ns.Clan.guildChatLFG and ns.Clan.guildChatLFG[lookupKey] then
+        if ns.Clan and ((ns.Clan.HasGuildChatLFG and ns.Clan:HasGuildChatLFG(lookupKey)) or (ns.Clan.guildChatLFG and ns.Clan.guildChatLFG[lookupKey])) then
             isMyGuild = true
         end
         if not isMyGuild and store and store.GetClanScopeData then
@@ -247,7 +692,84 @@ local function LookupKnownPlayerGuildOrMembership(firstName, fullName, guid)
         end
     end
 
-    return isMyGuild, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote
+    if (lookupKey and posAvoidKeys[lookupKey]) or ((not hasSurname) and firstLower and posAvoidFirsts[firstLower]) then
+        isBlocked = true
+    end
+    if store and store.GetResolvedSocialMeta and lookupKey then
+        local meta = store:GetResolvedSocialMeta(lookupKey)
+        if meta and meta.flag == "AVOID" then
+            isBlocked = true
+            if (not watchNote or watchNote == "") and meta.note and meta.note ~= "" then
+                watchNote = meta.note
+            end
+        end
+    end
+    if not isBlocked then
+        if (lookupKey and posIgnoreKeys[lookupKey]) or ((not hasSurname) and firstLower and posIgnoreFirsts[firstLower]) then
+            isBlocked = true
+        else
+            local isIgnoredFn = (C_FriendList and C_FriendList.IsIgnored) or IsIgnored
+            if isIgnoredFn then
+                local checkTarget = fullName or firstName
+                if checkTarget and checkTarget ~= "" then
+                    local okIgn, ignoredRes = pcall(isIgnoredFn, checkTarget)
+                    if okIgn and Safe.Value(ignoredRes) == true then
+                        isBlocked = true
+                    end
+                end
+            end
+        end
+    end
+
+    return isMyGuild, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote, isBlocked
+end
+
+local function RebuildGroupMemberCache()
+    wipe(groupMemberByGuid)
+    wipe(groupMemberByKey)
+    groupCacheDirty = false
+    if not (IsInGroup and Safe.Value(Safe.Call(IsInGroup)) == true) then
+        return
+    end
+    local isRaid = IsInRaid and Safe.Value(Safe.Call(IsInRaid)) == true
+    local count = (GetNumGroupMembers and Safe.Number(Safe.Call(GetNumGroupMembers))) or 0
+    local limit = isRaid and math.min(40, count) or math.min(4, count)
+    local prefix = isRaid and "raid" or "party"
+    for i = 1, limit do
+        local token = prefix .. i
+        if Safe.Value(Safe.Call(UnitExists, token)) == true then
+            local mGuid = Safe.String(Safe.Call(UnitGUID, token))
+            if mGuid and mGuid ~= "" then
+                groupMemberByGuid[mGuid] = token
+            end
+            local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(token, mGuid, nil, true)
+            local lKey = resolved and resolved.lookupKey
+            if (not lKey or lKey == "") and resolved and resolved.fullName then
+                if Compat.ParseCharacterFields then
+                    lKey = Compat.ParseCharacterFields(resolved.fullName)
+                elseif Compat.ParseCharacterName then
+                    local parsed = Compat.ParseCharacterName(resolved.fullName)
+                    lKey = parsed and parsed.lookupKey
+                end
+            end
+            if lKey and lKey ~= "" then
+                groupMemberByKey[lKey] = token
+            end
+        end
+    end
+end
+
+local function GetCachedGroupUnitToken(key, guid)
+    if groupCacheDirty then
+        RebuildGroupMemberCache()
+    end
+    if guid and groupMemberByGuid[guid] then
+        return groupMemberByGuid[guid]
+    end
+    if key and groupMemberByKey[key] then
+        return groupMemberByKey[key]
+    end
+    return nil
 end
 
 local function IsPlayerInMyGroup(unit, key, guid)
@@ -256,28 +778,7 @@ local function IsPlayerInMyGroup(unit, key, guid)
             return true
         end
     end
-    if IsInGroup and Safe.Value(Safe.Call(IsInGroup)) == true then
-        local isRaid = IsInRaid and Safe.Value(Safe.Call(IsInRaid)) == true
-        local count = (GetNumGroupMembers and Safe.Number(Safe.Call(GetNumGroupMembers))) or 0
-        for i = 1, count do
-            local token = isRaid and ("raid" .. i) or ("party" .. i)
-            if Safe.Value(Safe.Call(UnitExists, token)) == true then
-                local mGuid = Safe.String(Safe.Call(UnitGUID, token))
-                if guid and mGuid and guid == mGuid then
-                    return true
-                end
-                if key then
-                    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(token, mGuid)
-                    local fullName = (resolved and resolved.fullName) or Safe.String(Safe.Call(UnitName, token))
-                    local parsed = fullName and Compat.ParseCharacterName and Compat.ParseCharacterName(fullName)
-                    if parsed and parsed.lookupKey == key then
-                        return true
-                    end
-                end
-            end
-        end
-    end
-    return false
+    return GetCachedGroupUnitToken(key, guid) ~= nil
 end
 
 local function ShouldIgnoreGroupUnit(unit, key, guid)
@@ -298,6 +799,7 @@ local function IsStanceAllowed(stance, key)
     local s = ns.db and ns.db.settings
     if not s or s.spotterEnabled == false then return false end
     if stance == "ENEMY" then return s.spotterNotifyEnemy ~= false end
+    if stance == "BLOCKED" then return s.spotterNotifyBlocked ~= false end
     if stance == "WATCHLIST" then return s.spotterNotifyWatchlist ~= false end
     if stance == "FRIEND" then return s.spotterNotifyFriends ~= false end
     if stance == "ALLY" then return s.spotterNotifyAlly ~= false end
@@ -305,10 +807,14 @@ local function IsStanceAllowed(stance, key)
     return false
 end
 
-local function ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, watchNote, key, myNormGuild, myGuildName, gName)
+local function ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
     if rawStance == "ENEMY" and IsStanceAllowed("ENEMY", key) then
         local reason = (dipEntry and dipEntry.reason and dipEntry.reason ~= "") and dipEntry.reason or (watchNote or "")
         return "ENEMY", reason, gName
+    end
+    if isBlocked and IsStanceAllowed("BLOCKED", key) then
+        local reason = (watchNote and watchNote ~= "") and watchNote or L["Blocked"]
+        return "BLOCKED", reason, gName
     end
     if isWatched and IsStanceAllowed("WATCHLIST", key) then
         local reason = (watchNote and watchNote ~= "") and watchNote
@@ -350,20 +856,24 @@ local function GetUnitOrPlayerMapXY(mapID, unit)
     return nil, nil
 end
 
-local function CaptureLocationSnapshot(unit)
-    local zone = Safe.String(Safe.Call(GetRealZoneText))
+local function UpdateEntryLocation(entry, unit)
+    if not entry then return end
+    local zone = (Compat.CurrentZoneName and Compat.CurrentZoneName())
+        or Safe.String(Safe.Call(GetRealZoneText))
         or Safe.String(Safe.Call(GetZoneText))
-        or (Compat.CurrentZoneName and Compat.CurrentZoneName())
         or ""
     local subZone = Safe.String(Safe.Call(GetSubZoneText)) or ""
+    if zone ~= "" then entry.zone = zone end
+    if subZone ~= "" then entry.subZone = subZone end
 
     local coordsText, mapID, targetX, targetY
     local directUnitPos = false
-    if unit and unit ~= "player" and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
-        mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, unit))
+    local groupUnit = (IsGroupUnitToken(unit) and unit) or GetCachedGroupUnitToken(entry.key, entry.guid)
+    if groupUnit and groupUnit ~= "player" and (not IsInInstanceFast()) and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
+        mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, groupUnit))
             or Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
         if mapID then
-            local ux, uy = GetUnitOrPlayerMapXY(mapID, unit)
+            local ux, uy = GetUnitOrPlayerMapXY(mapID, groupUnit)
             if ux and uy then
                 targetX, targetY = ux, uy
                 directUnitPos = true
@@ -381,51 +891,45 @@ local function CaptureLocationSnapshot(unit)
         fullLocationText = (fullZone ~= "") and (fullZone .. " (" .. coordsText .. ")") or ("(" .. coordsText .. ")")
     end
 
-    return {
-        zone = zone,
-        subZone = subZone,
-        coordsText = coordsText,
-        locationText = locationText,
-        fullLocationText = fullLocationText,
-        mapID = directUnitPos and mapID or nil,
-        mapX = directUnitPos and targetX or nil,
-        mapY = directUnitPos and targetY or nil,
-        directUnitPos = directUnitPos,
-    }
-end
-
-local function ApplyLocationSnapshotToEntry(entry, locSnap)
-    if not (entry and locSnap) then return end
-    if locSnap.zone and locSnap.zone ~= "" then entry.zone = locSnap.zone end
-    if locSnap.subZone and locSnap.subZone ~= "" then entry.subZone = locSnap.subZone end
-
-    if locSnap.directUnitPos and locSnap.mapID and locSnap.mapX and locSnap.mapY then
-        entry._anchorMapID = locSnap.mapID
-        entry._anchorMapX = locSnap.mapX
-        entry._anchorMapY = locSnap.mapY
-        entry.coordsText = locSnap.coordsText
-        entry.locationText = locSnap.locationText
-        entry.fullLocationText = locSnap.fullLocationText
+    if directUnitPos and mapID and targetX and targetY then
+        entry._anchorMapID = mapID
+        entry._anchorMapX = targetX
+        entry._anchorMapY = targetY
+        entry.coordsText = coordsText
+        entry.locationText = locationText
+        entry.fullLocationText = fullLocationText
     else
         entry._anchorMapID = nil
         entry._anchorMapX = nil
         entry._anchorMapY = nil
         entry.coordsText = nil
-        if locSnap.locationText and locSnap.locationText ~= "" then
-            entry.locationText = locSnap.locationText
+        if locationText ~= "" then
+            entry.locationText = locationText
         end
-        if locSnap.fullLocationText and locSnap.fullLocationText ~= "" then
-            entry.fullLocationText = locSnap.fullLocationText
+        if fullLocationText ~= "" then
+            entry.fullLocationText = fullLocationText
         end
     end
 end
 
 local function CacheRangeCheckItems()
-    local requestItem = C_Item and C_Item.RequestLoadItemDataByID
-    if not requestItem then return end
     for _, spec in ipairs(ITEM_RANGES) do
-        pcall(requestItem, spec.item)
+        EnsureRangeItemRequested(spec.item)
     end
+end
+
+local function ProbeRangeItem(unit, idx)
+    local spec = ITEM_RANGES[idx]
+    if not spec or not ITEM_IN_RANGE_FN then return nil end
+    EnsureRangeItemRequested(spec.item)
+    local okR, raw = pcall(ITEM_IN_RANGE_FN, spec.item, unit)
+    local val = okR and Safe.Value(raw) or nil
+    if val == true or val == 1 then
+        return true
+    elseif val == false or val == 0 then
+        return false
+    end
+    return nil
 end
 
 local function MeasureUnitDistance(unit, screenRadial, hasPlateOrOnScreen)
@@ -437,12 +941,25 @@ local function MeasureUnitDistance(unit, screenRadial, hasPlateOrOnScreen)
     local isFriend = Safe.Value(Safe.Call(UnitIsFriend, "player", unit)) == true
     local canCheckFriendly = not (inCombat and isFriend)
 
-    local d3, d2, d1, in43, in43Checked
+    local d3, d2, d1
     if canCheckFriendly and CheckInteractDistance then
         d3 = Safe.Value(Safe.Call(CheckInteractDistance, unit, 3))
+        if d3 == true then
+            if ITEM_IN_RANGE_FN and ITEM_RANGES[1] then
+                if ProbeRangeItem(unit, 1) == true then
+                    return 8, "< 8m"
+                end
+            end
+            return 9, L["< 10m"]
+        end
         d2 = Safe.Value(Safe.Call(CheckInteractDistance, unit, 2))
+        if d2 == true then
+            return 11, L["~11m"]
+        end
         d1 = Safe.Value(Safe.Call(CheckInteractDistance, unit, 1))
     end
+
+    local in43, in43Checked
     if UnitInRange then
         local r, checked = Safe.Call(UnitInRange, unit)
         in43 = (r == true)
@@ -451,17 +968,126 @@ local function MeasureUnitDistance(unit, screenRadial, hasPlateOrOnScreen)
 
     local minRange = 0
     local maxRange = nil
-    local itemInRangeFn = (C_Item and C_Item.IsItemInRange) or IsItemInRange
-    if canCheckFriendly and itemInRangeFn then
-        for _, spec in ipairs(ITEM_RANGES) do
-            local okR, raw = pcall(itemInRangeFn, spec.item, unit)
-            if okR then
-                local val = Safe.Value(raw)
-                if val == true or val == 1 then
-                    maxRange = spec.range
-                    break
-                elseif val == false or val == 0 then
-                    minRange = spec.range
+    if canCheckFriendly and ITEM_IN_RANGE_FN then
+        -- Domain-partitioned binary probing: O(2-3) probes vs O(9) linear scan.
+        if d1 == true then
+            local r18 = ProbeRangeItem(unit, 3)
+            if r18 == true then
+                local r13 = ProbeRangeItem(unit, 2)
+                if r13 == true then
+                    maxRange = 13
+                else
+                    if r13 == false then minRange = 13 end
+                    maxRange = 18
+                end
+            elseif r18 == false then
+                minRange = 18
+                local r23 = ProbeRangeItem(unit, 4)
+                if r23 == true then
+                    maxRange = 23
+                else
+                    if r23 == false then minRange = 23 end
+                    local r28 = ProbeRangeItem(unit, 5)
+                    if r28 == true then
+                        maxRange = 28
+                    elseif r28 == false then
+                        minRange = 28
+                    end
+                end
+            else
+                for i = 2, 5 do
+                    local res = ProbeRangeItem(unit, i)
+                    if res == true then
+                        maxRange = ITEM_RANGES[i].range
+                        break
+                    elseif res == false then
+                        minRange = ITEM_RANGES[i].range
+                    end
+                end
+            end
+        elseif d1 == false and in43Checked and in43 then
+            minRange = 28
+            local r33 = ProbeRangeItem(unit, 6)
+            if r33 == true then
+                maxRange = 33
+            else
+                if r33 == false then minRange = 33 end
+                local r38 = ProbeRangeItem(unit, 7)
+                if r38 == true then
+                    maxRange = 38
+                else
+                    if r38 == false then minRange = 38 end
+                    local r48 = ProbeRangeItem(unit, 8)
+                    if r48 == true then
+                        maxRange = 48
+                    elseif r48 == false then
+                        minRange = 48
+                    end
+                end
+            end
+        elseif d1 == false and in43Checked and not in43 then
+            minRange = 43
+            local r48 = ProbeRangeItem(unit, 8)
+            if r48 == true then
+                maxRange = 48
+            else
+                if r48 == false then minRange = 48 end
+                local r103 = ProbeRangeItem(unit, 9)
+                if r103 == true then
+                    maxRange = 103
+                elseif r103 == false then
+                    minRange = 103
+                end
+            end
+        else
+            local r28 = ProbeRangeItem(unit, 5)
+            if r28 == true then
+                if d2 ~= false and ProbeRangeItem(unit, 1) == true then
+                    maxRange = 8
+                else
+                    local r18 = ProbeRangeItem(unit, 3)
+                    if r18 == true then
+                        maxRange = (ProbeRangeItem(unit, 2) == true) and 13 or 18
+                    elseif r18 == false then
+                        minRange = 18
+                        maxRange = (ProbeRangeItem(unit, 4) == true) and 23 or 28
+                    else
+                        maxRange = 28
+                    end
+                end
+            elseif r28 == false then
+                minRange = 28
+                local r38 = ProbeRangeItem(unit, 7)
+                if r38 == true then
+                    maxRange = (ProbeRangeItem(unit, 6) == true) and 33 or 38
+                else
+                    if r38 == false then minRange = 38 end
+                    local r48 = ProbeRangeItem(unit, 8)
+                    if r48 == true then
+                        maxRange = 48
+                    else
+                        if r48 == false then minRange = 48 end
+                        local r103 = ProbeRangeItem(unit, 9)
+                        if r103 == true then
+                            maxRange = 103
+                        elseif r103 == false then
+                            minRange = 103
+                        end
+                    end
+                end
+            else
+                local startIdx = (d2 == false) and 2 or 1
+                for i = startIdx, #ITEM_RANGES do
+                    if d1 == true and ITEM_RANGES[i].range > 28 then
+                        break
+                    end
+                    local res = ProbeRangeItem(unit, i)
+                    if res == true then
+                        maxRange = ITEM_RANGES[i].range
+                        break
+                    elseif res == false then
+                        minRange = ITEM_RANGES[i].range
+                    end
                 end
             end
         end
@@ -471,27 +1097,26 @@ local function MeasureUnitDistance(unit, screenRadial, hasPlateOrOnScreen)
         return 8, "< 8m"
     end
     if maxRange == 13 then
-        if d3 == true then
-            return 10, "~10m"
-        elseif d2 == true then
-            return 11, "~11m"
-        end
         return 13, "~13m"
     end
     if maxRange == 18 then
         return 16, "~16m"
     end
     if maxRange == 23 then
-        if minRange <= 13 then
-            if d3 == true then return 10, "~10m" end
-            if d2 == true then return 11, "~11m" end
-            return 18, "~18m"
-        end
         return 21, "~21m"
     end
     if maxRange == 28 then
         return 26, "~26m"
     end
+
+    if d1 == true then
+        if screenRadial then
+            local est = math.max(12, math.min(28, math.floor(12 + screenRadial * 14 + 0.5)))
+            return est, string.format("~%dm", est)
+        end
+        return 20, L["12-28m"]
+    end
+
     if maxRange == 33 then
         return 31, "~31m"
     end
@@ -507,25 +1132,33 @@ local function MeasureUnitDistance(unit, screenRadial, hasPlateOrOnScreen)
         end
         return 43, "~43m"
     end
-    if minRange >= 48 then
-        return 60, "> 48m"
-    end
-
-    if d3 == true then
-        return 8, L["< 10m"]
-    elseif d2 == true then
-        return 11, L["~11m"]
-    elseif d1 == true then
-        if screenRadial then
-            local est = math.max(12, math.min(28, math.floor(12 + screenRadial * 14 + 0.5)))
+    if maxRange == 103 then
+        if minRange >= 48 then
+            return 60, "> 48m"
+        elseif in43Checked and in43 then
+            return 38, L["29-40m"]
+        elseif minRange >= 38 then
+            return 45, "> 38m"
+        elseif hasPlateOrOnScreen then
+            local est = math.max(29, math.min(40, math.floor(29 + (screenRadial or 0.5) * 9 + 0.5)))
             return est, string.format("~%dm", est)
         end
-        return 20, L["12-28m"]
+        return 50, "> 28m"
+    end
+
+    if minRange >= 103 then
+        return 105, "> 100m"
+    elseif minRange >= 48 then
+        return 60, "> 48m"
     elseif in43Checked and in43 then
         return 35, L["29-40m"]
+    elseif in43Checked and not in43 then
+        return 50, "> 43m"
     elseif hasPlateOrOnScreen then
         local est = math.max(29, math.min(40, math.floor(29 + (screenRadial or 0.5) * 9 + 0.5)))
         return est, string.format("~%dm", est)
+    elseif d1 == false then
+        return 35, "> 28m"
     end
 
     return nil, nil
@@ -545,12 +1178,12 @@ local function FormatBearingLabel(angleRad)
 end
 
 local function RecomputeOnScreenFlags()
-    local counts = {}
+    wipe(onScreenCounts)
     for _, key in pairs(Spotter.visibleUnits) do
-        counts[key] = (counts[key] or 0) + 1
+        onScreenCounts[key] = (onScreenCounts[key] or 0) + 1
     end
     for key, entry in pairs(Spotter.entries) do
-        local c = counts[key] or 0
+        local c = onScreenCounts[key] or 0
         entry.onScreen = c > 0
         entry.onScreenCount = c
     end
@@ -561,6 +1194,17 @@ local function IsPlateAccessible(plate)
     if plate.IsForbidden then
         local ok, forbidden = pcall(plate.IsForbidden, plate)
         if not ok or forbidden then
+            return false
+        end
+    end
+    return true
+end
+
+local function IsPlateAnchorSafe(plate)
+    if not IsPlateAccessible(plate) then return false end
+    if plate.IsAnchoringRestricted then
+        local ok, restricted = pcall(plate.IsAnchoringRestricted, plate)
+        if not ok or restricted then
             return false
         end
     end
@@ -597,45 +1241,107 @@ local function EnsurePlateBadge(plate)
 end
 
 local function HidePlateBadgeForUnit(unit)
-    if not (C_NamePlate and C_NamePlate.GetNamePlateForUnit) then return end
-    local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
-    if not ok or not IsPlateAccessible(plate) then return end
+    local plate = activePlatesByUnit[unit]
+    if not plate and C_NamePlate and C_NamePlate.GetNamePlateForUnit then
+        local ok, p = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+        if ok then plate = p end
+    end
+    if not IsPlateAccessible(plate) then return end
     local badge = Spotter.plateBadges[plate]
     if badge then
         badge:Hide()
     end
 end
 
+local PLATE_STANCE_LABEL_KEYS = {
+    ENEMY = "ENEMY CLAN",
+    BLOCKED = "BLOCKED",
+    WATCHLIST = "WATCHLIST",
+    FRIEND = "FRIEND",
+    ALLY = "ALLY CLAN",
+    SAME = "SAME CLAN",
+}
+
 local function UpdatePlateBadge(unit, entry)
-    if not (C_NamePlate and C_NamePlate.GetNamePlateForUnit) then return end
-    local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
-    if not ok or not IsPlateAccessible(plate) then return end
+    local plate = activePlatesByUnit[unit]
+    if not plate and C_NamePlate and C_NamePlate.GetNamePlateForUnit then
+        local ok, p = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+        if ok then plate = p end
+    end
+    if not IsPlateAccessible(plate) then return end
 
     local s = ns.db and ns.db.settings
     local enabled = s and s.spotterEnabled ~= false and s.spotterNameplateBadges == true
-    if not enabled or not entry then
+    if not enabled or not entry or not IsPlateAnchorSafe(plate) then
         local existing = Spotter.plateBadges[plate]
         if existing then existing:Hide() end
         return
     end
 
     local badge = EnsurePlateBadge(plate)
-    local col = STANCE_COLORS[entry.stance] or STANCE_COLORS.ENEMY
-    local tagText = entry.stance == "ENEMY" and L["ENEMY CLAN"]
-        or (entry.stance == "WATCHLIST" and L["WATCHLIST"])
-        or (entry.stance == "FRIEND" and L["FRIEND"])
-        or (entry.stance == "ALLY" and L["ALLY CLAN"] or L["SAME CLAN"])
+    if badge._lastStance ~= entry.stance then
+        local col = STANCE_COLORS[entry.stance] or STANCE_COLORS.ENEMY
+        local tagText = L[PLATE_STANCE_LABEL_KEYS[entry.stance] or "SAME CLAN"]
 
-    badge.bg:SetColorTexture(0.05, 0.05, 0.07, 0.82)
-    badge.bar:SetColorTexture(col.r, col.g, col.b, 0.95)
-    badge.lbl:SetText(col.hex .. tagText .. "|r")
-    local w = math.max(58, math.min(116, (badge.lbl:GetStringWidth() or 48) + 12))
-    badge:SetWidth(w)
-    badge:Show()
+        badge.bg:SetColorTexture(0.05, 0.05, 0.07, 0.82)
+        badge.bar:SetColorTexture(col.r, col.g, col.b, 0.95)
+        badge.lbl:SetText(col.hex .. tagText .. "|r")
+        local w = math.max(58, math.min(116, (badge.lbl:GetStringWidth() or 48) + 12))
+        badge:SetWidth(w)
+        badge._lastStance = entry.stance
+    end
+    if not badge:IsShown() then
+        badge:Show()
+    end
+end
+
+local function MigrateEntryStateKey(self, oldKey, newKey, entry)
+    if not oldKey or not newKey or oldKey == newKey then return end
+    if self.entries[oldKey] then
+        self.entries[oldKey] = nil
+    end
+    if entry then
+        self.entries[newKey] = entry
+        entry.key = newKey
+        if entry.guid then
+            self.entryByGuid[entry.guid] = entry
+        end
+    end
+    if self.alertCooldowns[oldKey] ~= nil then
+        if self.alertCooldowns[newKey] == nil then
+            self.alertCooldowns[newKey] = self.alertCooldowns[oldKey]
+        end
+        self.alertCooldowns[oldKey] = nil
+    end
+    if self.dismissedUntil[oldKey] ~= nil then
+        if not self.dismissedUntil[newKey] or self.dismissedUntil[oldKey] > self.dismissedUntil[newKey] then
+            self.dismissedUntil[newKey] = self.dismissedUntil[oldKey]
+        end
+        self.dismissedUntil[oldKey] = nil
+    end
+    if self.manualTracked[oldKey] then
+        self.manualTracked[newKey] = true
+        self.manualTracked[oldKey] = nil
+    end
+    if self.manualTrackedStance[oldKey] ~= nil then
+        if self.manualTrackedStance[newKey] == nil then
+            self.manualTrackedStance[newKey] = self.manualTrackedStance[oldKey]
+        end
+        self.manualTrackedStance[oldKey] = nil
+    end
+    if entry then
+        entry._manualTracked = self.manualTracked[newKey] == true
+    end
+    for uTok, mappedKey in pairs(self.visibleUnits) do
+        if mappedKey == oldKey then
+            self.visibleUnits[uTok] = newKey
+        end
+    end
 end
 
 function Spotter:GetStanceLabel(stance)
     if stance == "ENEMY" then return L["Enemy Clan"] end
+    if stance == "BLOCKED" then return L["Blocked"] end
     if stance == "WATCHLIST" then return L["Watchlist"] end
     if stance == "FRIEND" then return L["Friend"] end
     if stance == "ALLY" then return L["Ally Clan"] end
@@ -673,6 +1379,7 @@ local function ShouldNotifyStance(stance, key)
     local s = ns.db and ns.db.settings
     if not s or s.spotterEnabled == false then return false end
     if stance == "ENEMY" then return s.spotterNotifyEnemy ~= false end
+    if stance == "BLOCKED" then return s.spotterNotifyBlocked ~= false end
     if stance == "WATCHLIST" then return s.spotterNotifyWatchlist ~= false end
     if stance == "FRIEND" then return s.spotterNotifyFriends ~= false end
     if stance == "ALLY" then return s.spotterNotifyAlly ~= false end
@@ -687,7 +1394,7 @@ local function PlaySpotterSound(stance)
 
     if SOUNDKIT then
         local kit
-        if stance == "ENEMY" then
+        if stance == "ENEMY" or stance == "BLOCKED" then
             kit = SOUNDKIT.RAID_WARNING or SOUNDKIT.ALARM_CLOCK_WARNING_3 or SOUNDKIT.TELL_MESSAGE
         elseif stance == "ALLY" then
             kit = SOUNDKIT.READY_CHECK or SOUNDKIT.IG_QUEST_LOG_OPEN
@@ -700,7 +1407,7 @@ local function PlaySpotterSound(stance)
         end
     end
 
-    local soundName = (stance == "ENEMY") and "RaidWarning" or ((stance == "ALLY") and "ReadyCheck" or "TellMessage")
+    local soundName = (stance == "ENEMY" or stance == "BLOCKED") and "RaidWarning" or ((stance == "ALLY") and "ReadyCheck" or "TellMessage")
     pcall(PlaySound, soundName)
 end
 
@@ -708,7 +1415,7 @@ function Spotter:MaybeTriggerAlert(entry)
     if not entry or not ShouldNotifyStance(entry.stance, entry.key) then return end
 
     local now = time()
-    local cooldown = (entry.stance == "ENEMY") and ENEMY_ALERT_COOLDOWN or FRIENDLY_ALERT_COOLDOWN
+    local cooldown = (entry.stance == "ENEMY" or entry.stance == "BLOCKED") and ENEMY_ALERT_COOLDOWN or FRIENDLY_ALERT_COOLDOWN
     local prev = self.alertCooldowns[entry.key] or 0
     if (now - prev) < cooldown then
         return
@@ -739,7 +1446,7 @@ function Spotter:MaybeTriggerAlert(entry)
 
     local s = ns.db and ns.db.settings
     local hudActive = (not s) or (s.spotterAutoShowHUD ~= false)
-    if (not hudActive) or entry.stance == "ENEMY" or entry.stance == "WATCHLIST" then
+    if (not hudActive) or entry.stance == "ENEMY" or entry.stance == "BLOCKED" or entry.stance == "WATCHLIST" then
         ns:Print("%s %s%s%s%s %s", tag, playerCol, guildText, whereText, reasonText, radarLink)
     end
 
@@ -785,8 +1492,133 @@ function Spotter:MaybeTriggerAlert(entry)
     ns:Emit("SPOTTER_ALERT", alert)
 end
 
+-- O(1) Inverse Positive-Set Pre-Filter (Bloom-Filter principle, 0 allocations, 0 false negatives).
+-- Immediately eliminates strangers outside Friends, Watchlist, Guild/Diplomacy, Blocked, or manual tracking.
+-- Returns (matched, confirmedNoGuildMatch) so uncached cold guild queries get a brief grace window.
+local function QuickCandidateGate(unit, guid, rawUnitName)
+    if posIndexDirty or socialCacheDirty then
+        RebuildPositiveIndex()
+    end
+    if guid and Spotter.entryByGuid[guid] then
+        return true, true
+    end
+    if (not hasAnyPosPeople) and (not hasAnyPosGuilds) then
+        return false, true
+    end
+    if guid and posGuidSet[guid] then
+        return true, true
+    end
+    if hasAnyPosPeople and rawUnitName and rawUnitName ~= "" then
+        local firstLower = ExtractFastFirstLower(rawUnitName)
+        if firstLower and posFirstSet[firstLower] then
+            return true, true
+        end
+    end
+    if hasAnyPosGuilds and unit then
+        local cleanRawGuild = Safe.String(Safe.Call(GetGuildInfo, unit))
+        if (not cleanRawGuild or cleanRawGuild == "") and guid and Compat.ReadUnitTooltipGuild then
+            cleanRawGuild = Compat.ReadUnitTooltipGuild(nil, guid, true)
+        end
+        if cleanRawGuild and cleanRawGuild ~= "" then
+            local cached = posGuildRawCache[cleanRawGuild]
+            if cached == nil then
+                local rawStance = Spotter:ClassifyGuild(cleanRawGuild)
+                if rawStance and IsStanceAllowed(rawStance, nil) then
+                    cached = rawStance
+                else
+                    cached = false
+                end
+                RecordPosGuildRawCache(cleanRawGuild, cached)
+            end
+            return cached ~= false, true
+        else
+            local s = ns.db and ns.db.settings
+            if s and s.spotterNotifySameClan == true and UnitIsInMyGuild then
+                if Safe.Value(Safe.Call(UnitIsInMyGuild, unit)) == true then
+                    return true, true
+                end
+            end
+            return false, false
+        end
+    end
+    return false, true
+end
+
+local function FlushInspectQueue()
+    inspectQueueTimerActive = false
+    if not Spotter:IsEnabled() then
+        wipe(inspectQueue)
+        wipe(inspectQueuedSet)
+        inspectQueueHead = 1
+        inspectQueueTail = 0
+        return
+    end
+    local processed = 0
+    while inspectQueueHead <= inspectQueueTail and processed < INSPECT_BATCH_LIMIT do
+        local rec = inspectQueue[inspectQueueHead]
+        inspectQueue[inspectQueueHead] = nil
+        inspectQueueHead = inspectQueueHead + 1
+        if rec then
+            inspectQueuedSet[rec.unit] = nil
+            if Safe.Value(Safe.Call(UnitExists, rec.unit)) == true then
+                Spotter:InspectUnit(rec.unit, rec.isNameplate, rec.fromTicker, false, true)
+                processed = processed + 1
+            end
+        end
+    end
+    if inspectQueueHead > inspectQueueTail then
+        wipe(inspectQueue)
+        wipe(inspectQueuedSet)
+        inspectQueueHead = 1
+        inspectQueueTail = 0
+    elseif C_Timer and C_Timer.After then
+        inspectQueueTimerActive = true
+        C_Timer.After(INSPECT_SLICE_INTERVAL, FlushInspectQueue)
+    end
+end
+
+local function EnqueueInspection(unit, isNameplate, fromTicker)
+    if not unit or inspectQueuedSet[unit] then return end
+    if (inspectQueueTail - inspectQueueHead + 1) >= 64 then
+        return
+    end
+    inspectQueuedSet[unit] = true
+    inspectQueueTail = inspectQueueTail + 1
+    inspectQueue[inspectQueueTail] = {
+        unit = unit,
+        isNameplate = isNameplate == true,
+        fromTicker = fromTicker == true,
+    }
+    if not inspectQueueTimerActive and C_Timer and C_Timer.After then
+        inspectQueueTimerActive = true
+        C_Timer.After(INSPECT_SLICE_INTERVAL, FlushInspectQueue)
+    end
+end
+
 function Spotter:IsEnabled()
-    return false
+    local s = ns.db and ns.db.settings
+    return s ~= nil and s.spotterEnabled ~= false
+end
+
+function Spotter:EnsurePruneLoop()
+    if self._pruneTimerActive or not self:IsEnabled() or next(self.entries) == nil then
+        return
+    end
+    if not (C_Timer and C_Timer.After) then return end
+    self._pruneTimerActive = true
+    local function PruneTick()
+        if not Spotter:IsEnabled() or next(Spotter.entries) == nil then
+            Spotter._pruneTimerActive = false
+            return
+        end
+        Spotter:CleanupAbsentTargets(false)
+        if Spotter:IsEnabled() and next(Spotter.entries) ~= nil then
+            C_Timer.After(PRUNE_INTERVAL, PruneTick)
+        else
+            Spotter._pruneTimerActive = false
+        end
+    end
+    C_Timer.After(PRUNE_INTERVAL, PruneTick)
 end
 
 function Spotter:FocusTarget(key)
@@ -839,11 +1671,16 @@ function Spotter:FocusTarget(key)
 end
 
 local function TrimExcessTargets()
+    local total = 0
+    for _ in pairs(Spotter.entries) do
+        total = total + 1
+    end
+    if total <= MAX_TARGETS then return end
+
     local list = {}
     for _, e in pairs(Spotter.entries) do
         table.insert(list, e)
     end
-    if #list <= MAX_TARGETS then return end
 
     table.sort(list, function(a, b)
         if a.onScreen ~= b.onScreen then return a.onScreen end
@@ -854,7 +1691,40 @@ local function TrimExcessTargets()
     end)
 
     for i = MAX_TARGETS + 1, #list do
-        Spotter.entries[list[i].key] = nil
+        local dropped = list[i]
+        Spotter.entries[dropped.key] = nil
+        if dropped.guid then
+            Spotter.entryByGuid[dropped.guid] = nil
+        end
+    end
+end
+
+function Spotter:QueueBatchEmit(metadataDirty)
+    if metadataDirty then
+        self._batchEmitDirty = true
+    end
+    self:EnsurePruneLoop()
+    if self._batchFlushQueued then return end
+    if C_Timer and C_Timer.After then
+        self._batchFlushQueued = true
+        C_Timer.After(0, function()
+            Spotter._batchFlushQueued = false
+            local shouldEmit = Spotter._batchEmitDirty == true
+            Spotter._batchEmitDirty = false
+            RecomputeOnScreenFlags()
+            TrimExcessTargets()
+            if shouldEmit then
+                ns:Emit("SPOTTER_UPDATED")
+            end
+        end)
+    else
+        local shouldEmit = self._batchEmitDirty == true
+        self._batchEmitDirty = false
+        RecomputeOnScreenFlags()
+        TrimExcessTargets()
+        if shouldEmit then
+            ns:Emit("SPOTTER_UPDATED")
+        end
     end
 end
 
@@ -865,24 +1735,41 @@ local function NormalizeAngleRad(a)
     return a
 end
 
-local function ComputeScreenAngleAndRadial(px, py, pScale)
-    if not (UIParent and UIParent.GetCenter) then return nil, nil end
+local function EnsureUiMetrics()
+    if uiMetricsValid and uiCenterX and uiCenterY then
+        return true
+    end
+    if not (UIParent and UIParent.GetCenter) then return false end
     local okC, cx, cy = pcall(UIParent.GetCenter, UIParent)
     cx, cy = Safe.Number(cx), Safe.Number(cy)
-    if not (okC and cx and cy and px and py) then return nil, nil end
-
+    if not (okC and cx and cy) then return false end
     local uScale = (UIParent.GetEffectiveScale and Safe.Number(Safe.Call(UIParent.GetEffectiveScale, UIParent))) or 1
-    local s = (pScale and pScale > 0) and pScale or 1
     local halfW = math.max(1, (Safe.Number(Safe.Call(UIParent.GetWidth, UIParent)) or 1000) * 0.5 * uScale)
     local halfH = math.max(1, (Safe.Number(Safe.Call(UIParent.GetHeight, UIParent)) or 700) * 0.5 * uScale)
+    uiCenterX = cx
+    uiCenterY = cy
+    uiScaleCached = uScale
+    uiHalfW = halfW
+    uiHalfH = halfH
+    uiMetricsValid = true
+    return true
+end
+
+local function ComputeScreenAngleAndRadial(px, py, pScale)
+    if not (px and py and EnsureUiMetrics()) then return nil, nil end
+
+    local uScale = uiScaleCached
+    local halfW = uiHalfW
+    local halfH = uiHalfH
+    local s = (pScale and pScale > 0) and pScale or 1
     local pxScreen = px * s
     local pyScreen = py * s
     if pxScreen < -20 or pxScreen > (halfW * 2 + 20) or pyScreen < -20 or pyScreen > (halfH * 2 + 20) then
         return nil, nil
     end
 
-    local screenDx = pxScreen - (cx * uScale)
-    local playerScreenY = (cy * uScale) - (halfH * 0.22)
+    local screenDx = pxScreen - (uiCenterX * uScale)
+    local playerScreenY = (uiCenterY * uScale) - (halfH * 0.22)
     local rawDy = pyScreen - playerScreenY
     local forwardDy
     if rawDy >= -(halfH * 0.06) then
@@ -915,15 +1802,19 @@ local function UnitMatchesEntry(unit, entry)
 
     local uName = Safe.String(Safe.Call(UnitName, unit))
     if uGuid and Compat.LookupForeverFullName then
-        local firstHint = uName and (Compat.ParseCharacterName and Compat.ParseCharacterName(uName))
-        local cached = Compat.LookupForeverFullName(uGuid, firstHint and firstHint.firstName or uName, false)
-        if cached and cached.fullName and Compat.ParseCharacterName then
-            local cParsed = Compat.ParseCharacterName(cached.fullName)
-            if cParsed and cParsed.lookupKey then
-                if cParsed.lookupKey == entry.key then
+        local firstHint
+        if uName and Compat.ParseCharacterFields then
+            local _, fHint = Compat.ParseCharacterFields(uName)
+            firstHint = fHint
+        end
+        local cached = Compat.LookupForeverFullName(uGuid, firstHint or uName, false)
+        if cached and cached.fullName and Compat.ParseCharacterFields then
+            local cLookupKey, _, _, cSurname = Compat.ParseCharacterFields(cached.fullName)
+            if cLookupKey then
+                if cLookupKey == entry.key then
                     return true
                 end
-                if cParsed.surname and entry.displayName and entry.displayName:find("%s") then
+                if cSurname and entry.displayName and entry.displayName:find("%s") then
                     return false
                 end
             end
@@ -932,20 +1823,25 @@ local function UnitMatchesEntry(unit, entry)
 
     if uName and uName ~= "" then
         if entry.unitName and uName:lower() == entry.unitName:lower() and not (entry.guid and uGuid and entry.guid ~= uGuid) then
-            local parsedRaw = Compat.ParseCharacterName and Compat.ParseCharacterName(uName)
-            if not (parsedRaw and parsedRaw.surname and entry.key and parsedRaw.lookupKey ~= entry.key) then
+            local rLookupKey, _, _, rSurname
+            if Compat.ParseCharacterFields then
+                rLookupKey, _, _, rSurname = Compat.ParseCharacterFields(uName)
+            end
+            if not (rSurname and entry.key and rLookupKey ~= entry.key) then
                 return true
             end
         end
-        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(uName)
-        if parsed then
-            if parsed.lookupKey == entry.key then
-                return true
-            end
-            local entryHasSurname = type(entry.displayName) == "string" and entry.displayName:find("%s") ~= nil
-            if (not parsed.surname or not entryHasSurname)
-                and entry.firstName and parsed.firstName:lower() == entry.firstName:lower() then
-                return true
+        if Compat.ParseCharacterFields then
+            local pLookupKey, pFirstName, _, pSurname = Compat.ParseCharacterFields(uName)
+            if pLookupKey then
+                if pLookupKey == entry.key then
+                    return true
+                end
+                local entryHasSurname = type(entry.displayName) == "string" and entry.displayName:find("%s") ~= nil
+                if (not pSurname or not entryHasSurname)
+                    and entry.firstName and pFirstName and pFirstName:lower() == entry.firstName:lower() then
+                    return true
+                end
             end
         end
     end
@@ -953,50 +1849,41 @@ local function UnitMatchesEntry(unit, entry)
 end
 
 local function ResolvePlateForUnitOrEntry(unit, entry)
-    if unit and C_NamePlate and C_NamePlate.GetNamePlateForUnit then
-        local ok, p = pcall(C_NamePlate.GetNamePlateForUnit, unit)
-        if ok and IsPlateAccessible(p) then
-            local pUnit = Safe.String(p.namePlateUnitToken) or (p.UnitFrame and Safe.String(p.UnitFrame.unit))
+    if unit then
+        local plate = activePlatesByUnit[unit]
+        if not plate and C_NamePlate and C_NamePlate.GetNamePlateForUnit then
+            local ok, p = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+            if ok and p then plate = p end
+        end
+        if IsPlateAccessible(plate) then
+            local pUnit = Safe.String(plate.namePlateUnitToken) or (plate.UnitFrame and Safe.String(plate.UnitFrame.unit))
             if pUnit and pUnit:match("^nameplate") then
-                return p, pUnit
+                return plate, pUnit
             end
-            return p, (unit:match("^nameplate") and unit or nil)
+            return plate, (unit:match("^nameplate") and unit or nil)
         end
         return nil, nil
     end
     if not entry then return nil, nil end
-    local hasPlatesApi = false
-    if C_NamePlate and C_NamePlate.GetNamePlates then
-        local ok, plates = pcall(C_NamePlate.GetNamePlates)
-        if ok and type(plates) == "table" then
-            hasPlatesApi = true
-            for _, p in ipairs(plates) do
-                if IsPlateAccessible(p) then
-                    local pUnit = Safe.String(p.namePlateUnitToken) or (p.UnitFrame and Safe.String(p.UnitFrame.unit))
-                    if pUnit and UnitMatchesEntry(pUnit, entry) then
-                        return p, pUnit
-                    end
-                end
+    if entry.guid then
+        local mappedUnit = activePlateUnitByGuid[entry.guid]
+        if mappedUnit then
+            local plate = activePlatesByUnit[mappedUnit]
+            if IsPlateAccessible(plate) and Safe.Value(Safe.Call(UnitExists, mappedUnit)) == true then
+                return plate, mappedUnit
             end
+            activePlateUnitByGuid[entry.guid] = nil
         end
     end
-    if not hasPlatesApi then
-        for i = 1, 40 do
-            local pUnit = "nameplate" .. i
-            if UnitMatchesEntry(pUnit, entry) then
-                local plate
-                if C_NamePlate and C_NamePlate.GetNamePlateForUnit then
-                    local ok, p = pcall(C_NamePlate.GetNamePlateForUnit, pUnit)
-                    if ok and IsPlateAccessible(p) then plate = p end
-                end
-                return plate, pUnit
-            end
+    for pUnit, p in pairs(activePlatesByUnit) do
+        if IsPlateAccessible(p) and UnitMatchesEntry(pUnit, entry) then
+            return p, pUnit
         end
     end
     return nil, nil
 end
 
-function Spotter:InspectUnit(unit, isNameplate, fromTicker)
+function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSliceLimit, knownGuid)
     if not self:IsEnabled() then
         return nil
     end
@@ -1012,8 +1899,7 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         if isNameplate and self.visibleUnits[unit] then
             self.visibleUnits[unit] = nil
             HidePlateBadgeForUnit(unit)
-            RecomputeOnScreenFlags()
-            ns:Emit("SPOTTER_UPDATED")
+            self:QueueBatchEmit(true)
         end
         return nil
     end
@@ -1023,25 +1909,91 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         if isNameplate and self.visibleUnits[unit] then
             self.visibleUnits[unit] = nil
             HidePlateBadgeForUnit(unit)
-            RecomputeOnScreenFlags()
+            self:QueueBatchEmit(false)
         end
         return nil
     end
 
-    local guid = Safe.String(Safe.Call(UnitGUID, unit))
+    -- O(1) Raid/Party short-circuit BEFORE touching GUID/Name/Guild tables
+    if s.spotterIgnoreGroup ~= false and next(self.manualTracked) == nil then
+        if unit ~= "player" and (Safe.Value(Safe.Call(UnitInRaid, unit)) == true or Safe.Value(Safe.Call(UnitInParty, unit)) == true) then
+            if isNameplate and self.visibleUnits[unit] then
+                self.visibleUnits[unit] = nil
+                HidePlateBadgeForUnit(unit)
+                self:QueueBatchEmit(true)
+            end
+            return nil
+        end
+    end
+
+    local guid = (knownGuid and knownGuid ~= "" and knownGuid) or Safe.String(Safe.Call(UnitGUID, unit))
     local nowClock = (GetTime and GetTime()) or time()
     local trackedByGuid = guid and self.entryByGuid[guid] or nil
     if trackedByGuid and self.entries[trackedByGuid.key] ~= trackedByGuid then
         self.entryByGuid[guid] = nil
         trackedByGuid = nil
     end
-    if fromTicker and guid and not trackedByGuid and bystanderCooldown[guid] and nowClock < bystanderCooldown[guid] then
+    if (not skipCooldown) and guid and not trackedByGuid and bystanderCooldown[guid] and nowClock < bystanderCooldown[guid] then
         return nil
     end
 
+    if (not skipCooldown) and unit == "mouseover" and not trackedByGuid then
+        if guid and guid == lastMouseoverGuid and (nowClock - lastMouseoverAt) < 0.25 then
+            return nil
+        end
+        lastMouseoverGuid = guid
+        lastMouseoverAt = nowClock
+    end
+
     local rawUnitName = Safe.String(Safe.Call(UnitName, unit))
+    if rawUnitName == "Unknown" or (UNKNOWNOBJECT and rawUnitName == UNKNOWNOBJECT) then
+        if (not skipCooldown) and (not IsCrowdMode()) and unknownRetryCount < 6 and C_Timer and C_Timer.After then
+            if not unknownRetryUnits[unit] then
+                unknownRetryUnits[unit] = true
+                unknownRetryCount = unknownRetryCount + 1
+                C_Timer.After(0.50, function()
+                    if unknownRetryUnits[unit] then
+                        unknownRetryUnits[unit] = nil
+                        unknownRetryCount = math.max(0, unknownRetryCount - 1)
+                    end
+                    if Spotter:IsEnabled() and Safe.Value(Safe.Call(UnitExists, unit)) == true then
+                        Spotter:InspectUnit(unit, isNameplate, false, false)
+                    end
+                end)
+            end
+        end
+        return nil
+    end
+
+    if not trackedByGuid then
+        local passedGate, confirmedNoMatch = QuickCandidateGate(unit, guid, rawUnitName)
+        if not passedGate then
+            RecordGateMissCooldown(guid, confirmedNoMatch, nowClock)
+            if isNameplate and self.visibleUnits[unit] then
+                self.visibleUnits[unit] = nil
+                HidePlateBadgeForUnit(unit)
+                self:QueueBatchEmit(true)
+            end
+            return nil
+        end
+    end
+
+    if (not skipCooldown) and (not skipSliceLimit) then
+        if (nowClock - sliceWindowStart) >= INSPECT_SLICE_INTERVAL then
+            sliceWindowStart = nowClock
+            sliceInspectCount = 0
+        end
+        sliceInspectCount = sliceInspectCount + 1
+        if sliceInspectCount > INSPECT_BATCH_LIMIT then
+            EnqueueInspection(unit, isNameplate, fromTicker)
+            return nil
+        end
+    end
+
     local existingName = trackedByGuid and trackedByGuid.displayName and trackedByGuid.displayName:find("%s") and trackedByGuid.displayName or nil
-    local resolved, rawRealm = Compat.ResolveUnitFullName(unit, guid, existingName, (fromTicker and (existingName ~= nil or bystanderCooldown[guid] ~= nil)) or false)
+    -- Passive nameplate hits never force a synchronous full-roster sync on FirstName collisions.
+    local useFastOnly = (not skipCooldown) and ((isNameplate == true) or (fromTicker == true) or (unit == "mouseover") or (existingName ~= nil) or (guid and bystanderCooldown[guid] ~= nil))
+    local resolved, rawRealm = Compat.ResolveUnitFullName(unit, guid, existingName, useFastOnly)
     local rawName = resolved and resolved.fullName or rawUnitName
     if not rawName or rawName == "" or Compat.IsMe(rawName, guid) then
         if isNameplate then
@@ -1051,8 +2003,16 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         return nil
     end
 
-    local parsed = Compat.ParseCharacterName(rawName)
-    local key = (parsed and parsed.lookupKey) or NormalizeKeyPart(rawName)
+    local pKey, pFirstName, pDisplayName, pSurname
+    if Compat.ParseCharacterFields then
+        pKey, pFirstName, pDisplayName, pSurname = Compat.ParseCharacterFields(rawName)
+    elseif Compat.ParseCharacterName then
+        local parsed = Compat.ParseCharacterName(rawName)
+        if parsed then
+            pKey, pFirstName, pDisplayName, pSurname = parsed.lookupKey, parsed.firstName, parsed.displayName, parsed.surname
+        end
+    end
+    local key = (pKey and pKey ~= "" and pKey) or NormalizeKeyPart(rawName)
     if not key or key == "" then return nil end
 
     local existingEntry = self.entries[key] or trackedByGuid
@@ -1061,8 +2021,9 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
     local isIgnoredGroup = ShouldIgnoreGroupUnit(unit, key, guid)
 
     local checkFirst = resolved and resolved.firstName or rawUnitName
-    local gName, gRank = GetUnitSafeGuild(unit, guid)
-    local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote = LookupKnownPlayerGuildOrMembership(checkFirst, rawName, guid)
+    local cacheOnlyTip = (unit ~= "target" and unit ~= "focus" and unit ~= "mouseover")
+    local gName, gRank = GetUnitSafeGuild(unit, guid, cacheOnlyTip)
+    local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(checkFirst, rawName, guid)
     if (not gName or gName == "") and knownGuild and knownGuild ~= "" then
         gName = knownGuild
     end
@@ -1089,25 +2050,21 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
     local stance, resolvedReason
     if not isDismissed and not isIgnoredGroup then
         local rawStance, dipEntry = self:ClassifyGuild(gName)
-        stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, watchNote, key, myNormGuild, myGuildName, gName)
+        stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
     end
     if not stance then
-        if guid then
-            bystanderCooldown[guid] = nowClock + 2.5
-            self.entryByGuid[guid] = nil
-        end
         local removedStale = false
         if self.entries[key] then
             self.entries[key] = nil
             removedStale = true
         end
+        if trackedByGuid and trackedByGuid.key and self.entries[trackedByGuid.key] == trackedByGuid then
+            self.entries[trackedByGuid.key] = nil
+            removedStale = true
+        end
         if guid then
-            for oldKey, oldEntry in pairs(self.entries) do
-                if oldEntry.guid == guid then
-                    self.entries[oldKey] = nil
-                    removedStale = true
-                end
-            end
+            RecordBystanderCooldown(guid, nowClock + GetBystanderCooldownSeconds())
+            self.entryByGuid[guid] = nil
         end
         if self.lastAlert and (self.lastAlert.key == key or (guid and self.lastAlert.guid == guid)) then
             self.lastAlert = nil
@@ -1116,17 +2073,14 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         if isNameplate and self.visibleUnits[unit] then
             self.visibleUnits[unit] = nil
             HidePlateBadgeForUnit(unit)
-            RecomputeOnScreenFlags()
-            ns:Emit("SPOTTER_UPDATED")
+            self:QueueBatchEmit(true)
         elseif isNameplate then
             HidePlateBadgeForUnit(unit)
             if removedStale then
-                RecomputeOnScreenFlags()
-                ns:Emit("SPOTTER_UPDATED")
+                self:QueueBatchEmit(true)
             end
         elseif removedStale then
-            RecomputeOnScreenFlags()
-            ns:Emit("SPOTTER_UPDATED")
+            self:QueueBatchEmit(true)
         end
         return nil
     end
@@ -1135,29 +2089,13 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         bystanderCooldown[guid] = nil
     end
 
-    -- Upgrade any earlier first-name-only sighting matching the same GUID cleanly.
-    local upgradedOld
-    if guid then
-        for oldKey, oldEntry in pairs(self.entries) do
-            if oldKey ~= key and oldEntry.guid == guid then
-                upgradedOld = oldEntry
-                self.entries[oldKey] = nil
-                if self.alertCooldowns[oldKey] then
-                    self.alertCooldowns[key] = self.alertCooldowns[oldKey]
-                    self.alertCooldowns[oldKey] = nil
-                end
-                for uTok, mappedKey in pairs(self.visibleUnits) do
-                    if mappedKey == oldKey then
-                        self.visibleUnits[uTok] = key
-                    end
-                end
-                break
-            end
-        end
+    -- Upgrade any earlier first-name-only sighting matching the same GUID cleanly in O(1).
+    if trackedByGuid and trackedByGuid.key and trackedByGuid.key ~= key then
+        MigrateEntryStateKey(self, trackedByGuid.key, key, existingEntry or trackedByGuid)
     end
 
-    local displayName = (parsed and parsed.displayName) or rawName
-    local firstName = (parsed and parsed.firstName) or rawName
+    local displayName = pDisplayName or rawName
+    local firstName = pFirstName or rawName
     local targetMacroName = SanitizeMacroTargetName(displayName, rawRealm)
     if not targetMacroName then return nil end
 
@@ -1167,7 +2105,7 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
     local isDead = Safe.Value(Safe.Call(UnitIsDeadOrGhost, unit)) == true
 
     local isNewOrChanged = false
-    local entry = existingEntry or upgradedOld
+    local entry = existingEntry
     if not entry then
         entry = {
             key = key,
@@ -1189,7 +2127,7 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
     local prevDead = entry and entry.dead
     local prevOnScreen = entry and entry.onScreen
 
-    if not (parsed and parsed.surname) and entry and entry.displayName and entry.displayName:find("%s") then
+    if (not pSurname) and entry and entry.displayName and entry.displayName:find("%s") then
         displayName = entry.displayName
         firstName = entry.firstName or firstName
     end
@@ -1218,8 +2156,8 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
     entry._lastFindUnitAt = 0
 
     local screenRadial
-    if plate and UIParent and UIParent.GetCenter then
-        local refFrame = (plate.UnitFrame and IsPlateAccessible(plate.UnitFrame) and plate.UnitFrame) or plate
+    if plate and IsPlateAnchorSafe(plate) then
+        local refFrame = (plate.UnitFrame and IsPlateAnchorSafe(plate.UnitFrame) and plate.UnitFrame) or plate
         if refFrame and refFrame.GetCenter and (not refFrame.IsVisible or refFrame:IsVisible()) and (not plate.IsShown or plate:IsShown()) then
             local okCenter, px, py = pcall(refFrame.GetCenter, refFrame)
             px, py = Safe.Number(px), Safe.Number(py)
@@ -1231,8 +2169,8 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         end
     end
 
-    -- Capture calibrated proximity metrics with a short throttle on background sweeps
-    if not fromTicker or not entry._lastDistCheckAt or (nowClock - entry._lastDistCheckAt) >= 0.25 then
+    -- Capture calibrated proximity metrics with a short throttle on passive events
+    if skipCooldown or not entry._lastDistCheckAt or (nowClock - entry._lastDistCheckAt) >= 0.35 then
         entry._lastDistCheckAt = nowClock
         local measuredYards, measuredText = MeasureUnitDistance(unit, screenRadial, isNameplate or (plate ~= nil) or (screenRadial ~= nil))
         if measuredYards and measuredText then
@@ -1241,10 +2179,9 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         end
     end
 
-    if not fromTicker or not entry._lastLocSyncAt or (nowClock - entry._lastLocSyncAt) >= 0.50 then
+    if skipCooldown or not entry._lastLocSyncAt or (nowClock - entry._lastLocSyncAt) >= 2.0 then
         entry._lastLocSyncAt = nowClock
-        local locSnap = CaptureLocationSnapshot(unit)
-        ApplyLocationSnapshotToEntry(entry, locSnap)
+        UpdateEntryLocation(entry, unit)
     end
 
     local activePlateUnit = (isNameplate and unit) or plateUnit
@@ -1254,11 +2191,14 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
             newPlateMapped = true
         end
         self.visibleUnits[activePlateUnit] = key
+        if plate then
+            activePlatesByUnit[activePlateUnit] = plate
+        end
+        if guid then
+            activePlateUnitByGuid[guid] = activePlateUnit
+        end
         UpdatePlateBadge(activePlateUnit, entry)
     end
-
-    RecomputeOnScreenFlags()
-    TrimExcessTargets()
 
     if isNewOrChanged then
         entry._alertEvaluated = true
@@ -1272,8 +2212,15 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker)
         or (entry.guild ~= prevGuild)
         or (entry.level ~= prevLevel)
         or (entry.onScreen ~= prevOnScreen)
-    if metadataChanged then
-        ns:Emit("SPOTTER_UPDATED")
+    if skipCooldown then
+        RecomputeOnScreenFlags()
+        TrimExcessTargets()
+        self:EnsurePruneLoop()
+        if metadataChanged then
+            ns:Emit("SPOTTER_UPDATED")
+        end
+    else
+        self:QueueBatchEmit(metadataChanged)
     end
     return entry
 end
@@ -1289,7 +2236,33 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         return nil
     end
 
-    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanSender)
+    local nowClock = (GetTime and GetTime()) or time()
+    local senderCacheKey = cleanGuid or cleanSender:lower()
+    if chatCooldown[senderCacheKey] and nowClock < chatCooldown[senderCacheKey] then
+        return nil
+    end
+    RecordChatCooldown(senderCacheKey, nowClock + CHAT_SIGHTING_COOLDOWN)
+
+    if posIndexDirty or socialCacheDirty then
+        RebuildPositiveIndex()
+    end
+    local fastFirst = ExtractFastFirstLower(cleanSender)
+    local mayMatch = (cleanGuid and (self.entryByGuid[cleanGuid] ~= nil or posGuidSet[cleanGuid] == true))
+        or (fastFirst and posFirstSet[fastFirst] == true)
+    if (not mayMatch) and hasAnyPosGuilds and cleanGuid and Compat.ReadUnitTooltipGuild then
+        local cachedChatGuild = Compat.ReadUnitTooltipGuild(nil, cleanGuid, true)
+        if cachedChatGuild and cachedChatGuild ~= "" then
+            local cStance = self:ClassifyGuild(cachedChatGuild)
+            if cStance and IsStanceAllowed(cStance, nil) then
+                mayMatch = true
+            end
+        end
+    end
+    if not mayMatch then
+        return nil
+    end
+
+    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanSender, true)
     local bestFullName = (resolved and resolved.fullName) or cleanSender
     local parsed = Compat.ParseCharacterName(bestFullName)
     local key = (parsed and parsed.lookupKey) or NormalizeKeyPart(bestFullName)
@@ -1317,8 +2290,8 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         return self:InspectUnit(liveUnit, liveUnit:match("^nameplate") ~= nil)
     end
 
-    local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote = LookupKnownPlayerGuildOrMembership(firstName, displayName, cleanGuid)
-    local gName, gRank = GetUnitSafeGuild(nil, cleanGuid)
+    local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(firstName, displayName, cleanGuid)
+    local gName, gRank = GetUnitSafeGuild(nil, cleanGuid, true)
     if (not gName or gName == "") and knownGuild and knownGuild ~= "" then
         gName = knownGuild
     end
@@ -1330,7 +2303,7 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     end
     local rawStance, dipEntry = self:ClassifyGuild(gName)
     local stance, resolvedReason
-    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, watchNote, key, myNormGuild, myGuildName, gName)
+    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
     if not stance then
         return nil
     end
@@ -1362,6 +2335,9 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     end
     entry.key = key
     self.entries[key] = entry
+    if cleanGuid and cleanGuid ~= "" then
+        self.entryByGuid[cleanGuid] = entry
+    end
 
     if not (parsed and parsed.surname) and entry.displayName and entry.displayName:find("%s") then
         displayName = entry.displayName
@@ -1383,18 +2359,14 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     entry.lastDistText = entry.lastDistText or L["12-28m"]
     entry.lastDistYards = entry.lastDistYards or 20
 
-    local locSnap = CaptureLocationSnapshot("player")
-    ApplyLocationSnapshotToEntry(entry, locSnap)
-
-    RecomputeOnScreenFlags()
-    TrimExcessTargets()
+    UpdateEntryLocation(entry, "player")
 
     if isNewOrChanged then
         entry._alertEvaluated = true
         self:MaybeTriggerAlert(entry)
     end
 
-    ns:Emit("SPOTTER_UPDATED")
+    self:QueueBatchEmit(true)
     return entry
 end
 
@@ -1406,23 +2378,60 @@ function Spotter:RefreshVisibleNameplates(fromTicker)
     if not s or s.spotterEnabled == false then
         return
     end
+    if posIndexDirty or socialCacheDirty then
+        RebuildPositiveIndex()
+    end
 
+    wipe(activePlatesByUnit)
+    wipe(activePlateUnitByGuid)
+    activePlateCount = 0
+
+    local nowClock = (GetTime and GetTime()) or time()
+    local crowdCooldown = GetBystanderCooldownSeconds()
     local hasPlatesApi = false
     if C_NamePlate and C_NamePlate.GetNamePlates then
         local ok, plates = pcall(C_NamePlate.GetNamePlates)
         if ok and type(plates) == "table" then
             hasPlatesApi = true
+            activePlateCount = #plates
+            crowdCooldown = GetBystanderCooldownSeconds()
+            local allowSubTarget = not IsCrowdMode()
             for _, plate in ipairs(plates) do
                 if IsPlateAccessible(plate) then
                     local unit = Safe.String(plate.namePlateUnitToken)
                     if not unit and plate.UnitFrame then
                         unit = Safe.String(plate.UnitFrame.unit)
                     end
-                    if unit and UnitExists(unit) then
-                        self:InspectUnit(unit, true, fromTicker)
-                        local npTarget = unit .. "target"
-                        if Safe.Value(Safe.Call(UnitExists, npTarget)) == true then
-                            self:InspectUnit(npTarget, false, fromTicker)
+                    if unit and Safe.Value(Safe.Call(UnitExists, unit)) == true then
+                        activePlatesByUnit[unit] = plate
+                        local pGuid = Safe.String(Safe.Call(UnitGUID, unit))
+                        if pGuid and pGuid ~= "" then
+                            activePlateUnitByGuid[pGuid] = unit
+                        end
+                        if Safe.Value(Safe.Call(UnitIsPlayer, unit)) == true then
+                            local skipGroup = (s.spotterIgnoreGroup ~= false and next(self.manualTracked) == nil)
+                                and (Safe.Value(Safe.Call(UnitInRaid, unit)) == true or Safe.Value(Safe.Call(UnitInParty, unit)) == true)
+                            if not skipGroup then
+                                local rName = Safe.String(Safe.Call(UnitName, unit))
+                                if rName and rName ~= "Unknown" then
+                                    local passedGate, confirmedNoMatch = QuickCandidateGate(unit, pGuid, rName)
+                                    if passedGate then
+                                        EnqueueInspection(unit, true, fromTicker)
+                                    elseif pGuid then
+                                        RecordGateMissCooldown(pGuid, confirmedNoMatch, nowClock)
+                                    end
+                                end
+                            end
+                        end
+                        if allowSubTarget then
+                            local npTarget = unit .. "target"
+                            if Safe.Value(Safe.Call(UnitExists, npTarget)) == true and Safe.Value(Safe.Call(UnitIsPlayer, npTarget)) == true then
+                                local ntGuid = Safe.String(Safe.Call(UnitGUID, npTarget))
+                                local ntName = Safe.String(Safe.Call(UnitName, npTarget))
+                                if ntName and ntName ~= "Unknown" and QuickCandidateGate(npTarget, ntGuid, ntName) then
+                                    EnqueueInspection(npTarget, false, fromTicker)
+                                end
+                            end
                         end
                     end
                 end
@@ -1434,22 +2443,38 @@ function Spotter:RefreshVisibleNameplates(fromTicker)
         for i = 1, 40 do
             local unit = "nameplate" .. i
             if Safe.Value(Safe.Call(UnitExists, unit)) == true then
-                self:InspectUnit(unit, true, fromTicker)
-                local npTarget = unit .. "target"
-                if Safe.Value(Safe.Call(UnitExists, npTarget)) == true then
-                    self:InspectUnit(npTarget, false, fromTicker)
+                activePlateCount = activePlateCount + 1
+                if Safe.Value(Safe.Call(UnitIsPlayer, unit)) == true then
+                    local pGuid = Safe.String(Safe.Call(UnitGUID, unit))
+                    local rName = Safe.String(Safe.Call(UnitName, unit))
+                    if rName and rName ~= "Unknown" then
+                        local passedGate, confirmedNoMatch = QuickCandidateGate(unit, pGuid, rName)
+                        if passedGate then
+                            EnqueueInspection(unit, true, fromTicker)
+                        elseif pGuid then
+                            RecordGateMissCooldown(pGuid, confirmedNoMatch, nowClock)
+                        end
+                    end
                 end
             end
         end
     end
 
     for _, token in ipairs(LIVE_TOKEN_LIST) do
-        if Safe.Value(Safe.Call(UnitExists, token)) == true then
-            self:InspectUnit(token, false, fromTicker)
+        if Safe.Value(Safe.Call(UnitExists, token)) == true and Safe.Value(Safe.Call(UnitIsPlayer, token)) == true then
+            if token == "target" or token == "focus" then
+                self:InspectUnit(token, false, fromTicker, true, true)
+            else
+                local lGuid = Safe.String(Safe.Call(UnitGUID, token))
+                local lName = Safe.String(Safe.Call(UnitName, token))
+                if lName and lName ~= "Unknown" and QuickCandidateGate(token, lGuid, lName) then
+                    EnqueueInspection(token, false, fromTicker)
+                end
+            end
         end
     end
 
-    if Compat.IsInGroup and Compat.IsInGroup() then
+    if (s.spotterIgnoreGroup == false or next(self.manualTracked) ~= nil) and Compat.IsInGroup and Compat.IsInGroup() then
         local inRaid = Compat.IsInRaid and Compat.IsInRaid()
         local numMembers = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
         local prefix = inRaid and "raid" or "party"
@@ -1457,13 +2482,46 @@ function Spotter:RefreshVisibleNameplates(fromTicker)
         for i = 1, limit do
             local token = prefix .. i
             if Safe.Value(Safe.Call(UnitExists, token)) == true and Safe.Value(Safe.Call(UnitIsVisible, token)) == true then
-                self:InspectUnit(token, false, fromTicker)
-            end
-            local subTarget = token .. "target"
-            if Safe.Value(Safe.Call(UnitExists, subTarget)) == true then
-                self:InspectUnit(subTarget, false, fromTicker)
+                local mGuid = Safe.String(Safe.Call(UnitGUID, token))
+                local mName = Safe.String(Safe.Call(UnitName, token))
+                if mName and mName ~= "Unknown" and QuickCandidateGate(token, mGuid, mName) then
+                    EnqueueInspection(token, false, fromTicker)
+                end
             end
         end
+    end
+end
+
+function Spotter:ReconcileGroupEntries()
+    if not self:IsEnabled() or next(self.entries) == nil then
+        return
+    end
+    local s = ns.db and ns.db.settings
+    if s and s.spotterIgnoreGroup == false then
+        return
+    end
+    local removedAny = false
+    for key, entry in pairs(self.entries) do
+        if ShouldIgnoreGroupUnit(nil, key, entry.guid) then
+            if entry.guid then
+                self.entryByGuid[entry.guid] = nil
+            end
+            self.entries[key] = nil
+            if self.lastAlert and self.lastAlert.key == key then
+                self.lastAlert = nil
+            end
+            for unit, uKey in pairs(self.visibleUnits) do
+                if uKey == key then
+                    self.visibleUnits[unit] = nil
+                    HidePlateBadgeForUnit(unit)
+                end
+            end
+            removedAny = true
+        end
+    end
+    if removedAny then
+        RecomputeOnScreenFlags()
+        self:QueueBatchEmit(true)
     end
 end
 
@@ -1471,6 +2529,7 @@ function Spotter:ReclassifyActiveEntries()
     if not self:IsEnabled() then
         return
     end
+    RebuildPositiveIndex()
     local rekeyed = {}
     local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
     local now = time()
@@ -1479,19 +2538,21 @@ function Spotter:ReclassifyActiveEntries()
         local dismissed = (not self.manualTracked[key]) and self.dismissedUntil[key] and now < self.dismissedUntil[key]
         local stance, resolvedReason, updatedGuild
         if not ignored and not dismissed then
-            local rawStance, dipEntry = self:ClassifyGuild(entry.guild)
-            local isMyGuildMember, knownGuild, _, _, isWatched, isFriend, watchNote = LookupKnownPlayerGuildOrMembership(entry.firstName, entry.displayName, entry.guid)
+            local isMyGuildMember, knownGuild, _, _, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(entry.firstName, entry.displayName, entry.guid)
             local gName = (entry.guild and entry.guild ~= "") and entry.guild or knownGuild
             if gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) ~= myNormGuild then
                 isMyGuildMember = false
             end
-            rawStance, dipEntry = self:ClassifyGuild(gName)
-            stance, resolvedReason, updatedGuild = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, watchNote, key, myNormGuild, myGuildName, gName)
+            local rawStance, dipEntry = self:ClassifyGuild(gName)
+            stance, resolvedReason, updatedGuild = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
             if updatedGuild and updatedGuild ~= "" then
                 entry.guild = updatedGuild
             end
         end
         if not stance then
+            if entry.guid then
+                self.entryByGuid[entry.guid] = nil
+            end
             self.entries[key] = nil
             if self.lastAlert and self.lastAlert.key == key then
                 self.lastAlert = nil
@@ -1518,13 +2579,7 @@ function Spotter:ReclassifyActiveEntries()
         end
     end
     for oldKey, entry in pairs(rekeyed) do
-        self.entries[oldKey] = nil
-        self.entries[entry.key] = entry
-        for uTok, mapped in pairs(self.visibleUnits) do
-            if mapped == oldKey then
-                self.visibleUnits[uTok] = entry.key
-            end
-        end
+        MigrateEntryStateKey(self, oldKey, entry.key, entry)
     end
 
     for unit, key in pairs(self.visibleUnits) do
@@ -1551,6 +2606,7 @@ function Spotter:OnGuildChanged()
 
     if not inGuild and self.lastScopeToken and self.lastScopeToken ~= "" then
         self._cachedPlayerGuild = nil
+        self._cachedPlayerGuildNorm = nil
         self:Clear(true)
         if Compat.ClearGuildMembers then Compat.ClearGuildMembers() end
         self.lastScopeToken = ""
@@ -1559,6 +2615,7 @@ function Spotter:OnGuildChanged()
 
     if self.lastScopeToken and self.lastScopeToken ~= "" and currentScope ~= "" and self.lastScopeToken ~= currentScope then
         self._cachedPlayerGuild = nil
+        self._cachedPlayerGuildNorm = nil
         self:Clear(true)
         if Compat.ClearGuildMembers then Compat.ClearGuildMembers() end
     end
@@ -1580,7 +2637,17 @@ function Spotter:Clear(silent)
     wipe(self.dismissedUntil)
     wipe(self.manualTracked)
     wipe(self.manualTrackedStance)
-    wipe(bystanderCooldown)
+    wipe(chatCooldown)
+    chatCooldownCount = 0
+    wipe(inspectQueue)
+    wipe(inspectQueuedSet)
+    inspectQueueHead = 1
+    inspectQueueTail = 0
+    inspectQueueTimerActive = false
+    wipe(unknownRetryUnits)
+    unknownRetryCount = 0
+    InvalidateBystanderCache()
+    MarkPositiveIndexDirty()
     self.lastAlert = nil
 
     for _, badge in pairs(self.plateBadges) do
@@ -1629,46 +2696,24 @@ function Spotter:FindLiveUnitForEntry(entry)
         end
     end
 
-    local checkedPlatesTarget = false
-    if C_NamePlate and C_NamePlate.GetNamePlates then
-        local ok, plates = pcall(C_NamePlate.GetNamePlates)
-        if ok and type(plates) == "table" then
-            checkedPlatesTarget = true
-            for _, p in ipairs(plates) do
-                if IsPlateAccessible(p) then
-                    local pUnit = Safe.String(p.namePlateUnitToken) or (p.UnitFrame and Safe.String(p.UnitFrame.unit))
-                    if pUnit then
-                        local npTarget = pUnit .. "target"
-                        if UnitMatchesEntry(npTarget, entry) then
-                            return npTarget, ResolvePlateForUnitOrEntry(npTarget, entry)
-                        end
-                    end
-                end
-            end
+    local groupToken = GetCachedGroupUnitToken(entry.key, entry.guid)
+    if groupToken then
+        if UnitMatchesEntry(groupToken, entry) then
+            return groupToken, ResolvePlateForUnitOrEntry(groupToken, entry)
         end
-    end
-    if not checkedPlatesTarget then
-        for i = 1, 40 do
-            local npTarget = "nameplate" .. i .. "target"
-            if UnitMatchesEntry(npTarget, entry) then
-                return npTarget, ResolvePlateForUnitOrEntry(npTarget, entry)
-            end
+        local groupSubTarget = groupToken .. "target"
+        if UnitMatchesEntry(groupSubTarget, entry) then
+            return groupSubTarget, ResolvePlateForUnitOrEntry(groupSubTarget, entry)
         end
     end
 
-    local inRaid = Compat.IsInRaid()
-    local numMembers = Compat.GetNumGroupMembers()
-    if numMembers and numMembers > 0 then
-        local prefix = inRaid and "raid" or "party"
-        local limit = inRaid and math.min(40, numMembers) or math.min(4, numMembers)
-        for i = 1, limit do
-            local token = prefix .. i
-            if UnitMatchesEntry(token, entry) then
-                return token, ResolvePlateForUnitOrEntry(token, entry)
-            end
-            local subTarget = token .. "target"
-            if UnitMatchesEntry(subTarget, entry) then
-                return subTarget, ResolvePlateForUnitOrEntry(subTarget, entry)
+    local nowClock = (GetTime and GetTime()) or time()
+    if (not IsCrowdMode()) and ((not entry._lastPlateTargetAt) or (nowClock - entry._lastPlateTargetAt) >= 1.5) then
+        entry._lastPlateTargetAt = nowClock
+        for pUnit, _ in pairs(activePlatesByUnit) do
+            local npTarget = pUnit .. "target"
+            if UnitMatchesEntry(npTarget, entry) then
+                return npTarget, ResolvePlateForUnitOrEntry(npTarget, entry)
             end
         end
     end
@@ -1682,20 +2727,41 @@ function Spotter:GetTargetKinematics(entry)
     local nowClock = (GetTime and GetTime()) or time()
     local unit = entry.unitToken
     local plate, plateUnit
-    if unit and UnitMatchesEntry(unit, entry) then
-        plate, plateUnit = ResolvePlateForUnitOrEntry(unit, entry)
-        if plateUnit then
-            unit = plateUnit
-            entry.unitToken = plateUnit
+    local matchedExisting = false
+    if unit then
+        if entry.guid then
+            local uGuid = Safe.String(Safe.Call(UnitGUID, unit))
+            if uGuid then
+                matchedExisting = (uGuid == entry.guid)
+            else
+                matchedExisting = UnitMatchesEntry(unit, entry)
+            end
+        else
+            matchedExisting = UnitMatchesEntry(unit, entry)
+        end
+    end
+    if matchedExisting then
+        local cachedPlate = activePlatesByUnit[unit]
+        if cachedPlate and IsPlateAccessible(cachedPlate) then
+            plate = cachedPlate
+            if unit:sub(1, 9) == "nameplate" then
+                plateUnit = unit
+            end
+        else
+            plate, plateUnit = ResolvePlateForUnitOrEntry(unit, entry)
+            if plateUnit then
+                unit = plateUnit
+                entry.unitToken = plateUnit
+            end
         end
     else
         unit = nil
         entry.unitToken = nil
-        if not entry._lastFindUnitAt or (nowClock - entry._lastFindUnitAt) >= 0.35 then
+        if not entry._lastFindUnitAt or (nowClock - entry._lastFindUnitAt) >= 0.50 then
             entry._lastFindUnitAt = nowClock
             unit, plate = self:FindLiveUnitForEntry(entry)
             entry.unitToken = unit
-            if unit and unit:match("^nameplate%d+$") then
+            if unit and unit:sub(1, 9) == "nameplate" then
                 plateUnit = unit
             end
         end
@@ -1706,7 +2772,6 @@ function Spotter:GetTargetKinematics(entry)
         entry.onScreen = true
     end
 
-    local facing = GetPlayerFacing and Safe.Number(Safe.Call(GetPlayerFacing)) or 0
     local angle, distYards, distText
 
     if unit then
@@ -1716,58 +2781,65 @@ function Spotter:GetTargetKinematics(entry)
         if uName and uName ~= "" then
             entry.unitName = uName
         end
-        -- 1. Engine-level world position when accessible (player & group units)
-        if UnitPosition then
-            local py, px, _, pMap = Safe.Call(UnitPosition, "player")
-            local ty, tx, _, tMap = Safe.Call(UnitPosition, unit)
-            py, px, pMap = Safe.Number(py), Safe.Number(px), Safe.Number(pMap)
-            ty, tx, tMap = Safe.Number(ty), Safe.Number(tx), Safe.Number(tMap)
-            if py and px and ty and tx and pMap and pMap == tMap then
-                local dy = ty - py
-                local dx = tx - px
-                if math.abs(dx) > 0.01 or math.abs(dy) > 0.01 then
-                    distYards = math.floor(math.sqrt(dx * dx + dy * dy) + 0.5)
-                    local worldAngle = math.atan2(dx, dy)
-                    angle = NormalizeAngleRad(worldAngle - facing)
-                    entry._lastWorldHeading = worldAngle
-                end
-            end
-        end
 
-        -- 2. Map coordinate vector fallback (works for party/raid members)
-        if not angle and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
-            local mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
-            if mapID then
-                local px, py = GetUnitOrPlayerMapXY(mapID, "player")
-                local tx, ty = GetUnitOrPlayerMapXY(mapID, unit)
-                if px and py and tx and ty then
-                    entry._anchorMapID = mapID
-                    entry._anchorMapX = tx
-                    entry._anchorMapY = ty
-                    entry.coordsText = string.format("%.1f, %.1f", tx * 100, ty * 100)
-                    local northDelta = py - ty
-                    local westDelta = px - tx
-                    if math.abs(northDelta) > 0.00001 or math.abs(westDelta) > 0.00001 then
-                        local worldAngle = math.atan2(westDelta, northDelta)
+        local canQueryWorldCoords = (not IsInInstanceFast()) and (IsGroupUnitToken(unit) or GetCachedGroupUnitToken(entry.key, entry.guid) ~= nil)
+        if canQueryWorldCoords then
+            local facing = GetPlayerFacing and Safe.Number(Safe.Call(GetPlayerFacing)) or 0
+            -- 1. Engine-level world position when accessible (open-world group units)
+            if UnitPosition then
+                local okP, py, px, _, pMap = pcall(UnitPosition, "player")
+                local okT, ty, tx, _, tMap = pcall(UnitPosition, unit)
+                if not okP then py, px, pMap = nil, nil, nil end
+                if not okT then ty, tx, tMap = nil, nil, nil end
+                py, px, pMap = Safe.Number(py), Safe.Number(px), Safe.Number(pMap)
+                ty, tx, tMap = Safe.Number(ty), Safe.Number(tx), Safe.Number(tMap)
+                if py and px and ty and tx and pMap and pMap == tMap then
+                    local dy = ty - py
+                    local dx = tx - px
+                    if math.abs(dx) > 0.01 or math.abs(dy) > 0.01 then
+                        distYards = math.floor(math.sqrt(dx * dx + dy * dy) + 0.5)
+                        local worldAngle = math.atan2(dx, dy)
                         angle = NormalizeAngleRad(worldAngle - facing)
                         entry._lastWorldHeading = worldAngle
                     end
                 end
             end
-        end
 
-        if not distYards and UnitDistanceSquared then
-            local dSq, checked = Safe.Call(UnitDistanceSquared, unit)
-            dSq = Safe.Number(dSq)
-            if Safe.Value(checked) == true and dSq and dSq >= 0 then
-                distYards = math.floor(math.sqrt(dSq) + 0.5)
+            -- 2. Map coordinate vector fallback (open-world group units)
+            if not angle and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
+                local mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
+                if mapID then
+                    local px, py = GetUnitOrPlayerMapXY(mapID, "player")
+                    local tx, ty = GetUnitOrPlayerMapXY(mapID, unit)
+                    if px and py and tx and ty then
+                        entry._anchorMapID = mapID
+                        entry._anchorMapX = tx
+                        entry._anchorMapY = ty
+                        entry.coordsText = string.format("%.1f, %.1f", tx * 100, ty * 100)
+                        local northDelta = py - ty
+                        local westDelta = px - tx
+                        if math.abs(northDelta) > 0.00001 or math.abs(westDelta) > 0.00001 then
+                            local worldAngle = math.atan2(westDelta, northDelta)
+                            angle = NormalizeAngleRad(worldAngle - facing)
+                            entry._lastWorldHeading = worldAngle
+                        end
+                    end
+                end
+            end
+
+            if not distYards and UnitDistanceSquared then
+                local dSq, checked = Safe.Call(UnitDistanceSquared, unit)
+                dSq = Safe.Number(dSq)
+                if Safe.Value(checked) == true and dSq and dSq >= 0 then
+                    distYards = math.floor(math.sqrt(dSq) + 0.5)
+                end
             end
         end
 
-        -- 3. Visible nameplate screen projection vector (only when unit nameplate is actively shown in viewport)
+        -- 3. Visible nameplate screen projection vector (only when non-restricted nameplate is visible in viewport)
         local screenRadial
-        if plate and UIParent and UIParent.GetCenter then
-            local refFrame = (plate.UnitFrame and IsPlateAccessible(plate.UnitFrame) and plate.UnitFrame) or plate
+        if plate and IsPlateAnchorSafe(plate) then
+            local refFrame = (plate.UnitFrame and IsPlateAnchorSafe(plate.UnitFrame) and plate.UnitFrame) or plate
             if refFrame and refFrame.GetCenter and (not refFrame.IsVisible or refFrame:IsVisible()) and (not plate.IsShown or plate:IsShown()) then
                 local okP, px, py = pcall(refFrame.GetCenter, refFrame)
                 px, py = Safe.Number(px), Safe.Number(py)
@@ -1783,7 +2855,8 @@ function Spotter:GetTargetKinematics(entry)
         end
 
         if not distYards then
-            if not entry._lastDistCheckAt or (nowClock - entry._lastDistCheckAt) >= 0.25 then
+            local distInterval = (entry.lastDistYards and entry.lastDistYards > 28) and 0.40 or 0.22
+            if not entry._lastDistCheckAt or (nowClock - entry._lastDistCheckAt) >= distInterval then
                 entry._lastDistCheckAt = nowClock
                 local mYards, mText = MeasureUnitDistance(unit, screenRadial, (plate ~= nil) or entry.onScreen)
                 if mYards and mText then
@@ -1804,11 +2877,10 @@ function Spotter:GetTargetKinematics(entry)
         end
     end
 
-    -- Refresh zone/subzone and party/raid map coords at 2 Hz when unit is live
-    if unit and (not entry._lastLocSyncAt or (nowClock - entry._lastLocSyncAt) >= 0.50) then
+    -- Refresh zone/subzone cleanly without per-tick table allocations
+    if unit and (not entry._lastLocSyncAt or (nowClock - entry._lastLocSyncAt) >= 2.0) then
         entry._lastLocSyncAt = nowClock
-        local locSnap = CaptureLocationSnapshot(unit)
-        ApplyLocationSnapshotToEntry(entry, locSnap)
+        UpdateEntryLocation(entry, unit)
     end
 
     local kin = entry._kinematics
@@ -1845,14 +2917,52 @@ function Spotter:CleanupAbsentTargets(silent)
         end
     end
 
+    local maxAlertCooldown = math.max(ENEMY_ALERT_COOLDOWN, FRIENDLY_ALERT_COOLDOWN)
+    for key, alertAt in pairs(self.alertCooldowns) do
+        if (now - alertAt) >= maxAlertCooldown then
+            self.alertCooldowns[key] = nil
+        end
+    end
+
+    local tExists = Safe.Value(Safe.Call(UnitExists, "target")) == true
+    local fExists = Safe.Value(Safe.Call(UnitExists, "focus")) == true
+    local mExists = Safe.Value(Safe.Call(UnitExists, "mouseover")) == true
+    local tGuid = tExists and Safe.String(Safe.Call(UnitGUID, "target")) or nil
+    local fGuid = fExists and Safe.String(Safe.Call(UnitGUID, "focus")) or nil
+    local mGuid = mExists and Safe.String(Safe.Call(UnitGUID, "mouseover")) or nil
+
     for key, entry in pairs(self.entries) do
         local isManual = self.manualTracked[key] == true
         local maxRetention = entry.dead and 3 or (isManual and MANUAL_RETENTION_SECONDS or RETENTION_SECONDS)
         local isRecent = (now - (entry.lastSeen or now)) <= maxRetention
+        local isCurTarget = false
+        if tExists then
+            if entry.guid and tGuid then
+                isCurTarget = (entry.guid == tGuid)
+            else
+                isCurTarget = UnitMatchesEntry("target", entry)
+            end
+        end
+        local isCurFocus = false
+        if fExists and not isCurTarget then
+            if entry.guid and fGuid then
+                isCurFocus = (entry.guid == fGuid)
+            else
+                isCurFocus = UnitMatchesEntry("focus", entry)
+            end
+        end
+        local isCurMouseover = false
+        if mExists and not isCurTarget and not isCurFocus then
+            if entry.guid and mGuid then
+                isCurMouseover = (entry.guid == mGuid)
+            else
+                isCurMouseover = UnitMatchesEntry("mouseover", entry)
+            end
+        end
         local keep = entry.onScreen
-            or UnitMatchesEntry("target", entry)
-            or UnitMatchesEntry("focus", entry)
-            or UnitMatchesEntry("mouseover", entry)
+            or isCurTarget
+            or isCurFocus
+            or isCurMouseover
             or isRecent
         if not keep then
             if entry.guid then
@@ -1879,10 +2989,12 @@ function Spotter:Prune(silent)
 end
 
 function Spotter:GetCounts()
-    local enemy, ally, same, onScreen, watchlist, friend = 0, 0, 0, 0, 0, 0
+    local enemy, ally, same, onScreen, watchlist, friend, blocked = 0, 0, 0, 0, 0, 0, 0
     for _, entry in pairs(self.entries) do
         if entry.stance == "ENEMY" then
             enemy = enemy + 1
+        elseif entry.stance == "BLOCKED" then
+            blocked = blocked + 1
         elseif entry.stance == "WATCHLIST" then
             watchlist = watchlist + 1
         elseif entry.stance == "FRIEND" then
@@ -1896,8 +3008,8 @@ function Spotter:GetCounts()
             onScreen = onScreen + 1
         end
     end
-    local total = enemy + ally + same + watchlist + friend
-    return enemy, ally, same, total, onScreen, watchlist, friend
+    local total = enemy + blocked + ally + same + watchlist + friend
+    return enemy, ally, same, total, onScreen, watchlist, friend, blocked
 end
 
 function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedStance)
@@ -1928,6 +3040,7 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     if forcedStance then
         self.manualTrackedStance[key] = forcedStance
     end
+    AddPositiveCandidate(displayName, cleanGuid, nil, nil, true)
 
     local tempEntry = {
         key = key,
@@ -1936,20 +3049,9 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
         unitName = firstName,
     }
     local liveUnit = self:FindLiveUnitForEntry(tempEntry)
-    if not liveUnit and IsInGroup and Safe.Value(Safe.Call(IsInGroup)) == true then
-        local isRaid = IsInRaid and Safe.Value(Safe.Call(IsInRaid)) == true
-        local count = (GetNumGroupMembers and Safe.Number(Safe.Call(GetNumGroupMembers))) or 0
-        for i = 1, count do
-            local token = isRaid and ("raid" .. i) or ("party" .. i)
-            if UnitMatchesEntry(token, tempEntry) then
-                liveUnit = token
-                break
-            end
-        end
-    end
 
     if liveUnit then
-        local trackedEntry = self:InspectUnit(liveUnit, liveUnit:match("^nameplate") ~= nil)
+        local trackedEntry = self:InspectUnit(liveUnit, liveUnit:match("^nameplate") ~= nil, false, true, true)
         if trackedEntry and ns.SpotterHUD then
             ns.SpotterHUD.focusedKey = trackedEntry.key
             if ns.SpotterHUD.Show then
@@ -1960,16 +3062,19 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     end
 
     local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
-    local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote = LookupKnownPlayerGuildOrMembership(firstName, displayName, cleanGuid)
+    local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(firstName, displayName, cleanGuid)
     local gName = (rawGuild and rawGuild ~= "") and rawGuild or knownGuild
     local rawStance, dipEntry = self:ClassifyGuild(gName)
     local stance, resolvedReason
-    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, watchNote, key, myNormGuild, myGuildName, gName)
+    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
     stance = stance or forcedStance or "WATCHLIST"
 
     local now = time()
     local entry = self.entries[key] or { key = key, firstSeen = now }
     self.entries[key] = entry
+    if cleanGuid and cleanGuid ~= "" then
+        self.entryByGuid[cleanGuid] = entry
+    end
     entry.displayName = displayName
     entry.firstName = firstName
     entry.unitName = entry.unitName or firstName
@@ -1984,8 +3089,10 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     entry.lastDistText = entry.lastDistText or L["Nearby"]
     entry._manualTracked = true
     entry._alertEvaluated = true
+    UpdateEntryLocation(entry, "player")
 
     RecomputeOnScreenFlags()
+    self:EnsurePruneLoop()
     if ns.SpotterHUD then
         ns.SpotterHUD.focusedKey = key
         if ns.SpotterHUD.Show then
@@ -2014,20 +3121,270 @@ function Spotter:GetActiveTargets(filterStance)
     return out
 end
 
+function Spotter:RegisterEvents()
+    if self._eventsRegistered then return end
+    if self._eventFrame then
+        local events = {
+            "NAME_PLATE_UNIT_ADDED",
+            "FORBIDDEN_NAME_PLATE_UNIT_ADDED",
+            "NAME_PLATE_UNIT_REMOVED",
+            "PLAYER_TARGET_CHANGED",
+            "PLAYER_FOCUS_CHANGED",
+            "UPDATE_MOUSEOVER_UNIT",
+            "PLAYER_SOFT_FRIEND_CHANGED",
+            "PLAYER_SOFT_ENEMY_CHANGED",
+            "PLAYER_SOFT_INTERACT_CHANGED",
+            "GROUP_ROSTER_UPDATE",
+            "PLAYER_GUILD_UPDATE",
+            "GUILD_ROSTER_UPDATE",
+            "FRIENDLIST_UPDATE",
+            "IGNORELIST_UPDATE",
+            "BN_FRIEND_LIST_SIZE_CHANGED",
+            "BN_FRIEND_INFO_CHANGED",
+            "PLAYER_ENTERING_WORLD",
+            "ZONE_CHANGED_NEW_AREA",
+            "UI_SCALE_CHANGED",
+            "DISPLAY_SIZE_CHANGED",
+            "CHAT_MSG_SAY",
+            "CHAT_MSG_YELL",
+            "CHAT_MSG_EMOTE",
+            "CHAT_MSG_TEXT_EMOTE",
+        }
+        for _, ev in ipairs(events) do
+            pcall(self._eventFrame.RegisterEvent, self._eventFrame, ev)
+        end
+    end
+    if self._unitFrame then
+        local okUnit = self._unitFrame.RegisterUnitEvent and pcall(self._unitFrame.RegisterUnitEvent, self._unitFrame, "UNIT_TARGET", "player", "target", "focus")
+        if not okUnit then
+            pcall(self._unitFrame.RegisterEvent, self._unitFrame, "UNIT_TARGET")
+        end
+    end
+    self._eventsRegistered = true
+end
+
+function Spotter:UnregisterEvents()
+    if not self._eventsRegistered then return end
+    if self._eventFrame then
+        pcall(self._eventFrame.UnregisterAllEvents, self._eventFrame)
+    end
+    if self._unitFrame then
+        pcall(self._unitFrame.UnregisterAllEvents, self._unitFrame)
+    end
+    wipe(activePlatesByUnit)
+    wipe(activePlateUnitByGuid)
+    activePlateCount = 0
+    self._eventsRegistered = false
+end
+
+local function ScheduleReindexRefresh(allowVisiblePlateRefresh)
+    MarkPositiveIndexDirty()
+    InvalidateBystanderCache()
+    if not Spotter:IsEnabled() then return end
+    if Spotter._socialRefreshQueued or not (C_Timer and C_Timer.After) then return end
+    Spotter._socialRefreshQueued = true
+    C_Timer.After(0.20, function()
+        Spotter._socialRefreshQueued = false
+        if not Spotter:IsEnabled() then return end
+        if next(Spotter.entries) ~= nil then
+            Spotter:ReclassifyActiveEntries()
+        elseif allowVisiblePlateRefresh and not (InCombatLockdown and InCombatLockdown()) then
+            Spotter:RefreshVisibleNameplates(false)
+        end
+    end)
+end
+
 function Spotter:Init()
-    -- Target Radar runtime scanning & OnUpdate loops deactivated cleanly per user request.
-    self.lastScopeToken = ""
-    wipe(self.entries)
-    wipe(self.entryByGuid)
-    wipe(self.visibleUnits)
-    wipe(self.alertCooldowns)
-    wipe(self.dismissedUntil)
-    wipe(self.manualTracked)
-    wipe(self.manualTrackedStance)
-    wipe(bystanderCooldown)
-    wipe(socialByGuid)
-    wipe(socialByKey)
-    self.lastAlert = nil
+    self.lastScopeToken = ns.Clan and ns.Clan.GetActiveScopeToken and ns.Clan:GetActiveScopeToken() or ""
+
+    if not self._eventFrame then
+        local ef = CreateFrame("Frame")
+        ef:SetScript("OnEvent", function(_, event, arg1, arg2, _, _, _, _, _, _, _, _, _, arg12)
+            if event == "UI_SCALE_CHANGED" or event == "DISPLAY_SIZE_CHANGED" then
+                InvalidateUiMetrics()
+                return
+            end
+            if not Spotter:IsEnabled() then
+                return
+            end
+            if event == "NAME_PLATE_UNIT_ADDED" then
+                local pGuid = nil
+                if arg1 and C_NamePlate and C_NamePlate.GetNamePlateForUnit then
+                    local okP, plate = pcall(C_NamePlate.GetNamePlateForUnit, arg1)
+                    if okP and IsPlateAccessible(plate) then
+                        if not activePlatesByUnit[arg1] then
+                            activePlateCount = activePlateCount + 1
+                        end
+                        activePlatesByUnit[arg1] = plate
+                        pGuid = Safe.String(Safe.Call(UnitGUID, arg1))
+                        if pGuid and pGuid ~= "" then
+                            activePlateUnitByGuid[pGuid] = arg1
+                        end
+                    end
+                end
+                Spotter:InspectUnit(arg1, true, false, false, false, pGuid)
+            elseif event == "FORBIDDEN_NAME_PLATE_UNIT_ADDED" then
+                if arg1 then
+                    if activePlatesByUnit[arg1] then
+                        activePlateCount = math.max(0, activePlateCount - 1)
+                    end
+                    activePlatesByUnit[arg1] = nil
+                end
+                Spotter:InspectUnit(arg1, false, false, false)
+            elseif event == "NAME_PLATE_UNIT_REMOVED" then
+                if arg1 then
+                    local pGuid = Safe.String(Safe.Call(UnitGUID, arg1))
+                    if pGuid and activePlateUnitByGuid[pGuid] == arg1 then
+                        activePlateUnitByGuid[pGuid] = nil
+                    end
+                    if activePlatesByUnit[arg1] then
+                        activePlateCount = math.max(0, activePlateCount - 1)
+                    end
+                    activePlatesByUnit[arg1] = nil
+                    if Spotter.visibleUnits[arg1] then
+                        Spotter.visibleUnits[arg1] = nil
+                        Spotter:QueueBatchEmit(true)
+                    end
+                    HidePlateBadgeForUnit(arg1)
+                end
+            elseif event == "PLAYER_TARGET_CHANGED" then
+                Spotter:InspectUnit("target", false, false, true)
+            elseif event == "PLAYER_FOCUS_CHANGED" then
+                Spotter:InspectUnit("focus", false, false, true)
+            elseif event == "UPDATE_MOUSEOVER_UNIT" then
+                Spotter:InspectUnit("mouseover", false, false, false)
+            elseif event == "PLAYER_SOFT_FRIEND_CHANGED" then
+                Spotter:InspectUnit("softfriend", false, false, false)
+            elseif event == "PLAYER_SOFT_ENEMY_CHANGED" then
+                Spotter:InspectUnit("softenemy", false, false, false)
+            elseif event == "PLAYER_SOFT_INTERACT_CHANGED" then
+                Spotter:InspectUnit("softinteract", false, false, false)
+            elseif event == "GROUP_ROSTER_UPDATE" then
+                groupCacheDirty = true
+                if next(Spotter.entries) ~= nil then
+                    if not Spotter._groupReclassQueued and C_Timer and C_Timer.After then
+                        Spotter._groupReclassQueued = true
+                        C_Timer.After(0.25, function()
+                            Spotter._groupReclassQueued = false
+                            if Spotter:IsEnabled() and next(Spotter.entries) ~= nil then
+                                Spotter:ReconcileGroupEntries()
+                            end
+                        end)
+                    end
+                end
+            elseif event == "PLAYER_GUILD_UPDATE" then
+                if arg1 == nil or arg1 == "player" then
+                    Spotter._cachedPlayerGuild = nil
+                    Spotter._cachedPlayerGuildNorm = nil
+                    MarkGuildPositiveDirty()
+                    InvalidateBystanderCache()
+                    Spotter:OnGuildChanged()
+                end
+            elseif event == "GUILD_ROSTER_UPDATE" then
+                local nowClock = (GetTime and GetTime()) or time()
+                if Spotter._lastGuildReclassAt == nil or (nowClock - Spotter._lastGuildReclassAt) >= 15 then
+                    Spotter._lastGuildReclassAt = nowClock
+                    MarkGuildPositiveDirty()
+                    if next(Spotter.entries) ~= nil then
+                        Spotter:ReclassifyActiveEntries()
+                    end
+                end
+            elseif event == "IGNORELIST_UPDATE" or event == "FRIENDLIST_UPDATE" or event == "BN_FRIEND_LIST_SIZE_CHANGED" then
+                ScheduleReindexRefresh(true)
+            elseif event == "BN_FRIEND_INFO_CHANGED" then
+                local nowClock = (GetTime and GetTime()) or time()
+                if Spotter._lastBnetReclassAt == nil or (nowClock - Spotter._lastBnetReclassAt) >= 3.0 then
+                    Spotter._lastBnetReclassAt = nowClock
+                    ScheduleReindexRefresh(false)
+                end
+            elseif event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA" then
+                inInstanceCached = nil
+                InvalidateUiMetrics()
+                if event == "PLAYER_ENTERING_WORLD" then
+                    wipe(activePlatesByUnit)
+                    wipe(activePlateUnitByGuid)
+                    activePlateCount = 0
+                    wipe(chatCooldown)
+                    chatCooldownCount = 0
+                    InvalidateBystanderCache()
+                    MarkPositiveIndexDirty()
+                    groupCacheDirty = true
+                    if C_Timer and C_Timer.After then
+                        C_Timer.After(0.6, function()
+                            if Spotter:IsEnabled() then
+                                Spotter:RefreshVisibleNameplates(false)
+                            end
+                        end)
+                    end
+                end
+            elseif event == "CHAT_MSG_SAY" or event == "CHAT_MSG_YELL" or event == "CHAT_MSG_EMOTE" or event == "CHAT_MSG_TEXT_EMOTE" then
+                Spotter:InspectChatSighting(arg2, arg12)
+            end
+        end)
+        self._eventFrame = ef
+    end
+
+    if not self._unitFrame then
+        local uf = CreateFrame("Frame")
+        uf:SetScript("OnEvent", function(_, _, unitTarget)
+            if not Spotter:IsEnabled() then return end
+            if unitTarget == "player" then
+                Spotter:InspectUnit("target", false, false, true)
+            elseif unitTarget == "target" then
+                Spotter:InspectUnit("targettarget", false, false, false)
+            elseif unitTarget == "focus" then
+                Spotter:InspectUnit("focustarget", false, false, false)
+            end
+        end)
+        self._unitFrame = uf
+    end
+
+    if not self._hooksInitialized then
+        self._hooksInitialized = true
+        ns:On("SETTINGS_UPDATED", function()
+            MarkPositiveIndexDirty()
+            InvalidateBystanderCache()
+            if Spotter:IsEnabled() then
+                Spotter:RegisterEvents()
+                CacheRangeCheckItems()
+                if next(Spotter.entries) ~= nil then
+                    Spotter:ReclassifyActiveEntries()
+                elseif C_Timer and C_Timer.After then
+                    C_Timer.After(0.05, function()
+                        if Spotter:IsEnabled() then
+                            Spotter:RefreshVisibleNameplates(false)
+                        end
+                    end)
+                end
+            else
+                Spotter:UnregisterEvents()
+                Spotter:Clear(false)
+            end
+        end)
+
+        local function OnSocialOrDiplomacyChanged()
+            ScheduleReindexRefresh(true)
+        end
+        ns:On("SOCIAL_UPDATED", OnSocialOrDiplomacyChanged)
+        ns:On("WATCHLIST_UPDATED", OnSocialOrDiplomacyChanged)
+        ns:On("CLAN_DIPLOMACY_UPDATED", OnSocialOrDiplomacyChanged)
+    end
+
+    if self:IsEnabled() then
+        RebuildPositiveIndex()
+        self:RegisterEvents()
+        CacheRangeCheckItems()
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.8, function()
+                if Spotter:IsEnabled() then
+                    Spotter:RefreshVisibleNameplates(false)
+                end
+            end)
+        end
+    else
+        self:UnregisterEvents()
+        self:Clear(true)
+    end
 end
 
 ns.Spotter = Spotter

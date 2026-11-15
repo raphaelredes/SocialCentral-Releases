@@ -20,6 +20,8 @@ local Clan = {
     MAX_EXTERNAL_LFG = 40,
     MAX_GLOBAL_CHAT_LFG = 35,
     MAX_ROSTER_HISTORY = 40,
+    MAX_PASSIVE_PROFS = 100,
+    PASSIVE_PROF_TTL = 6 * 3600,
     lastSyncSentAt = 0,
     lastAlfgSentAt = 0,
     lastAlfgRelayAt = 0,
@@ -40,6 +42,93 @@ local Clan = {
     intelQueue = {},
     activeScopeToken = nil,
 }
+
+local function IsClanOrLFGVisible()
+    if _G.SocialCentralFrame and _G.SocialCentralFrame.IsShown and _G.SocialCentralFrame:IsShown() then
+        return true
+    end
+    if ns.LFGFrameTab and ns.LFGFrameTab.subPanel and ns.LFGFrameTab.subPanel.IsShown and ns.LFGFrameTab.subPanel:IsShown() then
+        return true
+    end
+    return false
+end
+
+local function QueueClanEmit(delay)
+    if Clan._clanEmitQueued then return end
+    Clan._clanEmitQueued = true
+    local waitSec = tonumber(delay) or 0.8
+    if C_Timer and C_Timer.After then
+        C_Timer.After(waitSec, function()
+            Clan._clanEmitQueued = false
+            ns:Emit("CLAN_UPDATED")
+        end)
+    else
+        Clan._clanEmitQueued = false
+        ns:Emit("CLAN_UPDATED")
+    end
+end
+
+local function ResolveSelfIdentity()
+    local resolved = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local fullName = (resolved and resolved.fullName and resolved.fullName ~= "" and resolved.fullName)
+        or Safe.String(Safe.Call(UnitName, "player"))
+        or "Player"
+    local cleanName = Compat.CleanInput and Compat.CleanInput(fullName) or fullName
+    local lookupKey
+    if Compat.ParseCharacterFields then
+        local _, _, lKey = Compat.ParseCharacterFields(cleanName)
+        lookupKey = lKey
+    elseif Compat.ParseCharacterName then
+        local p = Compat.ParseCharacterName(cleanName)
+        lookupKey = p and p.lookupKey
+    end
+    return cleanName, lookupKey
+end
+
+local function PruneAndBoundByTimestamp(tbl, maxCount, ttlSeconds, nowTs)
+    if type(tbl) ~= "table" then return end
+    local count = 0
+    local oldestKey, oldestTs
+    for k, v in pairs(tbl) do
+        local ts = (type(v) == "table" and tonumber(v.updatedAt)) or 0
+        if type(v) ~= "table" or (ttlSeconds and (nowTs - ts) > ttlSeconds) then
+            tbl[k] = nil
+        else
+            count = count + 1
+            if not oldestTs or ts < oldestTs then
+                oldestTs = ts
+                oldestKey = k
+            end
+        end
+    end
+    if count > (maxCount or 40) and oldestKey then
+        tbl[oldestKey] = nil
+    end
+end
+
+local function GetGuildSocialLookupMap()
+    local socialByLookup = Store and Store.socialByLookup
+    if socialByLookup then
+        return socialByLookup
+    end
+    local out = {}
+    if Store and type(Store.social) == "table" then
+        for _, row in pairs(Store.social) do
+            if type(row) == "table" and row.sources and row.sources.guild == true and row.lookupKey then
+                out[row.lookupKey] = row
+            end
+        end
+    end
+    return out
+end
+
+local function GetLiveGuildRowFromMap(socialByLookup, key)
+    local row = key and socialByLookup and socialByLookup[key]
+    if row and row.sources and row.sources.guild == true then
+        return row
+    end
+    return nil
+end
 
 Clan.STATUS_TAGS = {
     { id = "NONE", labelKey = "No Status" },
@@ -76,6 +165,7 @@ Clan.PROFESSIONS = {
     { id = "SKINNING", labelKey = "Skinning" },
     { id = "TAILORING", labelKey = "Tailoring" },
     { id = "COOKING", labelKey = "Cooking" },
+    { id = "FIRST_AID", labelKey = "First Aid" },
 }
 
 Clan.DUNGEON_PRESETS = {
@@ -284,9 +374,10 @@ local function CollectExternalLFGRecipients(self, maxCount)
         table.insert(targets, clean)
     end
 
-    if ns.Social and ns.Social.GetList then
-        for _, row in ipairs(ns.Social:GetList("friends") or {}) do
-            if row.online and not (row.sources and row.sources.guild) then
+    if type(Store.social) == "table" then
+        for _, row in pairs(Store.social) do
+            if #targets >= limit then break end
+            if type(row) == "table" and row.online and row.sources and row.sources.friend == true and not row.sources.guild then
                 PushTarget(row.characterName or row.displayName)
             end
         end
@@ -463,8 +554,12 @@ local function IsPlayerGuildOfficer()
 end
 
 local function IsSenderConfirmedInGuild(lookupKey)
-    if not (IsInGuild and IsInGuild()) then
+    if not (IsInGuild and IsInGuild()) or not lookupKey or lookupKey == "" then
         return false
+    end
+    local liveRow = Store and Store.socialByLookup and Store.socialByLookup[lookupKey]
+    if liveRow and liveRow.sources and liveRow.sources.guild == true then
+        return true
     end
     local total = GetNumGuildMembers and Safe.Number(GetNumGuildMembers()) or 0
     if not total or total <= 0 then
@@ -474,9 +569,19 @@ local function IsSenderConfirmedInGuild(lookupKey)
     for i = 1, total do
         local ok, fullName = pcall(GetGuildRosterInfo, i)
         if ok and fullName then
-            local p = Compat.ParseCharacterName(Safe.String(fullName))
-            if p and p.lookupKey == lookupKey then
-                return true
+            local cleanName = Safe.String(fullName)
+            if cleanName then
+                if Compat.ParseCharacterFields then
+                    local _, _, lKey = Compat.ParseCharacterFields(cleanName)
+                    if lKey == lookupKey then
+                        return true
+                    end
+                else
+                    local p = Compat.ParseCharacterName(cleanName)
+                    if p and p.lookupKey == lookupKey then
+                        return true
+                    end
+                end
             end
         end
     end
@@ -583,9 +688,7 @@ function Clan:CanManageAlliance()
     if self:IsGuildLeader() then
         return true
     end
-    local myName = Safe.String(Safe.Call(UnitName, "player"))
-    local myParsed = myName and Compat.ParseCharacterName(myName)
-    local myKey = myParsed and myParsed.lookupKey
+    local _, myKey = ResolveSelfIdentity()
     if myKey then
         local bucket = Store:GetClanScopeData()
         if bucket.alliance and bucket.alliance.managers and bucket.alliance.managers[myKey] == true then
@@ -659,9 +762,8 @@ function Clan:IsMemberAllianceAuthorized(lookupKey)
         return true
     end
     if not lookupKey then
-        local myName = Safe.String(Safe.Call(UnitName, "player"))
-        local myParsed = myName and Compat.ParseCharacterName(myName)
-        lookupKey = myParsed and myParsed.lookupKey
+        local _, myKey = ResolveSelfIdentity()
+        lookupKey = myKey
     end
     if lookupKey then
         if all.managers and all.managers[lookupKey] == true then
@@ -681,20 +783,17 @@ function Clan:GetGuildMembersWithAllianceStatus()
     local wl = all.whitelist or {}
     local mgrs = all.managers or {}
 
-    local myName = Safe.String(Safe.Call(UnitName, "player"))
-    local myParsed = myName and Compat.ParseCharacterName(myName)
-    local myKey = myParsed and myParsed.lookupKey
+    local _, myKey = ResolveSelfIdentity()
 
-    if ns.Social then
-        local guildList = ns.Social:GetList("guild") or {}
-        for _, m in ipairs(guildList) do
-            if m.lookupKey then
+    if type(Store.social) == "table" then
+        for _, m in pairs(Store.social) do
+            if type(m) == "table" and m.sources and m.sources.guild == true and m.lookupKey then
                 table.insert(out, {
                     lookupKey = m.lookupKey,
                     displayName = m.displayName or m.name or "?",
                     classFile = m.classFile,
                     level = m.level or 0,
-                    rank = m.rank or "",
+                    rank = m.rankName or m.rank or "",
                     authorized = (all.accessMode == "ALL") or (wl[m.lookupKey] == true) or (mgrs[m.lookupKey] == true),
                     isManager = mgrs[m.lookupKey] == true,
                     isSelf = (m.lookupKey == myKey),
@@ -728,7 +827,7 @@ function Clan:SendAllianceChat(rawText)
     if cleanText == "" then return false end
 
     local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
-    local myName = Safe.String(Safe.Call(UnitName, "player")) or "Unknown"
+    local myName = ResolveSelfIdentity()
     local _, myClass = Safe.Call(UnitClass, "player")
 
     local payload = string.format("ALM~%s~%s~%s~%s", Compat.CleanPayloadField(myGuild, 32), Compat.CleanPayloadField(myName, 25), myClass or "", cleanText)
@@ -797,7 +896,7 @@ function Clan:SaveClanInfo(summary, schedule, rules, contacts, editMode)
 
     local bucket = Store:GetClanScopeData()
     local info = bucket.clanInfo
-    local myName = Compat.CleanInput(Safe.String(Safe.Call(UnitName, "player")) or "") or "Player"
+    local myName = ResolveSelfIdentity()
     local nextRev = math.max(time(), (info.rev or 0) + 1)
 
     info.summary = Compat.CleanPayloadField(summary or "", 60)
@@ -886,7 +985,7 @@ function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
     local bucket = Store:GetClanScopeData()
     local dip = bucket.diplomacy
     local nextRev = math.max(time(), (dip.rev or 0) + 1)
-    local myName = Compat.CleanInput(Safe.String(Safe.Call(UnitName, "player")) or "") or "Player"
+    local myName = ResolveSelfIdentity()
 
     dip.rev = nextRev
     dip.updatedAt = time()
@@ -1103,9 +1202,8 @@ function Clan:ToggleEventOpen(eventId)
     local bucket = Store:GetClanScopeData()
     local evt = bucket.events[eventId]
     if not evt then return false end
-    local myName = Safe.String(Safe.Call(UnitName, "player"))
-    local myParsed = myName and Compat.ParseCharacterName(myName)
-    if not (myParsed and evt.creatorKey == myParsed.lookupKey) then
+    local _, myKey = ResolveSelfIdentity()
+    if not (myKey and evt.creatorKey == myKey) then
         ns:Print(L["Only the group creator can open or close this Clan listing."])
         return false
     end
@@ -1141,16 +1239,23 @@ function Clan:ReannounceEvent(eventId)
     return true
 end
 
-function Clan:SetMyProfessions(prof1, prof2, craftNote)
+function Clan:SetMyProfessions(prof1, prof2, craftNote, prof1Rank, prof2Rank)
     if not IsValidProfession(prof1) then prof1 = "NONE" end
     if not IsValidProfession(prof2) then prof2 = "NONE" end
     local bucket = Store:GetClanScopeData()
     local cleanNote = Compat.CleanPayloadField(craftNote or "", 40)
+    local r1Fallback = (self._myDetectedRanks and self._myDetectedRanks[prof1] and self._myDetectedRanks[prof1].rank) or ""
+    local r2Fallback = (self._myDetectedRanks and self._myDetectedRanks[prof2] and self._myDetectedRanks[prof2].rank) or ""
+    local cleanR1 = Compat.CleanPayloadField((prof1Rank and prof1Rank ~= "" and prof1Rank) or r1Fallback, 12)
+    local cleanR2 = Compat.CleanPayloadField((prof2Rank and prof2Rank ~= "" and prof2Rank) or r2Fallback, 12)
     bucket.myProf1 = prof1
     bucket.myProf2 = prof2
+    bucket.myProf1Rank = (prof1 ~= "NONE") and cleanR1 or ""
+    bucket.myProf2Rank = (prof2 ~= "NONE") and cleanR2 or ""
     bucket.myCraftNote = cleanNote
+    bucket.userClearedProfs = (prof1 == "NONE" and prof2 == "NONE" and cleanNote == "") or nil
 
-    local sent = self:SendGuildSync(("PRF~%s~%s~%s"):format(prof1, prof2, cleanNote))
+    local sent = self:SendGuildSync(("PRF~%s~%s~%s~%s~%s"):format(prof1, prof2, cleanNote, bucket.myProf1Rank, bucket.myProf2Rank))
     if (ns.db and ns.db.settings and ns.db.settings.clanSync) and not sent and IsInGuild and IsInGuild() then
         local waitRem = math.ceil(math.max(0, self.MIN_SEND_INTERVAL - (GetTime() - (self.lastSyncSentAt or 0))))
         if waitRem > 0 then
@@ -1194,9 +1299,8 @@ function Clan:RemoveEvent(eventId)
     local bucket = Store:GetClanScopeData()
     local evt = bucket.events[eventId]
     if not evt then return false end
-    local myName = Safe.String(Safe.Call(UnitName, "player"))
-    local myParsed = myName and Compat.ParseCharacterName(myName)
-    local isCreator = myParsed and evt.creatorKey == myParsed.lookupKey
+    local _, myKey = ResolveSelfIdentity()
+    local isCreator = (myKey ~= nil and evt.creatorKey == myKey)
 
     bucket.events[eventId] = nil
     if isCreator then
@@ -1231,18 +1335,11 @@ end
 
 function Clan:GetPeersList()
     local bucket = Store:GetClanScopeData()
-    local liveByLookup = {}
-    if ns.Social then
-        for _, row in ipairs(ns.Social:GetList("guild")) do
-            if row.lookupKey then
-                liveByLookup[row.lookupKey] = row
-            end
-        end
-    end
+    local socialByLookup = GetGuildSocialLookupMap()
 
     local out = {}
     for key, peer in pairs(bucket.peers) do
-        local live = liveByLookup[key]
+        local live = GetLiveGuildRowFromMap(socialByLookup, key)
         table.insert(out, {
             lookupKey = key,
             displayName = (live and live.displayName) or peer.displayName or key,
@@ -1295,58 +1392,707 @@ function Clan:GetEventsList(filterId)
     return out
 end
 
+function Clan:GetOpenEventsCount()
+    local bucket = Store:GetClanScopeData()
+    local count = 0
+    for _, evt in pairs(bucket.events) do
+        if type(evt) == "table" and evt.isOpen ~= false then
+            count = count + 1
+        end
+    end
+    return count
+end
+
 local PROF_ID_TO_KEY = {}
 for _, item in ipairs(Clan.PROFESSIONS) do
     if item.id ~= "NONE" and item.labelKey then
         PROF_ID_TO_KEY[item.id] = item.labelKey
     end
 end
+PROF_ID_TO_KEY.FIRST_AID = "First Aid"
 
-function Clan:GetProfessionsList(query)
-    local bucket = Store:GetClanScopeData()
-    local out = {}
-    local q = type(query) == "string" and query ~= "" and query:lower() or nil
+local UTF8_ACCENT_FOLD = {
+    ["á"] = "a", ["Á"] = "a", ["à"] = "a", ["À"] = "a", ["â"] = "a", ["Â"] = "a", ["ã"] = "a", ["Ã"] = "a",
+    ["é"] = "e", ["É"] = "e", ["ê"] = "e", ["Ê"] = "e", ["è"] = "e", ["È"] = "e",
+    ["í"] = "i", ["Í"] = "i", ["ì"] = "i", ["Ì"] = "i", ["î"] = "i", ["Î"] = "i",
+    ["ó"] = "o", ["Ó"] = "o", ["ô"] = "o", ["Ô"] = "o", ["õ"] = "o", ["Õ"] = "o", ["ò"] = "o", ["Ò"] = "o",
+    ["ú"] = "u", ["Ú"] = "u", ["ù"] = "u", ["Ù"] = "u", ["û"] = "u", ["Û"] = "u", ["ü"] = "u", ["Ü"] = "u",
+    ["ç"] = "c", ["Ç"] = "c", ["ñ"] = "n", ["Ñ"] = "n",
+}
 
-    local function PushEntry(lookupKey, displayName, prof1, prof2, note, isSelf, classFile, updatedAt)
-        if (not prof1 or prof1 == "NONE") and (not prof2 or prof2 == "NONE") and (not note or note == "") then
-            return
+local function FoldProfText(str)
+    if type(str) ~= "string" or str == "" then return "" end
+    if not str:find("[\128-\255]") then
+        return str:lower()
+    end
+    local out = str
+    for k, v in pairs(UTF8_ACCENT_FOLD) do
+        if out:find(k, 1, true) then
+            out = out:gsub(k, v)
         end
-        if q then
-            local k1 = prof1 and PROF_ID_TO_KEY[prof1]
-            local k2 = prof2 and PROF_ID_TO_KEY[prof2]
-            local p1Label = ((k1 and L[k1]) or L[prof1] or prof1 or ""):lower()
-            local p2Label = ((k2 and L[k2]) or L[prof2] or prof2 or ""):lower()
-            local hay = ((displayName or "") .. " " .. p1Label .. " " .. p2Label .. " " .. (note or "")):lower()
-            if not hay:find(q, 1, true) then
-                return
+    end
+    return out:lower()
+end
+
+local function NormalizeProfId(val)
+    if type(val) ~= "string" or val == "" then return "NONE" end
+    if val == "FIRST_AID" or IsValidProfession(val) then
+        return val
+    end
+    return "NONE"
+end
+
+local EXACT_PROF_ALIASES = {
+    alchemy = "ALCHEMY", alquimia = "ALCHEMY",
+    blacksmithing = "BLACKSMITHING", ferraria = "BLACKSMITHING", herreria = "BLACKSMITHING",
+    enchanting = "ENCHANTING", encantamento = "ENCHANTING", encantamiento = "ENCHANTING",
+    engineering = "ENGINEERING", engenharia = "ENGINEERING", ingenieria = "ENGINEERING",
+    herbalism = "HERBALISM", herborismo = "HERBALISM", herboristeria = "HERBALISM", botanica = "HERBALISM",
+    inscription = "INSCRIPTION", escrivania = "INSCRIPTION", inscricao = "INSCRIPTION", inscripcion = "INSCRIPTION",
+    jewelcrafting = "JEWELCRAFTING", joalheria = "JEWELCRAFTING", joyeria = "JEWELCRAFTING",
+    leatherworking = "LEATHERWORKING", couraria = "LEATHERWORKING", peleteria = "LEATHERWORKING", coureiro = "LEATHERWORKING",
+    mining = "MINING", mineracao = "MINING", mineria = "MINING",
+    skinning = "SKINNING", esfolamento = "SKINNING", desuello = "SKINNING",
+    tailoring = "TAILORING", alfaiataria = "TAILORING", sastreria = "TAILORING",
+    cooking = "COOKING", culinaria = "COOKING", cocina = "COOKING",
+    ["first aid"] = "FIRST_AID", ["primeiros socorros"] = "FIRST_AID", ["primeros auxilios"] = "FIRST_AID",
+}
+
+local NOTE_TOKEN_RULES = {
+    { pat = "primeiros socor", id = "FIRST_AID" },
+    { pat = "primeros auxil", id = "FIRST_AID" },
+    { pat = "first aid", id = "FIRST_AID" },
+    { pat = "%f[%w]alchem", id = "ALCHEMY" },
+    { pat = "%f[%w]alquim", id = "ALCHEMY" },
+    { pat = "%f[%w]alch%f[%W]", id = "ALCHEMY" },
+    { pat = "%f[%w]alq%f[%W]", id = "ALCHEMY" },
+    { pat = "%f[%w]blacksmit", id = "BLACKSMITHING" },
+    { pat = "%f[%w]ferrar", id = "BLACKSMITHING" },
+    { pat = "%f[%w]ferreiro", id = "BLACKSMITHING" },
+    { pat = "%f[%w]herrer", id = "BLACKSMITHING" },
+    { pat = "%f[%w]bs%f[%W]", id = "BLACKSMITHING" },
+    { pat = "%f[%w]enchant", id = "ENCHANTING" },
+    { pat = "%f[%w]encant", id = "ENCHANTING" },
+    { pat = "%f[%w]ench%f[%W]", id = "ENCHANTING" },
+    { pat = "%f[%w]eng[ie]", id = "ENGINEERING" },
+    { pat = "%f[%w]engenh", id = "ENGINEERING" },
+    { pat = "%f[%w]ingeni", id = "ENGINEERING" },
+    { pat = "%f[%w]eng%f[%W]", id = "ENGINEERING" },
+    { pat = "%f[%w]herbal", id = "HERBALISM" },
+    { pat = "%f[%w]herbor", id = "HERBALISM" },
+    { pat = "%f[%w]herb%f[%W]", id = "HERBALISM" },
+    { pat = "%f[%w]botan", id = "HERBALISM" },
+    { pat = "%f[%w]inscrip", id = "INSCRIPTION" },
+    { pat = "%f[%w]escriv", id = "INSCRIPTION" },
+    { pat = "%f[%w]inscric", id = "INSCRIPTION" },
+    { pat = "%f[%w]jewel", id = "JEWELCRAFTING" },
+    { pat = "%f[%w]joalh", id = "JEWELCRAFTING" },
+    { pat = "%f[%w]joyer", id = "JEWELCRAFTING" },
+    { pat = "%f[%w]jc%f[%W]", id = "JEWELCRAFTING" },
+    { pat = "%f[%w]leather", id = "LEATHERWORKING" },
+    { pat = "%f[%w]courar", id = "LEATHERWORKING" },
+    { pat = "%f[%w]peleter", id = "LEATHERWORKING" },
+    { pat = "%f[%w]lw%f[%W]", id = "LEATHERWORKING" },
+    { pat = "%f[%w]mining%f[%W]", id = "MINING" },
+    { pat = "%f[%w]minera", id = "MINING" },
+    { pat = "%f[%w]mineria", id = "MINING" },
+    { pat = "%f[%w]miner%f[%W]", id = "MINING" },
+    { pat = "%f[%w]min%f[%W]%s*[/+&]", id = "MINING" },
+    { pat = "[/+&]%s*min%f[%W]", id = "MINING" },
+    { pat = "%f[%w]skinning", id = "SKINNING" },
+    { pat = "%f[%w]esfol", id = "SKINNING" },
+    { pat = "%f[%w]desuell", id = "SKINNING" },
+    { pat = "%f[%w]tailor", id = "TAILORING" },
+    { pat = "%f[%w]alfaiat", id = "TAILORING" },
+    { pat = "%f[%w]sastrer", id = "TAILORING" },
+    { pat = "%f[%w]cooking", id = "COOKING" },
+    { pat = "%f[%w]culin", id = "COOKING" },
+    { pat = "%f[%w]cocina", id = "COOKING" },
+}
+
+function Clan:MatchProfessionId(rawName)
+    if type(rawName) ~= "string" or rawName == "" then return "NONE" end
+    local up = rawName:upper()
+    if IsValidProfession(up) or up == "FIRST_AID" then
+        return up
+    end
+    local folded = Compat.Trim and Compat.Trim(FoldProfText(rawName)) or FoldProfText(rawName)
+    if EXACT_PROF_ALIASES[folded] then
+        return EXACT_PROF_ALIASES[folded]
+    end
+    for _, rule in ipairs(NOTE_TOKEN_RULES) do
+        if folded:find(rule.pat) then
+            return rule.id
+        end
+    end
+    return "NONE"
+end
+
+function Clan:ParseProfessionsFromNote(noteText)
+    if type(noteText) ~= "string" or noteText == "" then
+        return "NONE", "NONE"
+    end
+    local folded = FoldProfText(noteText)
+    local found = {}
+    local seen = {}
+    for _, rule in ipairs(NOTE_TOKEN_RULES) do
+        local pos = folded:find(rule.pat)
+        if pos and not seen[rule.id] then
+            seen[rule.id] = true
+            table.insert(found, { id = rule.id, pos = pos })
+        end
+    end
+    table.sort(found, function(a, b) return a.pos < b.pos end)
+    local p1 = found[1] and found[1].id or "NONE"
+    local p2 = found[2] and found[2].id or "NONE"
+    return p1, p2
+end
+
+local function CollectLiveCharacterProfessions()
+    local list = {}
+    local seen = {}
+    if GetProfessions and GetProfessionInfo then
+        local okP, p1, p2, p3, p4, p5, p6 = pcall(GetProfessions)
+        if okP then
+            local slots = { Safe.Value(p1), Safe.Value(p2), Safe.Value(p3), Safe.Value(p4), Safe.Value(p5), Safe.Value(p6) }
+            for idx = 1, 6 do
+                if slots[idx] then
+                    local ok, name, _, rank, maxRank = pcall(GetProfessionInfo, slots[idx])
+                    name = ok and Safe.String(name) or nil
+                    if name and name ~= "" and not seen[name:lower()] then
+                        seen[name:lower()] = true
+                        list[#list + 1] = {
+                            name = name,
+                            rank = Safe.Number(rank) or 0,
+                            maxRank = Safe.Number(maxRank) or 0,
+                            isPrimary = (idx <= 2),
+                        }
+                    end
+                end
             end
         end
-        table.insert(out, {
-            lookupKey = lookupKey,
-            displayName = displayName,
-            prof1 = prof1 or "NONE",
-            prof2 = prof2 or "NONE",
-            craftNote = note or "",
-            isSelf = isSelf,
-            classFile = classFile,
-            updatedAt = updatedAt,
-        })
+    end
+    if GetNumSkillLines and GetSkillLineInfo then
+        local count = Safe.Number(Safe.Call(GetNumSkillLines)) or 0
+        local currentHeader = ""
+        for i = 1, count do
+            local ok, sName, isHeader, _, sRank, _, _, sMaxRank, isAbandonable = pcall(GetSkillLineInfo, i)
+            if ok then
+                sName = Safe.String(sName)
+                if Safe.Value(isHeader) then
+                    currentHeader = sName and FoldProfText(sName) or ""
+                elseif sName and sName ~= "" and not seen[sName:lower()] then
+                    local inProfHeader = currentHeader:find("profiss", 1, true)
+                        or currentHeader:find("profession", 1, true)
+                        or currentHeader:find("profesion", 1, true)
+                    local abandonable = (Safe.Value(isAbandonable) == true) or (Safe.Number(isAbandonable) == 1)
+                    local pid = Clan:MatchProfessionId(sName)
+                    if inProfHeader or abandonable or (pid ~= "NONE") then
+                        seen[sName:lower()] = true
+                        list[#list + 1] = {
+                            name = sName,
+                            rank = Safe.Number(sRank) or 0,
+                            maxRank = Safe.Number(sMaxRank) or 0,
+                            isPrimary = (abandonable or (inProfHeader and pid ~= "COOKING" and pid ~= "FIRST_AID")) and true or false,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    if #list == 0 and ns.db and ns.db.alts and Compat.CharacterKey then
+        local cur = ns.db.alts[Compat.CharacterKey()]
+        if cur and type(cur.professions) == "table" then
+            return cur.professions
+        end
+    end
+    return list
+end
+
+function Clan:AutoDetectMyProfessions(forceApply)
+    self._lastProfAutoDetectAt = (GetTime and GetTime()) or time()
+    local rawList = CollectLiveCharacterProfessions()
+    local primaries, secondaries = {}, {}
+    local rankById = {}
+    for _, ap in ipairs(rawList) do
+        if ap and ap.name then
+            local pid = self:MatchProfessionId(ap.name)
+            if pid ~= "NONE" then
+                local rStr = ((ap.maxRank or 0) > 0) and string.format("%d/%d", ap.rank or 0, ap.maxRank or 0) or ""
+                if not rankById[pid] then
+                    rankById[pid] = { rank = rStr, label = ap.name }
+                end
+                if ap.isPrimary ~= false and pid ~= "COOKING" and pid ~= "FIRST_AID" then
+                    if #primaries < 2 and primaries[1] ~= pid then
+                        primaries[#primaries + 1] = pid
+                    end
+                else
+                    secondaries[pid] = { id = pid, name = ap.name, rank = rStr }
+                end
+            end
+        end
+    end
+    self._myDetectedPrimary = primaries
+    self._myDetectedSecondaries = secondaries
+    self._myDetectedRanks = rankById
+
+    local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+    if not bucket then return false end
+
+    local changed = false
+    local p1 = NormalizeProfId(bucket.myProf1)
+    local p2 = NormalizeProfId(bucket.myProf2)
+    if (forceApply or (not bucket.userClearedProfs and p1 == "NONE" and p2 == "NONE")) and #primaries > 0 then
+        local np1 = primaries[1] or "NONE"
+        local np2 = primaries[2] or "NONE"
+        if np1 ~= p1 or np2 ~= p2 then
+            bucket.myProf1 = np1
+            bucket.myProf2 = np2
+            p1, p2 = np1, np2
+            changed = true
+        end
+        if forceApply then
+            bucket.userClearedProfs = nil
+        end
+    end
+    local r1 = (p1 ~= "NONE" and rankById[p1] and rankById[p1].rank) or ""
+    local r2 = (p2 ~= "NONE" and rankById[p2] and rankById[p2].rank) or ""
+    if r1 ~= "" and bucket.myProf1Rank ~= r1 then
+        bucket.myProf1Rank = r1
+        changed = true
+    elseif p1 == "NONE" and bucket.myProf1Rank ~= "" then
+        bucket.myProf1Rank = ""
+    end
+    if r2 ~= "" and bucket.myProf2Rank ~= r2 then
+        bucket.myProf2Rank = r2
+        changed = true
+    elseif p2 == "NONE" and bucket.myProf2Rank ~= "" then
+        bucket.myProf2Rank = ""
     end
 
-    local myName = Safe.String(Safe.Call(UnitName, "player"))
-    local myParsed = myName and Compat.ParseCharacterName(myName)
-    local _, myClass = Safe.Call(UnitClass, "player")
-    PushEntry(myParsed and myParsed.lookupKey or "me", myParsed and myParsed.displayName or "Me", bucket.myProf1, bucket.myProf2, bucket.myCraftNote, true, Safe.String(myClass), time())
+    if changed then
+        ns:Emit("CLAN_UPDATED")
+    end
+    return (#primaries > 0 or next(secondaries) ~= nil), p1, p2, r1, r2
+end
 
-    for key, peer in pairs(bucket.peers) do
-        PushEntry(key, peer.displayName or key, peer.prof1, peer.prof2, peer.craftNote, false, peer.classFile, peer.updatedAt)
+function Clan:CanEditMyGuildNote()
+    if not (IsInGuild and IsInGuild()) then return false end
+    return (CanEditPublicNote and Safe.Value(Safe.Call(CanEditPublicNote)) == true) or false
+end
+
+function Clan:PublishProfessionsToGuildNote(customNote)
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        return false, L["In Combat"]
+    end
+    if not self:CanEditMyGuildNote() then
+        return false, L["Your guild rank cannot edit your Guild Public Note."]
+    end
+    local bucket = Store:GetClanScopeData()
+    local p1 = NormalizeProfId(bucket.myProf1)
+    local p2 = NormalizeProfId(bucket.myProf2)
+    if p1 == "NONE" and p2 == "NONE" then
+        self:AutoDetectMyProfessions(true)
+        p1 = NormalizeProfId(bucket.myProf1)
+        p2 = NormalizeProfId(bucket.myProf2)
+    end
+    if p1 == "NONE" and p2 == "NONE" then
+        return false, L["No professions detected to publish."]
+    end
+
+    local function ShortProf(pid, rankStr)
+        local key = PROF_ID_TO_KEY[pid]
+        local lbl = (key and L[key]) or pid
+        if lbl and #lbl > 12 then lbl = lbl:sub(1, 12) end
+        if rankStr and rankStr ~= "" then
+            local cur = rankStr:match("^(%d+)")
+            if cur then return lbl .. " " .. cur end
+        end
+        return lbl
+    end
+
+    local parts = {}
+    if p1 ~= "NONE" then parts[#parts + 1] = ShortProf(p1, bucket.myProf1Rank) end
+    if p2 ~= "NONE" then parts[#parts + 1] = ShortProf(p2, bucket.myProf2Rank) end
+    local noteText = table.concat(parts, " / ")
+    local extra = Compat.CleanInput(customNote or bucket.myCraftNote or "")
+    if extra and extra ~= "" and (#noteText + 3 + #extra) <= 31 then
+        noteText = noteText .. " - " .. extra
+    end
+    if #noteText > 31 then
+        parts = {}
+        if p1 ~= "NONE" then parts[#parts + 1] = ShortProf(p1, nil) end
+        if p2 ~= "NONE" then parts[#parts + 1] = ShortProf(p2, nil) end
+        noteText = table.concat(parts, "/")
+    end
+    if #noteText > 31 then
+        noteText = noteText:sub(1, 31)
+    end
+
+    local targetIdx = nil
+    if GetNumGuildMembers and GetGuildRosterInfo then
+        local total = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
+        for i = 1, total do
+            local okRoster, fullName, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, guid = pcall(GetGuildRosterInfo, i)
+            if okRoster then
+                fullName = Safe.String(fullName)
+                guid = Safe.String(guid)
+                if Compat.IsMe(fullName, guid) then
+                    targetIdx = i
+                    break
+                end
+            end
+        end
+    end
+    if not targetIdx then
+        return false, L["Guild roster not loaded yet."]
+    end
+    local ok = false
+    if C_GuildInfo and C_GuildInfo.SetNote then
+        ok = pcall(C_GuildInfo.SetNote, targetIdx, noteText, true)
+    elseif GuildRosterSetPublicNote then
+        ok = pcall(GuildRosterSetPublicNote, targetIdx, noteText)
+    end
+    if ok then
+        if C_GuildInfo and C_GuildInfo.GuildRoster then
+            pcall(C_GuildInfo.GuildRoster)
+        end
+        ns:Emit("CLAN_UPDATED")
+        return true, noteText
+    end
+    return false, L["Unable to update Guild Public Note right now."]
+end
+
+function Clan:GetProfessionsList(query, profFilter, sourceFilter)
+    local nowClock = (GetTime and GetTime()) or 0
+    if not self._myDetectedPrimary or (nowClock - (self._lastProfAutoDetectAt or 0)) >= 15 then
+        self:AutoDetectMyProfessions(false)
+    end
+    local bucket = Store:GetClanScopeData()
+    local q = (type(query) == "string" and query ~= "") and FoldProfText(query) or nil
+    local pf = (type(profFilter) == "string" and profFilter ~= "" and profFilter ~= "ALL") and NormalizeProfId(profFilter) or nil
+    local sf = (type(sourceFilter) == "string" and sourceFilter ~= "") and sourceFilter:upper() or "ALL"
+
+    local socialByLookup = GetGuildSocialLookupMap()
+    local function GetLiveGuildRow(key)
+        return GetLiveGuildRowFromMap(socialByLookup, key)
+    end
+
+    local entries = {}
+    local function UpsertEntry(key, data)
+        if not key or key == "" then return end
+        local p1 = NormalizeProfId(data.prof1)
+        local p2 = NormalizeProfId(data.prof2)
+        if p1 == "NONE" and p2 ~= "NONE" then
+            p1, p2 = p2, "NONE"
+        end
+        local hasSec = type(data.secProfIds) == "table" and next(data.secProfIds) ~= nil
+        if p1 == "NONE" and p2 == "NONE" and not hasSec then
+            return
+        end
+        local cur = entries[key]
+        if cur then
+            if data.isSelf then cur.isSelf = true end
+            if data.online then cur.online = true end
+            if p1 ~= "NONE" and (cur.prof1 == "NONE" or (data.priority or 0) >= (cur.priority or 0)) then
+                cur.prof1 = p1
+                cur.prof2 = p2
+                if data.prof1Rank and data.prof1Rank ~= "" then cur.prof1Rank = data.prof1Rank end
+                if data.prof2Rank and data.prof2Rank ~= "" then cur.prof2Rank = data.prof2Rank end
+                if data.sourceTag then cur.sourceTag = data.sourceTag end
+                cur.priority = data.priority or cur.priority
+            end
+            if data.craftNote and data.craftNote ~= "" and (not cur.craftNote or cur.craftNote == "") then
+                cur.craftNote = data.craftNote
+            end
+            if data.guildNote and data.guildNote ~= "" and (not cur.guildNote or cur.guildNote == "") then
+                cur.guildNote = data.guildNote
+            end
+            if data.secSummary and data.secSummary ~= "" then cur.secSummary = data.secSummary end
+            if data.secProfIds then
+                cur.secProfIds = cur.secProfIds or {}
+                for k, v in pairs(data.secProfIds) do cur.secProfIds[k] = v end
+            end
+            if (not cur.updatedAt or (data.updatedAt or 0) > cur.updatedAt) and data.updatedAt then
+                cur.updatedAt = data.updatedAt
+            end
+            return
+        end
+        data.lookupKey = key
+        data.prof1 = p1
+        data.prof2 = p2
+        entries[key] = data
+    end
+
+    -- 1. Current Player (auto-detected + synced craftNote)
+    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local myDisplay = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player")) or "Player"
+    local myParsed = Compat.ParseCharacterName(myDisplay)
+    local myKey = (myParsed and myParsed.lookupKey) or myDisplay:lower()
+    local myGuildRow = GetLiveGuildRow(myKey)
+    local _, myClass = Safe.Call(UnitClass, "player")
+    local secIds, secParts = {}, {}
+    for sid, sInfo in pairs(self._myDetectedSecondaries or {}) do
+        secIds[sid] = true
+        local kLbl = PROF_ID_TO_KEY[sid]
+        local lbl = (kLbl and L[kLbl]) or sInfo.name or sid
+        secParts[#secParts + 1] = (sInfo.rank and sInfo.rank ~= "") and (lbl .. " " .. sInfo.rank) or lbl
+    end
+    table.sort(secParts)
+    UpsertEntry(myKey, {
+        displayName = (myParsed and myParsed.displayName) or myDisplay,
+        prof1 = bucket.myProf1,
+        prof2 = bucket.myProf2,
+        prof1Rank = bucket.myProf1Rank or "",
+        prof2Rank = bucket.myProf2Rank or "",
+        craftNote = bucket.myCraftNote or "",
+        guildNote = (myGuildRow and myGuildRow.note) or "",
+        secProfIds = secIds,
+        secSummary = table.concat(secParts, " · "),
+        isSelf = true,
+        isGuild = (IsInGuild and IsInGuild() == true) or (myGuildRow ~= nil),
+        online = true,
+        level = Safe.Number(Safe.Call(UnitLevel, "player")) or (myGuildRow and myGuildRow.level),
+        classFile = Safe.String(myClass) or (myGuildRow and myGuildRow.classFile),
+        rankName = myGuildRow and myGuildRow.rankName or nil,
+        area = Compat.CurrentZoneName and Compat.CurrentZoneName() or (myGuildRow and myGuildRow.area),
+        guid = Safe.String(Safe.Call(UnitGUID, "player")),
+        sourceTag = "SELF",
+        priority = 4,
+        updatedAt = time(),
+    })
+
+    -- 2. Synced SocialCentral Guild Peers (SCentral1)
+    for key, peer in pairs(bucket.peers or {}) do
+        if type(peer) == "table" then
+            local live = GetLiveGuildRow(key)
+            local isOnline = (live and live.online == true) or ((time() - (peer.updatedAt or 0)) <= 900)
+            UpsertEntry(key, {
+                displayName = (live and live.displayName) or peer.displayName or key,
+                prof1 = peer.prof1,
+                prof2 = peer.prof2,
+                prof1Rank = peer.prof1Rank or "",
+                prof2Rank = peer.prof2Rank or "",
+                craftNote = peer.craftNote or "",
+                guildNote = (live and live.note) or "",
+                isSelf = Compat.IsMe(peer.displayName or key, live and live.guid),
+                isGuild = true,
+                online = isOnline,
+                level = live and live.level,
+                classFile = (live and live.classFile) or peer.classFile,
+                rankName = live and live.rankName,
+                area = live and live.area,
+                guid = live and live.guid,
+                hasAddon = true,
+                sourceTag = "SC",
+                priority = 3,
+                updatedAt = peer.updatedAt,
+            })
+        end
+    end
+
+    -- 3. Passive Guild Chat |Htrade: links & craft offers
+    local nowTs = time()
+    for key, chatRec in pairs(self.passiveChatProfs or {}) do
+        if type(chatRec) == "table" and (nowTs - (chatRec.updatedAt or 0)) <= 21600 then
+            local live = GetLiveGuildRow(key)
+            UpsertEntry(key, {
+                displayName = (live and live.displayName) or chatRec.displayName or key,
+                prof1 = chatRec.prof1,
+                prof2 = chatRec.prof2,
+                prof1Rank = chatRec.prof1Rank or "",
+                prof2Rank = chatRec.prof2Rank or "",
+                craftNote = chatRec.craftNote or "",
+                guildNote = (live and live.note) or "",
+                isSelf = false,
+                isGuild = true,
+                online = (live == nil) and true or (live.online == true),
+                level = live and live.level,
+                classFile = live and live.classFile,
+                rankName = live and live.rankName,
+                area = live and live.area,
+                guid = live and live.guid,
+                sourceTag = "CHAT",
+                priority = 2,
+                updatedAt = chatRec.updatedAt,
+            })
+        else
+            self.passiveChatProfs[key] = nil
+        end
+    end
+
+    -- 4. Guild Roster Public Note Profession Scanner (zero addon required on guildmate!)
+    for key, live in pairs(socialByLookup or {}) do
+        if type(live) == "table" and live.sources and live.sources.guild == true and type(live.note) == "string" and live.note ~= "" then
+            local np1, np2 = self:ParseProfessionsFromNote(live.note)
+            if np1 ~= "NONE" or np2 ~= "NONE" then
+                UpsertEntry(key, {
+                    displayName = live.displayName or key,
+                    prof1 = np1,
+                    prof2 = np2,
+                    craftNote = "",
+                    guildNote = live.note,
+                    isSelf = Compat.IsMe(live.displayName or key, live.guid),
+                    isGuild = true,
+                    online = (live.online == true),
+                    level = live.level,
+                    classFile = live.classFile,
+                    rankName = live.rankName,
+                    area = live.area,
+                    guid = live.guid,
+                    sourceTag = "NOTE",
+                    priority = 1,
+                    updatedAt = live.lastOnlineTs or (live.online and nowTs or nil),
+                })
+            end
+        end
+    end
+
+    -- 5. Player's Own Alts on Current Realm Pool
+    local curCharKey = Compat.CharacterKey and Compat.CharacterKey() or ""
+    if Store and Store.GetAltsList then
+        for _, alt in ipairs(Store:GetAltsList()) do
+            if type(alt) == "table" and alt.key ~= curCharKey and type(alt.professions) == "table" and #alt.professions > 0 then
+                local altName = alt.fullName or alt.name or alt.key
+                local altParsed = Compat.ParseCharacterName(altName)
+                local altKey = (altParsed and altParsed.lookupKey) or ("alt:" .. tostring(alt.key))
+                local ap1, ap2, ar1, ar2 = "NONE", "NONE", "", ""
+                local aSecIds, aSecParts = {}, {}
+                for _, ap in ipairs(alt.professions) do
+                    if ap and ap.name then
+                        local pid = self:MatchProfessionId(ap.name)
+                        if pid ~= "NONE" then
+                            local rStr = ((ap.maxRank or 0) > 0) and string.format("%d/%d", ap.rank or 0, ap.maxRank or 0) or ""
+                            if ap.isPrimary ~= false and pid ~= "COOKING" and pid ~= "FIRST_AID" then
+                                if ap1 == "NONE" then
+                                    ap1, ar1 = pid, rStr
+                                elseif ap2 == "NONE" and pid ~= ap1 then
+                                    ap2, ar2 = pid, rStr
+                                end
+                            else
+                                aSecIds[pid] = true
+                                local kLbl = PROF_ID_TO_KEY[pid]
+                                local lbl = (kLbl and L[kLbl]) or ap.name or pid
+                                aSecParts[#aSecParts + 1] = (rStr ~= "") and (lbl .. " " .. rStr) or lbl
+                            end
+                        end
+                    end
+                end
+                if ap1 == "NONE" and next(aSecIds) ~= nil then
+                    if aSecIds.COOKING then
+                        ap1 = "COOKING"
+                    elseif aSecIds.FIRST_AID then
+                        ap1 = "FIRST_AID"
+                    else
+                        local bestSid
+                        for sid in pairs(aSecIds) do
+                            if not bestSid or sid < bestSid then
+                                bestSid = sid
+                            end
+                        end
+                        ap1 = bestSid or "NONE"
+                    end
+                end
+                if ap1 ~= "NONE" then
+                    UpsertEntry(altKey, {
+                        displayName = (altParsed and altParsed.displayName) or altName,
+                        prof1 = ap1,
+                        prof2 = ap2,
+                        prof1Rank = ar1,
+                        prof2Rank = ar2,
+                        craftNote = "",
+                        guildNote = (alt.guild and alt.guild ~= "") and ("<" .. alt.guild .. ">") or "",
+                        secProfIds = aSecIds,
+                        secSummary = table.concat(aSecParts, " · "),
+                        isSelf = false,
+                        isAlt = true,
+                        isGuild = false,
+                        online = false,
+                        level = alt.level,
+                        classFile = alt.classFile,
+                        area = alt.zone,
+                        altGuild = alt.guild,
+                        sourceTag = "ALT",
+                        priority = 1,
+                        updatedAt = alt.lastActive,
+                    })
+                end
+            end
+        end
+    end
+
+    local function MatchesSource(e)
+        if sf == "ONLINE" then
+            return e.online == true and (e.isGuild or e.isSelf)
+        elseif sf == "GUILD" then
+            return e.isGuild == true or e.isSelf == true
+        elseif sf == "ALTS" then
+            return e.isAlt == true or e.isSelf == true
+        elseif sf == "SYNC" then
+            return e.sourceTag == "SC" or e.isSelf == true
+        end
+        return true
+    end
+
+    local profCounts = {}
+    local out = {}
+    for _, entry in pairs(entries) do
+        if MatchesSource(entry) then
+            local counted = {}
+            for _, pid in ipairs({ entry.prof1, entry.prof2 }) do
+                if pid and pid ~= "NONE" and not counted[pid] then
+                    counted[pid] = true
+                    profCounts[pid] = (profCounts[pid] or 0) + 1
+                end
+            end
+            for sid in pairs(entry.secProfIds or {}) do
+                if not counted[sid] then
+                    counted[sid] = true
+                    profCounts[sid] = (profCounts[sid] or 0) + 1
+                end
+            end
+
+            local passProf = (not pf)
+                or entry.prof1 == pf
+                or entry.prof2 == pf
+                or (entry.secProfIds and entry.secProfIds[pf] == true)
+            if passProf then
+                local passQuery = true
+                if q then
+                    local k1 = PROF_ID_TO_KEY[entry.prof1]
+                    local k2 = PROF_ID_TO_KEY[entry.prof2]
+                    local p1Label = (k1 and L[k1]) or entry.prof1 or ""
+                    local p2Label = (k2 and L[k2]) or entry.prof2 or ""
+                    local hay = FoldProfText(
+                        (entry.displayName or "") .. " " ..
+                        p1Label .. " " .. (entry.prof1 or "") .. " " ..
+                        p2Label .. " " .. (entry.prof2 or "") .. " " ..
+                        (entry.secSummary or "") .. " " ..
+                        (entry.craftNote or "") .. " " ..
+                        (entry.guildNote or "") .. " " ..
+                        (entry.rankName or "") .. " " ..
+                        (entry.area or "")
+                    )
+                    if not hay:find(q, 1, true) then
+                        passQuery = false
+                    end
+                end
+                if passQuery then
+                    table.insert(out, entry)
+                end
+            end
+        end
     end
 
     table.sort(out, function(a, b)
-        if a.isSelf ~= b.isSelf then return a.isSelf end
+        if a.isSelf ~= b.isSelf then return a.isSelf == true end
+        local aOn = a.online == true
+        local bOn = b.online == true
+        if aOn ~= bOn then return aOn end
+        if (a.priority or 0) ~= (b.priority or 0) then return (a.priority or 0) > (b.priority or 0) end
         return (a.displayName or "") < (b.displayName or "")
     end)
-    return out
+    return out, profCounts
 end
 
 function Clan:SetPreferredRightView(viewId)
@@ -1415,6 +2161,14 @@ function Clan:MaybeNotifyClanLFG(lookupKey, displayName, classFile, summaryText,
 
     local now = time()
     self.lfgAlertCooldowns = self.lfgAlertCooldowns or {}
+    if not self._lastAlertCooldownPruneAt or (now - self._lastAlertCooldownPruneAt) >= 60 then
+        self._lastAlertCooldownPruneAt = now
+        for k, ts in pairs(self.lfgAlertCooldowns) do
+            if (now - (ts or 0)) >= 180 then
+                self.lfgAlertCooldowns[k] = nil
+            end
+        end
+    end
     local prevAt = self.lfgAlertCooldowns[lookupKey] or 0
     if (now - prevAt) < 180 then
         return false
@@ -1525,12 +2279,44 @@ function Clan:GetPlayerGameSummary()
     }
 end
 
-function Clan:GetSavedLockouts()
+function Clan:FormatResetDuration(secs)
+    local s = math.max(0, math.floor(tonumber(secs) or 0))
+    if s <= 0 then
+        return "0m"
+    end
+    local days = math.floor(s / 86400)
+    local hours = math.floor((s % 86400) / 3600)
+    local mins = math.floor((s % 3600) / 60)
+    if days > 0 then
+        return string.format("%dd %dh", days, hours)
+    elseif hours > 0 then
+        return string.format("%dh %dm", hours, mins)
+    end
+    return string.format("%dm", math.max(1, mins))
+end
+
+function Clan:RequestLockoutsRefresh(force)
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        return false
+    end
+    if not RequestRaidInfo then
+        return false
+    end
+    local monoNow = GetTime and GetTime() or 0
+    if not force and (monoNow - (self.lastLockoutRefreshAt or 0)) < 15 then
+        return false
+    end
+    self.lastLockoutRefreshAt = monoNow
+    pcall(RequestRaidInfo)
+    return true
+end
+
+function Clan:GetSavedLockouts(skipSort)
     local out = {}
     if not (GetNumSavedInstances and GetSavedInstanceInfo) then return out end
     local count = Safe.Number(Safe.Call(GetNumSavedInstances)) or 0
     for i = 1, count do
-        local ok, name, id, reset, _, locked, extended, _, _, _, difficultyName, numEncounters, encounterProgress = pcall(GetSavedInstanceInfo, i)
+        local ok, name, id, reset, _, locked, extended, _, isRaid, _, difficultyName, numEncounters, encounterProgress = pcall(GetSavedInstanceInfo, i)
         if ok then
             name = Safe.String(name)
             if name and (Safe.Value(locked) == true or Safe.Value(extended) == true or (Safe.Number(reset) or 0) > 0) then
@@ -1541,6 +2327,7 @@ function Clan:GetSavedLockouts()
                     reset = Safe.Number(reset) or 0,
                     locked = Safe.Value(locked) == true,
                     extended = Safe.Value(extended) == true,
+                    isRaid = Safe.Value(isRaid) == true,
                     difficultyName = Safe.String(difficultyName) or "",
                     numEncounters = Safe.Number(numEncounters) or 0,
                     encounterProgress = Safe.Number(encounterProgress) or 0,
@@ -1548,7 +2335,61 @@ function Clan:GetSavedLockouts()
             end
         end
     end
+    if not skipSort then
+        table.sort(out, function(a, b)
+            return (a.reset or 0) < (b.reset or 0)
+        end)
+    end
+    return out
+end
+
+function Clan:GetAllLockouts()
+    local out = {}
+    local now = time()
+    local myResolved = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local myName = (myResolved and myResolved.fullName) or Safe.String(Safe.Call(UnitName, "player")) or "Player"
+    local _, myClass = Safe.Call(UnitClass, "player")
+    myClass = Safe.String(myClass)
+
+    for _, lk in ipairs(self:GetSavedLockouts(true)) do
+        lk.charName = myName
+        lk.classFile = myClass
+        lk.isSelf = true
+        lk.isAlt = false
+        table.insert(out, lk)
+    end
+
+    local curKey = Compat.CharacterKey and Compat.CharacterKey() or ""
+    if Store and Store.GetAltsList then
+        for _, alt in ipairs(Store:GetAltsList()) do
+            if type(alt) == "table" and alt.key ~= curKey and type(alt.lockouts) == "table" then
+                for _, lk in ipairs(alt.lockouts) do
+                    if type(lk) == "table" and (lk.expiresAt or 0) > now then
+                        local rem = math.max(0, (lk.expiresAt or 0) - now)
+                        table.insert(out, {
+                            name = lk.name or "?",
+                            id = lk.id or 0,
+                            reset = rem,
+                            locked = lk.locked == true,
+                            extended = lk.extended == true,
+                            isRaid = lk.isRaid == true,
+                            difficultyName = lk.difficultyName or "",
+                            numEncounters = lk.numEncounters or 0,
+                            encounterProgress = lk.encounterProgress or 0,
+                            charName = alt.fullName or alt.name or alt.key or "Alt",
+                            classFile = alt.classFile,
+                            isSelf = false,
+                            isAlt = true,
+                        })
+                    end
+                end
+            end
+        end
+    end
+
     table.sort(out, function(a, b)
+        if a.isSelf ~= b.isSelf then return a.isSelf end
+        if a.charName ~= b.charName then return (a.charName or "") < (b.charName or "") end
         return (a.reset or 0) < (b.reset or 0)
     end)
     return out
@@ -1904,23 +2745,32 @@ function Clan:GetPlayerRelationshipFlags(lookupKey, rawName, guid, rawGuild)
         isClan = true
     end
 
-    if type(Store.social) == "table" then
+    local function ApplyMatchedSocialRow(row)
+        if type(row) ~= "table" then return false end
+        local matched = (cleanGuid and row.guid and row.guid == cleanGuid)
+            or (not (cleanGuid and row.guid and row.guid ~= cleanGuid) and key and row.lookupKey and row.lookupKey == key)
+        if not matched then return false end
+        if row.sources and row.sources.guild == true then
+            isClan = true
+        end
+        if row.sources and (row.sources.friend == true or row.sources.bnet == true) then
+            isFriend = true
+        end
+        if (not resolvedGuild or resolvedGuild == "") and row.guild and row.guild ~= "" then
+            resolvedGuild = row.guild
+        end
+        return true
+    end
+
+    if Store.socialByGuid or Store.socialByLookup then
+        local gRow = cleanGuid and Store.socialByGuid and Store.socialByGuid[cleanGuid]
+        if not ApplyMatchedSocialRow(gRow) and key and Store.socialByLookup then
+            ApplyMatchedSocialRow(Store.socialByLookup[key])
+        end
+    elseif type(Store.social) == "table" then
         for _, row in pairs(Store.social) do
-            if type(row) == "table" then
-                local matched = (cleanGuid and row.guid and row.guid == cleanGuid)
-                    or (key and row.lookupKey and row.lookupKey == key)
-                if matched then
-                    if row.sources and row.sources.guild == true then
-                        isClan = true
-                    end
-                    if row.sources and (row.sources.friend == true or row.sources.bnet == true) then
-                        isFriend = true
-                    end
-                    if (not resolvedGuild or resolvedGuild == "") and row.guild and row.guild ~= "" then
-                        resolvedGuild = row.guild
-                    end
-                    break
-                end
+            if ApplyMatchedSocialRow(row) then
+                break
             end
         end
     end
@@ -1965,11 +2815,14 @@ end
 
 function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter)
     local bucket = Store:GetClanScopeData()
-    local liveByLookup = {}
-    if ns.Social then
-        for _, row in ipairs(ns.Social:GetList("all") or {}) do
-            if row.lookupKey and not liveByLookup[row.lookupKey] then
-                liveByLookup[row.lookupKey] = row
+    local liveByLookup = Store.socialByLookup
+    if not liveByLookup then
+        liveByLookup = {}
+        if type(Store.social) == "table" then
+            for _, row in pairs(Store.social) do
+                if type(row) == "table" and row.lookupKey and not liveByLookup[row.lookupKey] then
+                    liveByLookup[row.lookupKey] = row
+                end
             end
         end
     end
@@ -2234,34 +3087,48 @@ end
 function Clan:GetMergedGuildMembers(query)
     local bucket = Store:GetClanScopeData()
     local q = (type(query) == "string" and query ~= "") and query:lower() or nil
-    local merged = {}
+    local out = {}
     local seen = {}
+    local nowTs = time()
 
-    if ns.Social then
-        for _, live in ipairs(ns.Social:GetList("guild")) do
-            local peer = live.lookupKey and bucket.peers[live.lookupKey]
-            local row = {
-                lookupKey = live.lookupKey,
-                displayName = live.displayName,
-                version = peer and peer.version or nil,
-                tag = peer and IsValidTag(peer.tag) and peer.tag or "NONE",
-                note = (peer and peer.note and peer.note ~= "" and peer.note) or live.note or "",
-                rankName = live.rankName or "",
-                level = live.level,
-                classFile = live.classFile,
-                area = live.area or "",
-                online = true,
-                hasAddon = (peer ~= nil) or (ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(live.lookupKey)),
-                updatedAt = (peer and peer.updatedAt) or time(),
-            }
-            if live.lookupKey then seen[live.lookupKey] = true end
-            table.insert(merged, row)
+    local function PushIfMatches(row)
+        if not q then
+            out[#out + 1] = row
+            return
+        end
+        local hay = ((row.displayName or "") .. " " .. (row.rankName or "") .. " " .. (row.area or "") .. " " .. (row.note or "") .. " " .. (row.tag or "")):lower()
+        if hay:find(q, 1, true) then
+            out[#out + 1] = row
+        end
+    end
+
+    if type(Store.social) == "table" then
+        for _, live in pairs(Store.social) do
+            if type(live) == "table" and live.sources and live.sources.guild == true then
+                local peer = live.lookupKey and bucket.peers[live.lookupKey]
+                local row = {
+                    lookupKey = live.lookupKey,
+                    displayName = live.displayName,
+                    version = peer and peer.version or nil,
+                    tag = peer and IsValidTag(peer.tag) and peer.tag or "NONE",
+                    note = (peer and peer.note and peer.note ~= "" and peer.note) or live.note or "",
+                    rankName = live.rankName or "",
+                    level = live.level,
+                    classFile = live.classFile,
+                    area = live.area or "",
+                    online = true,
+                    hasAddon = (peer ~= nil) or (ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(live.lookupKey)),
+                    updatedAt = (peer and peer.updatedAt) or nowTs,
+                }
+                if live.lookupKey then seen[live.lookupKey] = true end
+                PushIfMatches(row)
+            end
         end
     end
 
     for key, peer in pairs(bucket.peers or {}) do
         if not seen[key] then
-            table.insert(merged, {
+            PushIfMatches({
                 lookupKey = key,
                 displayName = peer.displayName or key,
                 version = peer.version,
@@ -2275,18 +3142,6 @@ function Clan:GetMergedGuildMembers(query)
                 hasAddon = true,
                 updatedAt = peer.updatedAt or 0,
             })
-        end
-    end
-
-    local out = {}
-    for _, row in ipairs(merged) do
-        if not q then
-            table.insert(out, row)
-        else
-            local hay = ((row.displayName or "") .. " " .. (row.rankName or "") .. " " .. (row.area or "") .. " " .. (row.note or "") .. " " .. (row.tag or "")):lower()
-            if hay:find(q, 1, true) then
-                table.insert(out, row)
-            end
         end
     end
 
@@ -2313,6 +3168,63 @@ function Clan:GetGuildChatLFGList()
         end
     end
     return out
+end
+
+function Clan:HasGuildChatLFG(lookupKey)
+    if not lookupKey or lookupKey == "" or type(self.guildChatLFG) ~= "table" then
+        return false
+    end
+    local now = time()
+    for i = #self.guildChatLFG, 1, -1 do
+        local row = self.guildChatLFG[i]
+        if type(row) ~= "table" or (now - (row.timestamp or 0)) > 900 then
+            table.remove(self.guildChatLFG, i)
+        elseif row.lookupKey == lookupKey then
+            return true
+        end
+    end
+    return false
+end
+
+function Clan:GetClanBadgeLFGCount()
+    local bucket = Store:GetClanScopeData()
+    local now = time()
+    local count = 0
+    local seen = {}
+    for key in pairs(bucket.lfg or {}) do
+        seen[key] = true
+        count = count + 1
+    end
+    for _, evt in pairs(bucket.events or {}) do
+        if type(evt) == "table" and evt.isOpen ~= false then
+            count = count + 1
+        end
+    end
+    for key, peer in pairs(bucket.peers or {}) do
+        if not seen[key] and type(peer) == "table" and (peer.tag == "LFG" or peer.tag == "MPLUS") then
+            seen[key] = true
+            count = count + 1
+        end
+    end
+    for i = #self.guildChatLFG, 1, -1 do
+        local row = self.guildChatLFG[i]
+        if (now - (row.timestamp or 0)) > 900 then
+            table.remove(self.guildChatLFG, i)
+        elseif row.lookupKey and not seen[row.lookupKey] then
+            seen[row.lookupKey] = true
+            count = count + 1
+        end
+    end
+    for key, ext in pairs(self.externalLFG or {}) do
+        if type(ext) == "table" then
+            if (now - (ext.updatedAt or 0)) > 1800 then
+                self.externalLFG[key] = nil
+            elseif not seen[key] then
+                count = count + 1
+            end
+        end
+    end
+    return count
 end
 
 function Clan:GetSignupSummary(evt)
@@ -2368,8 +3280,9 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             local delay = 1.5 + math.random() * 2.5
             local targetChannel = chatType
             if targetChannel == "GUILD" and GetNumGuildMembers then
-                local _, online = GetNumGuildMembers()
-                local chances = math.max(1, math.ceil((Safe.Number(online) or 1) / 40))
+                local okCount, _, online = pcall(GetNumGuildMembers)
+                local onlineCount = (okCount and Safe.Number(online)) or 1
+                local chances = math.max(1, math.ceil(onlineCount / 40))
                 if math.random(1, chances) ~= 1 then
                     return
                 end
@@ -2378,7 +3291,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 TransmitAddonMessage(Clan, "VR~" .. ns.version, targetChannel, true)
             end)
         end
-        if chatType == "GUILD" then ns:Emit("CLAN_UPDATED") end
+        if chatType == "GUILD" then QueueClanEmit(0.8) end
         return
     end
 
@@ -2387,7 +3300,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         if chatType ~= "GUILD" or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return end
         local ver = cmd:match("^PING:(.*)$")
         ProcessPeerVersion(parsed.displayName, parsed.lookupKey, ver, chatType)
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.8)
         return
     end
 
@@ -2405,7 +3318,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             local originParsed = Compat.ParseCharacterName(parts[2] ~= "" and parts[2] or parsed.displayName)
             if originParsed and not Compat.IsMe(originParsed.displayName) then
                 Clan.externalLFG[originParsed.lookupKey] = nil
-                ns:Emit("CLAN_UPDATED")
+                QueueClanEmit(0.5)
             end
             return
         end
@@ -2439,6 +3352,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local existing = Clan.externalLFG[originParsed.lookupKey]
         local alreadyRelayed = existing and existing._sig == sig and (time() - (existing.updatedAt or 0)) < 60
 
+        local extNow = time()
         Clan.externalLFG[originParsed.lookupKey] = {
             sourceType = "ALLY_LFG",
             lookupKey = originParsed.lookupKey,
@@ -2453,22 +3367,11 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             isDungeon = IsDungeonLFGText(activity .. " " .. note, keyLvl > 0 and "DUNGEON" or nil),
             isFriend = isFriend,
             isWatchlist = isWatchlist,
-            updatedAt = time(),
+            updatedAt = extNow,
             _sig = sig,
         }
 
-        local count = 0
-        local oldestKey, oldestTs
-        for k, v in pairs(Clan.externalLFG) do
-            count = count + 1
-            if not oldestTs or (v.updatedAt or 0) < oldestTs then
-                oldestTs = v.updatedAt or 0
-                oldestKey = k
-            end
-        end
-        if count > (Clan.MAX_EXTERNAL_LFG or 40) and oldestKey then
-            Clan.externalLFG[oldestKey] = nil
-        end
+        PruneAndBoundByTimestamp(Clan.externalLFG, Clan.MAX_EXTERNAL_LFG or 40, 1800, extNow)
 
         if chatType == "WHISPER" and isAllied and not alreadyRelayed and IsInGuild and IsInGuild() and (GetTime() - (Clan.lastAlfgRelayAt or 0)) >= 15 then
             Clan.lastAlfgRelayAt = GetTime()
@@ -2480,7 +3383,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 end
             end)
         end
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.6)
         return
     end
 
@@ -2516,7 +3419,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             local isDng = (peer.tag == "MPLUS") or IsDungeonLFGText(note, nil)
             Clan:MaybeNotifyClanLFG(parsed.lookupKey, parsed.displayName, peer.classFile, note ~= "" and note or (L[peer.tag] or peer.tag), peer.tag, isDng, "TAG")
         end
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.6)
 
         if cmd == "REQ" and (GetTime() - (Clan.lastReqReplyAt or 0)) >= 15 then
             Clan.lastReqReplyAt = GetTime()
@@ -2558,13 +3461,13 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         }
         local summary = ("%s [%s] %s%s"):format(cleanMode, cleanRole, keyLvl > 0 and ("+" .. keyLvl .. " ") or "", activity)
         Clan:MaybeNotifyClanLFG(parsed.lookupKey, parsed.displayName, nil, summary, activity, isDng or cleanMode == "LFG" or cleanMode == "LFM", "LFG")
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.5)
 
     elseif cmd == "LFX" then
         if bucket.lfg then
             bucket.lfg[parsed.lookupKey] = nil
         end
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.5)
 
     elseif cmd == "EVT" then
         local eventId = Compat.CleanPayloadField(parts[2] or "", 16)
@@ -2598,7 +3501,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 local isDng = IsDungeonLFGText(title, cat)
                 Clan:MaybeNotifyClanLFG(parsed.lookupKey, parsed.displayName, nil, title .. " (" .. (whenText ~= "" and whenText or L["Now"]) .. ")", title, isDng, "EVT")
             end
-            ns:Emit("CLAN_UPDATED")
+            QueueClanEmit(0.6)
         end
 
     elseif cmd == "EVS" then
@@ -2607,11 +3510,13 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         if evt and evt.creatorKey == parsed.lookupKey then
             evt.isOpen = parts[3] ~= "0"
             evt.updatedAt = now
-            ns:Emit("CLAN_UPDATED")
+            QueueClanEmit(0.6)
         end
 
     elseif cmd == "PRF" then
         local p1, p2, cNote = parts[2], parts[3], Compat.CleanPayloadField(parts[4] or "", 40)
+        local r1 = Compat.CleanPayloadField(parts[5] or "", 12)
+        local r2 = Compat.CleanPayloadField(parts[6] or "", 12)
         local peer = bucket.peers[parsed.lookupKey] or {
             displayName = parsed.displayName,
             lookupKey = parsed.lookupKey,
@@ -2620,10 +3525,12 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         }
         peer.prof1 = IsValidProfession(p1) and p1 or "NONE"
         peer.prof2 = IsValidProfession(p2) and p2 or "NONE"
+        peer.prof1Rank = r1
+        peer.prof2Rank = r2
         peer.craftNote = cNote
         peer.updatedAt = now
         bucket.peers[parsed.lookupKey] = peer
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.8)
 
     elseif cmd == "SIG" then
         local eventId = Compat.CleanPayloadField(parts[2] or "", 16)
@@ -2642,7 +3549,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 }
             end
             evt.updatedAt = now
-            ns:Emit("CLAN_UPDATED")
+            QueueClanEmit(0.5)
         end
 
     elseif cmd == "DEL" then
@@ -2650,7 +3557,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local evt = bucket.events[eventId]
         if evt and evt.creatorKey == parsed.lookupKey then
             bucket.events[eventId] = nil
-            ns:Emit("CLAN_UPDATED")
+            QueueClanEmit(0.5)
         end
 
     elseif cmd == "CINF" or cmd == "CINF2" or cmd == "CDIP" or cmd == "CDEL" or cmd == "CREQ" then
@@ -2800,16 +3707,97 @@ local LFG_PATTERNS = {
     "mazmorra", "dungeon", "mythic", "m%+", "chave", "pedra", "raid", "raide", "boss",
 }
 
+local function CapturePassiveGuildProfession(rawMsg, cleanMsg, parsed)
+    if not (Clan.ParseProfessionsFromNote and parsed and parsed.lookupKey) then return end
+    Clan.passiveChatProfs = Clan.passiveChatProfs or {}
+    if Compat.IsMe(parsed.displayName) then return end
+
+    -- 1) Official Blizzard trade hyperlink: |Htrade:guid:spell:cur:max:...|h[Prof]|h
+    local p1, p2, r1, r2, noteHint = "NONE", "NONE", "", "", ""
+    if type(rawMsg) == "string" and rawMsg:find("|Htrade:", 1, true) then
+        for cur, maxVal, linkLabel in rawMsg:gmatch("|Htrade:[^:]*:[^:]*:(%d+):(%d+)[^|]*|h%[([^%]]+)%]|h") do
+            local pid = Clan:MatchProfessionId(linkLabel)
+            if pid and pid ~= "NONE" then
+                if p1 == "NONE" then
+                    p1 = pid
+                    if tonumber(maxVal) and tonumber(maxVal) > 0 then
+                        r1 = ("%d/%d"):format(tonumber(cur) or 0, tonumber(maxVal) or 0)
+                    end
+                elseif p2 == "NONE" and pid ~= p1 then
+                    p2 = pid
+                    if tonumber(maxVal) and tonumber(maxVal) > 0 then
+                        r2 = ("%d/%d"):format(tonumber(cur) or 0, tonumber(maxVal) or 0)
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2) Craft offer / service mention alongside a profession keyword in /g
+    if p1 == "NONE" and type(cleanMsg) == "string" then
+        local low = cleanMsg:lower()
+        local hasOfferVerb = low:find("%f[%w]faco%f[%W]")
+            or low:find("faço")
+            or low:find("%f[%w]craft")
+            or low:find("%f[%w]hago%f[%W]")
+            or low:find("%f[%w]mats%f[%W]")
+            or low:find("%f[%w]wts%f[%W]")
+            or low:find("%f[%w]gratis%f[%W]")
+            or low:find("%f[%w]free%f[%W]")
+        if hasOfferVerb then
+            local dp1, dp2 = Clan:ParseProfessionsFromNote(cleanMsg)
+            if dp1 ~= "NONE" then
+                p1, p2 = dp1, dp2
+                noteHint = Compat.CleanPayloadField(cleanMsg, 40)
+            end
+        end
+    end
+
+    if p1 ~= "NONE" then
+        local nowProf = time()
+        local ttl = Clan.PASSIVE_PROF_TTL or (6 * 3600)
+        local profCount, oldestProfKey, oldestProfTs = 0, nil, nil
+        for k, rec in pairs(Clan.passiveChatProfs) do
+            if type(rec) ~= "table" or (nowProf - (rec.updatedAt or 0)) > ttl then
+                Clan.passiveChatProfs[k] = nil
+            else
+                profCount = profCount + 1
+                if not oldestProfTs or (rec.updatedAt or 0) < oldestProfTs then
+                    oldestProfTs = rec.updatedAt or 0
+                    oldestProfKey = k
+                end
+            end
+        end
+        if not Clan.passiveChatProfs[parsed.lookupKey] and profCount >= (Clan.MAX_PASSIVE_PROFS or 100) and oldestProfKey then
+            Clan.passiveChatProfs[oldestProfKey] = nil
+        end
+        Clan.passiveChatProfs[parsed.lookupKey] = {
+            lookupKey = parsed.lookupKey,
+            displayName = parsed.displayName,
+            prof1 = p1,
+            prof2 = p2,
+            prof1Rank = r1,
+            prof2Rank = r2,
+            craftNote = (noteHint ~= "") and noteHint or Compat.CleanPayloadField(cleanMsg or "", 40),
+            updatedAt = nowProf,
+        }
+        QueueClanEmit(0.8)
+    end
+end
+
 local function OnGuildChatPassive(_, _, text, sender)
-    local s = ns.db and ns.db.settings
-    if not (s and (s.guildChatFinder or s.clanLfgAlertEnabled)) then return end
     if Safe.IsSecret(text) or Safe.IsSecret(sender) then return end
-    local cleanMsg = Safe.String(text)
+    local rawText = Safe.String(text)
     local cleanSender = Safe.String(sender)
-    if not cleanMsg or not cleanSender then return end
-    cleanMsg = Compat.CleanInput(cleanMsg)
+    if not rawText or not cleanSender then return end
+    local cleanMsg = Compat.CleanInput(rawText)
     local parsed = Compat.ParseCharacterName(cleanSender)
     if not cleanMsg or not parsed then return end
+
+    CapturePassiveGuildProfession(rawText, cleanMsg, parsed)
+
+    local s = ns.db and ns.db.settings
+    if not (s and (s.guildChatFinder or s.clanLfgAlertEnabled)) then return end
 
     local low = cleanMsg:lower()
     local matched = false
@@ -2842,28 +3830,35 @@ local function OnGuildChatPassive(_, _, text, sender)
     if not Compat.IsMe(parsed.displayName) then
         Clan:MaybeNotifyClanLFG(parsed.lookupKey, parsed.displayName, nil, cleanMsg:sub(1, 120), "", isDng, "GCHAT")
     end
-    ns:Emit("CLAN_UPDATED")
+    QueueClanEmit(0.6)
 end
 
 local function OnExternalChatPassive(_, _, text, sender, ...)
     if Safe.IsSecret(text) or Safe.IsSecret(sender) then return end
-    local cleanMsg = Safe.String(text)
+    local rawMsg = Safe.String(text)
     local cleanSender = Safe.String(sender)
-    local cleanGuid = Safe.String(select(10, ...))
-    if not cleanMsg or not cleanSender then return end
-    cleanMsg = Compat.CleanInput(cleanMsg)
-    local parsed = Compat.ParseCharacterName(cleanSender)
-    if not cleanMsg or not parsed or Compat.IsMe(parsed.displayName, cleanGuid) then return end
+    if not rawMsg or not cleanSender then return end
 
-    local low = cleanMsg:lower()
+    local cleanMsg
+    if rawMsg:find("|", 1, true) then
+        cleanMsg = Compat.CleanInput(rawMsg)
+        if not cleanMsg then return end
+    end
+
+    local scanLow = (cleanMsg or rawMsg):lower()
     local matched = false
     for _, pat in ipairs(LFG_PATTERNS) do
-        if low:find(pat) then
+        if scanLow:find(pat) then
             matched = true
             break
         end
     end
     if not matched then return end
+
+    cleanMsg = cleanMsg or Compat.CleanInput(rawMsg)
+    local cleanGuid = Safe.String(select(10, ...))
+    local parsed = Compat.ParseCharacterName(cleanSender)
+    if not cleanMsg or not parsed or Compat.IsMe(parsed.displayName, cleanGuid) then return end
 
     local isClan, isAllied, isFriend, isWatchlist, resolvedGuild = Clan:GetPlayerRelationshipFlags(
         parsed.lookupKey,
@@ -2871,6 +3866,13 @@ local function OnExternalChatPassive(_, _, text, sender, ...)
         cleanGuid,
         nil
     )
+    local s = ns.db and ns.db.settings
+    local scanGlobal = (not s) or (s.globalChatLfgScan ~= false)
+    if (not scanGlobal) and not (isAllied or isFriend or isWatchlist or isClan) then
+        return
+    end
+
+    local low = cleanMsg:lower()
     local isDng = IsDungeonLFGText(cleanMsg, nil)
     local msgMode = low:find("%f[%w]lfg%f[%W]") and "LFG" or "LFM"
     local roleHint = "ANY"
@@ -2883,8 +3885,7 @@ local function OnExternalChatPassive(_, _, text, sender, ...)
     end
     local nowTs = time()
 
-    local s = ns.db and ns.db.settings
-    if not s or s.globalChatLfgScan ~= false then
+    if scanGlobal then
         Clan.globalChatLFG = Clan.globalChatLFG or {}
         local chRaw = Safe.String(select(2, ...)) or ""
         local chShort = chRaw:match("^%d+%.%s*(.+)$") or chRaw
@@ -2902,19 +3903,10 @@ local function OnExternalChatPassive(_, _, text, sender, ...)
             isDungeon = isDng,
             updatedAt = nowTs,
         }
-        local pubCount = 0
-        local oldestPubKey, oldestPubTs
-        for k, v in pairs(Clan.globalChatLFG) do
-            pubCount = pubCount + 1
-            if not oldestPubTs or (v.updatedAt or 0) < oldestPubTs then
-                oldestPubTs = v.updatedAt or 0
-                oldestPubKey = k
-            end
+        PruneAndBoundByTimestamp(Clan.globalChatLFG, Clan.MAX_GLOBAL_CHAT_LFG or 35, 600, nowTs)
+        if IsClanOrLFGVisible() then
+            QueueClanEmit(1.2)
         end
-        if pubCount > (Clan.MAX_GLOBAL_CHAT_LFG or 35) and oldestPubKey then
-            Clan.globalChatLFG[oldestPubKey] = nil
-        end
-        ns:Emit("CLAN_UPDATED")
     end
 
     if not (isAllied or isFriend or isWatchlist or isClan) then
@@ -2940,20 +3932,9 @@ local function OnExternalChatPassive(_, _, text, sender, ...)
         updatedAt = nowTs,
     }
 
-    local count = 0
-    local oldestKey, oldestTs
-    for k, v in pairs(Clan.externalLFG) do
-        count = count + 1
-        if not oldestTs or (v.updatedAt or 0) < oldestTs then
-            oldestTs = v.updatedAt or 0
-            oldestKey = k
-        end
-    end
-    if count > (Clan.MAX_EXTERNAL_LFG or 40) and oldestKey then
-        Clan.externalLFG[oldestKey] = nil
-    end
+    PruneAndBoundByTimestamp(Clan.externalLFG, Clan.MAX_EXTERNAL_LFG or 40, 1800, nowTs)
 
-    ns:Emit("CLAN_UPDATED")
+    QueueClanEmit(0.6)
 end
 
 function Clan:ApplyAutoInstanceStatus()
@@ -3003,6 +3984,16 @@ local function UpdateGuildRosterHistory()
     if not gName or gName == "" or not total or total <= 0 then return end
     Clan._lastRosterHistoryAt = nowClock
 
+    local function UnpackSnapshotMember(val)
+        if type(val) == "string" then
+            local n, r = val:match("^([^\t]*)\t(.*)$")
+            return n or val, r or ""
+        elseif type(val) == "table" then
+            return val.name or "", val.rank or ""
+        end
+        return "", ""
+    end
+
     local current = {}
     local currentCount = 0
     for i = 1, total do
@@ -3010,10 +4001,9 @@ local function UpdateGuildRosterHistory()
         if ok and fullName then
             local p = Compat.ParseCharacterName(Safe.String(fullName))
             if p and p.lookupKey then
-                current[p.lookupKey] = {
-                    name = p.displayName,
-                    rank = Safe.String(rankName) or "",
-                }
+                local cleanName = (p.displayName or ""):gsub("\t", " ")
+                local cleanRank = (Safe.String(rankName) or ""):gsub("\t", " ")
+                current[p.lookupKey] = cleanName .. "\t" .. cleanRank
                 currentCount = currentCount + 1
             end
         end
@@ -3034,17 +4024,22 @@ local function UpdateGuildRosterHistory()
                 ts = now,
             })
         end
-        for k, cur in pairs(current) do
-            local prev = prevSnap.members[k]
-            if not prev then
-                PushHist("JOINED", cur.name, cur.rank)
-            elseif prev.rank ~= cur.rank and cur.rank ~= "" then
-                PushHist("RANK", cur.name, (prev.rank ~= "" and (prev.rank .. " -> " .. cur.rank)) or cur.rank)
+        for k, curPacked in pairs(current) do
+            local curName, curRank = UnpackSnapshotMember(curPacked)
+            local prevRaw = prevSnap.members[k]
+            if not prevRaw then
+                PushHist("JOINED", curName, curRank)
+            else
+                local _, prevRank = UnpackSnapshotMember(prevRaw)
+                if prevRank ~= curRank and curRank ~= "" then
+                    PushHist("RANK", curName, (prevRank ~= "" and (prevRank .. " -> " .. curRank)) or curRank)
+                end
             end
         end
-        for k, prev in pairs(prevSnap.members) do
+        for k, prevRaw in pairs(prevSnap.members) do
             if not current[k] then
-                PushHist("LEFT", prev.name, prev.rank)
+                local prevName, prevRank = UnpackSnapshotMember(prevRaw)
+                PushHist("LEFT", prevName, prevRank)
             end
         end
         for i = #bucket.rosterHistory, 1, -1 do
@@ -3078,38 +4073,28 @@ function Clan:Init()
     ns.RegisterEvent(self, "CHAT_MSG_YELL", OnExternalChatPassive)
     ns.RegisterEvent(self, "CALENDAR_UPDATE_EVENT_LIST", function()
         Clan:RefreshGameCalendar(false)
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(1.0)
     end)
     ns.RegisterEvent(self, "UPDATE_INSTANCE_INFO", function()
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.8)
     end)
     ns.RegisterEvent(self, "LFG_LIST_ACTIVE_ENTRY_UPDATE", function()
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.8)
     end)
     ns.RegisterEvent(self, "LFG_UPDATE", function()
-        ns:Emit("CLAN_UPDATED")
+        QueueClanEmit(0.8)
     end)
     ns.RegisterEvent(self, "GUILD_ROSTER_UPDATE", function()
         if Compat.SyncRosterForeverNames then
             Compat.SyncRosterForeverNames()
         end
         UpdateGuildRosterHistory()
-        if not Clan._rosterEmitQueued then
-            Clan._rosterEmitQueued = true
-            if C_Timer and C_Timer.After then
-                C_Timer.After(1.5, function()
-                    Clan._rosterEmitQueued = false
-                    ns:Emit("CLAN_UPDATED")
-                end)
-            else
-                Clan._rosterEmitQueued = false
-                ns:Emit("CLAN_UPDATED")
-            end
-        end
+        QueueClanEmit(1.5)
     end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
         C_Timer.After(6, function()
             Clan.activeScopeToken = ComputeGuildScopeToken()
+            Clan:AutoDetectMyProfessions(false)
             Clan:SendVersionHello()
             Clan:ApplyAutoInstanceStatus()
             Clan:RefreshGameCalendar(false)
@@ -3117,6 +4102,12 @@ function Clan:Init()
                 Clan:RequestIntelSync()
             end
         end)
+    end)
+    ns.RegisterEvent(self, "SKILL_LINES_CHANGED", function()
+        Clan:AutoDetectMyProfessions(false)
+    end)
+    ns:On("ALTS_UPDATED", function()
+        Clan:AutoDetectMyProfessions(false)
     end)
     ns.RegisterEvent(self, "PLAYER_GUILD_UPDATE", function(_, _, unit)
         if unit and unit ~= "player" then return end
@@ -3135,10 +4126,16 @@ function Clan:Init()
     end)
     for _, grpEv in ipairs({ "GROUP_ROSTER_UPDATE", "PARTY_MEMBERS_CHANGED", "RAID_ROSTER_UPDATE" }) do
         ns.RegisterEvent(self, grpEv, function()
+            if Clan._groupVerPending then return end
             local grpChan = GetActiveGroupChannel()
             if grpChan then
+                Clan._groupVerPending = true
                 C_Timer.After(4, function()
-                    Clan:SendVersionHello(grpChan)
+                    Clan._groupVerPending = false
+                    local ch = GetActiveGroupChannel()
+                    if ch then
+                        Clan:SendVersionHello(ch)
+                    end
                 end)
             end
         end)

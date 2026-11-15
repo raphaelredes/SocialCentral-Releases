@@ -6,6 +6,7 @@ local SettingsMod = {}
 ns.Settings = SettingsMod
 
 local panel
+local panelBuilt = false
 local category
 local syncFns = {}
 
@@ -155,9 +156,20 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
     return row
 end
 
+local function EnsurePanelFrame()
+    if not panel then
+        panel = CreateFrame("Frame", "SocialCentralSettingsPanel", UIParent)
+        panel.name = "SocialCentral"
+    end
+    return panel
+end
+
 local function BuildPanel()
-    panel = CreateFrame("Frame", "SocialCentralSettingsPanel", UIParent)
-    panel.name = "SocialCentral"
+    if panelBuilt then
+        return
+    end
+    panelBuilt = true
+    EnsurePanelFrame()
 
     local scrollFrame = CreateFrame("ScrollFrame", "SocialCentralSettingsScroll", panel, "UIPanelScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", 4, -4)
@@ -610,7 +622,7 @@ local function BuildPanel()
     clanFilterLbl:SetWordWrap(true)
     clanFilterLbl:SetText(L["Dungeon keywords filter (comma-separated, blank = all):"])
 
-    local clanFilterInput = ns.Theme:CreateEditBox(clanFilterRow, { width = 260, height = 22, maxLetters = 120 })
+    local clanFilterInput = ns.Theme:CreateEditBox(clanFilterRow, { width = 260, height = 22, maxLetters = 120, clearButton = true })
     clanFilterInput:SetPoint("TOPLEFT", clanFilterLbl, "BOTTOMLEFT", 0, -4)
     clanFilterInput:SetScript("OnEnterPressed", function(self)
         if ns.db and ns.db.settings then
@@ -931,10 +943,25 @@ local function BuildPanel()
         L["Combine with 'Ignore Party/Raid members' below to hide friends once you already invited them into your group."]
     )
 
+    local spotterBlockedCb = CreateCheckbox(
+        content,
+        L["Notify when a Blocked or Avoided player appears nearby"],
+        spotterFriendsCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifyBlocked ~= false end,
+        function(checked)
+            ns.db.settings.spotterNotifyBlocked = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Blocked Alerts"],
+        L["Alerts and displays on Target Radar whenever someone on your WoW Ignore list or SocialCentral 'Avoid' red flag appears nearby."],
+        L["Strangers outside Friends, Watchlist, Guild/Diplomacy, and Blocked lists are never scanned repeatedly."]
+    )
+
     local spotterSameCb = CreateCheckbox(
         content,
         L["Notify when a Same Clan guildmate appears on screen"],
-        spotterFriendsCb,
+        spotterBlockedCb,
         -6,
         function() return ns.db and ns.db.settings and ns.db.settings.spotterNotifySameClan == true end,
         function(checked)
@@ -1120,22 +1147,18 @@ local function BuildPanel()
 
     if ns.Theme and ns.Theme.RegisterListener then
         ns.Theme:RegisterListener(function()
-            for _, sync in ipairs(syncFns) do
-                sync()
+            if panel and panel:IsShown() then
+                for _, sync in ipairs(syncFns) do
+                    sync()
+                end
             end
         end)
     end
-
-    panel:SetScript("OnShow", function()
-        for _, sync in ipairs(syncFns) do
-            sync()
-        end
-    end)
 end
 
 --- Refresh all Settings panel widgets from saved preferences.
 function SettingsMod:Refresh()
-    if not panel then
+    if not (panel and panelBuilt) then
         return
     end
     for _, sync in ipairs(syncFns) do
@@ -1148,7 +1171,13 @@ function SettingsMod:Register()
     if panel then
         return
     end
-    BuildPanel()
+    EnsurePanelFrame()
+    panel:HookScript("OnShow", function()
+        BuildPanel()
+        for _, sync in ipairs(syncFns) do
+            sync()
+        end
+    end)
 
     if Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
         category = Settings.RegisterCanvasLayoutCategory(panel, "SocialCentral")
@@ -1163,6 +1192,7 @@ function SettingsMod:Open()
     if not panel then
         self:Register()
     end
+    BuildPanel()
     if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
         ns:Print("%s", L["In Combat"])
         return

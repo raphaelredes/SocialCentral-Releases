@@ -112,10 +112,10 @@ local function PopulateTooltip(tt)
         )
     end
 
-    if ns.Social then
-        local guildCount = #ns.Social:GetList("guild")
-        local friendCount = #ns.Social:GetList("friend")
-        local bnetCount = #ns.Social:GetList("bnet")
+    if ns.Social and ns.Social.GetCount then
+        local guildCount = ns.Social:GetCount("guild")
+        local friendCount = ns.Social:GetCount("friend")
+        local bnetCount = ns.Social:GetCount("bnet")
         tt:AddDoubleLine(
             L["Social"],
             string.format("%s: %d  |  %s: %d  |  %s: %d", L["Guild"], guildCount, L["Friends"], friendCount, "BNet", bnetCount),
@@ -123,8 +123,8 @@ local function PopulateTooltip(tt)
         )
     end
 
-    if ns.Nearby then
-        tt:AddDoubleLine(L["Nearby"], tostring(#ns.Nearby:GetList()), 0.88, 0.92, 0.98, 0.35, 0.80, 1.0)
+    if ns.Nearby and ns.Nearby.GetCount then
+        tt:AddDoubleLine(L["Nearby"], tostring(ns.Nearby:GetCount()), 0.88, 0.92, 0.98, 0.35, 0.80, 1.0)
     end
 
     if ns.Spotter then
@@ -301,10 +301,14 @@ local function OpenContextMenu(anchor)
 end
 
 local function UpdateBadge()
-    local summary = ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
-    local unreadDirect = (type(summary) == "table" and summary.totalDirect)
-        or (type(summary) == "number" and summary)
-        or (ns.Chat and ns.Chat:GetTotalUnread() or 0)
+    local unreadDirect = 0
+    if ns.Chat then
+        if ns.Chat.GetUnreadDirectCount then
+            unreadDirect = ns.Chat:GetUnreadDirectCount() or 0
+        elseif ns.Chat.GetTotalUnread then
+            unreadDirect = ns.Chat:GetTotalUnread(false) or 0
+        end
+    end
 
     if button and button.badge then
         button.badge:Hide()
@@ -316,9 +320,10 @@ local function UpdateBadge()
     end
 
     if button and button.overlayRing then
+        local spotterEnabled = ns.db and ns.db.settings and ns.db.settings.spotterEnabled == true
         if unreadDirect > 0 then
             button.overlayRing:SetVertexColor(1.0, 0.85, 0.22)
-        elseif ns.Spotter and select(1, ns.Spotter:GetCounts()) > 0 then
+        elseif spotterEnabled and ns.Spotter and select(1, ns.Spotter:GetCounts()) > 0 then
             button.overlayRing:SetVertexColor(0.96, 0.28, 0.28)
         else
             button.overlayRing:SetVertexColor(1, 1, 1)
@@ -465,6 +470,6 @@ function MinimapBtn:Update()
     end
 end
 
-for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "GROUP_UPDATED", "CHAT_UPDATED", "CLAN_UPDATED", "SPOTTER_UPDATED", "SETTINGS_CHANGED" }) do
+for _, ev in ipairs({ "CHAT_UPDATED", "SPOTTER_UPDATED", "SETTINGS_CHANGED" }) do
     ns:On(ev, UpdateBadge)
 end

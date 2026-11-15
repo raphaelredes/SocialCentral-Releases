@@ -571,9 +571,12 @@ local function OnMonsterMessage(_, msg, sender)
     local lowerMsg = msg:lower()
     local lowerSender = (sender or ""):lower()
     local now = GetTime and GetTime() or 0
+    local myFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
 
     for _, def in ipairs(BUFF_DEFINITIONS) do
-        if def.yellDelay and def.yellDelay > 0 and def.keywords then
+        local defFaction = def.faction
+        local factionOk = (not defFaction or defFaction == "Both" or not myFaction or defFaction == myFaction)
+        if factionOk and def.yellDelay and def.yellDelay > 0 and def.keywords then
             local matched = false
             for _, kw in ipairs(def.keywords) do
                 if lowerMsg:find(kw, 1, true) or lowerSender:find(kw, 1, true) then
@@ -680,7 +683,7 @@ local function TrackFreshOpenWorldAuras(isInitial)
             changed = true
         end
         if hasSong and not WorldBuffs.previousAuraState.songflower and not isInitial then
-            local mapId = C_Map and C_Map.GetBestMapForUnit and Safe.Call(C_Map.GetBestMapForUnit, "player")
+            local mapId = C_Map and C_Map.GetBestMapForUnit and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
             local zoneLow = (Compat.CurrentZoneName and Compat.CurrentZoneName() or ""):lower()
             if mapId == 1448 or zoneLow:find("felwood", 1, true) or zoneLow:find("selva maleva", 1, true) or zoneLow:find("frondavil", 1, true) then
                 WorldBuffs:RecordDropTime("songflower", nowTs, "local")
@@ -720,21 +723,43 @@ function WorldBuffs:Init()
     ns.RegisterEvent(self, "CHAT_MSG_MONSTER_EMOTE", function(_, _, msg, sender)
         OnMonsterMessage("CHAT_MSG_MONSTER_EMOTE", msg, sender)
     end)
-    ns.RegisterEvent(self, "UNIT_AURA", function(_, _, unit)
-        if unit == "player" then
-            local nowClock = (GetTime and GetTime()) or 0
-            if self._lastAuraAt and (nowClock - self._lastAuraAt) < 2.0 then
-                return
-            end
-            self._lastAuraAt = nowClock
-            local changed = TrackFreshOpenWorldAuras(false)
-            local mapShown = _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()
-            local scShown = _G.SocialCentralFrame and _G.SocialCentralFrame.IsShown and _G.SocialCentralFrame:IsShown()
-            if changed or mapShown or scShown then
-                ns:Emit("WORLD_BUFFS_UPDATED")
-            end
+    local function HandlePlayerAura()
+        local nowClock = (GetTime and GetTime()) or 0
+        if self._lastAuraAt and (nowClock - self._lastAuraAt) < 2.0 then
+            return
         end
-    end)
+        self._lastAuraAt = nowClock
+        local changed = TrackFreshOpenWorldAuras(false)
+        local mapShown = _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()
+        local scShown = _G.SocialCentralFrame and _G.SocialCentralFrame.IsShown and _G.SocialCentralFrame:IsShown()
+        if changed or mapShown or scShown then
+            ns:Emit("WORLD_BUFFS_UPDATED")
+        end
+    end
+
+    local auraFrame = CreateFrame and CreateFrame("Frame")
+    if auraFrame and auraFrame.RegisterUnitEvent then
+        local okUnit = pcall(auraFrame.RegisterUnitEvent, auraFrame, "UNIT_AURA", "player")
+        if okUnit then
+            auraFrame:SetScript("OnEvent", function(_, _, unit)
+                if unit == "player" then
+                    HandlePlayerAura()
+                end
+            end)
+        else
+            ns.RegisterEvent(self, "UNIT_AURA", function(_, _, unit)
+                if unit == "player" then
+                    HandlePlayerAura()
+                end
+            end)
+        end
+    else
+        ns.RegisterEvent(self, "UNIT_AURA", function(_, _, unit)
+            if unit == "player" then
+                HandlePlayerAura()
+            end
+        end)
+    end
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
         TrackFreshOpenWorldAuras(true)
         ns:Emit("WORLD_BUFFS_UPDATED")

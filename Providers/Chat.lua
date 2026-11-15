@@ -42,6 +42,10 @@ local DIRECT_SEND_COOLDOWN = 0.8
 local PING_COOLDOWN = 10
 local PONG_COOLDOWN = 6
 local PING_TIMEOUT = 3.5
+local HISTORY_TTL_SECONDS = 30 * 86400
+local MAX_SAVED_THREADS = 80
+local PEER_TTL_SECONDS = 30 * 86400
+local MAX_SAVED_PEERS = 200
 
 local STATIC_CHANNEL_ORDER = {
     ["ch:party"] = { titleKey = "Party", kind = "PARTY", slash = "/p ", order = 1 },
@@ -76,6 +80,55 @@ local function GetAddonPeersScopeTable()
     return root[scope]
 end
 
+local function CountHashKeys(tbl)
+    if type(tbl) ~= "table" then return 0 end
+    local n = 0
+    for _ in pairs(tbl) do
+        n = n + 1
+    end
+    return n
+end
+
+local function GetHistoryStamp(saved)
+    local ts = tonumber(saved.updatedAt)
+    if ts and ts > 0 then return ts end
+    if type(saved.lines) == "table" and #saved.lines > 0 then
+        local lastLine = saved.lines[#saved.lines]
+        return tonumber(type(lastLine) == "table" and lastLine.ts) or 0
+    end
+    return 0
+end
+
+local function GetPeerStamp(peer)
+    return tonumber(peer.lastSeenAt) or 0
+end
+
+local function PruneSavedScopeTable(tbl, ttlSeconds, maxEntries, getStamp)
+    if type(tbl) ~= "table" then return end
+    local now = time()
+    local entries = {}
+    for k, v in pairs(tbl) do
+        if type(k) ~= "string" or type(v) ~= "table" then
+            tbl[k] = nil
+        else
+            local ts = tonumber(getStamp(v)) or 0
+            if now > ttlSeconds and ts > 0 and (now - ts) > ttlSeconds then
+                tbl[k] = nil
+            else
+                entries[#entries + 1] = { key = k, ts = ts }
+            end
+        end
+    end
+    if #entries > maxEntries then
+        table.sort(entries, function(a, b)
+            return a.ts > b.ts
+        end)
+        for i = maxEntries + 1, #entries do
+            tbl[entries[i].key] = nil
+        end
+    end
+end
+
 local function CleanRoomToken(raw)
     if type(raw) ~= "string" then return nil end
     local clean = raw:gsub("[^%w_%-]", ""):sub(1, 24)
@@ -92,19 +145,72 @@ local function NonEmptyField(text, maxLen, fallback)
 end
 
 local function GetMyInfo()
+    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    if resolvedSelf and resolvedSelf.fullName and resolvedSelf.fullName ~= "" then
+        local p = Compat.ParseCharacterName and Compat.ParseCharacterName(resolvedSelf.fullName)
+        if p then
+            return p.displayName, p.lookupKey, p.firstName, p.surname
+        end
+        return resolvedSelf.fullName, resolvedSelf.fullName:lower(), resolvedSelf.firstName or resolvedSelf.fullName, resolvedSelf.surname
+    end
     local raw = Safe.String(Safe.Call(UnitName, "player")) or "Unknown"
     local parsed = Compat.ParseCharacterName(raw)
-    local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
-    if Compat.LookupForeverFullName and parsed then
-        local resolved = Compat.LookupForeverFullName(myGuid, parsed.firstName)
-        if resolved and resolved.fullName then
-            return resolved.fullName, parsed.lookupKey, parsed.firstName, resolved.surname
-        end
-    end
     if parsed then
         return parsed.displayName, parsed.lookupKey, parsed.firstName, parsed.surname
     end
     return raw, raw:lower(), raw, nil
+end
+
+local function TrackDeliveryEntry(self, msgId, threadKey, entry)
+    if not (msgId and entry) then return end
+    self.deliveryIndex = self.deliveryIndex or {}
+    local nowClock = (GetTime and GetTime()) or 0
+    local count, oldestId, oldestTs = 0, nil, nil
+    for id, rec in pairs(self.deliveryIndex) do
+        local ts = (type(rec) == "table" and rec.sentAt) or 0
+        if type(rec) ~= "table" or (nowClock > ts and (nowClock - ts) > 600) then
+            self.deliveryIndex[id] = nil
+        else
+            count = count + 1
+            if not oldestTs or ts < oldestTs then
+                oldestTs = ts
+                oldestId = id
+            end
+        end
+    end
+    if count >= 80 and oldestId then
+        self.deliveryIndex[oldestId] = nil
+    end
+    self.deliveryIndex[msgId] = { threadKey = threadKey, entry = entry, sentAt = nowClock }
+end
+
+local function PruneProbeTracking(self, nowClock)
+    local total = 0
+    for k, ts in pairs(self.probeSentAt) do
+        if (not self.threads[k]) or (nowClock > (ts or 0) and (nowClock - (ts or 0)) > 600) then
+            self.probeSentAt[k] = nil
+            if self.probeFailures then
+                self.probeFailures[k] = nil
+            end
+        else
+            total = total + 1
+        end
+    end
+    if total >= 80 then
+        local oldestK, oldestTs
+        for k, ts in pairs(self.probeSentAt) do
+            if not oldestTs or ts < oldestTs then
+                oldestTs = ts
+                oldestK = k
+            end
+        end
+        if oldestK then
+            self.probeSentAt[oldestK] = nil
+            if self.probeFailures then
+                self.probeFailures[oldestK] = nil
+            end
+        end
+    end
 end
 
 local function IsPublicChannelKind(kind)
@@ -201,7 +307,7 @@ local function EnsureThread(key, kind, title, extra)
         }
         Chat.threads[key] = t
     else
-        if title and title ~= "" and not t.title then
+        if title and title ~= "" and (not t.title or t.title == "" or t.title == key or (title:find("%s") and not t.title:find("%s"))) then
             t.title = title
         end
         if extra then
@@ -235,7 +341,8 @@ local function PersistWhisperLine(threadKey, entry)
     if not hist then return end
 
     local saved = hist[threadKey]
-    if type(saved) ~= "table" then
+    local isNewThread = (type(saved) ~= "table")
+    if isNewThread then
         saved = { title = entry.threadTitle, targetName = entry.targetName, lines = {} }
         hist[threadKey] = saved
     end
@@ -253,6 +360,23 @@ local function PersistWhisperLine(threadKey, entry)
     })
     while #saved.lines > limit do
         table.remove(saved.lines, 1)
+    end
+    if isNewThread and CountHashKeys(hist) > MAX_SAVED_THREADS then
+        PruneSavedScopeTable(hist, HISTORY_TTL_SECONDS, MAX_SAVED_THREADS, GetHistoryStamp)
+    end
+end
+
+local function QueueChatEmit(delay)
+    if Chat._chatEmitQueued then return end
+    Chat._chatEmitQueued = true
+    if C_Timer and C_Timer.After then
+        C_Timer.After(delay or 0.30, function()
+            Chat._chatEmitQueued = false
+            ns:Emit("CHAT_UPDATED")
+        end)
+    else
+        Chat._chatEmitQueued = false
+        ns:Emit("CHAT_UPDATED")
     end
 end
 
@@ -277,7 +401,8 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     end
     thread.lastAt = ts
 
-    local isViewing = Chat.activeThreadKey == thread.key and ns.UI and ns.UI.IsMainVisible and ns.UI:IsMainVisible()
+    local mainVisible = ns.UI and ns.UI.IsMainVisible and ns.UI:IsMainVisible()
+    local isViewing = Chat.activeThreadKey == thread.key and mainVisible
     local isMuted = Chat:IsThreadMuted(thread.key)
     local isPublic = IsPublicChannelKind(thread.kind)
     local allowChannelUnread = ns.db and ns.db.settings and ns.db.settings.chatChannelUnread == true
@@ -295,7 +420,11 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
         PersistWhisperLine(thread.key, entry)
     end
 
-    ns:Emit("CHAT_UPDATED")
+    if isPublic and not mainVisible then
+        QueueChatEmit(0.30)
+    else
+        ns:Emit("CHAT_UPDATED")
+    end
     return entry
 end
 
@@ -305,8 +434,19 @@ local function LookupClassFromCache(lookupKey, guid)
         local cf = Compat.ClassFileFromGuid(guid)
         if cf then return cf end
     end
-    if lookupKey then
-        if Store and Store.social then
+    if Store and Store.social then
+        local byGuid = Store.socialByGuid
+        local byLookup = Store.socialByLookup
+        if byGuid or byLookup then
+            local gRow = guid and byGuid and byGuid[guid]
+            if gRow and gRow.classFile then return gRow.classFile end
+            if lookupKey then
+                local lRow = byLookup and byLookup[lookupKey]
+                if lRow and lRow.classFile and not (guid and lRow.guid and lRow.guid ~= guid) then
+                    return lRow.classFile
+                end
+            end
+        elseif lookupKey then
             local direct = Store.social[lookupKey]
             if direct and direct.classFile then return direct.classFile end
             for _, row in pairs(Store.social) do
@@ -315,6 +455,8 @@ local function LookupClassFromCache(lookupKey, guid)
                 end
             end
         end
+    end
+    if lookupKey then
         if Store and Store.nearby and Store.nearby[lookupKey] then
             return Store.nearby[lookupKey].classFile
         end
@@ -331,6 +473,13 @@ end
 function Chat:LoadSavedHistory()
     local limit = GetChatHistoryLimit()
     local hist = GetHistoryScopeTable()
+    if hist then
+        PruneSavedScopeTable(hist, HISTORY_TTL_SECONDS, MAX_SAVED_THREADS, GetHistoryStamp)
+    end
+    local savedPeers = GetAddonPeersScopeTable()
+    if savedPeers then
+        PruneSavedScopeTable(savedPeers, PEER_TTL_SECONDS, MAX_SAVED_PEERS, GetPeerStamp)
+    end
     if hist and limit > 0 then
         for threadKey, saved in pairs(hist) do
             if type(threadKey) == "string" and threadKey:sub(1, 2) == "w:" and type(saved) == "table" and type(saved.lines) == "table" then
@@ -432,12 +581,45 @@ function Chat:GetUnreadSummary()
     }
 end
 
-function Chat:GetTotalUnread(includeChannels)
-    local sum = self:GetUnreadSummary()
+local function CountUnreadThreadsAndInvites(self, includeChannels)
+    local allowChannels = false
     if includeChannels then
-        return sum.total
+        local s = ns.db and ns.db.settings
+        allowChannels = (s and s.chatMirrorChannels == true and s.chatChannelUnread == true) and true or false
     end
-    return sum.totalDirect
+
+    local total = 0
+    for key, t in pairs(self.threads) do
+        local u = t.unread or 0
+        if u > 0 and not self:IsThreadMuted(key) then
+            if IsPublicChannelKind(t.kind) then
+                if allowChannels then
+                    total = total + u
+                end
+            else
+                total = total + u
+            end
+        end
+    end
+
+    local rooms = GetRoomsScopeTable()
+    if rooms then
+        for _, room in pairs(rooms) do
+            if type(room) == "table" and room.pendingInvite and not room.joined then
+                total = total + 1
+            end
+        end
+    end
+
+    return total
+end
+
+function Chat:GetUnreadDirectCount()
+    return CountUnreadThreadsAndInvites(self, false)
+end
+
+function Chat:GetTotalUnread(includeChannels)
+    return CountUnreadThreadsAndInvites(self, includeChannels == true)
 end
 
 function Chat:MarkThreadRead(threadKey)
@@ -976,7 +1158,7 @@ function Chat:SendAllianceMessage(rawText)
 
     local ok = ns.Clan:SendAllianceChat(clean)
     if ok then
-        local myName = Safe.String(Safe.Call(UnitName, "player")) or "Unknown"
+        local myName = GetMyInfo()
         local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
         local _, myClass = Safe.Call(UnitClass, "player")
         self:ReceiveAllianceMessage(myGuild, myName, myClass, clean)
@@ -1020,24 +1202,34 @@ local function IsCharacterOnlineOrReachable(parsed, bnetAccountID)
             end
         end
 
-        for _, bucket in ipairs({ Store.social, Store.clanMembers, Store.nearby }) do
-            if type(bucket) == "table" then
-                local row = bucket[parsed.lookupKey]
-                if not row then
-                    for _, candidate in pairs(bucket) do
-                        if type(candidate) == "table" and candidate.lookupKey == parsed.lookupKey then
-                            row = candidate
-                            break
-                        end
+        local socialRow = Store.socialByLookup and Store.socialByLookup[parsed.lookupKey]
+        if not socialRow and not Store.socialByLookup and type(Store.social) == "table" then
+            local direct = Store.social[parsed.lookupKey]
+            if type(direct) == "table" and direct.lookupKey == parsed.lookupKey then
+                socialRow = direct
+            else
+                for _, candidate in pairs(Store.social) do
+                    if type(candidate) == "table" and candidate.lookupKey == parsed.lookupKey then
+                        socialRow = candidate
+                        break
                     end
                 end
-                if type(row) == "table" then
-                    if row.online == true then
-                        return true, "store"
-                    elseif row.online == false and (not seenAt or (tonumber(row.lastSeenAt or 0) or 0) > seenAt) then
-                        return false, "offline"
-                    end
-                end
+            end
+        end
+        if type(socialRow) == "table" then
+            if socialRow.online == true then
+                return true, "store"
+            elseif socialRow.online == false and (not seenAt or (tonumber(socialRow.lastSeenAt or 0) or 0) > seenAt) then
+                return false, "offline"
+            end
+        end
+
+        local nearbyRow = type(Store.nearby) == "table" and Store.nearby[parsed.lookupKey]
+        if type(nearbyRow) == "table" then
+            if nearbyRow.online == true then
+                return true, "store"
+            elseif nearbyRow.online == false and (not seenAt or (tonumber(nearbyRow.lastSeenAt or 0) or 0) > seenAt) then
+                return false, "offline"
             end
         end
     end
@@ -1073,6 +1265,7 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
             end
         end
 
+        local addedSavedPeer = false
         for _, lk in ipairs(keysToUpdate) do
             self.sessionPeers[lk] = {
                 version = ver or (self.sessionPeers[lk] and self.sessionPeers[lk].version) or "SC",
@@ -1087,6 +1280,9 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
             end
             if self.probeFailures then self.probeFailures["w:" .. lk] = nil end
             if savedPeers then
+                if savedPeers[lk] == nil then
+                    addedSavedPeer = true
+                end
                 -- Save strictly WoW character key + non-personal addon version metadata.
                 savedPeers[lk] = {
                     name = parsed.displayName,
@@ -1094,6 +1290,9 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
                     lastSeenAt = now,
                 }
             end
+        end
+        if addedSavedPeer and savedPeers and CountHashKeys(savedPeers) > MAX_SAVED_PEERS then
+            PruneSavedScopeTable(savedPeers, PEER_TTL_SECONDS, MAX_SAVED_PEERS, GetPeerStamp)
         end
     end
 
@@ -1380,6 +1579,7 @@ function Chat:ProbePeerAddon(threadKey, force)
         sent, err = SendRoomPacket(state.targetChar or t.targetName, state.bnetGameAccId, payload)
     end
 
+    PruneProbeTracking(self, monoNow)
     self.probeSentAt[threadKey] = monoNow
     if not sent then
         self.probeFailures[threadKey] = err or "failed"
@@ -1590,10 +1790,7 @@ function Chat:SendDirectMessage(threadKey, rawText)
         deliveryMsgId = msgId,
         deliveryState = "sent",
     })
-    if entry then
-        self.deliveryIndex = self.deliveryIndex or {}
-        self.deliveryIndex[msgId] = { threadKey = t.key, entry = entry }
-    end
+    TrackDeliveryEntry(self, msgId, t.key, entry)
     return true
 end
 
@@ -1662,10 +1859,7 @@ function Chat:SendLocationPing(threadKey)
         deliveryMsgId = msgId,
         deliveryState = "sent",
     })
-    if entry then
-        self.deliveryIndex = self.deliveryIndex or {}
-        self.deliveryIndex[msgId] = { threadKey = t.key, entry = entry }
-    end
+    TrackDeliveryEntry(self, msgId, t.key, entry)
     return true
 end
 
@@ -1976,8 +2170,33 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
         end
         if incoming then
-            Chat.seenOnlineChars = Chat.seenOnlineChars or {}
-            Chat.seenOnlineChars[parsed.lookupKey] = time()
+            local map = Chat.seenOnlineChars
+            if not map then
+                map = {}
+                Chat.seenOnlineChars = map
+                Chat._seenOnlineCount = 0
+            end
+            local nowSeen = time()
+            if not map[parsed.lookupKey] then
+                if (Chat._seenOnlineCount or 0) >= 400 then
+                    local kept = 0
+                    for k, seenTs in pairs(map) do
+                        if (nowSeen - seenTs) > 7200 then
+                            map[k] = nil
+                        else
+                            kept = kept + 1
+                        end
+                    end
+                    if kept >= 400 then
+                        wipe(map)
+                        Chat._seenOnlineCount = 0
+                    else
+                        Chat._seenOnlineCount = kept
+                    end
+                end
+                Chat._seenOnlineCount = (Chat._seenOnlineCount or 0) + 1
+            end
+            map[parsed.lookupKey] = nowSeen
         end
         local key = "w:" .. parsed.lookupKey
         local cls = LookupClassFromCache(parsed.lookupKey, guid)

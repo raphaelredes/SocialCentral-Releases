@@ -77,19 +77,20 @@ function Group:Scan()
         end
     end
 
+    local prevByGuid = {}
+    if self.members then
+        for _, m in ipairs(self.members) do
+            if m.guid and m.displayName and m.displayName:find("%s") then
+                prevByGuid[m.guid] = m.displayName
+            end
+        end
+    end
+
     local seen = {}
     for _, unit in ipairs(unitTokens) do
         if UnitExists and Safe.Value(UnitExists(unit)) == true then
             local guid = Safe.String(Safe.Call(UnitGUID, unit))
-            local existingName = nil
-            if guid and self.members then
-                for _, m in ipairs(self.members) do
-                    if m.guid == guid and m.displayName and m.displayName:find("%s") then
-                        existingName = m.displayName
-                        break
-                    end
-                end
-            end
+            local existingName = guid and prevByGuid[guid] or nil
             local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, guid, existingName)
             local rawName = (resolved and resolved.fullName)
                 or Safe.String(Safe.Call(GetUnitName, unit, true))
@@ -125,14 +126,32 @@ function Group:Scan()
                 table.insert(nextList, item)
 
                 if not isMe and Store and Store.RecordCompanion then
-                    Store:RecordCompanion({
-                        displayName = parsed.displayName,
-                        guid = guid,
-                        classFile = classFile,
-                        level = item.level,
-                        role = role,
-                        zone = currentZone,
-                    })
+                    local compKey = guid or parsed.lookupKey
+                    local compSig = tostring(role or "") .. "|" .. tostring(currentZone or "") .. "|" .. tostring(item.level or 0)
+                    local nowComp = GetTime and GetTime() or 0
+                    local sentMap = self._companionSentAt
+                    if not sentMap or (self._companionSentCount or 0) >= 250 then
+                        sentMap = {}
+                        self._companionSentAt = sentMap
+                        self._companionSentCount = 0
+                    end
+                    local prevSent = compKey and sentMap[compKey]
+                    if not prevSent or prevSent.sig ~= compSig or (nowComp - prevSent.at) >= 120 then
+                        if compKey then
+                            if not prevSent then
+                                self._companionSentCount = (self._companionSentCount or 0) + 1
+                            end
+                            sentMap[compKey] = { at = nowComp, sig = compSig }
+                        end
+                        Store:RecordCompanion({
+                            displayName = parsed.displayName,
+                            guid = guid,
+                            classFile = classFile,
+                            level = item.level,
+                            role = role,
+                            zone = currentZone,
+                        })
+                    end
                 end
             end
         end
