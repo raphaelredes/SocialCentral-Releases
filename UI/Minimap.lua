@@ -302,7 +302,9 @@ end
 
 local function UpdateBadge()
     local summary = ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
-    local unreadDirect = summary and summary.totalDirect or (ns.Chat and ns.Chat:GetTotalUnread() or 0)
+    local unreadDirect = (type(summary) == "table" and summary.totalDirect)
+        or (type(summary) == "number" and summary)
+        or (ns.Chat and ns.Chat:GetTotalUnread() or 0)
 
     if button and button.badge then
         button.badge:Hide()

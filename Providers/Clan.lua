@@ -1360,13 +1360,13 @@ function Clan:ConsumePreferredRightView()
 end
 
 local DUNGEON_KEYWORDS = {
-    "%fdg%f", "masmorra", "mazmorra", "calabou", "calabozo", "dungeon",
-    "mythic", "mitic", "m%+", "%+%d+", "heroic", "heroic[ao]", "%fhc%f",
-    "chave", "pedra", "piedra", "keystone", "%fkey%f", "timewalking", "caminhada",
-    "%fcam%f", "delve", "follower", "deadmines", "scarlet", "strath", "scholo",
+    "%f[%w]dg%f[%W]", "masmorra", "mazmorra", "calabou", "calabozo", "dungeon",
+    "mythic", "mitic", "m%+", "%+%d+", "heroic", "heroic[ao]", "%f[%w]hc%f[%W]",
+    "chave", "pedra", "piedra", "keystone", "%f[%w]key%f[%W]", "timewalking", "caminhada",
+    "%f[%w]cam%f[%W]", "delve", "follower", "deadmines", "scarlet", "strath", "scholo",
     "brd", "ubrs", "lbrs", "maraudon", "dire maul", "razorfen", "gnomer",
-    "zul'farrak", "%fzf%f", "sunken", "wailing", "shadowfang", "%fsfk%f", "%fsm%f",
-    "%frfc%f", "%fwc%f", "stockade", "uldaman", "blackrock",
+    "zul'farrak", "%f[%w]zf%f[%W]", "sunken", "wailing", "shadowfang", "%f[%w]sfk%f[%W]", "%f[%w]sm%f[%W]",
+    "%f[%w]rfc%f[%W]", "%f[%w]wc%f[%W]", "stockade", "uldaman", "blackrock",
 }
 
 local function IsDungeonLFGText(text, category)
@@ -2795,8 +2795,8 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
 end
 
 local LFG_PATTERNS = {
-    "%flfm%f", "%flfg%f", "lf%d+m", "precis", "falta", "procuro", "busco",
-    "bora", "alguem", "alguien", "tank", "heal", "dps", "%fdg%f", "masmorra",
+    "%f[%w]lfm%f[%W]", "%f[%w]lfg%f[%W]", "lf%d+m", "precis", "falta", "procuro", "busco",
+    "bora", "alguem", "alguien", "tank", "heal", "dps", "%f[%w]dg%f[%W]", "masmorra",
     "mazmorra", "dungeon", "mythic", "m%+", "chave", "pedra", "raid", "raide", "boss",
 }
 
@@ -2872,13 +2872,13 @@ local function OnExternalChatPassive(_, _, text, sender, ...)
         nil
     )
     local isDng = IsDungeonLFGText(cleanMsg, nil)
-    local msgMode = low:find("%flfg%f") and "LFG" or "LFM"
+    local msgMode = low:find("%f[%w]lfg%f[%W]") and "LFG" or "LFM"
     local roleHint = "ANY"
-    if low:find("%ftank%f") then
+    if low:find("%f[%w]tank%f[%W]") then
         roleHint = "TANK"
     elseif low:find("heal") then
         roleHint = "HEALER"
-    elseif low:find("%fdps%f") then
+    elseif low:find("%f[%w]dps%f[%W]") then
         roleHint = "DPS"
     end
     local nowTs = time()

@@ -41,6 +41,12 @@ function Safe.Number(value)
     return value
 end
 
+function Safe.Bool(value)
+    value = Safe.Value(value)
+    if type(value) ~= "boolean" then return nil end
+    return value
+end
+
 function Safe.Call(fn, ...)
     if type(fn) ~= "function" then return nil end
     local ok, a, b, c = pcall(fn, ...)

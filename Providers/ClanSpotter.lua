@@ -327,7 +327,7 @@ local function GetUnitOrPlayerMapXY(mapID, unit)
     return nil, nil
 end
 
-local function CaptureLocationSnapshot(unit, worldHeading, distYards)
+local function CaptureLocationSnapshot(unit)
     local zone = Safe.String(Safe.Call(GetRealZoneText))
         or Safe.String(Safe.Call(GetZoneText))
         or (Compat.CurrentZoneName and Compat.CurrentZoneName())
@@ -336,31 +336,15 @@ local function CaptureLocationSnapshot(unit, worldHeading, distYards)
 
     local coordsText, mapID, targetX, targetY
     local directUnitPos = false
-    if C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
-        mapID = (unit and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, unit)))
+    if unit and unit ~= "player" and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
+        mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, unit))
             or Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
         if mapID then
-            local ux, uy
-            if unit and unit ~= "player" then
-                ux, uy = GetUnitOrPlayerMapXY(mapID, unit)
-            end
+            local ux, uy = GetUnitOrPlayerMapXY(mapID, unit)
             if ux and uy then
                 targetX, targetY = ux, uy
                 directUnitPos = true
-            else
-                local px, py = GetUnitOrPlayerMapXY(mapID, "player")
-                if px and py then
-                    if worldHeading and distYards and distYards > 0 then
-                        local mapRadius = math.min(60, math.max(0, distYards)) * MAP_COORD_PER_YARD
-                        targetX = math.max(0, math.min(1, px - math.sin(worldHeading) * mapRadius))
-                        targetY = math.max(0, math.min(1, py - math.cos(worldHeading) * mapRadius))
-                    else
-                        targetX, targetY = px, py
-                    end
-                end
-            end
-            if targetX and targetY then
-                coordsText = string.format("%.1f, %.1f", targetX * 100, targetY * 100)
+                coordsText = string.format("%.1f, %.1f", ux * 100, uy * 100)
             end
         end
     end
@@ -380,38 +364,36 @@ local function CaptureLocationSnapshot(unit, worldHeading, distYards)
         coordsText = coordsText,
         locationText = locationText,
         fullLocationText = fullLocationText,
-        mapID = mapID,
-        mapX = targetX,
-        mapY = targetY,
+        mapID = directUnitPos and mapID or nil,
+        mapX = directUnitPos and targetX or nil,
+        mapY = directUnitPos and targetY or nil,
         directUnitPos = directUnitPos,
     }
 end
 
-local function ApplyLocationSnapshotToEntry(entry, locSnap, allowReanchor)
+local function ApplyLocationSnapshotToEntry(entry, locSnap)
     if not (entry and locSnap) then return end
     if locSnap.zone and locSnap.zone ~= "" then entry.zone = locSnap.zone end
     if locSnap.subZone and locSnap.subZone ~= "" then entry.subZone = locSnap.subZone end
 
-    local hasAnchor = (entry._anchorMapID and entry._anchorMapX and entry._anchorMapY)
-    local sameMapAnchor = (hasAnchor and locSnap.mapID and locSnap.mapID == entry._anchorMapID)
-    if locSnap.directUnitPos or allowReanchor or not sameMapAnchor then
-        if locSnap.coordsText and locSnap.coordsText ~= "" then entry.coordsText = locSnap.coordsText end
-        if locSnap.locationText and locSnap.locationText ~= "" then entry.locationText = locSnap.locationText end
-        if locSnap.fullLocationText and locSnap.fullLocationText ~= "" then entry.fullLocationText = locSnap.fullLocationText end
-        if locSnap.mapID and locSnap.mapX and locSnap.mapY then
-            entry._anchorMapID = locSnap.mapID
-            entry._anchorMapX = locSnap.mapX
-            entry._anchorMapY = locSnap.mapY
-        end
+    if locSnap.directUnitPos and locSnap.mapID and locSnap.mapX and locSnap.mapY then
+        entry._anchorMapID = locSnap.mapID
+        entry._anchorMapX = locSnap.mapX
+        entry._anchorMapY = locSnap.mapY
+        entry.coordsText = locSnap.coordsText
+        entry.locationText = locSnap.locationText
+        entry.fullLocationText = locSnap.fullLocationText
     else
-        local anchoredCoords = entry.coordsText or string.format("%.1f, %.1f", entry._anchorMapX * 100, entry._anchorMapY * 100)
-        entry.coordsText = anchoredCoords
-        local zone = entry.zone or locSnap.zone or ""
-        local subZone = entry.subZone or locSnap.subZone or ""
-        local shortZone = (subZone ~= "" and subZone ~= zone) and subZone or zone
-        local fullZone = (subZone ~= "" and subZone ~= zone and zone ~= "") and (zone .. " - " .. subZone) or shortZone
-        entry.locationText = (shortZone ~= "") and (shortZone .. " (" .. anchoredCoords .. ")") or ("(" .. anchoredCoords .. ")")
-        entry.fullLocationText = (fullZone ~= "") and (fullZone .. " (" .. anchoredCoords .. ")") or ("(" .. anchoredCoords .. ")")
+        entry._anchorMapID = nil
+        entry._anchorMapX = nil
+        entry._anchorMapY = nil
+        entry.coordsText = nil
+        if locSnap.locationText and locSnap.locationText ~= "" then
+            entry.locationText = locSnap.locationText
+        end
+        if locSnap.fullLocationText and locSnap.fullLocationText ~= "" then
+            entry.fullLocationText = locSnap.fullLocationText
+        end
     end
 end
 
@@ -867,17 +849,19 @@ local function ComputeScreenAngleAndRadial(px, py, pScale)
     local halfW = math.max(1, (Safe.Number(Safe.Call(UIParent.GetWidth, UIParent)) or 1000) * 0.5 * uScale)
     local halfH = math.max(1, (Safe.Number(Safe.Call(UIParent.GetHeight, UIParent)) or 700) * 0.5 * uScale)
 
-    -- In WoW's 3D camera, the player character stands slightly below the screen center.
-    local playerScreenY = (cy * uScale) - (halfH * 0.14)
-    local screenDy = py and ((py * s) - playerScreenY) or (halfH * 0.35)
+    -- A visible nameplate is always in the camera's forward frustum: keep forward depth positive
+    -- so looking downwards or standing close never flips an in-view player into "Behind".
+    local playerScreenY = (cy * uScale) - (halfH * 0.22)
+    local rawDy = py and ((py * s) - playerScreenY) or (halfH * 0.55)
+    local forwardDy = math.max(halfH * 0.45, rawDy)
 
     local angle = 0
-    if math.abs(screenDx) > 2 or math.abs(screenDy) > 2 then
-        angle = math.atan2(-screenDx, screenDy)
+    if math.abs(screenDx) > 3 then
+        angle = math.atan2(-screenDx, forwardDy)
     end
 
     local normX = screenDx / halfW
-    local normY = screenDy / halfH
+    local normY = rawDy / halfH
     local radial = math.min(1.4, math.sqrt(normX * normX + normY * normY))
     return NormalizeAngleRad(angle), radial
 end
@@ -892,14 +876,36 @@ local function UnitMatchesEntry(unit, entry)
         return uGuid == entry.guid
     end
 
+    if Compat.ResolveUnitFullName then
+        local resolved = Compat.ResolveUnitFullName(unit, uGuid)
+        if resolved and resolved.lookupKey then
+            if resolved.lookupKey == entry.key then
+                return true
+            end
+            if resolved.surname and entry.displayName and entry.displayName:find("%s") then
+                return false
+            end
+        end
+    end
+
     local uName = Safe.String(Safe.Call(UnitName, unit))
     if uName and uName ~= "" then
-        if entry.unitName and uName:lower() == entry.unitName:lower() then
-            return true
+        if entry.unitName and uName:lower() == entry.unitName:lower() and not (entry.guid and uGuid and entry.guid ~= uGuid) then
+            local parsedRaw = Compat.ParseCharacterName and Compat.ParseCharacterName(uName)
+            if not (parsedRaw and parsedRaw.surname and entry.key and parsedRaw.lookupKey ~= entry.key) then
+                return true
+            end
         end
         local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(uName)
-        if parsed and (parsed.lookupKey == entry.key or (entry.firstName and parsed.firstName:lower() == entry.firstName:lower())) then
-            return true
+        if parsed then
+            if parsed.lookupKey == entry.key then
+                return true
+            end
+            local entryHasSurname = type(entry.displayName) == "string" and entry.displayName:find("%s") ~= nil
+            if (not parsed.surname or not entryHasSurname)
+                and entry.firstName and parsed.firstName:lower() == entry.firstName:lower() then
+                return true
+            end
         end
     end
     return false
@@ -1143,32 +1149,24 @@ function Spotter:InspectUnit(unit, isNameplate)
     local plate, plateUnit = ResolvePlateForUnitOrEntry(unit, entry)
     if plateUnit then
         entry.unitToken = plateUnit
+    elseif isNameplate or unit:match("^party") or unit:match("^raid") or unit == "focus" then
+        entry.unitToken = unit
     else
-        entry.unitToken = isNameplate and unit or (entry.unitToken or unit)
+        entry.unitToken = nil
     end
 
-    -- Capture initial world heading and screen radial from plate or soft-target forward cone
-    local facing = GetPlayerFacing and Safe.Number(Safe.Call(GetPlayerFacing)) or 0
     local screenRadial
-    local hasDirectBearing = false
     if plate and UIParent and UIParent.GetCenter then
-        local refFrame = (self.plateBadges and self.plateBadges[plate]) or (plate.UnitFrame and IsPlateAccessible(plate.UnitFrame) and plate.UnitFrame) or plate
+        local refFrame = (plate.UnitFrame and IsPlateAccessible(plate.UnitFrame) and plate.UnitFrame) or plate
         if refFrame and refFrame.GetCenter and (not refFrame.IsVisible or refFrame:IsVisible()) and (not plate.IsShown or plate:IsShown()) then
             local okCenter, px, py = pcall(refFrame.GetCenter, refFrame)
             px, py = Safe.Number(px), Safe.Number(py)
             if okCenter and px then
                 local pScale = (refFrame.GetEffectiveScale and Safe.Number(Safe.Call(refFrame.GetEffectiveScale, refFrame))) or 1
-                local plateAngle, radial = ComputeScreenAngleAndRadial(px, py, pScale)
+                local _, radial = ComputeScreenAngleAndRadial(px, py, pScale)
                 screenRadial = radial
-                if plateAngle then
-                    entry._lastWorldHeading = NormalizeAngleRad(facing + plateAngle)
-                    hasDirectBearing = true
-                end
             end
         end
-    elseif not isNameplate and (unit == "softfriend" or unit == "softenemy" or unit == "softinteract") then
-        entry._lastWorldHeading = facing
-        hasDirectBearing = true
     end
 
     -- Capture immediate calibrated proximity metrics when unit is reachable
@@ -1178,8 +1176,8 @@ function Spotter:InspectUnit(unit, isNameplate)
         entry.lastDistText = measuredText
     end
 
-    local locSnap = CaptureLocationSnapshot(unit, entry._lastWorldHeading, entry.lastDistYards)
-    ApplyLocationSnapshotToEntry(entry, locSnap, hasDirectBearing)
+    local locSnap = CaptureLocationSnapshot(unit)
+    ApplyLocationSnapshotToEntry(entry, locSnap)
 
     local activePlateUnit = (isNameplate and unit) or plateUnit
     local newPlateMapped = false
@@ -1316,8 +1314,8 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     entry.lastDistText = entry.lastDistText or L["12-28m"]
     entry.lastDistYards = entry.lastDistYards or 20
 
-    local locSnap = CaptureLocationSnapshot("player", entry._lastWorldHeading, entry.lastDistYards)
-    ApplyLocationSnapshotToEntry(entry, locSnap, false)
+    local locSnap = CaptureLocationSnapshot("player")
+    ApplyLocationSnapshotToEntry(entry, locSnap)
 
     RecomputeOnScreenFlags()
     TrimExcessTargets()
@@ -1654,10 +1652,10 @@ function Spotter:GetTargetKinematics(entry)
             end
         end
 
-        -- 3. Screen-space nameplate vector fallback
+        -- 3. Visible nameplate horizontal screen vector
         local screenRadial
         if plate and UIParent and UIParent.GetCenter then
-            local refFrame = (self.plateBadges and self.plateBadges[plate]) or (plate.UnitFrame and IsPlateAccessible(plate.UnitFrame) and plate.UnitFrame) or plate
+            local refFrame = (plate.UnitFrame and IsPlateAccessible(plate.UnitFrame) and plate.UnitFrame) or plate
             if refFrame and refFrame.GetCenter and (not refFrame.IsVisible or refFrame:IsVisible()) and (not plate.IsShown or plate:IsShown()) then
                 local okP, px, py = pcall(refFrame.GetCenter, refFrame)
                 px, py = Safe.Number(px), Safe.Number(py)
@@ -1667,7 +1665,6 @@ function Spotter:GetTargetKinematics(entry)
                     screenRadial = radial
                     if not angle and plateAngle then
                         angle = plateAngle
-                        entry._lastWorldHeading = NormalizeAngleRad(facing + angle)
                         hasDirectBearing = true
                     end
                 end
@@ -1677,7 +1674,6 @@ function Spotter:GetTargetKinematics(entry)
         -- 4. Forward cone sensor (soft targeting reticle is directly ahead)
         if not angle and (UnitMatchesEntry("softfriend", entry) or UnitMatchesEntry("softenemy", entry) or UnitMatchesEntry("softinteract", entry)) then
             angle = 0
-            entry._lastWorldHeading = facing
             hasDirectBearing = true
         end
 
@@ -1689,7 +1685,7 @@ function Spotter:GetTargetKinematics(entry)
                 entry.lastDistYards = mYards
                 entry.lastDistText = mText
             else
-                distText = entry.lastDistText or L["> 28m"]
+                distText = entry.lastDistText or L["Nearby"]
                 distYards = entry.lastDistYards
             end
         else
@@ -1699,50 +1695,20 @@ function Spotter:GetTargetKinematics(entry)
         end
     end
 
-    -- 5. Off-screen / no-nameplate world-coordinate dead-reckoning:
-    -- when no live screen angle is available, compute the live bearing from the player's
-    -- current map position to the target's anchored map position so walking around updates the arrow.
-    if not angle and entry._anchorMapID and entry._anchorMapX and entry._anchorMapY then
-        local mapID, px, py = GetUnitOrPlayerMapXY("player")
-        if mapID and mapID == entry._anchorMapID and px and py then
-            local northDelta = py - entry._anchorMapY
-            local westDelta = px - entry._anchorMapX
-            local mapDistSq = (northDelta * northDelta) + (westDelta * westDelta)
-            if mapDistSq > 0.00000004 then
-                local worldAngle = math.atan2(westDelta, northDelta)
-                entry._lastWorldHeading = worldAngle
-                angle = NormalizeAngleRad(worldAngle - facing)
-                if not distYards then
-                    local approxYards = math.floor((math.sqrt(mapDistSq) / MAP_COORD_PER_YARD) + 0.5)
-                    if approxYards >= 1 and approxYards <= 120 then
-                        distYards = approxYards
-                        distText = string.format("~%dm", approxYards)
-                        entry.lastDistYards = distYards
-                        entry.lastDistText = distText
-                    end
-                end
-            end
-        end
-    end
-
-    if not angle and entry._lastWorldHeading and facing then
-        angle = NormalizeAngleRad(entry._lastWorldHeading - facing)
-    end
-
-    -- Continuously refresh zone/subzone and projected target coordinates at 5 Hz when unit is live
+    -- Refresh current zone/subzone and verified party/raid map coords at 5 Hz when unit is live
     local nowClock = (GetTime and GetTime()) or time()
     if unit and (not entry._lastLocSyncAt or (nowClock - entry._lastLocSyncAt) >= 0.20) then
         entry._lastLocSyncAt = nowClock
-        local locSnap = CaptureLocationSnapshot(unit, entry._lastWorldHeading, distYards or entry.lastDistYards)
-        ApplyLocationSnapshotToEntry(entry, locSnap, hasDirectBearing)
+        local locSnap = CaptureLocationSnapshot(unit)
+        ApplyLocationSnapshotToEntry(entry, locSnap)
     end
 
     return {
         unit = unit,
         hasAngle = (angle ~= nil),
-        angle = angle and NormalizeAngleRad(angle) or 0,
+        angle = angle and NormalizeAngleRad(angle) or nil,
         distYards = distYards or entry.lastDistYards,
-        distText = distText or entry.lastDistText or L["> 28m"],
+        distText = distText or entry.lastDistText or L["Nearby"],
         exact = (distYards ~= nil),
     }
 end

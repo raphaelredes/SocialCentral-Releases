@@ -260,7 +260,7 @@ local function RecordPeakHourSample(realmPool, buffId, ts)
     if math.abs(ts - (hist._last or 0)) < 300 then
         return
     end
-    local hour = tonumber(os.date("%H", ts))
+    local hour = tonumber(date("%H", ts))
     if hour and hour >= 0 and hour <= 23 then
         hist[hour] = (hist[hour] or 0) + 1
         hist._total = (hist._total or 0) + 1
@@ -320,7 +320,7 @@ local function BuildCooldownEntry(lastDrop, cooldownSec)
     local remaining = cooldownSec - elapsed
     if remaining > 0 then
         local remFormatted = WorldBuffs:FormatDuration(remaining)
-        local readyAt = os.date("%H:%M", lastDrop + cooldownSec)
+        local readyAt = date("%H:%M", lastDrop + cooldownSec)
         return {
             status = "COOLDOWN",
             remaining = remaining,
@@ -339,7 +339,7 @@ end
 
 function WorldBuffs:GetDarkmoonFaireStatus()
     local now = NowServerTime()
-    local t = os.date("*t", now)
+    local t = date("*t", now)
     if not t then return nil end
     local d = t.day or 1
     local wday = t.wday or 1 -- 1=Sun .. 7=Sat
@@ -357,7 +357,8 @@ function WorldBuffs:GetDarkmoonFaireStatus()
     end
     local daysUntil = firstSun - d
     if daysUntil < 0 then
-        local daysInMonth = tonumber(os.date("%d", os.time({ year = t.year, month = (t.month % 12) + 1, day = 0 }))) or 30
+        local nextMonthEnd = time({ year = t.year, month = (t.month % 12) + 1, day = 0 })
+        local daysInMonth = tonumber(nextMonthEnd and date("%d", nextMonthEnd)) or 30
         local nextMonthWday1 = ((wday + (daysInMonth - d)) % 7) + 1
         local nextFirstSun = (nextMonthWday1 == 1) and 1 or (9 - nextMonthWday1)
         daysUntil = (daysInMonth - d) + nextFirstSun

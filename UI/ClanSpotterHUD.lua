@@ -161,6 +161,14 @@ end
 
 local function BuildTargetMacroText(entry, liveUnit)
     if not entry then return "" end
+
+    -- 1. When a verified live unit token is active right now (nameplate1..40, party1..4, raid1..40, focus, soft*),
+    -- target that exact 3D unit directly so recycled tokens or twin FirstNames never steal focus.
+    if type(liveUnit) == "string" and liveUnit ~= "" and liveUnit ~= "target" and liveUnit ~= "mouseover"
+        and not liveUnit:find("[%c%|%/%\\%[%]%;%s]") then
+        return "/target [@" .. liveUnit .. ",exists]"
+    end
+
     local lines = {}
     local seen = {}
     local function addLine(cmd)
@@ -168,12 +176,6 @@ local function BuildTargetMacroText(entry, liveUnit)
             seen[cmd] = true
             table.insert(lines, cmd)
         end
-    end
-
-    -- 1. Direct live unit token targeting when available (nameplate1..40, party1..4, raid1..40, focus)
-    local uTok = liveUnit or entry.unitToken
-    if uTok and type(uTok) == "string" and uTok ~= "target" and uTok ~= "mouseover" and not uTok:find("[%c%|%/%\\%[%]%;%s]") then
-        addLine("/target [@" .. uTok .. ",exists]")
     end
 
     -- 2. Exact raw unitName returned by UnitName(unit) in WoW Forever
@@ -184,7 +186,7 @@ local function BuildTargetMacroText(entry, liveUnit)
         end
     end
 
-    -- 3. All Forever target variants (FirstName, FirstName Surname, FirstName-Surname)
+    -- 3. All Forever target variants (FirstName Surname, FirstName-Surname, FirstName)
     local cleanDisplay = entry.displayName and entry.displayName:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
     local candidates = Compat.GetForeverTargetVariants and Compat.GetForeverTargetVariants(cleanDisplay or entry.firstName) or {}
     for _, cand in ipairs(candidates) do
@@ -212,18 +214,18 @@ local function ApplySecureMacroAttributes(btn, entry, liveUnit)
         return
     end
     btn:SetAttribute("useOnKeyDown", false)
+    btn:SetAttribute("type2", nil)
+    btn:SetAttribute("*type2", nil)
+    btn:SetAttribute("macrotext2", nil)
+    btn:SetAttribute("*macrotext2", nil)
     if not entry then
         btn:SetAttribute("type", nil)
         btn:SetAttribute("type1", nil)
         btn:SetAttribute("*type1", nil)
-        btn:SetAttribute("type2", nil)
-        btn:SetAttribute("*type2", nil)
         btn:SetAttribute("unit", nil)
         btn:SetAttribute("macrotext", nil)
         btn:SetAttribute("macrotext1", nil)
         btn:SetAttribute("*macrotext1", nil)
-        btn:SetAttribute("macrotext2", nil)
-        btn:SetAttribute("*macrotext2", nil)
         btn._lastMacroText = nil
         return
     end
@@ -233,14 +235,10 @@ local function ApplySecureMacroAttributes(btn, entry, liveUnit)
     btn:SetAttribute("type", "macro")
     btn:SetAttribute("type1", "macro")
     btn:SetAttribute("*type1", "macro")
-    btn:SetAttribute("type2", "macro")
-    btn:SetAttribute("*type2", "macro")
     btn:SetAttribute("unit", nil)
     btn:SetAttribute("macrotext", mText)
     btn:SetAttribute("macrotext1", mText)
     btn:SetAttribute("*macrotext1", mText)
-    btn:SetAttribute("macrotext2", mText)
-    btn:SetAttribute("*macrotext2", mText)
     btn._lastMacroText = mText
 end
 
@@ -253,7 +251,10 @@ local function IsEntryCurrentlyTargeted(entry, currentTargetGuid, parsedTarget)
         if parsedTarget.lookupKey == entry.key then
             return true
         end
-        if entry.firstName and parsedTarget.firstName and parsedTarget.firstName:lower() == entry.firstName:lower() then
+        local entryHasSurname = type(entry.displayName) == "string" and entry.displayName:find("%s") ~= nil
+        if (not parsedTarget.surname or not entryHasSurname)
+            and entry.firstName and parsedTarget.firstName
+            and parsedTarget.firstName:lower() == entry.firstName:lower() then
             return true
         end
     end
@@ -360,6 +361,15 @@ function SpotterHUD:BuildFrame()
     arrowBox.arrowTex = arrowTex
     compassBar.arrowBox = arrowBox
     compassBar.arrowTex = arrowTex
+
+    local noSignalDot = arrowBox:CreateTexture(nil, "OVERLAY")
+    noSignalDot:SetSize(14, 14)
+    noSignalDot:SetPoint("CENTER")
+    noSignalDot:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+    noSignalDot:SetVertexColor(0.95, 0.78, 0.25, 0.92)
+    noSignalDot:Hide()
+    arrowBox.noSignalDot = noSignalDot
+    compassBar.noSignalDot = noSignalDot
 
     local compassNameFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     compassNameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 6, -3)
@@ -618,6 +628,15 @@ function SpotterHUD:BuildCombatArrowFrame()
     cf.arrowBox = arrowBox
     cf.arrowTex = arrowTex
 
+    local noSignalDot = arrowBox:CreateTexture(nil, "OVERLAY")
+    noSignalDot:SetSize(14, 14)
+    noSignalDot:SetPoint("CENTER")
+    noSignalDot:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+    noSignalDot:SetVertexColor(0.95, 0.78, 0.25, 0.92)
+    noSignalDot:Hide()
+    arrowBox.noSignalDot = noSignalDot
+    cf.noSignalDot = noSignalDot
+
     local nameFs = cf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     nameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 6, -4)
     nameFs:SetPoint("TOPRIGHT", cf, "TOPRIGHT", -8, -4)
@@ -646,6 +665,7 @@ function SpotterHUD:BuildCombatArrowFrame()
     end)
 
     cf:Hide()
+    Theme:ApplyBackdrop(cf, "window", Theme:GetPalette())
     self.combatArrowFrame = cf
     return cf
 end
@@ -659,7 +679,27 @@ function SpotterHUD:ShowCombatArrowFallback()
         return
     end
     local allTargets = ns.Spotter and ns.Spotter:GetActiveTargets("ALL") or {}
-    local entry = allTargets[1]
+    local entry
+    if self.focusedKey then
+        for _, cand in ipairs(allTargets) do
+            if cand.key == self.focusedKey then
+                entry = cand
+                break
+            end
+        end
+    end
+    if not entry then
+        local currentTargetGuid = Safe.String(Safe.Call(UnitGUID, "target"))
+        local currentTargetName = Safe.String(Safe.Call(UnitName, "target"))
+        local parsedTarget = currentTargetName and Compat.ParseCharacterName(currentTargetName)
+        for _, cand in ipairs(allTargets) do
+            if IsEntryCurrentlyTargeted(cand, currentTargetGuid, parsedTarget) then
+                entry = cand
+                break
+            end
+        end
+    end
+    entry = entry or allTargets[1]
     if not entry then
         cf:Hide()
         return
@@ -721,11 +761,27 @@ end
 
 local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
     if not bar then return end
-    RotateArrowTexture(bar.arrowTex, smoothAngle)
 
     local rgb = STANCE_RGB[entry.stance] or STANCE_RGB.SAME
+    local hasAngle = kin and kin.hasAngle == true
     local zoneShort = (entry.subZone and entry.subZone ~= "") and entry.subZone or ""
     local locPart = (zoneShort ~= "") and (" |cff8b949e· " .. zoneShort .. "|r") or ""
+
+    if hasAngle then
+        if bar.noSignalDot then bar.noSignalDot:Hide() end
+        if bar.arrowTex then bar.arrowTex:Show() end
+        RotateArrowTexture(bar.arrowTex, smoothAngle)
+    else
+        if bar.arrowTex then bar.arrowTex:Hide() end
+        if bar.noSignalDot then
+            if entry.dead then
+                bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.65)
+            else
+                bar.noSignalDot:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.95)
+            end
+            bar.noSignalDot:Show()
+        end
+    end
 
     if entry.dead then
         if bar.arrowBox and bar.arrowBox.aura then
@@ -734,24 +790,22 @@ local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
         if bar.arrowTex and bar.arrowTex.SetVertexColor then
             bar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.65)
         end
-        local bearing = kin.hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
+        local bearing = hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
         bar.distFs:SetText(string.format("|cff888888%s|r |cff8b949e· %s|r%s", L["Dead"], bearing, locPart))
     else
-        local isAhead = kin.hasAngle and math.abs(kin.angle or 0) <= 0.42
+        local isAhead = hasAngle and math.abs(kin.angle or 0) <= 0.42
         if bar.arrowBox and bar.arrowBox.aura then
-            bar.arrowBox.aura:SetVertexColor(rgb[1], rgb[2], rgb[3], kin.hasAngle and 0.42 or 0.20)
+            bar.arrowBox.aura:SetVertexColor(rgb[1], rgb[2], rgb[3], hasAngle and 0.42 or 0.24)
         end
         if bar.arrowTex and bar.arrowTex.SetVertexColor then
-            if not kin.hasAngle then
-                bar.arrowTex:SetVertexColor(0.7, 0.7, 0.7, 0.45)
-            elseif isAhead then
+            if isAhead then
                 bar.arrowTex:SetVertexColor(0.35, 1.0, 0.58, 1)
             else
                 bar.arrowTex:SetVertexColor(1, 1, 1, 1)
             end
         end
-        local bearing = kin.hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
-        bar.distFs:SetText(string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", kin.distText or L["> 28m"], bearing, locPart))
+        local bearing = hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
+        bar.distFs:SetText(string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", kin.distText or L["Nearby"], bearing, locPart))
     end
 end
 
@@ -776,13 +830,18 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
         end
     end
 
-    local targetAngle = kin.hasAngle and kin.angle or 0
-    if snap or not self._hasSmoothAngle then
-        self._smoothAngle = targetAngle
-        self._hasSmoothAngle = true
+    if kin.hasAngle and kin.angle then
+        local targetAngle = kin.angle
+        if snap or not self._hasSmoothAngle then
+            self._smoothAngle = targetAngle
+            self._hasSmoothAngle = true
+        else
+            local step = math.min(1, (dt or 0.04) * 14)
+            self._smoothAngle = self._smoothAngle + ShortestAngleDelta(self._smoothAngle, targetAngle) * step
+        end
     else
-        local step = math.min(1, (dt or 0.04) * 14)
-        self._smoothAngle = self._smoothAngle + ShortestAngleDelta(self._smoothAngle, targetAngle) * step
+        self._hasSmoothAngle = false
+        self._smoothAngle = 0
     end
 
     if mainCompassActive then
@@ -818,7 +877,25 @@ function SpotterHUD:UpdateTargetVisuals()
     local f = self.frame
     if not (f and f:IsShown() and f.compassBar) then return end
 
+    local allTargets = ns.Spotter and ns.Spotter:GetActiveTargets("ALL") or {}
     local entry = self._compassEntry
+    if entry then
+        local stillActive = false
+        for _, cand in ipairs(allTargets) do
+            if cand.key == entry.key then
+                entry = cand
+                stillActive = true
+                break
+            end
+        end
+        if not stillActive then
+            entry = allTargets[1]
+            self._compassEntry = entry
+        end
+    else
+        entry = allTargets[1]
+        self._compassEntry = entry
+    end
     if not entry then return end
 
     local currentTargetGuid = Safe.String(Safe.Call(UnitGUID, "target"))
@@ -941,8 +1018,13 @@ function SpotterHUD:Refresh()
             f.compassBar:SetBackdrop(nil)
         end
         f.compassBar.entry = nil
-        RotateArrowTexture(f.compassBar.arrowTex, 0)
-        f.compassBar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.6)
+        if f.compassBar.arrowTex then
+            f.compassBar.arrowTex:Hide()
+        end
+        if f.compassBar.noSignalDot then
+            f.compassBar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.65)
+            f.compassBar.noSignalDot:Show()
+        end
         f.compassBar.nameFs:SetText(L["Target Radar"])
         f.compassBar.distFs:SetText("|cff8b949e" .. L["No targets currently detected."] .. "|r")
         f.actionPanel:Hide()
@@ -1223,6 +1305,21 @@ function SpotterHUD:OnAlert(alert)
         end
     end
     self:Refresh()
+end
+
+function SpotterHUD:TrackEntry(info, forcedStance)
+    if not (ns.Spotter and ns.Spotter.TrackPlayer) then return nil end
+    local name = (type(info) == "table" and (info.displayName or info.targetName or info.firstName)) or (type(info) == "string" and info)
+    if not name or name == "" then return nil end
+    local guild = type(info) == "table" and info.guild or nil
+    local classFile = type(info) == "table" and info.classFile or nil
+    local level = type(info) == "table" and info.level or nil
+    local guid = type(info) == "table" and info.guid or nil
+    local stanceArg = forcedStance
+    if stanceArg ~= "ENEMY" and stanceArg ~= "ALLY" and stanceArg ~= "SAME" and stanceArg ~= "WATCHLIST" and stanceArg ~= "FRIEND" then
+        stanceArg = nil
+    end
+    return ns.Spotter:TrackPlayer(name, guild, classFile, level, guid, stanceArg)
 end
 
 function SpotterHUD:Init()

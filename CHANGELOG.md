@@ -5,6 +5,19 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-11-15
+### Fixed
+- **Eliminated Repeated In-Game Lua Error Sounds & Blizzard Throttling Popups (`Core/Compat.lua`, `Providers/Watchlist.lua`, `Providers/WorldBuffs.lua`, `Providers/Clan.lua`, `UI/Minimap.lua`, `UI/LFGFrameTab.lua`):**
+  - Added `Safe.Bool()` in `Core/Compat.lua`, fixing repeated nil-call errors in `Watchlist` unit mouseover tooltips (`Watchlist.lua:789`, `919`, `922`).
+  - Replaced unsupported Lua `os.date` / `os.time` globals with native WoW `date` / `time` functions in `Providers/WorldBuffs.lua` (`GetDarkmoonFaireStatus`, `RecordPeakHourSample`, `BuildCooldownEntry`).
+  - Fixed malformed Lua frontier patterns (`%flfm%f` -> `%f[%w]lfm%f[%W]`, etc.) in `Providers/Clan.lua` chat LFG/keyword scanners (`DUNGEON_KEYWORDS`, `LFG_PATTERNS`, and role/mode classifiers).
+  - Hardened `UI/Minimap.lua` `UpdateBadge()` against non-table `GetUnreadSummary()` payloads and removed addon-context `ToggleCharacter` calls in `UI/LFGFrameTab.lua` (`OpenOfficialModule("alts")`) to prevent `Blizzard_TextStatusBar` secret-number taint on `CharacterFrame`.
+- **Target Radar & Directional Arrow Overhaul (`Providers/ClanSpotter.lua`, `UI/ClanSpotterHUD.lua`):**
+  - Removed speculative stale-anchor world dead-reckoning (`_anchorMapX`/`_anchorMapY`) and camera-corrupted `_lastWorldHeading` fallbacks so the HUD never spins backwards toward old ground anchors when tracking enemies or ungrouped guildmates off-plate.
+  - Fixed visible nameplate screen bearing (`ComputeScreenAngleAndRadial`) using the underlying `plate.UnitFrame` / `plate` center with a forward-hemisphere floor so players visibly in front never invert into `"Behind"`.
+  - Replaced the misleading fixed-upward `0°` arrow on `"Nearby"` targets without live directional vectors (`not kin.hasAngle`) with a clean stance-colored radar orb (`noSignalDot`) while reserving the rotating 360° `Media/arrow.tga` needle strictly for verified bearings (live `UnitPosition` / `C_Map` group vectors, visible nameplates, or soft-target reticles).
+  - Hardened click-to-target secure macros (`BuildTargetMacroText` + `ApplySecureMacroAttributes`) to emit `/target [@liveUnit,exists]` only for freshly verified live units, stopped Right-click from misfiring target macros while opening the context menu, prevented WoW: Forever `"FirstName Surname"` collisions in `UnitMatchesEntry` and `IsEntryCurrentlyTargeted`, synchronized combat fallback target selection (`focusedKey` / current target), and wired `SpotterHUD:TrackEntry` for unit right-click `"Track on Radar"` menus.
+
 ## [0.2.5] - 2026-11-15
 ### Added
 - **World Buffs Opt-In Guild Sync (`SCentral1 WB`), Separated Onyxia/Nefarian Cooldowns & Peak Drop Analytics (`Providers/WorldBuffs.lua`, `Providers/Clan.lua`, `UI/LFGFrameTab.lua`, `UI/SocialPanels.lua`):** Switched drop timing to `GetServerTime()`, split Dragonslayer into independent **Onyxia (6h)** and **Nefarian (8h)** head-turn-in cooldowns, updated **Spirit of Zandalar (Hakkar)** to reflect zero server cooldown while still recording last observed turn-in time, tracked **Songflower Serenade (~25m Felwood respawn)** and **Darkmoon Faire calendar schedule + Sayge 4h `/played` personal cooldown**, added per-realm peak drop hour analytics (`worldBuffsHistory`), and added strictly opt-in (`clanSync == true`) guild buff sync.

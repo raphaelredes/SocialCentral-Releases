@@ -3914,20 +3914,17 @@ function LFGFrameTab:OpenOfficialModule(moduleId)
     end
 
     if mod == "alts" then
-        if not (_G.CharacterFrame and _G.CharacterFrame:IsShown()) and _G.ToggleCharacter then
-            pcall(_G.ToggleCharacter, "PaperDollFrame")
-        end
-        local function ShowAlts()
+        if _G.CharacterFrame and _G.CharacterFrame:IsShown() then
             LFGFrameTab:AttachCharacterUI()
             LFGFrameTab:EnsureCharacterSideTab()
-            local host = _G.CharacterFrame
-            if host and host:IsShown() and ns.UI and ns.UI.OpenEmbedded then
-                ns.UI:OpenEmbedded(host, { "alts" }, "alts")
-            elseif ns.UI and ns.UI.ShowHub then
-                ns.UI:ShowHub("alts")
+            if ns.UI and ns.UI.OpenEmbedded then
+                ns.UI:OpenEmbedded(_G.CharacterFrame, { "alts" }, "alts")
+                return
             end
         end
-        if C_Timer and C_Timer.After then C_Timer.After(0, ShowAlts) else ShowAlts() end
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub("alts")
+        end
         return
     end
 
