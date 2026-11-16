@@ -7,12 +7,16 @@ local Compat = ns.Compat
 local Store = {
     social = {},       -- [key] -> row
     nearby = {},       -- [lookupKey] -> row
+    guildRosterRanks = {}, -- [lookupKey] -> { rankIndex, rankName, guid, displayName, online }
     guildInfo = {
         inGuild = false,
         name = nil,
         motd = nil,
         onlineCount = 0,
         totalCount = 0,
+        myRankIndex = nil,
+        myRankName = nil,
+        isGuildLeader = false,
     },
 }
 
@@ -109,6 +113,36 @@ function Store:GetClanScopeData(forcePrune)
         end
         if bucket.clanInfo.editMode ~= "ALL" and bucket.clanInfo.editMode ~= "OFFICERS" then
             bucket.clanInfo.editMode = "OFFICERS"
+        end
+        if type(bucket.hierarchy) ~= "table" then
+            bucket.hierarchy = {
+                rev = 0,
+                updatedAt = 0,
+                updatedBy = "",
+                diplomacyMode = "LEADER",
+                diplomacyMaxRank = 1,
+                infoMode = (bucket.clanInfo.editMode == "ALL") and "ALL" or "OFFICERS",
+                infoMaxRank = 1,
+                eventModMode = "OFFICERS",
+                eventModMaxRank = 1,
+                allianceMinRank = -1,
+            }
+        else
+            local h = bucket.hierarchy
+            if h.diplomacyMode ~= "LEADER" and h.diplomacyMode ~= "OFFICERS" and h.diplomacyMode ~= "RANK" then
+                h.diplomacyMode = "LEADER"
+            end
+            h.diplomacyMaxRank = math.max(0, math.min(9, tonumber(h.diplomacyMaxRank) or 1))
+            if h.infoMode ~= "LEADER" and h.infoMode ~= "OFFICERS" and h.infoMode ~= "RANK" and h.infoMode ~= "ALL" then
+                h.infoMode = (bucket.clanInfo.editMode == "ALL") and "ALL" or "OFFICERS"
+            end
+            h.infoMaxRank = math.max(0, math.min(9, tonumber(h.infoMaxRank) or 1))
+            if h.eventModMode ~= "LEADER" and h.eventModMode ~= "OFFICERS" and h.eventModMode ~= "RANK" then
+                h.eventModMode = "OFFICERS"
+            end
+            h.eventModMaxRank = math.max(0, math.min(9, tonumber(h.eventModMaxRank) or 1))
+            local ar = tonumber(h.allianceMinRank)
+            h.allianceMinRank = (ar and ar >= 0 and ar <= 9) and ar or -1
         end
         normalizedClanBuckets[bucket] = true
     end

@@ -185,7 +185,7 @@ local function PopulateTooltip(tt)
     end
 
     tt:AddLine(" ")
-    tt:AddLine(L["Left-click: open settings\nAlt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+    tt:AddLine(L["Left-click: choose Main Window or Settings\nAlt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
 end
 
 local function OpenViaOfficialOrHub(modId)
@@ -341,8 +341,92 @@ local function UpdateBadge()
     end
 end
 
+local leftChooserFrame
+
+local function OpenMainWindowFromMinimap()
+    if ns.UI and ns.UI.ShowHub then
+        ns.UI:ShowHub()
+    elseif ns.UI and ns.UI.Toggle then
+        ns.UI:Toggle()
+    end
+end
+
+local function OpenSettingsFromMinimap()
+    if ns.Settings and ns.Settings.Toggle then
+        ns.Settings:Toggle()
+    elseif ns.Settings and ns.Settings.Open then
+        ns.Settings:Open()
+    end
+end
+
+local function OpenLeftClickMenu(anchor)
+    if MenuUtil and MenuUtil.CreateContextMenu then
+        MenuUtil.CreateContextMenu(anchor, function(_, root)
+            root:CreateTitle("SocialCentral")
+            root:CreateButton(L["Open Main Window"], OpenMainWindowFromMinimap)
+            root:CreateButton(L["Open Settings"], OpenSettingsFromMinimap)
+        end)
+        return
+    end
+
+    if not leftChooserFrame then
+        local f = CreateFrame("Frame", "SocialCentralMinimapLeftChooser", UIParent, "BackdropTemplate")
+        f:SetSize(188, 86)
+        f:SetFrameStrata("DIALOG")
+        f:SetFrameLevel(160)
+        f:EnableMouse(true)
+        f:SetClampedToScreen(true)
+        table.insert(UISpecialFrames, "SocialCentralMinimapLeftChooser")
+
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        title:SetPoint("TOPLEFT", 12, -10)
+        title:SetPoint("TOPRIGHT", -12, -10)
+        title:SetJustifyH("CENTER")
+        title:SetText("SocialCentral")
+        f.title = title
+
+        local btnMain = ns.Theme and ns.Theme:CreateButton(f, 164, 24, L["Open Main Window"], "primary")
+        btnMain:SetPoint("TOP", title, "BOTTOM", 0, -6)
+        btnMain:SetScript("OnClick", function()
+            f:Hide()
+            OpenMainWindowFromMinimap()
+        end)
+        f.btnMain = btnMain
+
+        local btnSettings = ns.Theme and ns.Theme:CreateButton(f, 164, 24, L["Open Settings"], "default")
+        btnSettings:SetPoint("TOP", btnMain, "BOTTOM", 0, -4)
+        btnSettings:SetScript("OnClick", function()
+            f:Hide()
+            OpenSettingsFromMinimap()
+        end)
+        f.btnSettings = btnSettings
+
+        f:Hide()
+        leftChooserFrame = f
+    end
+
+    if leftChooserFrame:IsShown() then
+        leftChooserFrame:Hide()
+        return
+    end
+
+    if ns.Theme and ns.Theme.ApplyBackdrop then
+        ns.Theme:ApplyBackdrop(leftChooserFrame, "window")
+        ns.Theme:StyleButton(leftChooserFrame.btnMain, "primary")
+        ns.Theme:StyleButton(leftChooserFrame.btnSettings, "default")
+    end
+    leftChooserFrame:ClearAllPoints()
+    if anchor and anchor.GetCenter then
+        leftChooserFrame:SetPoint("TOPRIGHT", anchor, "BOTTOMLEFT", -2, -2)
+    else
+        leftChooserFrame:SetPoint("CENTER")
+    end
+    leftChooserFrame:Show()
+end
+
 local function HandleMinimapClick(anchor, mouseButton)
     if mouseButton == "RightButton" then
+        if leftChooserFrame and leftChooserFrame:IsShown() then leftChooserFrame:Hide() end
         if GameTooltip then GameTooltip:Hide() end
         OpenContextMenu(anchor)
     elseif IsAltKeyDown and IsAltKeyDown() then
@@ -355,12 +439,9 @@ local function HandleMinimapClick(anchor, mouseButton)
         if ns.Watchlist then
             ns.Watchlist:CheckNext()
         end
-    elseif ns.Settings and ns.Settings.Toggle then
-        ns.Settings:Toggle()
-    elseif ns.Settings and ns.Settings.Open then
-        ns.Settings:Open()
-    elseif ns.UI then
-        ns.UI:Toggle()
+    else
+        if GameTooltip then GameTooltip:Hide() end
+        OpenLeftClickMenu(anchor)
     end
 end
 

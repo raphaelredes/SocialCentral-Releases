@@ -46,6 +46,10 @@ local clanLfgDungeonsOnly = false
 local clanLfgSourceFilter = "ALL" -- "ALL" | "CLAN" | "ALLY" | "FRIENDS"
 local clanLfgQuery = ""
 local clanPeerQuery = ""
+local clanPeerStatusFilter = "all"
+local clanPeerRankFilter = nil
+local clanPeerClassFilter = nil
+local clanPeerSortBy = "level_desc"
 local clanProfQuery = ""
 local clanProfFilter = "ALL"
 local clanProfSourceFilter = "ALL"
@@ -240,6 +244,9 @@ local function EnsureModal()
     m.title:SetPoint("TOPRIGHT", -42, -14)
     m.title:SetJustifyH("LEFT")
     m.title:SetWordWrap(true)
+    if Theme.DecorateSectionHeader then
+        Theme:DecorateSectionHeader(m, m.title, 360)
+    end
 
     local topCloseBtn = Theme:CreateButton(m, 22, 20, "X", "default")
     topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
@@ -589,6 +596,30 @@ local function OpenGuildInviteModal()
     m.input:SetScript("OnEnterPressed", Commit)
     m:Show()
     m.input:SetFocus()
+end
+
+local function OpenPublicNoteModal(memberItem)
+    if not memberItem or not memberItem.lookupKey then return end
+    local m = EnsureModal()
+    Theme:ApplyBackdrop(m, "window")
+    m.title:SetText(L["Edit Guild Public Note (%s):"]:format(memberItem.displayName or "?"))
+    m.input:SetText(memberItem.note or "")
+    m.btnSave:Show()
+    Theme:SetButtonText(m.btnSave, L["Save"])
+
+    local function Commit()
+        if ns.Clan and ns.Clan.SetMemberPublicNote then
+            ns.Clan:SetMemberPublicNote(memberItem.lookupKey, m.input:GetText() or "")
+        end
+        m.input:ClearFocus()
+        m:Hide()
+    end
+
+    m.btnSave:SetScript("OnClick", Commit)
+    m.input:SetScript("OnEnterPressed", Commit)
+    m:Show()
+    m.input:SetFocus()
+    m.input:HighlightText()
 end
 
 local function ReflowEventModal()
@@ -1270,25 +1301,39 @@ local function OpenClanInfoModal()
 
         m._editMode = "OFFICERS"
         m._modeBtns = {}
-        local btnOff = Theme:CreateButton(m, 146, 22, L["Officers Only"], "default")
-        Theme:AutoFitButton(btnOff, 118, 16, 200)
-        btnOff:SetPoint("TOPLEFT", 16, -304)
+        local btnLeader = Theme:CreateButton(m, 140, 22, L["Guild Leader Only"], "default")
+        Theme:AutoFitButton(btnLeader, 114, 14, 180)
+        btnLeader:SetPoint("TOPLEFT", 16, -304)
+        btnLeader:SetScript("OnClick", function()
+            if not m._isLeader then return end
+            m._editMode = "LEADER"
+            Theme:SetButtonActive(btnLeader, true, "default")
+            Theme:SetButtonActive(m._btnOff, false, "default")
+            Theme:SetButtonActive(m._btnAll, false, "default")
+        end)
+
+        local btnOff = Theme:CreateButton(m, 140, 22, L["Officers Only"], "default")
+        Theme:AutoFitButton(btnOff, 110, 14, 175)
+        btnOff:SetPoint("LEFT", btnLeader, "RIGHT", 8, 0)
         btnOff:SetScript("OnClick", function()
-            if not m._isOfficer then return end
+            if not m._isLeader then return end
             m._editMode = "OFFICERS"
+            Theme:SetButtonActive(btnLeader, false, "default")
             Theme:SetButtonActive(btnOff, true, "default")
             Theme:SetButtonActive(m._btnAll, false, "default")
         end)
 
-        local btnAll = Theme:CreateButton(m, 164, 22, L["All Guild Members"], "default")
-        Theme:AutoFitButton(btnAll, 130, 16, 210)
+        local btnAll = Theme:CreateButton(m, 154, 22, L["All Guild Members"], "default")
+        Theme:AutoFitButton(btnAll, 120, 14, 185)
         btnAll:SetPoint("LEFT", btnOff, "RIGHT", 8, 0)
         btnAll:SetScript("OnClick", function()
-            if not m._isOfficer then return end
+            if not m._isLeader then return end
             m._editMode = "ALL"
+            Theme:SetButtonActive(btnLeader, false, "default")
             Theme:SetButtonActive(btnOff, false, "default")
             Theme:SetButtonActive(btnAll, true, "default")
         end)
+        m._btnLeader = btnLeader
         m._btnOff = btnOff
         m._btnAll = btnAll
 
@@ -1331,12 +1376,16 @@ local function OpenClanInfoModal()
     end
 
     local info = ns.Clan and ns.Clan:GetClanInfo() or {}
+    local pol = ns.Clan and ns.Clan.GetGuildHierarchyPolicy and ns.Clan:GetGuildHierarchyPolicy() or {}
     local canEdit, isOfficer = false, false
     if ns.Clan and ns.Clan.CanEditClanManagement then
         canEdit, isOfficer = ns.Clan:CanEditClanManagement()
     end
+    local isLeader = (ns.Clan and ns.Clan.IsGuildLeader and ns.Clan:IsGuildLeader()) == true
     clanInfoModalFrame._isOfficer = isOfficer
-    clanInfoModalFrame._editMode = (info.editMode == "ALL") and "ALL" or "OFFICERS"
+    clanInfoModalFrame._isLeader = isLeader
+    local curInfoMode = pol.infoMode or ((info.editMode == "ALL") and "ALL" or "OFFICERS")
+    clanInfoModalFrame._editMode = curInfoMode
 
     Theme:ApplyBackdrop(clanInfoModalFrame, "window")
     Theme:StyleButton(clanInfoModalFrame.topCloseBtn, "default")
@@ -1346,7 +1395,8 @@ local function OpenClanInfoModal()
 
     local updater = (info.updatedBy and info.updatedBy ~= "") and info.updatedBy or "-"
     local age = (info.updatedAt and info.updatedAt > 0) and Compat.FormatRelativeTime(info.updatedAt, L) or "-"
-    clanInfoModalFrame.metaLbl:SetText(string.format("|cff3fb950[%s]|r  ·  %s: %s (%s)", L["Guild-Isolated Scope"], L["Updated by"], updater, age))
+    local dipAuth = (ns.Clan and ns.Clan.GetDiplomacyAuthoritySummary and ns.Clan:GetDiplomacyAuthoritySummary()) or L["Guild Leader Only"]
+    clanInfoModalFrame.metaLbl:SetText(string.format("|cff3fb950[%s]|r  ·  %s: %s (%s)  ·  %s", L["Guild-Isolated Scope"], L["Updated by"], updater, age, L["Diplomacy: %s"]:format(dipAuth)))
 
     clanInfoModalFrame.sumIn:SetText(info.summary or "")
     clanInfoModalFrame.schIn:SetText(info.schedule or "")
@@ -1358,10 +1408,12 @@ local function OpenClanInfoModal()
         box:UpdatePlaceholder()
     end
 
-    Theme:SetButtonActive(clanInfoModalFrame._btnOff, clanInfoModalFrame._editMode == "OFFICERS", "default")
-    Theme:SetButtonActive(clanInfoModalFrame._btnAll, clanInfoModalFrame._editMode == "ALL", "default")
-    clanInfoModalFrame._btnOff:SetEnabled(isOfficer)
-    clanInfoModalFrame._btnAll:SetEnabled(isOfficer)
+    Theme:SetButtonActive(clanInfoModalFrame._btnLeader, curInfoMode == "LEADER", "default")
+    Theme:SetButtonActive(clanInfoModalFrame._btnOff, curInfoMode == "OFFICERS" or curInfoMode == "RANK", "default")
+    Theme:SetButtonActive(clanInfoModalFrame._btnAll, curInfoMode == "ALL", "default")
+    clanInfoModalFrame._btnLeader:SetEnabled(isLeader)
+    clanInfoModalFrame._btnOff:SetEnabled(isLeader)
+    clanInfoModalFrame._btnAll:SetEnabled(isLeader)
     clanInfoModalFrame.btnSave:SetEnabled(canEdit)
     clanInfoModalFrame:Show()
 end
@@ -1483,6 +1535,11 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
         diplomacyModalFrame = m
     end
 
+    local canDip, authSummary = true, L["Guild Leader Only"]
+    if ns.Clan and ns.Clan.CanManageDiplomacy then
+        canDip, authSummary = ns.Clan:CanManageDiplomacy()
+    end
+
     diplomacyModalFrame._prefillFaction = prefillFaction
     diplomacyModalFrame._stance = (prefillStance == "ALLY" or prefillStance == "NEUTRAL") and prefillStance or "ENEMY"
     Theme:ApplyBackdrop(diplomacyModalFrame, "window")
@@ -1492,6 +1549,7 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
     Theme:StyleButton(diplomacyModalFrame.tgtGuildBtn, "default")
     for _, item in ipairs(diplomacyModalFrame._stanceBtns) do
         Theme:SetButtonActive(item.btn, diplomacyModalFrame._stance == item.id, item.id == "ENEMY" and "danger" or "default")
+        if item.btn.SetEnabled then item.btn:SetEnabled(canDip) end
     end
     diplomacyModalFrame.guildIn:SetText(prefillGuild or "")
     local existingReason = ""
@@ -1500,11 +1558,22 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
         if entry and entry.reason then existingReason = entry.reason end
     end
     diplomacyModalFrame.reasonIn:SetText(existingReason)
-    diplomacyModalFrame:Show()
-    if not prefillGuild or prefillGuild == "" then
-        diplomacyModalFrame.guildIn:SetFocus()
+    diplomacyModalFrame.guildIn:SetEnabled(canDip)
+    diplomacyModalFrame.reasonIn:SetEnabled(canDip)
+    diplomacyModalFrame.tgtGuildBtn:SetEnabled(canDip)
+    diplomacyModalFrame.btnSave:SetEnabled(canDip)
+    if canDip then
+        diplomacyModalFrame.tipFs:SetText("|cff3fb950" .. L["Diplomacy Authority: %s"]:format(authSummary) .. "|r  ·  " .. L["Players from Enemy or Ally clans appearing on your screen will trigger Spotter alerts & Target Radar."])
     else
-        diplomacyModalFrame.reasonIn:SetFocus()
+        diplomacyModalFrame.tipFs:SetText("|cffff6666" .. L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authSummary) .. "|r")
+    end
+    diplomacyModalFrame:Show()
+    if canDip then
+        if not prefillGuild or prefillGuild == "" then
+            diplomacyModalFrame.guildIn:SetFocus()
+        else
+            diplomacyModalFrame.reasonIn:SetFocus()
+        end
     end
 end
 
@@ -2038,6 +2107,59 @@ local function OpenRowMenu(row, item, tabOverride)
             OpenCopyModal(targetName)
         end)
 
+        if item._isGuildRosterRow and charKey and targetName and not Compat.IsMe(targetName, item.guid) and ns.Clan and ns.Clan.GetSelfGuildRank then
+            local selfRank = ns.Clan:GetSelfGuildRank()
+            local canPromote = selfRank.canPromote and item.rankIndex and item.rankIndex > 1
+            local canDemote = selfRank.canDemote and item.rankIndex and item.rankIndex > 0
+            local canNote = selfRank.canEditPublicNote
+            local canAssign = (selfRank.isGuildLeader or selfRank.canPromote or selfRank.canDemote) and C_GuildInfo and C_GuildInfo.SetGuildRankOrder
+            local canAllyMgr = selfRank.isGuildLeader and ns.Clan.SetMemberAllianceAccess
+            if canPromote or canDemote or canNote or canAssign or canAllyMgr then
+                root:CreateDivider()
+                local curRankStr = (item.rankName and item.rankName ~= "") and (" (" .. item.rankName .. ")") or ""
+                root:CreateTitle(L["Guild Hierarchy"] .. curRankStr)
+                if canPromote then
+                    root:CreateButton(L["Promote in Guild"], function()
+                        ns.Clan:PromoteMember(charKey, targetName, item.guid)
+                    end)
+                end
+                if canDemote then
+                    root:CreateButton(L["Demote in Guild"], function()
+                        ns.Clan:DemoteMember(charKey, targetName, item.guid)
+                    end)
+                end
+                if canAssign then
+                    local ranks = ns.Clan.GetGuildRanks and ns.Clan:GetGuildRanks() or {}
+                    if #ranks > 1 then
+                        local assignBtn = root:CreateButton(L["Assign Game Rank"])
+                        if assignBtn and assignBtn.CreateButton then
+                            for _, rk in ipairs(ranks) do
+                                if rk.rankIndex >= 1 then
+                                    local rIdx = rk.rankIndex
+                                    local rLabel = string.format("#%d %s", rIdx, rk.name)
+                                    assignBtn:CreateRadio(rLabel, function()
+                                        return item.rankIndex == rIdx
+                                    end, function()
+                                        ns.Clan:SetMemberRank(charKey, item.guid, rIdx)
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                end
+                if canNote then
+                    root:CreateButton(L["Edit Public Note"], function()
+                        OpenPublicNoteModal(item)
+                    end)
+                end
+                if canAllyMgr then
+                    root:CreateButton(L["Alliance"], function()
+                        OpenAllianceManagementModal()
+                    end)
+                end
+            end
+        end
+
         if tab == "watchlist" then
             root:CreateDivider()
             root:CreateButton(L["Remove"], function()
@@ -2059,13 +2181,21 @@ local function CreateListRow(parent, _, rowHeight)
     row:SetHeight(rowHeight)
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-    row.dot = row:CreateTexture(nil, "ARTWORK")
+    row.statusBar = row:CreateTexture(nil, "ARTWORK", nil, 1)
+    row.statusBar:SetWidth(3)
+    row.statusBar:SetPoint("TOPLEFT", row, "TOPLEFT", 2, -4)
+    row.statusBar:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 2, 4)
+    row.statusBar:SetColorTexture(0.35, 0.75, 1.0, 0.75)
+
+    row.dot = row:CreateTexture(nil, "ARTWORK", nil, 2)
     row.dot:SetSize(8, 8)
-    row.dot:SetPoint("LEFT", 9, 6)
+    row.dot:SetPoint("LEFT", 9, 0)
+    row.dot:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
+    row.dot._scKeepTexture = true
 
     row.btnNotifyBell = CreateFrame("Button", nil, row)
-    row.btnNotifyBell:SetSize(16, 16)
-    row.btnNotifyBell:SetPoint("TOPLEFT", 21, -4)
+    row.btnNotifyBell:SetSize(15, 15)
+    row.btnNotifyBell:SetPoint("LEFT", row.dot, "RIGHT", 4, 0)
     row.btnNotifyBell:SetHitRectInsets(-3, -3, -3, -3)
     row.btnNotifyBell.tex = row.btnNotifyBell:CreateTexture(nil, "ARTWORK")
     row.btnNotifyBell.tex:SetAllPoints()
@@ -2093,6 +2223,12 @@ local function CreateListRow(parent, _, rowHeight)
     end)
     row.btnNotifyBell:Hide()
 
+    row.classIcon = row:CreateTexture(nil, "ARTWORK", nil, 2)
+    row.classIcon:SetSize(20, 20)
+    row.classIcon:SetPoint("LEFT", row.dot, "RIGHT", 6, 0)
+    row.classIcon:SetTexture("Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES")
+    row.classIcon:Hide()
+
     row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     row.nameText:SetPoint("TOPLEFT", 26, -5)
     row.nameText:SetJustifyH("LEFT")
@@ -2107,9 +2243,39 @@ local function CreateListRow(parent, _, rowHeight)
     row.btnRemove:SetPoint("RIGHT", -8, 0)
 
     row.btnInvite = Theme:CreateButton(row, 78, 22, L["Invite"], "default")
+    row.btnInvite.ico = row.btnInvite:CreateTexture(nil, "OVERLAY", nil, 2)
+    row.btnInvite.ico:SetSize(14, 14)
+    row.btnInvite.ico:SetPoint("CENTER")
+    row.btnInvite.ico:SetTexture("Interface\\PaperDollInfoFrame\\Character-Plus")
+    row.btnInvite.ico:SetVertexColor(0.45, 0.95, 0.55)
+    row.btnInvite.ico:Hide()
+    row.btnInvite:HookScript("OnEnter", function(selfBtn)
+        if GameTooltip and selfBtn._scCompactIcon then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:SetText(L["Invite to Group"], 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+    row.btnInvite:HookScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
     Theme:AutoFitButton(row.btnInvite, 66, 18)
+
     row.btnWhisper = Theme:CreateButton(row, 84, 22, L["Whisper"], "default")
+    row.btnWhisper.ico = row.btnWhisper:CreateTexture(nil, "OVERLAY", nil, 2)
+    row.btnWhisper.ico:SetSize(13, 13)
+    row.btnWhisper.ico:SetPoint("CENTER")
+    row.btnWhisper.ico:SetTexture("Interface\\Icons\\INV_Letter_15")
+    row.btnWhisper.ico:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    row.btnWhisper.ico:Hide()
+    row.btnWhisper:HookScript("OnEnter", function(selfBtn)
+        if GameTooltip and selfBtn._scCompactIcon then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:SetText(L["Whisper / Chat"], 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+    row.btnWhisper:HookScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
     Theme:AutoFitButton(row.btnWhisper, 72, 18)
+
     row.btnAction = Theme:CreateButton(row, 86, 22, L["Check"], "primary")
     Theme:AutoFitButton(row.btnAction, 70, 18)
 
@@ -2347,7 +2513,7 @@ local function UpdateListRow(row, item, idx, palette)
 
     local tab = item._tab or activeTab
     local hex = item.classFile and Compat.ClassHex(item.classFile) or ((palette.key == "blizzard" and item.status ~= "offline") and "|cffffd100" or Compat.ClassHex(nil))
-    local levelStr = item.level and item.level > 0 and (" |cff9da7b5[" .. L["Level %d"]:format(item.level) .. "]|r") or ""
+    local levelStr = item.level and item.level > 0 and (" |cff9da7b5" .. L["Lv %d"]:format(item.level) .. "|r") or ""
 
     row.btnRemove:Hide()
     row.btnInvite:Hide()
@@ -2362,23 +2528,59 @@ local function UpdateListRow(row, item, idx, palette)
         row.btnNotifyBell:Hide()
     end
 
+    local classCoords = item.classFile and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[item.classFile]
+    local showClassIcon = classCoords ~= nil
+    if row.classIcon then
+        if showClassIcon then
+            row.classIcon:SetTexCoord(classCoords[1] + 0.02, classCoords[2] - 0.02, classCoords[3] + 0.02, classCoords[4] - 0.02)
+            row.classIcon:ClearAllPoints()
+            if showBell and row.btnNotifyBell then
+                row.classIcon:SetPoint("LEFT", row.btnNotifyBell, "RIGHT", 4, 0)
+            else
+                row.classIcon:SetPoint("LEFT", row.dot, "RIGHT", 6, 0)
+            end
+            row.classIcon:Show()
+        else
+            row.classIcon:Hide()
+        end
+    end
+
     if row.SetClipsChildren then
         row:SetClipsChildren(true)
     end
     local rowW = row:GetWidth() or (frame and frame:GetWidth()) or 760
     local compactRow = rowW > 0 and rowW < 520
-    local btnPad = compactRow and 10 or 18
-    local btnGap = compactRow and -3 or -6
-    local minInvW = compactRow and 50 or 66
-    local minWhispW = compactRow and 54 or 72
-    local minActW = compactRow and 50 or 68
-    local minWatchAddW = compactRow and 68 or 86
-    local maxRowBtnW = compactRow and 84 or 150
+    local btnPad = compactRow and 12 or 20
+    local btnGap = compactRow and -4 or -6
+    local minInvW = compactRow and 24 or 72
+    local minWhispW = compactRow and 24 or 80
+    local minActW = compactRow and 56 or 72
+    local minWatchAddW = compactRow and 74 or 90
+    local maxRowBtnW = compactRow and 106 or 155
+
+    local function SyncRowActionStyle(btn, fullLabel, isIconMode)
+        if not btn then return end
+        btn._scCompactIcon = isIconMode == true
+        if isIconMode then
+            btn._scAutoFit = false
+            btn:SetSize(24, 22)
+            Theme:SetButtonText(btn, "")
+            if btn.ico then btn.ico:Show() end
+        else
+            if btn.ico then btn.ico:Hide() end
+            Theme:SetButtonText(btn, fullLabel)
+            Theme:AutoFitButton(btn, (btn == row.btnWhisper) and minWhispW or minInvW, btnPad, maxRowBtnW)
+        end
+    end
 
     local leftMostAnchor
     local scBadge = (item.lookupKey and ns.Chat and ((ns.Chat.GetLookupKeyAddonBadge and ns.Chat:GetLookupKeyAddonBadge(item.lookupKey)) or (ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(item.lookupKey) and " |cff3fb950[SC]|r"))) or ""
     if tab == "watchlist" then
         Theme:ApplyStatusColor(row.dot, item.status or "unknown")
+        if row.statusBar then
+            Theme:ApplyStatusColor(row.statusBar, item.status or "unknown")
+            row.statusBar:SetAlpha((item.status == "online") and 0.90 or ((item.status == "unknown") and 0.45 or 0.25))
+        end
         local star = item.favorite and "|cffffd24d* |r" or ""
         local grp = (type(item.group) == "string" and item.group ~= "") and (" |cff8ab4f8[" .. item.group .. "]|r") or ""
         local warn = item.truncatedWarning and " |cffff9b3d[!50+]|r" or ""
@@ -2388,8 +2590,8 @@ local function UpdateListRow(row, item, idx, palette)
         row.btnRemove:Hide()
         row.btnAction:Hide()
         if item.status == "online" then
-            Theme:AutoFitButton(row.btnInvite, minInvW, btnPad, maxRowBtnW)
-            Theme:AutoFitButton(row.btnWhisper, minWhispW, btnPad, maxRowBtnW)
+            SyncRowActionStyle(row.btnInvite, L["Invite"], compactRow)
+            SyncRowActionStyle(row.btnWhisper, L["Whisper"], compactRow)
             row.btnInvite:Show()
             row.btnInvite:ClearAllPoints()
             row.btnInvite:SetPoint("RIGHT", compactRow and -5 or -8, 0)
@@ -2415,6 +2617,10 @@ local function UpdateListRow(row, item, idx, palette)
             dotState = "app"
         end
         Theme:ApplyStatusColor(row.dot, dotState)
+        if row.statusBar then
+            Theme:ApplyStatusColor(row.statusBar, dotState)
+            row.statusBar:SetAlpha(item.online and 0.90 or 0.22)
+        end
 
         local meta = (item.lookupKey and ns.Store)
             and ((ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(item.lookupKey)) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(item.lookupKey)))
@@ -2453,8 +2659,8 @@ local function UpdateListRow(row, item, idx, palette)
         local canWhisperNow = item.online == true
 
         if canInviteNow then
-            Theme:AutoFitButton(row.btnInvite, minInvW, btnPad, maxRowBtnW)
-            Theme:AutoFitButton(row.btnWhisper, minWhispW, btnPad, maxRowBtnW)
+            SyncRowActionStyle(row.btnInvite, L["Invite"], compactRow)
+            SyncRowActionStyle(row.btnWhisper, L["Whisper"], compactRow)
             row.btnInvite:Show()
             row.btnInvite:ClearAllPoints()
             row.btnInvite:SetPoint("RIGHT", compactRow and -5 or -8, 0)
@@ -2463,7 +2669,7 @@ local function UpdateListRow(row, item, idx, palette)
             row.btnWhisper:SetPoint("RIGHT", row.btnInvite, "LEFT", btnGap, 0)
             leftMostAnchor = row.btnWhisper
         elseif canWhisperNow then
-            Theme:AutoFitButton(row.btnWhisper, minWhispW, btnPad, maxRowBtnW)
+            SyncRowActionStyle(row.btnWhisper, L["Whisper"], compactRow)
             row.btnWhisper:Show()
             row.btnWhisper:ClearAllPoints()
             row.btnWhisper:SetPoint("RIGHT", compactRow and -5 or -8, 0)
@@ -2474,6 +2680,10 @@ local function UpdateListRow(row, item, idx, palette)
 
     elseif tab == "nearby" then
         Theme:ApplyStatusColor(row.dot, "nearby")
+        if row.statusBar then
+            Theme:ApplyStatusColor(row.statusBar, "nearby")
+            row.statusBar:SetAlpha(0.90)
+        end
         local srcTag = item.source and (" |cff6ec1e4[" .. item.source .. "]|r") or ""
         row.nameText:SetText(hex .. (item.displayName or "") .. "|r" .. levelStr .. srcTag .. scBadge)
 
@@ -2505,6 +2715,10 @@ local function UpdateListRow(row, item, idx, palette)
     elseif tab == "alts" then
         local isCurrent = (item.key == Compat.CharacterKey())
         Theme:ApplyStatusColor(row.dot, isCurrent and "online" or "offline")
+        if row.statusBar then
+            Theme:ApplyStatusColor(row.statusBar, isCurrent and "online" or "offline")
+            row.statusBar:SetAlpha(isCurrent and 0.92 or 0.28)
+        end
         local shownName = item.fullName or item.name or ""
         local roleBadge = isCurrent and (" |cff63e29a[" .. L["Current Character"] .. "]|r") or (" |cff9da7b5[" .. L["Alt"] .. "]|r")
         local factionTag = item.faction and (" |cff9da7b5[" .. item.faction .. "]|r") or ""
@@ -2530,13 +2744,16 @@ local function UpdateListRow(row, item, idx, palette)
 
     local anchorKey = leftMostAnchor or false
     local bellKey = showBell == true
-    if row._lastLeftAnchor ~= anchorKey or row._lastBellShown ~= bellKey then
+    local classKey = showClassIcon == true
+    if row._lastLeftAnchor ~= anchorKey or row._lastBellShown ~= bellKey or row._lastClassIconShown ~= classKey then
         row._lastLeftAnchor = anchorKey
         row._lastBellShown = bellKey
+        row._lastClassIconShown = classKey
+        local textLeftX = 24 + (bellKey and 19 or 0) + (classKey and 25 or 0)
         row.nameText:ClearAllPoints()
-        row.nameText:SetPoint("TOPLEFT", bellKey and 41 or 26, -5)
+        row.nameText:SetPoint("TOPLEFT", textLeftX, -5)
         row.subText:ClearAllPoints()
-        row.subText:SetPoint("BOTTOMLEFT", 26, 5)
+        row.subText:SetPoint("BOTTOMLEFT", textLeftX, 5)
         if leftMostAnchor then
             row.nameText:SetPoint("RIGHT", leftMostAnchor, "LEFT", -8, 0)
             row.subText:SetPoint("RIGHT", leftMostAnchor, "LEFT", -8, 0)
@@ -2663,13 +2880,19 @@ local function CreateEventRow(parent, _, rowHeight)
     row:SetHeight(rowHeight)
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
+    row.evtBar = row:CreateTexture(nil, "ARTWORK", nil, 1)
+    row.evtBar:SetWidth(3)
+    row.evtBar:SetPoint("TOPLEFT", row, "TOPLEFT", 2, -4)
+    row.evtBar:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 2, 4)
+    row.evtBar:SetColorTexture(0.95, 0.76, 0.24, 0.85)
+
     row.titleText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    row.titleText:SetPoint("TOPLEFT", 8, -7)
+    row.titleText:SetPoint("TOPLEFT", 10, -7)
     row.titleText:SetJustifyH("LEFT")
     row.titleText:SetWordWrap(false)
 
     row.subText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.subText:SetPoint("BOTTOMLEFT", 8, 7)
+    row.subText:SetPoint("BOTTOMLEFT", 10, 7)
     row.subText:SetJustifyH("LEFT")
     row.subText:SetWordWrap(false)
 
@@ -2895,7 +3118,7 @@ local function UpdateEventRow(row, evt, idx, palette)
 
     local isCreator = (myParsed and evt.creatorKey and myParsed.lookupKey == evt.creatorKey)
         or (myParsed and evt.creator and (myParsed.displayName == evt.creator or myParsed.firstName:lower() == evt.creator:lower()))
-    local canManage = (isCreator or (ns.Clan and ns.Clan:CanEditClanManagement())) == true
+    local canManage = (isCreator or (ns.Clan and ns.Clan.CanModerateEvents and ns.Clan:CanModerateEvents())) == true
 
     if row._lastCanManage ~= canManage then
         row._lastCanManage = canManage
@@ -2935,22 +3158,43 @@ local function FormatClanProfParts(item)
     return pList
 end
 
+local PEER_CLASS_TEX = "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES"
+
 local function CreatePeerRow(parent, _, rowHeight)
     local row = CreateFrame("Button", nil, parent, "BackdropTemplate")
     row:SetHeight(rowHeight)
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-    row.dot = row:CreateTexture(nil, "ARTWORK")
-    row.dot:SetSize(7, 7)
-    row.dot:SetPoint("LEFT", 8, 6)
+    row.statusBar = row:CreateTexture(nil, "ARTWORK", nil, 1)
+    row.statusBar:SetWidth(3)
+    row.statusBar:SetPoint("TOPLEFT", row, "TOPLEFT", 2, -4)
+    row.statusBar:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 2, 4)
+    row.statusBar:SetColorTexture(0.35, 0.75, 1.0, 0.80)
+
+    row.dot = row:CreateTexture(nil, "ARTWORK", nil, 2)
+    row.dot:SetSize(8, 8)
+    row.dot:SetPoint("LEFT", 9, 0)
+    row.dot:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
+    row.dot._scKeepTexture = true
+
+    row.classIcon = row:CreateTexture(nil, "ARTWORK", nil, 2)
+    row.classIcon:SetSize(20, 20)
+    row.classIcon:SetPoint("LEFT", row.dot, "RIGHT", 6, 0)
+    row.classIcon:SetTexture(PEER_CLASS_TEX)
+    row.classIcon:Hide()
+
+    row.rightText = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    row.rightText:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+    row.rightText:SetJustifyH("RIGHT")
+    row.rightText:SetWordWrap(false)
 
     row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    row.nameText:SetPoint("TOPLEFT", 20, -5)
+    row.nameText:SetPoint("TOPLEFT", 23, -5)
     row.nameText:SetJustifyH("LEFT")
     row.nameText:SetWordWrap(false)
 
     row.subText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.subText:SetPoint("BOTTOMLEFT", 20, 5)
+    row.subText:SetPoint("BOTTOMLEFT", 23, 5)
     row.subText:SetJustifyH("LEFT")
     row.subText:SetWordWrap(false)
 
@@ -2963,23 +3207,82 @@ local function CreatePeerRow(parent, _, rowHeight)
             if view == "diplomacy" then
                 if MenuUtil and MenuUtil.CreateContextMenu then
                     local entry = self._item
+                    local canDip, authSummary = false, L["Guild Leader Only"]
+                    if ns.Clan and ns.Clan.CanManageDiplomacy then
+                        canDip, authSummary = ns.Clan:CanManageDiplomacy()
+                    end
                     MenuUtil.CreateContextMenu(self, function(_, root)
                         root:CreateTitle(entry.name or "?")
-                        root:CreateButton(L["Edit Diplomacy Entry"], function()
-                            OpenDiplomacyModal(entry.name, entry.stance, entry.faction)
-                        end)
-                        root:CreateButton(L["Mark Ally"], function()
-                            if ns.Clan then ns.Clan:SetGuildStance(entry.name, "ALLY", entry.reason or "", entry.faction) end
-                        end)
-                        root:CreateButton(L["Mark Enemy"], function()
-                            if ns.Clan then ns.Clan:SetGuildStance(entry.name, "ENEMY", entry.reason or "", entry.faction) end
-                        end)
-                        root:CreateButton(L["Remove Diplomacy Entry"], function()
-                            if ns.Clan then ns.Clan:RemoveGuildDiplomacy(entry.key) end
-                        end)
+                        if canDip then
+                            root:CreateButton(L["Edit Diplomacy Entry"], function()
+                                OpenDiplomacyModal(entry.name, entry.stance, entry.faction)
+                            end)
+                            root:CreateButton(L["Mark Ally"], function()
+                                if ns.Clan then ns.Clan:SetGuildStance(entry.name, "ALLY", entry.reason or "", entry.faction) end
+                            end)
+                            root:CreateButton(L["Mark Enemy"], function()
+                                if ns.Clan then ns.Clan:SetGuildStance(entry.name, "ENEMY", entry.reason or "", entry.faction) end
+                            end)
+                            root:CreateButton(L["Remove Diplomacy Entry"], function()
+                                if ns.Clan then ns.Clan:RemoveGuildDiplomacy(entry.key) end
+                            end)
+                        else
+                            root:CreateTitle("|cff8b949e" .. L["View Only (Leadership Controlled)"] .. "|r")
+                            root:CreateTitle("|cff9da7b5" .. L["Diplomacy Authority: %s"]:format(authSummary) .. "|r")
+                        end
                         root:CreateDivider()
                         root:CreateButton(L["Sync Intel"], function()
                             if ns.Clan then ns.Clan:BroadcastFullIntel() end
+                        end)
+                        root:CreateButton(L["Hierarchy & Ranks"], function()
+                            clanRightView = "hierarchy"
+                            UpdateClanPanel()
+                        end)
+                    end)
+                end
+                return
+            elseif view == "hierarchy" then
+                if MenuUtil and MenuUtil.CreateContextMenu then
+                    local rankItem = self._item
+                    local isGM = ns.Clan and ns.Clan.IsGuildLeader and ns.Clan:IsGuildLeader()
+                    MenuUtil.CreateContextMenu(self, function(_, root)
+                        root:CreateTitle(string.format("#%d %s", rankItem.rankIndex or 0, rankItem.name or "?"))
+                        if isGM and ns.Clan and ns.Clan.SaveGuildHierarchyPolicy then
+                            local rIdx = rankItem.rankIndex or 0
+                            root:CreateButton(L["Allow Diplomacy up to this Rank"], function()
+                                if rIdx == 0 then
+                                    ns.Clan:SaveGuildHierarchyPolicy({ diplomacyMode = "LEADER", diplomacyMaxRank = 0 })
+                                else
+                                    ns.Clan:SaveGuildHierarchyPolicy({ diplomacyMode = "RANK", diplomacyMaxRank = rIdx })
+                                end
+                            end)
+                            root:CreateButton(L["Allow Guild Info Edit up to this Rank"], function()
+                                if rIdx == 0 then
+                                    ns.Clan:SaveGuildHierarchyPolicy({ infoMode = "LEADER", infoMaxRank = 0 })
+                                else
+                                    ns.Clan:SaveGuildHierarchyPolicy({ infoMode = "RANK", infoMaxRank = rIdx })
+                                end
+                            end)
+                            root:CreateButton(L["Allow Event Moderation up to this Rank"], function()
+                                if rIdx == 0 then
+                                    ns.Clan:SaveGuildHierarchyPolicy({ eventModMode = "LEADER", eventModMaxRank = 0 })
+                                else
+                                    ns.Clan:SaveGuildHierarchyPolicy({ eventModMode = "RANK", eventModMaxRank = rIdx })
+                                end
+                            end)
+                            root:CreateButton(L["Allow Alliance Chat up to this Rank"], function()
+                                ns.Clan:SaveGuildHierarchyPolicy({ allianceMinRank = rIdx })
+                            end)
+                            root:CreateDivider()
+                        end
+                        root:CreateButton(L["Filter Roster by this Rank"], function()
+                            clanPeerRankFilter = rankItem.rankIndex
+                            clanPeerQuery = ""
+                            if clanPanel and clanPanel.peerSearch and clanPanel.peerSearch.SetText then
+                                clanPanel.peerSearch:SetText("")
+                            end
+                            clanRightView = "peers"
+                            UpdateClanPanel()
                         end)
                     end)
                 end
@@ -3054,6 +3357,7 @@ local function CreatePeerRow(parent, _, rowHeight)
                 end
                 return
             elseif self._item.displayName then
+                self._item._isGuildRosterRow = (view == "peers")
                 OpenRowMenu(self, self._item, "social")
             end
         end
@@ -3080,6 +3384,17 @@ local function CreatePeerRow(parent, _, rowHeight)
                 end
                 GameTooltip:AddLine(string.format("%s: %s (%s)", L["Updated by"], item.addedBy or "?", Compat.FormatRelativeTime(item.updatedAt, L)), 0.65, 0.72, 0.82, true)
                 GameTooltip:AddLine(L["Right-click to edit stance or remove."], 0.55, 0.82, 0.62, true)
+                GameTooltip:Show()
+                return
+            elseif view == "hierarchy" then
+                GameTooltip:AddLine(string.format("#%d  %s", item.rankIndex or 0, item.name or "?"), 1.0, 0.85, 0.25, true)
+                GameTooltip:AddLine(string.format("%s: %d/%d %s", L["Members"], item.onlineMembers or 0, item.totalMembers or 0, L["Online"]:lower()), 0.82, 0.90, 0.96)
+                if item.permSummary and item.permSummary ~= "" then
+                    GameTooltip:AddLine(item.permSummary, 0.55, 0.86, 0.65, true)
+                end
+                if item.nativeSummary and item.nativeSummary ~= "" then
+                    GameTooltip:AddLine(L["Native Rank"] .. ": " .. item.nativeSummary, 0.92, 0.84, 0.45, true)
+                end
                 GameTooltip:Show()
                 return
             end
@@ -3146,50 +3461,125 @@ local function CreatePeerRow(parent, _, rowHeight)
     return row
 end
 
+local function SyncPeerRowLayout(row, hasIcon, rightTxt)
+    local leftX = hasIcon and 46 or 24
+    local hasRight = type(rightTxt) == "string" and rightTxt ~= ""
+    if row.rightText then
+        if hasRight then
+            row.rightText:SetText(rightTxt)
+            row.rightText:Show()
+        else
+            row.rightText:SetText("")
+            row.rightText:Hide()
+        end
+    end
+    if row._lastPeerLeft ~= leftX or row._lastPeerHasRight ~= hasRight then
+        row._lastPeerLeft = leftX
+        row._lastPeerHasRight = hasRight
+        row.nameText:ClearAllPoints()
+        row.nameText:SetPoint("TOPLEFT", leftX, -5)
+        row.subText:ClearAllPoints()
+        row.subText:SetPoint("BOTTOMLEFT", leftX, 5)
+        if hasRight and row.rightText then
+            row.nameText:SetPoint("RIGHT", row.rightText, "LEFT", -8, 0)
+            row.subText:SetPoint("RIGHT", row.rightText, "LEFT", -8, 0)
+        else
+            row.nameText:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+            row.subText:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+        end
+    end
+end
+
+local function SetPeerClassIcon(row, classFile)
+    if not row.classIcon then return false end
+    local coords = classFile and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFile]
+    if coords then
+        row.classIcon:SetTexture(PEER_CLASS_TEX)
+        row.classIcon:SetTexCoord(coords[1] + 0.02, coords[2] - 0.02, coords[3] + 0.02, coords[4] - 0.02)
+        row.classIcon:Show()
+        return true
+    end
+    row.classIcon:Hide()
+    return false
+end
+
 local function UpdatePeerRow(row, item, idx, palette)
     row._item = item
     row._dataIdx = idx
     row.subText:SetTextColor(palette.textMuted[1], palette.textMuted[2], palette.textMuted[3])
-    if not row._peerAnchorsInit then
-        row._peerAnchorsInit = true
-        row.nameText:ClearAllPoints()
-        row.nameText:SetPoint("TOPLEFT", 20, -5)
-        row.nameText:SetPoint("RIGHT", row, "RIGHT", -10, 0)
-        row.subText:ClearAllPoints()
-        row.subText:SetPoint("BOTTOMLEFT", 20, 5)
-        row.subText:SetPoint("RIGHT", row, "RIGHT", -10, 0)
-    end
 
     local view = item._clanView or clanRightView
     if view == "locks" then
         Theme:ApplyStatusColor(row.dot, item.statusColor or "unknown")
+        if row.statusBar then
+            Theme:ApplyStatusColor(row.statusBar, item.statusColor or "unknown")
+            row.statusBar:SetAlpha(0.85)
+        end
+        SetPeerClassIcon(row, nil)
+        SyncPeerRowLayout(row, false, nil)
         row.nameText:SetText(item.title or "")
         row.subText:SetText(item.detail or "")
         return
     elseif view == "diplomacy" then
         local tagHex, stanceLbl
         if item.stance == "ENEMY" then
-            row.dot:SetColorTexture(0.96, 0.28, 0.28, 1)
+            row.dot:SetVertexColor(0.96, 0.28, 0.28, 1)
+            if row.statusBar then row.statusBar:SetColorTexture(0.96, 0.28, 0.28, 0.90) end
             tagHex = "|cfff54747"
             stanceLbl = L["ENEMY"]
         elseif item.stance == "ALLY" then
-            row.dot:SetColorTexture(0.25, 0.85, 0.45, 1)
+            row.dot:SetVertexColor(0.25, 0.85, 0.45, 1)
+            if row.statusBar then row.statusBar:SetColorTexture(0.25, 0.85, 0.45, 0.90) end
             tagHex = "|cff40d973"
             stanceLbl = L["ALLY"]
         else
-            row.dot:SetColorTexture(0.66, 0.70, 0.78, 1)
+            row.dot:SetVertexColor(0.66, 0.70, 0.78, 1)
+            if row.statusBar then row.statusBar:SetColorTexture(0.66, 0.70, 0.78, 0.45) end
             tagHex = "|cffb0b8c4"
             stanceLbl = L["NEUTRAL"]
         end
+        SetPeerClassIcon(row, nil)
+        local timeTxt = "|cff8b949e" .. Compat.FormatRelativeTime(item.updatedAt, L) .. "|r"
+        SyncPeerRowLayout(row, false, timeTxt)
         local facStr = (item.faction and item.faction ~= "") and ("  |cff8b949e(" .. item.faction .. ")|r") or ""
         row.nameText:SetText(string.format("%s[%s]|r  |cffffffff<%s>|r%s", tagHex, stanceLbl, item.name or "?", facStr))
         local reasonText = (item.reason and item.reason ~= "") and item.reason or L["No note"]
-        row.subText:SetText(string.format("%s  ·  %s: %s · %s", reasonText, L["Updated by"], item.addedBy or "?", Compat.FormatRelativeTime(item.updatedAt, L)))
+        row.subText:SetText(string.format("%s  ·  %s: %s", reasonText, L["Updated by"], item.addedBy or "?"))
+        return
+    elseif view == "hierarchy" then
+        local rIdx = item.rankIndex or 0
+        if rIdx == 0 then
+            row.dot:SetVertexColor(1.0, 0.82, 0.18, 1.0)
+            if row.statusBar then row.statusBar:SetColorTexture(1.0, 0.82, 0.18, 0.95) end
+        elseif item.hasAddonAuthority then
+            row.dot:SetVertexColor(0.35, 0.75, 1.0, 1.0)
+            if row.statusBar then row.statusBar:SetColorTexture(0.35, 0.75, 1.0, 0.90) end
+        elseif (item.onlineMembers or 0) > 0 then
+            row.dot:SetVertexColor(0.25, 0.85, 0.45, 1.0)
+            if row.statusBar then row.statusBar:SetColorTexture(0.25, 0.85, 0.45, 0.80) end
+        else
+            row.dot:SetVertexColor(0.55, 0.60, 0.68, 1.0)
+            if row.statusBar then row.statusBar:SetColorTexture(0.55, 0.60, 0.68, 0.35) end
+        end
+        SetPeerClassIcon(row, nil)
+        local countTxt = string.format("|cff9da7b5%d/%d %s|r", item.onlineMembers or 0, item.totalMembers or 0, L["Online"]:lower())
+        SyncPeerRowLayout(row, false, countTxt)
+        local selfTag = item.isMyRank and ("  |cff58a6ff[" .. L["You"] .. "]|r") or ""
+        local nameColor = (rIdx == 0) and "|cffffd200" or (item.hasAddonAuthority and "|cff6ec1e4" or "|cffffffff")
+        row.nameText:SetText(string.format("|cff9da7b5#%d|r %s%s|r%s%s", rIdx, nameColor, item.name or "?", selfTag, item.badgeText or ""))
+        row.subText:SetText(item.subSummary or L["No permissions listed (Member rank)"])
         return
     end
 
     local isOnline = (view == "gchat") or (item.online == true)
-    Theme:ApplyStatusColor(row.dot, (view == "gchat" or item.isAlt) and "nearby" or (isOnline and "online" or "offline"))
+    local peerDotState = (view == "gchat" or item.isAlt) and "nearby" or (isOnline and "online" or "offline")
+    Theme:ApplyStatusColor(row.dot, peerDotState)
+    if row.statusBar then
+        Theme:ApplyStatusColor(row.statusBar, peerDotState)
+        row.statusBar:SetAlpha((isOnline or view == "gchat" or item.isAlt) and 0.90 or 0.25)
+    end
+
+    local hasClassIcon = SetPeerClassIcon(row, item.classFile)
 
     local hex = item.classFile and Compat.ClassHex(item.classFile) or ((palette.key == "blizzard" and isOnline) and "|cffffd100" or Compat.ClassHex(nil))
     local scTag = (item.hasAddon and " |cff3fb950[SC]|r")
@@ -3198,6 +3588,7 @@ local function UpdatePeerRow(row, item, idx, palette)
         or ""
 
     if view == "lfg" then
+        SyncPeerRowLayout(row, hasClassIcon, "|cff8b949e" .. Compat.FormatRelativeTime(item.updatedAt, L) .. "|r")
         local modeCol = (item.mode == "LFM") and "|cff58a6ff[LFM]|r" or "|cff3fb950[LFG]|r"
         local roleTag = (item.role and item.role ~= "ANY") and (" [" .. (ROLE_LABELS[item.role] or item.role) .. "]") or ""
         local keyTag = (item.keyLvl and item.keyLvl > 0) and (" |cfff2c94c+" .. item.keyLvl .. "|r") or ""
@@ -3221,10 +3612,11 @@ local function UpdatePeerRow(row, item, idx, palette)
         if item.hasFriendOrWatchlistSignup and item.friendOrWatchlistNames and item.friendOrWatchlistNames ~= "" then
             table.insert(subParts, L["In group"] .. ": " .. item.friendOrWatchlistNames)
         end
-        table.insert(subParts, Compat.FormatRelativeTime(item.updatedAt, L))
         row.subText:SetText(table.concat(subParts, "  ·  "))
         return
     elseif view == "prof" then
+        local rightArea = (item.area and item.area ~= "") and ("|cff9da7b5" .. item.area .. "|r") or nil
+        SyncPeerRowLayout(row, hasClassIcon, rightArea)
         local pList = FormatClanProfParts(item)
         local srcBadge = ""
         if item.isAlt then
@@ -3236,7 +3628,7 @@ local function UpdatePeerRow(row, item, idx, palette)
         elseif item.sourceTag == "SC" and scTag == "" then
             srcBadge = " |cff3fb950[SC]|r"
         end
-        local lvlStr = (item.level and item.level > 0) and (" [" .. item.level .. "]") or ""
+        local lvlStr = (item.level and item.level > 0) and (" |cff9da7b5[" .. item.level .. "]|r") or ""
         local profTxt = (#pList > 0) and ("  |cff3fb950[" .. table.concat(pList, " / ") .. "]|r") or ""
         row.nameText:SetText(hex .. (item.displayName or "") .. "|r" .. lvlStr .. scTag .. srcBadge .. profTxt)
         local subParts = {}
@@ -3245,9 +3637,7 @@ local function UpdatePeerRow(row, item, idx, palette)
         if item.guildNote and item.guildNote ~= "" and item.guildNote ~= item.craftNote then
             table.insert(subParts, item.guildNote)
         end
-        if item.area and item.area ~= "" then
-            table.insert(subParts, item.area)
-        elseif item.isGuild and not item.isAlt then
+        if not rightArea and item.isGuild and not item.isAlt then
             table.insert(subParts, item.online and L["Online"] or L["Offline"])
         end
         if item.updatedAt then
@@ -3256,25 +3646,31 @@ local function UpdatePeerRow(row, item, idx, palette)
         row.subText:SetText(table.concat(subParts, "  ·  "))
         return
     elseif view == "gchat" then
+        SyncPeerRowLayout(row, hasClassIcon, "|cff8b949e" .. Compat.FormatRelativeTime(item.ts, L) .. "|r")
         row.nameText:SetText(hex .. (item.displayName or "") .. "|r  |cff58a6ff[/g LFM]|r")
-        row.subText:SetText((item.text or "") .. "  ·  " .. Compat.FormatRelativeTime(item.ts, L))
+        row.subText:SetText(item.text or "")
         return
     end
 
-    local lvlStr = (item.level and item.level > 0) and (" [" .. item.level .. "]") or ""
+    local areaStr = (isOnline and item.area and item.area ~= "") and ("|cff9da7b5" .. item.area .. "|r")
+        or (not isOnline and ("|cff6e7681" .. L["Offline"] .. "|r") or nil)
+    SyncPeerRowLayout(row, hasClassIcon, areaStr)
+
+    local nameCol = isOnline and hex or "|cff8b949e"
+    local lvlStr = (item.level and item.level > 0) and (" |cff9da7b5" .. L["Lv %d"]:format(item.level) .. "|r") or ""
     local ver = item.version and (" |cff3fb950[SC v" .. item.version .. "]|r") or (item.hasAddon and " |cff3fb950[SC]|r" or scTag)
-    local rankStr = (item.rankName and item.rankName ~= "") and (" |cff9da7b5<" .. item.rankName .. ">|r") or ""
-    row.nameText:SetText(hex .. (item.displayName or "") .. "|r" .. lvlStr .. rankStr .. ver)
+    row.nameText:SetText(nameCol .. (item.displayName or "") .. "|r" .. lvlStr .. ver)
 
     local sub = {}
+    if item.rankName and item.rankName ~= "" then
+        local rColor = (item.rankIndex == 0) and "|cffffd200" or ((item.rankIndex and item.rankIndex <= 2) and "|cff6ec1e4" or "|cff9da7b5")
+        table.insert(sub, rColor .. "<" .. item.rankName .. ">|r")
+    end
     if item.tag and item.tag ~= "NONE" then
-        table.insert(sub, "[" .. (TAG_LABELS[item.tag] or item.tag) .. "]")
+        table.insert(sub, "|cff58a6ff[" .. (TAG_LABELS[item.tag] or item.tag) .. "]|r")
     end
     if item.note and item.note ~= "" then
         table.insert(sub, item.note)
-    end
-    if item.area and item.area ~= "" then
-        table.insert(sub, item.area)
     end
     if #sub == 0 then
         table.insert(sub, isOnline and L["Online"] or Compat.FormatRelativeTime(item.updatedAt, L))
@@ -3292,7 +3688,7 @@ local function UpdateClanPanel()
     end
     clanPanel._dirty = nil
     local prefView = ns.Clan and ns.Clan.ConsumePreferredRightView and ns.Clan:ConsumePreferredRightView()
-    if prefView and (prefView == "peers" or prefView == "events" or prefView == "diplomacy" or prefView == "prof" or prefView == "locks" or prefView == "lfg") then
+    if prefView and (prefView == "peers" or prefView == "events" or prefView == "diplomacy" or prefView == "prof" or prefView == "locks" or prefView == "lfg" or prefView == "hierarchy") then
         clanRightView = prefView
     end
 
@@ -3353,21 +3749,33 @@ local function UpdateClanPanel()
     if activeNav == "locks" then activeNav = "prof" end
     if activeNav == "lfg" then activeNav = "peers" end
     for id, b in pairs(clanRightViewButtons) do
-        Theme:SetButtonActive(b, inGuild and (activeNav == id), "default")
+        Theme:SetButtonActive(b, inGuild and (activeNav == id), "nav")
         if b.SetEnabled then
             b:SetEnabled(inGuild)
         end
-        Theme:StyleButton(b, "default")
+        Theme:StyleButton(b, "nav")
     end
+    local canDip, dipAuthSummary = false, L["Guild Leader Only"]
+    if inGuild and ns.Clan and ns.Clan.CanManageDiplomacy then
+        canDip, dipAuthSummary = ns.Clan:CanManageDiplomacy()
+    end
+    local isGM = inGuild and ns.Clan and ns.Clan.IsGuildLeader and ns.Clan:IsGuildLeader()
+    local canAlly = inGuild and ns.Clan and ns.Clan.CanManageAlliance and ns.Clan:CanManageAlliance()
+
     for _, gBtn in ipairs({
         clanPanel.statusBtn,
         clanPanel.clanInfoBtn,
         clanPanel.syncBtn,
         clanPanel.guildInviteBtn,
+        clanPanel.clanFilterBtn,
         clanPanel.evtFilterBtn,
         clanPanel.newEventBtn,
         clanPanel.dipFilterBtn,
         clanPanel.dipAddBtn,
+        clanPanel.dipAuthBtn,
+        clanPanel.hierDipBtn,
+        clanPanel.hierRulesBtn,
+        clanPanel.hierAllyBtn,
         clanPanel.profViewBtn,
         clanPanel.profBtn,
         clanPanel.openLfgFinderBtn,
@@ -3376,6 +3784,10 @@ local function UpdateClanPanel()
             local canUse = inGuild
             if gBtn == clanPanel.guildInviteBtn then
                 canUse = inGuild and (gameSum.canInviteGuild == true)
+            elseif gBtn == clanPanel.dipAddBtn then
+                canUse = inGuild and (canDip == true)
+            elseif gBtn == clanPanel.hierAllyBtn then
+                canUse = canAlly == true
             elseif gBtn == clanPanel.profViewBtn or gBtn == clanPanel.profBtn then
                 canUse = true
             end
@@ -3470,6 +3882,25 @@ local function UpdateClanPanel()
             Theme:SetButtonActive(clanPanel.dipFilterBtn, clanRightViewFilterDip ~= "all", clanRightViewFilterDip == "ENEMY" and "danger" or "default")
             Theme:AutoFitButton(clanPanel.dipFilterBtn, 90, 14, 145)
         end
+        if clanPanel.dipAuthBtn then
+            Theme:SetButtonText(clanPanel.dipAuthBtn, L["Diplomacy: %s"]:format(dipAuthSummary))
+            Theme:SetButtonActive(clanPanel.dipAuthBtn, isGM == true, isGM and "default" or "default")
+            Theme:AutoFitButton(clanPanel.dipAuthBtn, 120, 14, 235)
+        end
+    end
+    if clanPanel.hierToolBar then
+        clanPanel.hierToolBar:SetShown(clanRightView == "hierarchy")
+        if clanPanel.hierDipBtn then
+            Theme:SetButtonText(clanPanel.hierDipBtn, L["Diplomacy: %s"]:format(dipAuthSummary) .. "  v")
+            Theme:AutoFitButton(clanPanel.hierDipBtn, 130, 14, 240)
+        end
+        if clanPanel.hierRulesBtn then
+            Theme:SetButtonText(clanPanel.hierRulesBtn, L["Hierarchy Rules"] .. "  v")
+            Theme:AutoFitButton(clanPanel.hierRulesBtn, 110, 14, 190)
+        end
+        if clanPanel.hierAllyBtn then
+            Theme:AutoFitButton(clanPanel.hierAllyBtn, 72, 12, 130)
+        end
     end
 
     if clanPanel.radarBtn then
@@ -3490,14 +3921,33 @@ local function UpdateClanPanel()
                 Theme:SetButtonText(clanPanel.radarBtn, L["Target Radar"])
                 Theme:SetButtonActive(clanPanel.radarBtn, false, "default")
             end
-            Theme:AutoFitButton(clanPanel.radarBtn, 84, 14, 144)
+            Theme:AutoFitButton(clanPanel.radarBtn, 96, 20, 165)
         end
     end
 
-    local allPeers = (inGuild and ns.Clan) and ns.Clan:GetMergedGuildMembers("") or {}
+    local allPeers = (inGuild and ns.Clan) and ns.Clan:GetMergedGuildMembers("", { sortBy = "level_desc" }) or {}
     local peers = allPeers
-    if clanRightView == "peers" and clanPeerQuery ~= "" and ns.Clan then
-        peers = ns.Clan:GetMergedGuildMembers(clanPeerQuery)
+    if clanRightView == "peers" and ns.Clan then
+        local peerOpts = {
+            statusFilter = clanPeerStatusFilter,
+            rankFilter = clanPeerRankFilter,
+            classFilter = clanPeerClassFilter,
+            sortBy = clanPeerSortBy,
+        }
+        if clanPeerQuery ~= "" or clanPeerStatusFilter ~= "all" or clanPeerRankFilter ~= nil or clanPeerClassFilter ~= nil or clanPeerSortBy ~= "level_desc" then
+            peers = ns.Clan:GetMergedGuildMembers(clanPeerQuery, peerOpts)
+        end
+    end
+    if clanPanel.clanFilterBtn then
+        local activeFilters = 0
+        if clanPeerStatusFilter ~= "all" then activeFilters = activeFilters + 1 end
+        if clanPeerRankFilter ~= nil then activeFilters = activeFilters + 1 end
+        if clanPeerClassFilter ~= nil then activeFilters = activeFilters + 1 end
+        if clanPeerSortBy ~= "level_desc" then activeFilters = activeFilters + 1 end
+        local fltText = (activeFilters > 0) and string.format("%s (%d)  v", L["Filters"], activeFilters) or (L["Filters"] .. "  v")
+        Theme:SetButtonText(clanPanel.clanFilterBtn, fltText)
+        Theme:SetButtonActive(clanPanel.clanFilterBtn, activeFilters > 0, "default")
+        Theme:AutoFitButton(clanPanel.clanFilterBtn, 78, 18, 130)
     end
 
     if clanPanel.heroSummaryLbl and clanPanel.heroDetailLbl then
@@ -3527,6 +3977,15 @@ local function UpdateClanPanel()
                 table.insert(sumParts, ("|cff6ec1e4[%s: %s]|r"):format(L["Alliance"], allyCfg.name))
             end
             clanPanel.heroSummaryLbl:SetText(table.concat(sumParts, "  ·  "))
+            if clanPanel.heroRankLbl then
+                local selfRank = ns.Clan and ns.Clan.GetSelfGuildRank and ns.Clan:GetSelfGuildRank()
+                if selfRank and selfRank.rankName and selfRank.rankName ~= "" then
+                    local rCol = selfRank.isGuildLeader and "|cffffd200" or (selfRank.isOfficer and "|cff6ec1e4" or "|cff9da7b5")
+                    clanPanel.heroRankLbl:SetText(rCol .. selfRank.rankName .. "|r")
+                else
+                    clanPanel.heroRankLbl:SetText("")
+                end
+            end
 
             local cInfo = ns.Clan and ns.Clan.GetClanInfo and ns.Clan:GetClanInfo() or {}
             local detailParts = {}
@@ -3683,6 +4142,77 @@ local function UpdateClanPanel()
     elseif clanRightView == "diplomacy" then
         local dipRows = (ns.Clan and ns.Clan:GetDiplomacyList(clanRightViewFilterDip)) or {}
         clanPanel.peersScroll:SetData(dipRows, L["No guild diplomacy entries yet. Click '+ Add Guild' to tag Allies or Enemies cleanly."], false)
+    elseif clanRightView == "hierarchy" then
+        local rankRows = {}
+        local rawRanks = (ns.Clan and ns.Clan.GetGuildRanks and ns.Clan:GetGuildRanks()) or {}
+        local pol = (ns.Clan and ns.Clan.GetGuildHierarchyPolicy and ns.Clan:GetGuildHierarchyPolicy()) or {}
+        local selfRank = (ns.Clan and ns.Clan.GetSelfGuildRank and ns.Clan:GetSelfGuildRank()) or {}
+        local allyCfg = (ns.Clan and ns.Clan.GetAllianceConfig and ns.Clan:GetAllianceConfig()) or {}
+
+        local function RankMatchesRule(rIdx, rName, mode, maxR)
+            if rIdx == 0 then return true end
+            if mode == "ALL" then return true end
+            if mode == "RANK" then return rIdx <= (tonumber(maxR) or 0) end
+            if mode == "OFFICERS" then
+                if selfRank.rankIndex == rIdx then
+                    return selfRank.isOfficer == true
+                end
+                local ln = type(rName) == "string" and rName:lower() or ""
+                if ln:find("officer", 1, true) or ln:find("oficial", 1, true) or ln:find("leader", 1, true) or ln:find("lider", 1, true) then
+                    return true
+                end
+                return rIdx <= 1
+            end
+            return false
+        end
+
+        for _, rk in ipairs(rawRanks) do
+            local rIdx = rk.rankIndex or 0
+            local hasDip = RankMatchesRule(rIdx, rk.name, pol.diplomacyMode, pol.diplomacyMaxRank)
+            local hasInfo = RankMatchesRule(rIdx, rk.name, pol.infoMode, pol.infoMaxRank)
+            local hasEvt = RankMatchesRule(rIdx, rk.name, pol.eventModMode, pol.eventModMaxRank)
+            local hasAlly = (allyCfg.accessMode == "ALL") or (pol.allianceMinRank and pol.allianceMinRank >= 0 and rIdx <= pol.allianceMinRank) or (rIdx == 0)
+
+            local badges = {}
+            if rIdx == 0 then badges[#badges + 1] = "|cffffd200[" .. L["LEADER"] .. "]|r" end
+            if hasDip then badges[#badges + 1] = "|cfff54747[" .. L["Diplomacy"] .. "]|r" end
+            if hasInfo then badges[#badges + 1] = "|cff58a6ff[" .. L["Info"] .. "]|r" end
+            if hasEvt then badges[#badges + 1] = "|cff40d973[" .. L["Events"] .. "]|r" end
+            if hasAlly then badges[#badges + 1] = "|cff6ec1e4[" .. L["Alliance"] .. "]|r" end
+
+            local isMeRank = (selfRank.rankIndex ~= nil and selfRank.rankIndex == rIdx)
+            local nativeList = {}
+            if isMeRank then
+                if selfRank.canEditMOTD then nativeList[#nativeList + 1] = L["Edit MOTD"] end
+                if selfRank.canEditGuildInfo then nativeList[#nativeList + 1] = L["Can Edit Guild Info"] end
+                if selfRank.canEditOfficerNote then nativeList[#nativeList + 1] = L["Officer Notes"] end
+                if selfRank.canInvite then nativeList[#nativeList + 1] = L["Can Invite"] end
+                if selfRank.canPromote then nativeList[#nativeList + 1] = L["Can Promote"] end
+                if selfRank.canDemote then nativeList[#nativeList + 1] = L["Can Demote"] end
+                if selfRank.canEditCalendar then nativeList[#nativeList + 1] = L["Calendar Events"] end
+            end
+
+            local permSummary = (#badges > 0) and table.concat(badges, " ") or ""
+            local nativeSummary = (#nativeList > 0) and table.concat(nativeList, " · ") or ""
+            local subSummary = (nativeSummary ~= "") and (L["Native Rank"] .. ": " .. nativeSummary)
+                or ((rIdx == 0) and L["Guild Leader"] or ((hasDip or hasInfo or hasEvt) and L["Leader & Game Officers"] or L["No permissions listed (Member rank)"]))
+
+            table.insert(rankRows, {
+                _clanView = "hierarchy",
+                rankIndex = rIdx,
+                rankOrder = rk.rankOrder,
+                name = rk.name,
+                totalMembers = rk.totalMembers or 0,
+                onlineMembers = rk.onlineMembers or 0,
+                isMyRank = isMeRank,
+                hasAddonAuthority = (rIdx == 0) or hasDip or hasInfo or hasEvt,
+                badgeText = (permSummary ~= "") and ("  " .. permSummary) or "",
+                permSummary = permSummary,
+                nativeSummary = nativeSummary,
+                subSummary = subSummary,
+            })
+        end
+        clanPanel.peersScroll:SetData(rankRows, L["Guild roster not loaded yet."], false)
     else
         clanPanel.peersScroll:SetData(peers, L["No online Guild members seen yet. Open Guild Roster or enable Clan Sync."], false)
     end
@@ -3763,8 +4293,8 @@ local function CreateClanPanel(parent)
     bottomBar:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -2, 2)
     bottomBar:SetHeight(28)
 
-    local radarBtn = Theme:CreateButton(bottomBar, 96, 20, L["Target Radar"], "default")
-    Theme:AutoFitButton(radarBtn, 84, 14, 144)
+    local radarBtn = Theme:CreateButton(bottomBar, 110, 20, L["Target Radar"], "default")
+    Theme:AutoFitButton(radarBtn, 96, 20, 165)
     radarBtn:SetScript("OnClick", function()
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then
             ns.SpotterHUD:Toggle()
@@ -3801,8 +4331,8 @@ local function CreateClanPanel(parent)
         L["Tag Ally/Enemy guilds in the Diplomacy view, then click players on the Target Radar to target them (Blizzard-legal secure click)."]
     )
 
-    local clanInfoBtn = Theme:CreateButton(bottomBar, 88, 20, L["Clan Info"], "default")
-    Theme:AutoFitButton(clanInfoBtn, 84, 16, 152)
+    local clanInfoBtn = Theme:CreateButton(bottomBar, 102, 20, L["Clan Info"], "default")
+    Theme:AutoFitButton(clanInfoBtn, 90, 20, 168)
     clanInfoBtn:SetScript("OnClick", function()
         OpenClanInfoModal()
     end)
@@ -3857,14 +4387,26 @@ local function CreateClanPanel(parent)
     sidebarDiv:SetVertexColor(0.35, 0.30, 0.22, 0.65)
 
     local navDefs = {
-        { id = "peers", label = L["Roster"] },
-        { id = "events", label = L["Events & Calendar"] },
-        { id = "diplomacy", label = L["Diplomacy"] },
-        { id = "prof", label = L["Professions & Locks"] },
+        { id = "peers", label = L["Roster"], icon = "Interface\\FriendsFrame\\UI-Toast-FriendOnlineIcon" },
+        { id = "events", label = L["Events & Calendar"], icon = "Interface\\Icons\\INV_Misc_PocketWatch_01" },
+        { id = "diplomacy", label = L["Diplomacy"], icon = "Interface\\Icons\\Ability_DualWield" },
+        { id = "prof", label = L["Professions & Locks"], icon = "Interface\\Icons\\Trade_BlackSmithing" },
+        { id = "hierarchy", label = L["Hierarchy"], icon = "Interface\\Icons\\INV_Crown_01" },
     }
     local prevNav = sidebarDiv
     for _, nd in ipairs(navDefs) do
-        local nb = Theme:CreateButton(sidebar, 158, 28, nd.label, "default")
+        local nb = Theme:CreateButton(sidebar, 158, 28, nd.label, "nav")
+        if nd.icon and nb.CreateTexture then
+            local navIco = nb:CreateTexture(nil, "OVERLAY", nil, 2)
+            navIco:SetSize(14, 14)
+            navIco:SetPoint("LEFT", nb, "LEFT", 9, 0)
+            navIco:SetTexture(nd.icon)
+            if not nd.icon:find("UI-Toast", 1, true) then
+                navIco:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            end
+            nb._scNavIcon = navIco
+            Theme:StyleButton(nb, "nav")
+        end
         nb:SetPoint("TOPLEFT", prevNav, "BOTTOMLEFT", 0, (prevNav == sidebarDiv) and -8 or -4)
         nb:SetPoint("TOPRIGHT", prevNav, "BOTTOMRIGHT", 0, (prevNav == sidebarDiv) and -8 or -4)
         nb:SetScript("OnClick", function()
@@ -3872,7 +4414,7 @@ local function CreateClanPanel(parent)
             UpdateClanPanel()
         end)
         clanRightViewButtons[nd.id] = nb
-        themeTargets[#themeTargets + 1] = { btn = nb, variant = "default" }
+        themeTargets[#themeTargets + 1] = { btn = nb, variant = "nav" }
         prevNav = nb
     end
 
@@ -3901,11 +4443,22 @@ local function CreateClanPanel(parent)
     guildHeroBar:SetHeight(42)
     Theme:ApplyBackdrop(guildHeroBar, "header")
 
+    local heroRankLbl = guildHeroBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    heroRankLbl:SetPoint("TOPRIGHT", -8, -5)
+    heroRankLbl:SetJustifyH("RIGHT")
+    heroRankLbl:SetWordWrap(false)
+
     local heroSummaryLbl = guildHeroBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     heroSummaryLbl:SetPoint("TOPLEFT", 8, -5)
-    heroSummaryLbl:SetPoint("TOPRIGHT", -8, -5)
+    heroSummaryLbl:SetPoint("RIGHT", heroRankLbl, "LEFT", -8, 0)
     heroSummaryLbl:SetJustifyH("LEFT")
     heroSummaryLbl:SetWordWrap(false)
+
+    local heroMidSep = guildHeroBar:CreateTexture(nil, "ARTWORK", nil, 1)
+    heroMidSep:SetHeight(1)
+    heroMidSep:SetPoint("TOPLEFT", guildHeroBar, "TOPLEFT", 8, -21)
+    heroMidSep:SetPoint("TOPRIGHT", guildHeroBar, "TOPRIGHT", -8, -21)
+    heroMidSep:SetColorTexture(0.76, 0.60, 0.24, 0.26)
 
     local heroDetailLbl = guildHeroBar:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     heroDetailLbl:SetPoint("BOTTOMLEFT", 8, 5)
@@ -3983,8 +4536,8 @@ local function CreateClanPanel(parent)
         L["Type a member name, class, rank, or zone to filter the roster, or switch views in the sidebar."]
     )
 
-    local syncBtn = Theme:CreateButton(peersToolBar, 76, 22, L["Sync"], "default")
-    Theme:AutoFitButton(syncBtn, 62, 12, 108)
+    local syncBtn = Theme:CreateButton(peersToolBar, 88, 22, L["Sync"], "default")
+    Theme:AutoFitButton(syncBtn, 72, 20, 145)
     syncBtn:SetScript("OnClick", function()
         if ns.Clan then
             ns.Clan:RequestClanSync()
@@ -4004,17 +4557,16 @@ local function CreateClanPanel(parent)
     syncBtn:ClearAllPoints()
     syncBtn:SetPoint("RIGHT", syncBtnHelp, "LEFT", -4, 0)
 
-    local guildInviteBtn = Theme:CreateButton(peersToolBar, 84, 22, "+ " .. L["Invite"], "primary")
-    Theme:AutoFitButton(guildInviteBtn, 70, 12, 118)
+    local guildInviteBtn = Theme:CreateButton(peersToolBar, 96, 22, "+ " .. L["Invite"], "primary")
+    Theme:AutoFitButton(guildInviteBtn, 84, 22, 145)
     guildInviteBtn:SetPoint("RIGHT", syncBtn, "LEFT", -6, 0)
     guildInviteBtn:SetScript("OnClick", function()
         OpenGuildInviteModal()
     end)
     themeTargets[#themeTargets + 1] = { btn = guildInviteBtn, variant = "primary" }
 
-    local historyBtn = Theme:CreateButton(peersToolBar, 72, 22, L["History"], "default")
-    Theme:AutoFitButton(historyBtn, 60, 12, 108)
-    historyBtn:SetPoint("RIGHT", guildInviteBtn, "LEFT", -6, 0)
+    local historyBtn = Theme:CreateButton(peersToolBar, 78, 22, L["History"], "default")
+    Theme:AutoFitButton(historyBtn, 68, 20, 125)
     historyBtn:SetScript("OnClick", function()
         local list = ns.Clan and ns.Clan.GetRosterHistory and ns.Clan:GetRosterHistory() or {}
         if #list == 0 then
@@ -4038,18 +4590,120 @@ local function CreateClanPanel(parent)
         end
     end)
     themeTargets[#themeTargets + 1] = { btn = historyBtn, variant = "default" }
-    AddHelp(
+    local historyHelp = AddHelp(
         peersToolBar,
         historyBtn,
         L["Help: Guild Roster History"],
         L["Tracks recent guild member joins, departures, and rank promotions/demotions across sessions."],
-        L["Click 'History' to view and optionally copy the recent Guild Roster changelog."],
-        "RIGHT",
-        historyBtn,
-        "LEFT",
-        -4,
-        0
+        L["Click 'History' to view and optionally copy the recent Guild Roster changelog."]
     )
+    historyHelp:ClearAllPoints()
+    historyHelp:SetPoint("RIGHT", guildInviteBtn, "LEFT", -6, 0)
+    historyBtn:ClearAllPoints()
+    historyBtn:SetPoint("RIGHT", historyHelp, "LEFT", -4, 0)
+
+    local clanFilterBtn = Theme:CreateButton(peersToolBar, 82, 22, L["Filters"] .. "  v", "default")
+    Theme:AutoFitButton(clanFilterBtn, 78, 18, 130)
+    clanFilterBtn:SetPoint("RIGHT", historyBtn, "LEFT", -6, 0)
+    clanFilterBtn:SetScript("OnClick", function(selfBtn)
+        if not (MenuUtil and MenuUtil.CreateContextMenu and ns.Clan) then return end
+        local ranks = ns.Clan.GetGuildRanks and ns.Clan:GetGuildRanks() or {}
+        local classes = ns.Clan.GetGuildPresentClasses and ns.Clan:GetGuildPresentClasses() or {}
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["Presence / Status"])
+            for _, opt in ipairs({
+                { id = "all", label = L["All"] },
+                { id = "online", label = L["Online Only"] },
+                { id = "offline", label = L["Offline Only"] },
+                { id = "sc", label = L["Has Addon [SC]"] },
+                { id = "lfg", label = L["Active Status (LFG)"] },
+            }) do
+                local sid = opt.id
+                root:CreateRadio(opt.label, function()
+                    return clanPeerStatusFilter == sid
+                end, function()
+                    clanPeerStatusFilter = sid
+                    UpdateClanPanel()
+                end)
+            end
+
+            root:CreateDivider()
+            local rankSub = root:CreateButton(L["Rank"])
+            if rankSub and rankSub.CreateRadio then
+                rankSub:CreateRadio(L["All Ranks"], function()
+                    return clanPeerRankFilter == nil
+                end, function()
+                    clanPeerRankFilter = nil
+                    UpdateClanPanel()
+                end)
+                for _, rk in ipairs(ranks) do
+                    local rIdx = rk.rankIndex
+                    local rLabel = string.format("#%d %s (%d)", rIdx, rk.name, rk.totalMembers or 0)
+                    rankSub:CreateRadio(rLabel, function()
+                        return clanPeerRankFilter == rIdx
+                    end, function()
+                        clanPeerRankFilter = rIdx
+                        UpdateClanPanel()
+                    end)
+                end
+            end
+
+            if #classes > 0 then
+                local clsSub = root:CreateButton(L["Class"])
+                if clsSub and clsSub.CreateRadio then
+                    clsSub:CreateRadio(L["All Classes"], function()
+                        return clanPeerClassFilter == nil
+                    end, function()
+                        clanPeerClassFilter = nil
+                        UpdateClanPanel()
+                    end)
+                    for _, cl in ipairs(classes) do
+                        local cid = cl.id
+                        clsSub:CreateRadio(Compat.ClassHex(cid) .. cl.label .. "|r", function()
+                            return clanPeerClassFilter == cid
+                        end, function()
+                            clanPeerClassFilter = cid
+                            UpdateClanPanel()
+                        end)
+                    end
+                end
+            end
+
+            local sortSub = root:CreateButton(L["Sort Order"])
+            if sortSub and sortSub.CreateRadio then
+                for _, sopt in ipairs({
+                    { id = "level_desc", label = L["Sort: Level (High-Low)"] },
+                    { id = "rank", label = L["Sort: Rank"] },
+                    { id = "name", label = L["Sort: Name"] },
+                    { id = "zone", label = L["Sort: Zone"] },
+                }) do
+                    local sId = sopt.id
+                    sortSub:CreateRadio(sopt.label, function()
+                        return clanPeerSortBy == sId
+                    end, function()
+                        clanPeerSortBy = sId
+                        UpdateClanPanel()
+                    end)
+                end
+            end
+
+            if clanPeerStatusFilter ~= "all" or clanPeerRankFilter ~= nil or clanPeerClassFilter ~= nil or clanPeerSortBy ~= "level_desc" or clanPeerQuery ~= "" then
+                root:CreateDivider()
+                root:CreateButton(L["Clear Filters"], function()
+                    clanPeerStatusFilter = "all"
+                    clanPeerRankFilter = nil
+                    clanPeerClassFilter = nil
+                    clanPeerSortBy = "level_desc"
+                    clanPeerQuery = ""
+                    if clanPanel and clanPanel.peerSearch and clanPanel.peerSearch.SetText then
+                        clanPanel.peerSearch:SetText("")
+                    end
+                    UpdateClanPanel()
+                end)
+            end
+        end)
+    end)
+    themeTargets[#themeTargets + 1] = { btn = clanFilterBtn, variant = "default" }
 
     -- 4b) Events contextual toolbar (1 filter dropdown + 1 primary button)
     local eventsToolBar = CreateFrame("Frame", nil, ctxBar)
@@ -4158,7 +4812,206 @@ local function CreateClanPanel(parent)
     dipAddBtn:SetScript("OnClick", function()
         OpenDiplomacyModal()
     end)
+    dipAddBtn:SetScript("OnEnter", function(selfBtn)
+        if GameTooltip then
+            local canDip, authSummary = false, L["Guild Leader Only"]
+            if ns.Clan and ns.Clan.CanManageDiplomacy then
+                canDip, authSummary = ns.Clan:CanManageDiplomacy()
+            end
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(L["Guild Diplomacy Registry"], 1.0, 0.85, 0.25)
+            if canDip then
+                GameTooltip:AddLine(L["Diplomacy Authority: %s"]:format(authSummary), 0.35, 0.88, 0.50, true)
+            else
+                GameTooltip:AddLine(L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authSummary), 1.0, 0.42, 0.42, true)
+            end
+            GameTooltip:Show()
+        end
+    end)
+    dipAddBtn:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
     themeTargets[#themeTargets + 1] = { btn = dipAddBtn, variant = "primary" }
+
+    local dipAuthBtn = Theme:CreateButton(dipToolBar, 148, 22, L["Guild Leader Only"], "default")
+    Theme:AutoFitButton(dipAuthBtn, 120, 14, 235)
+    dipAuthBtn:SetScript("OnClick", function()
+        clanRightView = "hierarchy"
+        UpdateClanPanel()
+    end)
+    dipAuthBtn:SetScript("OnEnter", function(selfBtn)
+        if GameTooltip then
+            local _, authSummary = false, L["Guild Leader Only"]
+            if ns.Clan and ns.Clan.CanManageDiplomacy then
+                _, authSummary = ns.Clan:CanManageDiplomacy()
+            end
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(L["Diplomacy Authority: %s"]:format(authSummary), 1.0, 0.85, 0.25, true)
+            GameTooltip:AddLine(L["Click to open Guild Hierarchy & Permissions."], 0.65, 0.82, 1.0, true)
+            GameTooltip:Show()
+        end
+    end)
+    dipAuthBtn:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    themeTargets[#themeTargets + 1] = { btn = dipAuthBtn, variant = "default" }
+    dipAuthBtn._pairedHelp = AddHelp(
+        dipToolBar,
+        dipAuthBtn,
+        L["Help: Guild Hierarchy & Permissions"],
+        L["Uses your guild's real WoW rank ladder to show permissions per rank and let the Guild Leader delegate who can define Allied/Enemy guilds, edit Guild Info, moderate Events, and access Alliance Chat."],
+        L["Click 'Diplomacy' to choose which ranks can tag Allied/Enemy guilds, 'Hierarchy Rules' for Info/Events/Alliance rank access, or click any rank row below."]
+    )
+
+    -- 4c-2) Hierarchy & Ranks contextual toolbar
+    local hierToolBar = CreateFrame("Frame", nil, ctxBar)
+    hierToolBar:SetAllPoints()
+    hierToolBar:Hide()
+
+    local function BuildRuleSubmenu(parentMenu, titleText, currentMode, currentMaxRank, onSelectMode, onSelectRank, includeAllOption)
+        local ranks = (ns.Clan and ns.Clan.GetGuildRanks and ns.Clan:GetGuildRanks()) or {}
+        local sub = parentMenu:CreateButton(titleText)
+        if not (sub and sub.CreateRadio) then return end
+        sub:CreateRadio(L["Guild Leader Only"], function()
+            return currentMode == "LEADER"
+        end, function()
+            onSelectMode("LEADER", 0)
+        end)
+        sub:CreateRadio(L["Leader & Game Officers"], function()
+            return currentMode == "OFFICERS"
+        end, function()
+            onSelectMode("OFFICERS", 1)
+        end)
+        if includeAllOption then
+            sub:CreateRadio(L["All Guild Members"], function()
+                return currentMode == "ALL"
+            end, function()
+                onSelectMode("ALL", 9)
+            end)
+        end
+        if #ranks > 1 then
+            sub:CreateDivider()
+            sub:CreateTitle(L["Or allow up to Game Rank:"])
+            for _, rk in ipairs(ranks) do
+                if rk.rankIndex >= 1 then
+                    local rIdx = rk.rankIndex
+                    sub:CreateRadio(string.format("#%d %s", rIdx, rk.name), function()
+                        return currentMode == "RANK" and currentMaxRank == rIdx
+                    end, function()
+                        onSelectRank(rIdx)
+                    end)
+                end
+            end
+        end
+    end
+
+    local hierDipBtn = Theme:CreateButton(hierToolBar, 152, 22, L["Guild Leader Only"] .. "  v", "default")
+    Theme:AutoFitButton(hierDipBtn, 130, 14, 240)
+    hierDipBtn:SetScript("OnClick", function(selfBtn)
+        if not (MenuUtil and MenuUtil.CreateContextMenu and ns.Clan) then return end
+        local isGM = ns.Clan.IsGuildLeader and ns.Clan:IsGuildLeader()
+        local pol = ns.Clan:GetGuildHierarchyPolicy()
+        local ranks = ns.Clan.GetGuildRanks and ns.Clan:GetGuildRanks() or {}
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["Who can define Allied / Enemy guilds (Diplomacy):"])
+            if not isGM then
+                root:CreateTitle("|cffff6666" .. L["Only the Guild Leader can configure Guild Hierarchy & Rank Permissions."] .. "|r")
+                return
+            end
+            root:CreateRadio(L["Guild Leader Only"], function()
+                return pol.diplomacyMode == "LEADER"
+            end, function()
+                ns.Clan:SaveGuildHierarchyPolicy({ diplomacyMode = "LEADER", diplomacyMaxRank = 0 })
+            end)
+            root:CreateRadio(L["Leader & Game Officers"], function()
+                return pol.diplomacyMode == "OFFICERS"
+            end, function()
+                ns.Clan:SaveGuildHierarchyPolicy({ diplomacyMode = "OFFICERS", diplomacyMaxRank = 1 })
+            end)
+            if #ranks > 1 then
+                root:CreateDivider()
+                root:CreateTitle(L["Or allow up to Game Rank:"])
+                for _, rk in ipairs(ranks) do
+                    if rk.rankIndex >= 1 then
+                        local rIdx = rk.rankIndex
+                        root:CreateRadio(string.format("#%d %s", rIdx, rk.name), function()
+                            return pol.diplomacyMode == "RANK" and pol.diplomacyMaxRank == rIdx
+                        end, function()
+                            ns.Clan:SaveGuildHierarchyPolicy({ diplomacyMode = "RANK", diplomacyMaxRank = rIdx })
+                        end)
+                    end
+                end
+            end
+        end)
+    end)
+    themeTargets[#themeTargets + 1] = { btn = hierDipBtn, variant = "default" }
+    hierDipBtn._pairedHelp = AddHelp(
+        hierToolBar,
+        hierDipBtn,
+        L["Help: Guild Hierarchy & Permissions"],
+        L["Uses your guild's real WoW rank ladder to show permissions per rank and let the Guild Leader delegate who can define Allied/Enemy guilds, edit Guild Info, moderate Events, and access Alliance Chat."],
+        L["Click 'Diplomacy' to choose which ranks can tag Allied/Enemy guilds, 'Hierarchy Rules' for Info/Events/Alliance rank access, or click any rank row below."]
+    )
+
+    local hierRulesBtn = Theme:CreateButton(hierToolBar, 132, 22, L["Hierarchy Rules"] .. "  v", "primary")
+    Theme:AutoFitButton(hierRulesBtn, 110, 14, 190)
+    hierRulesBtn:SetScript("OnClick", function(selfBtn)
+        if not (MenuUtil and MenuUtil.CreateContextMenu and ns.Clan) then return end
+        local isGM = ns.Clan.IsGuildLeader and ns.Clan:IsGuildLeader()
+        local pol = ns.Clan:GetGuildHierarchyPolicy()
+        local ranks = ns.Clan.GetGuildRanks and ns.Clan:GetGuildRanks() or {}
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["Hierarchy Rules"])
+            if not isGM then
+                root:CreateTitle("|cffff6666" .. L["Only the Guild Leader can configure Guild Hierarchy & Rank Permissions."] .. "|r")
+            else
+                BuildRuleSubmenu(root, L["Who can edit Guild Info & Schedule:"], pol.infoMode, pol.infoMaxRank, function(mode, maxR)
+                    ns.Clan:SaveGuildHierarchyPolicy({ infoMode = mode, infoMaxRank = maxR })
+                end, function(rIdx)
+                    ns.Clan:SaveGuildHierarchyPolicy({ infoMode = "RANK", infoMaxRank = rIdx })
+                end, true)
+
+                BuildRuleSubmenu(root, L["Who can moderate / close any Event Call:"], pol.eventModMode, pol.eventModMaxRank, function(mode, maxR)
+                    ns.Clan:SaveGuildHierarchyPolicy({ eventModMode = mode, eventModMaxRank = maxR })
+                end, function(rIdx)
+                    ns.Clan:SaveGuildHierarchyPolicy({ eventModMode = "RANK", eventModMaxRank = rIdx })
+                end, false)
+
+                local allySub = root:CreateButton(L["Auto-allow Alliance Chat up to Rank:"])
+                if allySub and allySub.CreateRadio then
+                    allySub:CreateRadio(L["Manual Whitelist / Mode Only"], function()
+                        return (pol.allianceMinRank or -1) < 0
+                    end, function()
+                        ns.Clan:SaveGuildHierarchyPolicy({ allianceMinRank = -1 })
+                    end)
+                    for _, rk in ipairs(ranks) do
+                        local rIdx = rk.rankIndex
+                        allySub:CreateRadio(string.format("#%d %s", rIdx, rk.name), function()
+                            return pol.allianceMinRank == rIdx
+                        end, function()
+                            ns.Clan:SaveGuildHierarchyPolicy({ allianceMinRank = rIdx })
+                        end)
+                    end
+                end
+            end
+            root:CreateDivider()
+            root:CreateButton(L["Sync Hierarchy Rules"], function()
+                if isGM then
+                    ns.Clan:SaveGuildHierarchyPolicy({})
+                else
+                    ns.Clan:RequestIntelSync()
+                end
+            end)
+        end)
+    end)
+    themeTargets[#themeTargets + 1] = { btn = hierRulesBtn, variant = "primary" }
+
+    local hierAllyBtn = Theme:CreateButton(hierToolBar, 88, 22, L["Alliance"], "default")
+    Theme:AutoFitButton(hierAllyBtn, 72, 12, 130)
+    hierAllyBtn:SetScript("OnClick", OpenAllianceManagementModal)
+    themeTargets[#themeTargets + 1] = { btn = hierAllyBtn, variant = "default" }
 
     -- 4d) Professions & Lockouts contextual toolbar (View + Profession Filter + Source Filter + My Profs + Refresh + Search)
     local profToolBar = CreateFrame("Frame", nil, ctxBar)
@@ -4359,7 +5212,8 @@ local function CreateClanPanel(parent)
 
     local evtItems = { evtFilterBtn, newEventBtn }
     local profItems = { profViewBtn, profFilterBtn, profSourceBtn, profBtn, locksRefreshBtn, profSearch }
-    local dipItems = { dipFilterBtn, dipAddBtn }
+    local dipItems = { dipFilterBtn, dipAddBtn, dipAuthBtn }
+    local hierItems = { hierDipBtn, hierRulesBtn, hierAllyBtn }
 
     ReflowClanPanel = function()
         if not panel or not topHeader then return end
@@ -4397,9 +5251,16 @@ local function CreateClanPanel(parent)
 
         -- Reflow active contextual toolbar
         local ctxW = ctxBar:GetWidth() or 420
-        local rightReserved = (syncBtn:GetWidth() or 76) + (guildInviteBtn:GetWidth() or 92) + 46
+        local rightReserved = (syncBtn:GetWidth() or 88)
+            + (syncBtnHelp:GetWidth() or 16)
+            + (guildInviteBtn:GetWidth() or 96)
+            + (historyBtn:GetWidth() or 78)
+            + (historyHelp:GetWidth() or 16)
+            + (clanFilterBtn and clanFilterBtn:GetWidth() or 84)
+            + (peersHelp:GetWidth() or 16)
+            + 44
         if peerSearch and peerSearch.SetWidth then
-            peerSearch:SetWidth(math.max(96, math.min(184, ctxW - rightReserved)))
+            peerSearch:SetWidth(math.max(76, math.min(180, ctxW - rightReserved)))
         end
         local ctxH = 24
         if clanRightView == "events" then
@@ -4411,6 +5272,8 @@ local function CreateClanPanel(parent)
             ctxH = FlowButtonGroup(profToolBar, profItems, 4, 4, 0)
         elseif clanRightView == "diplomacy" then
             ctxH = FlowButtonGroup(dipToolBar, dipItems, 4, 4, 0)
+        elseif clanRightView == "hierarchy" then
+            ctxH = FlowButtonGroup(hierToolBar, hierItems, 4, 4, 0)
         end
         ctxBar:SetHeight(math.max(24, ctxH))
         listHolder:ClearAllPoints()
@@ -4425,6 +5288,7 @@ local function CreateClanPanel(parent)
     panel.mainCard = mainCard
     panel.guildHeroBar = guildHeroBar
     panel.heroSummaryLbl = heroSummaryLbl
+    panel.heroRankLbl = heroRankLbl
     panel.heroDetailLbl = heroDetailLbl
     panel.bottomBar = bottomBar
     panel.guildHead = guildHead
@@ -4439,11 +5303,17 @@ local function CreateClanPanel(parent)
     panel.syncStatus = syncStatus
     panel.eventsScroll = eventsScroll
     panel.peerSearch = peerSearch
+    panel.clanFilterBtn = clanFilterBtn
     panel.guildInviteBtn = guildInviteBtn
     panel.syncBtn = syncBtn
     panel.newEventBtn = newEventBtn
     panel.dipFilterBtn = dipFilterBtn
     panel.dipAddBtn = dipAddBtn
+    panel.dipAuthBtn = dipAuthBtn
+    panel.hierToolBar = hierToolBar
+    panel.hierDipBtn = hierDipBtn
+    panel.hierRulesBtn = hierRulesBtn
+    panel.hierAllyBtn = hierAllyBtn
     panel.profBtn = profBtn
     panel.profFilterBtn = profFilterBtn
     panel.profSourceBtn = profSourceBtn
@@ -4661,10 +5531,35 @@ local function ApplyTheme()
         end
     end
 
+    local singleEmbedded = IsSingleTabEmbedded()
     local showEmbeddedArt = isEmbedded and isBlizz
-    if frame._embeddedArtBg then frame._embeddedArtBg:SetShown(showEmbeddedArt) end
-    if frame._embeddedHeaderStone then frame._embeddedHeaderStone:SetShown(showEmbeddedArt) end
-    if frame._embeddedInsideFrame then frame._embeddedInsideFrame:SetShown(showEmbeddedArt) end
+    local showEmbeddedHeaderBand = showEmbeddedArt and (not singleEmbedded)
+    if frame._embeddedArtBg then
+        frame._embeddedArtBg:ClearAllPoints()
+        frame._embeddedArtBg:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, showEmbeddedHeaderBand and -34 or 0)
+        frame._embeddedArtBg:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+        frame._embeddedArtBg:SetShown(showEmbeddedArt)
+    end
+    if frame._embeddedHeaderStone then frame._embeddedHeaderStone:SetShown(showEmbeddedHeaderBand) end
+    if frame._embeddedHeaderSep then frame._embeddedHeaderSep:SetShown(showEmbeddedHeaderBand) end
+    if frame._embeddedInsideFrame then
+        frame._embeddedInsideFrame:ClearAllPoints()
+        frame._embeddedInsideFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, showEmbeddedHeaderBand and -34 or 0)
+        frame._embeddedInsideFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+        frame._embeddedInsideFrame:SetShown(showEmbeddedArt)
+    end
+    if frame._blizzHeaderShelf then
+        frame._blizzHeaderShelf:SetShown((not isEmbedded) and isBlizz and frame.blizzChrome ~= nil)
+    end
+    if frame._tabStripRule then
+        frame._tabStripRule:SetShown((not isEmbedded) and not singleEmbedded)
+        if isBlizz then
+            frame._tabStripRule:SetColorTexture(0.76, 0.60, 0.24, 0.42)
+        else
+            local ac = p.accentBorder or { 0.30, 0.72, 1.0 }
+            frame._tabStripRule:SetColorTexture(ac[1], ac[2], ac[3], 0.35)
+        end
+    end
 
     if frame.blizzTitleDrag then
         frame.blizzTitleDrag:SetFrameStrata(frame:GetFrameStrata())
@@ -4820,8 +5715,13 @@ local function ApplyTheme()
         frame.filterBar:SetFrameLevel(baseLevel + 8)
         frame.filterBar:ClearAllPoints()
         if isEmbedded then
-            frame.filterBar:SetPoint("TOPLEFT", frame.tabBar, "BOTTOMLEFT", 0, -8)
-            frame.filterBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -39)
+            if IsSingleTabEmbedded() then
+                frame.filterBar:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -8)
+                frame.filterBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -8)
+            else
+                frame.filterBar:SetPoint("TOPLEFT", frame.tabBar, "BOTTOMLEFT", 0, -8)
+                frame.filterBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -39)
+            end
         elseif isBlizz and frame.blizzChrome then
             frame.filterBar:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -93)
             frame.filterBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -14, -93)
@@ -4989,6 +5889,15 @@ local function BuildMainFrame()
     embeddedHeaderStone:Hide()
     frame._embeddedHeaderStone = embeddedHeaderStone
 
+    local embeddedHeaderSep = frame:CreateTexture(nil, "ARTWORK", nil, 2)
+    embeddedHeaderSep:SetHeight(1)
+    embeddedHeaderSep:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -34)
+    embeddedHeaderSep:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -34)
+    embeddedHeaderSep:SetTexture(WHITE8X8)
+    embeddedHeaderSep:SetVertexColor(0.68, 0.54, 0.24, 0.72)
+    embeddedHeaderSep:Hide()
+    frame._embeddedHeaderSep = embeddedHeaderSep
+
     local embeddedInsideFrame = frame:CreateTexture(nil, "ARTWORK", nil, 1)
     embeddedInsideFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -34)
     embeddedInsideFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
@@ -5056,6 +5965,18 @@ local function BuildMainFrame()
     header:SetHeight(42)
     header:EnableMouse(true)
     frame.header = header
+
+    local blizzHeaderShelf = frame:CreateTexture(nil, "BACKGROUND", nil, -3)
+    blizzHeaderShelf:SetPoint("TOPLEFT", header, "TOPLEFT", -4, 1)
+    blizzHeaderShelf:SetPoint("BOTTOMRIGHT", header, "BOTTOMRIGHT", 4, -1)
+    if Theme:HasAtlas("groupfinder-Stat-StoneBG") then
+        blizzHeaderShelf:SetAtlas("groupfinder-Stat-StoneBG", false)
+        blizzHeaderShelf:SetAlpha(0.55)
+    else
+        blizzHeaderShelf:SetColorTexture(0.11, 0.10, 0.08, 0.65)
+    end
+    blizzHeaderShelf:Hide()
+    frame._blizzHeaderShelf = blizzHeaderShelf
 
     local blizzTitleDrag = CreateFrame("Frame", nil, frame)
     blizzTitleDrag:SetPoint("TOPLEFT", frame, "TOPLEFT", 58, -2)
@@ -5205,6 +6126,13 @@ local function BuildMainFrame()
         ReflowTabStrip()
     end)
     frame.tabBar = tabBar
+
+    local tabStripRule = frame:CreateTexture(nil, "ARTWORK", nil, 1)
+    tabStripRule:SetHeight(1)
+    tabStripRule:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", -2, -2)
+    tabStripRule:SetPoint("TOPRIGHT", tabBar, "BOTTOMRIGHT", 2, -2)
+    tabStripRule:SetColorTexture(0.76, 0.60, 0.24, 0.42)
+    frame._tabStripRule = tabStripRule
 
     local tabDefs = {
         { id = "watchlist", label = L["Watchlist"], width = 108 },
@@ -5598,8 +6526,8 @@ local function BuildMainFrame()
         end
     end)
 
-    local socialAddBtn = Theme:CreateButton(socialBar, 88, 22, "+ " .. L["Friend"], "default")
-    themeTargets[#themeTargets + 1] = { btn = socialAddBtn, variant = "default" }
+    local socialAddBtn = Theme:CreateButton(socialBar, 96, 22, "+ " .. L["Friend"], "primary")
+    themeTargets[#themeTargets + 1] = { btn = socialAddBtn, variant = "primary" }
     frame.socialAddBtn = socialAddBtn
     socialAddBtn:SetScript("OnClick", function()
         OpenAddFriendModal()
@@ -5634,17 +6562,17 @@ local function BuildMainFrame()
             end
 
             if activeTab == "social" then
-                Theme:AutoFitButton(socialFilterBtn, 94, 12, 170)
-                Theme:AutoFitButton(socialSortBtn, 84, 12, 145)
-                Theme:AutoFitButton(socialAddBtn, 68, 12, 118)
+                Theme:AutoFitButton(socialFilterBtn, 108, 18, 190)
+                Theme:AutoFitButton(socialSortBtn, 100, 18, 175)
+                Theme:AutoFitButton(socialAddBtn, 86, 18, 138)
                 local sBtns = { socialFilterBtn, socialSortBtn, socialAddBtn }
                 if socialHelp then table.insert(sBtns, socialHelp) end
                 local flowH = FlowButtonGroup(socialBar, sBtns, 6, 4, 0)
                 socialBar:SetHeight(flowH)
                 rowH = flowH
             elseif activeTab == "watchlist" then
-                Theme:AutoFitButton(groupFilterBtn, 78, 10, 145)
-                Theme:AutoFitButton(sortBtn, 82, 10, 145)
+                Theme:AutoFitButton(groupFilterBtn, 108, 18, 185)
+                Theme:AutoFitButton(sortBtn, 108, 18, 180)
                 local wBtns = { groupFilterBtn, sortBtn }
                 if watchFilterHelp then table.insert(wBtns, watchFilterHelp) end
                 local flowH = FlowButtonGroup(watchFilterBar, wBtns, 6, 4, 0)
@@ -5684,9 +6612,9 @@ local function BuildMainFrame()
                 sb:SetHeight(26)
             end
 
-            Theme:AutoFitButton(socialFilterBtn, 104, 14, 185)
-            Theme:AutoFitButton(socialSortBtn, 92, 14, 150)
-            Theme:AutoFitButton(socialAddBtn, 74, 14, 118)
+            Theme:AutoFitButton(socialFilterBtn, 112, 18, 195)
+            Theme:AutoFitButton(socialSortBtn, 104, 18, 175)
+            Theme:AutoFitButton(socialAddBtn, 88, 18, 138)
             socialFilterBtn:ClearAllPoints()
             socialFilterBtn:SetPoint("LEFT", socialBar, "LEFT", 0, 0)
             socialSortBtn:ClearAllPoints()
@@ -5783,8 +6711,8 @@ local function BuildMainFrame()
     addBox:SetScript("OnEnterPressed", SubmitAdd)
     addBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
-    local addBtn = Theme:CreateButton(watchBar, 76, 24, "+ " .. L["Add"], "default")
-    Theme:AutoFitButton(addBtn, 66, 16, 112)
+    local addBtn = Theme:CreateButton(watchBar, 92, 24, "+ " .. L["Add"], "primary")
+    Theme:AutoFitButton(addBtn, 86, 20, 140)
     addBtn:SetPoint("LEFT", addBox, "RIGHT", 6, 0)
     addBtn:SetScript("OnClick", function()
         if not ns.Watchlist then return end
@@ -5797,7 +6725,7 @@ local function BuildMainFrame()
             SubmitAdd()
         end
     end)
-    themeTargets[#themeTargets + 1] = { btn = addBtn, variant = "default" }
+    themeTargets[#themeTargets + 1] = { btn = addBtn, variant = "primary" }
 
     local watchHelp = AddHelp(
         watchBar,
@@ -5831,7 +6759,7 @@ local function BuildMainFrame()
         watchBar:SetPoint("TOPRIGHT", filterBar, "BOTTOMRIGHT", 0, -6)
 
         local compact = avail < 420
-        Theme:AutoFitButton(addBtn, compact and 60 or 66, compact and 12 or 16, 128)
+        Theme:AutoFitButton(addBtn, compact and 84 or 92, compact and 18 or 20, 145)
         if watchHelp then
             watchHelp:ClearAllPoints()
             watchHelp:SetPoint("RIGHT", watchBar, "RIGHT", -2, 0)
@@ -6887,7 +7815,7 @@ function UI:Toggle()
     end
 end
 
-for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "ALTS_UPDATED", "CLAN_UPDATED", "CLAN_DIPLOMACY_UPDATED", "CLAN_LFG_ALERT", "SPOTTER_UPDATED", "GROUP_UPDATED", "CHAT_UPDATED", "VERSION_UPDATE_FOUND", "SETTINGS_UPDATED" }) do
+for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "ALTS_UPDATED", "CLAN_UPDATED", "CLAN_DIPLOMACY_UPDATED", "CLAN_HIERARCHY_UPDATED", "CLAN_LFG_ALERT", "SPOTTER_UPDATED", "GROUP_UPDATED", "CHAT_UPDATED", "VERSION_UPDATE_FOUND", "SETTINGS_UPDATED" }) do
     ns:On(ev, function()
         UI:QueueRefresh(false)
     end)

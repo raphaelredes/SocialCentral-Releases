@@ -109,9 +109,9 @@ Theme.PALETTES = {
         offline = { 0.54, 0.54, 0.58 },
         unknown = { 0.98, 0.78, 0.24 },
         nearby = { 0.35, 0.80, 1.0 },
-        scrollTrack = { 0.03, 0.03, 0.03, 0.76 },
-        scrollThumb = { 0.44, 0.40, 0.34, 0.92 },
-        scrollThumbHover = { 0.78, 0.66, 0.36, 1.0 },
+        scrollTrack = { 0.03, 0.03, 0.03, 0.68 },
+        scrollThumb = { 0.56, 0.45, 0.24, 0.88 },
+        scrollThumbHover = { 0.90, 0.72, 0.28, 1.0 },
     },
 }
 
@@ -207,6 +207,120 @@ local function ApplyBackdropSpec(frame, spec, bg, border, forceOpaque)
     end
 end
 
+local gradColorA, gradColorB
+
+local function ApplySafeGradient(tex, orient, r1, g1, b1, a1, r2, g2, b2, a2)
+    if not tex then return end
+    if tex.SetGradient and CreateColor then
+        if not gradColorA then gradColorA = CreateColor(0, 0, 0, 1) end
+        if not gradColorB then gradColorB = CreateColor(0, 0, 0, 1) end
+        gradColorA:SetRGBA(r1, g1, b1, a1)
+        gradColorB:SetRGBA(r2, g2, b2, a2)
+        tex:SetTexture(WHITE8X8)
+        tex:SetVertexColor(1, 1, 1, 1)
+        pcall(tex.SetGradient, tex, orient, gradColorA, gradColorB)
+    else
+        tex:SetColorTexture((r1 + r2) * 0.5, (g1 + g2) * 0.5, (b1 + b2) * 0.5, (a1 + a2) * 0.5)
+    end
+end
+
+local function SyncDepthPolish(frame, kind, p, isBlizz)
+    if not frame then return end
+    local fw = frame.GetWidth and frame:GetWidth() or 0
+    local fh = frame.GetHeight and frame:GetHeight() or 0
+    local isLargeFrame = (not frame._scIsListRow) and (fw == 0 or fw >= 100)
+    local wantSheen = isLargeFrame and (kind == "header" or kind == "surface" or kind == "window")
+    local wantBevel = isLargeFrame and (kind == "header" or kind == "surface")
+    local wantInsetStone = (kind == "inset" and isBlizz and not frame._scNoStone and fw >= 120 and fh >= 80 and HasAtlas("groupfinder-background"))
+
+    if wantSheen then
+        if not frame._scCardSheen then
+            local sheen = frame:CreateTexture(nil, "BACKGROUND", nil, -5)
+            sheen:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -2)
+            sheen:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
+            frame._scCardSheen = sheen
+        end
+        local acc = p.accent or { 0.3, 0.7, 1.0 }
+        if kind == "header" then
+            frame._scCardSheen:SetHeight(math.max(20, (frame:GetHeight() or 36) - 4))
+            if isBlizz then
+                ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, 0.52, 0.40, 0.16, 0.18)
+            else
+                ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, acc[1] * 0.24 + 0.06, acc[2] * 0.24 + 0.06, acc[3] * 0.24 + 0.08, 0.28)
+            end
+        elseif kind == "surface" then
+            frame._scCardSheen:SetHeight(48)
+            ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, 1, 1, 1, isBlizz and 0.03 or 0.045)
+        else
+            frame._scCardSheen:SetHeight(56)
+            ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, acc[1] * 0.3 + 0.05, acc[2] * 0.3 + 0.05, acc[3] * 0.3 + 0.08, isBlizz and 0.04 or 0.14)
+        end
+        frame._scCardSheen:Show()
+    elseif frame._scCardSheen then
+        frame._scCardSheen:Hide()
+    end
+
+    if wantBevel then
+        if not frame._scTopBevel then
+            local bev = frame:CreateTexture(nil, "BORDER", nil, 2)
+            bev:SetHeight(1)
+            bev:SetPoint("TOPLEFT", frame, "TOPLEFT", 3, -2)
+            bev:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -3, -2)
+            frame._scTopBevel = bev
+        end
+        if isBlizz or p.key == "native" then
+            frame._scTopBevel:SetColorTexture(0.95, 0.80, 0.38, 0.24)
+        else
+            frame._scTopBevel:SetColorTexture(0.65, 0.85, 1.0, 0.16)
+        end
+        frame._scTopBevel:Show()
+    elseif frame._scTopBevel then
+        frame._scTopBevel:Hide()
+    end
+
+    if wantInsetStone then
+        if not frame._scInsetStone then
+            local st = frame:CreateTexture(nil, "BACKGROUND", nil, -4)
+            st:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -2)
+            st:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+            st:SetAtlas("groupfinder-background", false)
+            frame._scInsetStone = st
+        end
+        frame._scInsetStone:SetVertexColor(0.36, 0.34, 0.32, 0.42)
+        frame._scInsetStone:Show()
+    elseif frame._scInsetStone then
+        frame._scInsetStone:Hide()
+    end
+end
+
+--- Add a clean tapered gold/accent horizontal rule directly below a section heading.
+function Theme:DecorateSectionHeader(parent, labelFs, lineWidth)
+    if not (parent and labelFs) then return nil end
+    local p = self:GetPalette()
+    local isBlizz = self:IsBlizzard(p) or p.key == "native"
+    local r, g, b = 0.88, 0.72, 0.28
+    if not isBlizz and p.accentBorder then
+        r, g, b = p.accentBorder[1], p.accentBorder[2], p.accentBorder[3]
+    end
+    local halfW = math.floor((lineWidth or 280) * 0.5)
+    local sep = CreateFrame("Frame", nil, parent)
+    sep:SetHeight(2)
+    sep:SetPoint("TOPLEFT", labelFs, "BOTTOMLEFT", 0, -4)
+    sep:SetWidth(halfW * 2)
+
+    local leftTex = sep:CreateTexture(nil, "ARTWORK")
+    leftTex:SetPoint("LEFT", sep, "LEFT", 0, 0)
+    leftTex:SetSize(halfW, 1)
+    ApplySafeGradient(leftTex, "HORIZONTAL", r, g, b, 0.72, r, g, b, 0.22)
+
+    local rightTex = sep:CreateTexture(nil, "ARTWORK")
+    rightTex:SetPoint("LEFT", leftTex, "RIGHT", 0, 0)
+    rightTex:SetSize(halfW, 1)
+    ApplySafeGradient(rightTex, "HORIZONTAL", r, g, b, 0.22, r, g, b, 0.0)
+
+    return sep
+end
+
 --- Apply a flat, bordered, or Blizzard-official backdrop to a frame created with BackdropTemplate.
 function Theme:ApplyBackdrop(frame, kind, palette)
     if not frame or not frame.SetBackdrop then
@@ -233,6 +347,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
         if frame._foreverSurfaceStone then
             frame._foreverSurfaceStone:Hide()
         end
+        SyncDepthPolish(frame, "none", p, false)
         return
     end
 
@@ -251,37 +366,33 @@ function Theme:ApplyBackdrop(frame, kind, palette)
     end
 
     if self:IsBlizzard(p) then
-        local hasListAtlas = HasAtlas("common-button-list-large")
         local hasStoneAtlas = HasAtlas("groupfinder-Stat-StoneBG")
 
-        if (kind == "row" or kind == "rowAlt") and hasListAtlas then
+        if kind == "row" or kind == "rowAlt" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, { 0.055, 0.052, 0.050 }, nil, true)
-            if not frame._foreverRowBg then
-                frame._foreverRowBg = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
-                frame._foreverRowBg:SetAllPoints(frame)
-                frame._foreverRowBg:SetAtlas("common-button-list-large", false)
+            if frame._foreverRowBg then
+                frame._foreverRowBg:Hide()
             end
-            local shade = (kind == "row") and 1.0 or 0.88
-            frame._foreverRowBg:SetVertexColor(shade, shade, shade, 1.0)
-            frame._foreverRowBg:Show()
-            if frame.GetObjectType and frame:GetObjectType() == "Button" and not frame._foreverRowHl and HasAtlas("common-button-list-large-hover") then
+            SyncDepthPolish(frame, "none", p, true)
+            local bgRow = (kind == "row") and { 0.085, 0.078, 0.070 } or { 0.055, 0.050, 0.045 }
+            ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, bgRow, nil, false)
+            frame:SetBackdropColor(bgRow[1], bgRow[2], bgRow[3], (kind == "row") and 0.42 or 0.25)
+            if frame.GetObjectType and frame:GetObjectType() == "Button" and not frame._foreverRowHl then
                 local hl = frame:CreateTexture(nil, "HIGHLIGHT")
                 hl:SetAllPoints(frame)
-                hl:SetAtlas("common-button-list-large-hover", false)
-                hl:SetBlendMode("ADD")
-                hl:SetAlpha(0.55)
+                hl:SetColorTexture(0.95, 0.78, 0.28, 0.10)
                 frame._foreverRowHl = hl
             end
             return
         end
 
-        if kind == "surface" and frame._foreverRowBg then
-            ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.14, 0.11, 0.06 }, { 0.84, 0.66, 0.24 }, true)
-            frame._foreverRowBg:SetVertexColor(1.0, 0.88, 0.58, 1.0)
-            frame._foreverRowBg:Show()
+        if kind == "surface" and frame._scIsListRow then
+            ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, { 0.22, 0.17, 0.08 }, nil, false)
+            frame:SetBackdropColor(0.22, 0.17, 0.08, 0.55)
+            if frame._foreverRowBg then frame._foreverRowBg:Hide() end
+            SyncDepthPolish(frame, "none", p, true)
             return
         end
 
@@ -294,6 +405,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
                 frame._foreverSurfaceStone:Hide()
             end
             ApplyBackdropSpec(frame, BLIZZ_DIALOG_BACKDROP, { 0.08, 0.075, 0.07 }, { 0.86, 0.80, 0.68 }, true)
+            SyncDepthPolish(frame, "none", p, true)
             return
         elseif kind == "header" then
             ApplyBackdropSpec(frame, hasStoneAtlas and BACKDROP_SPEC or BLIZZ_SURFACE_BACKDROP, { 0.085, 0.08, 0.07 }, { 0.46, 0.38, 0.22 }, true)
@@ -308,26 +420,21 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             elseif frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
+            SyncDepthPolish(frame, "header", p, true)
             return
         elseif kind == "inset" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            if hasListAtlas or hasStoneAtlas then
-                ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.055, 0.052, 0.050 }, { 0.32, 0.27, 0.18 }, true)
-            else
-                ApplyBackdropSpec(frame, BLIZZ_INSET_BACKDROP, { 0.12, 0.11, 0.10 }, { 0.58, 0.52, 0.40 }, true)
-            end
+            ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.048, 0.045, 0.042 }, { 0.36, 0.30, 0.19 }, true)
+            SyncDepthPolish(frame, "inset", p, true)
             return
         elseif kind == "surface" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            if hasListAtlas or hasStoneAtlas then
-                ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.068, 0.064, 0.060 }, { 0.42, 0.35, 0.22 }, true)
-            else
-                ApplyBackdropSpec(frame, BLIZZ_SURFACE_BACKDROP, { 0.14, 0.13, 0.12 }, { 0.48, 0.43, 0.34 }, true)
-            end
+            ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.075, 0.068, 0.060 }, { 0.44, 0.36, 0.22 }, true)
+            SyncDepthPolish(frame, "surface", p, true)
             return
         end
     else
@@ -368,6 +475,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
     end
 
     ApplyBackdropSpec(frame, border and BACKDROP_SPEC or FLAT_BACKDROP_SPEC, bg, border, true)
+    SyncDepthPolish(frame, resolvedKind, p, false)
 end
 
 local function SyncBlizzTextOffset(btn, xOff, yOff)
@@ -523,9 +631,11 @@ local function ApplyButtonColors(btn, hovered)
     end
     SyncBlizzTextOffset(btn, 0, 0)
 
-    if isBlizz and variant ~= "ghost" and (variant == "tab" or w >= 26) then
+    local useBlizzPlate = isBlizz and (variant == "tab" or ((variant == "primary" or variant == "danger") and w >= 26))
+    if useBlizzPlate then
         local vis, kind = EnsureBlizzButtonVisual(btn, variant == "tab")
         if vis then
+            if btn._scNavIndicator then btn._scNavIndicator:Hide() end
             if btn._scAppliedBackdrop ~= nil then
                 btn:SetBackdrop(nil)
                 btn._scAppliedBackdrop = nil
@@ -586,18 +696,15 @@ local function ApplyButtonColors(btn, hovered)
                     else
                         vis:SetButtonState("NORMAL")
                     end
-                    if hovered or active then
+                    if hovered then
                         vis:LockHighlight()
                     else
                         vis:UnlockHighlight()
                     end
-                    if variant == "primary" or active then
-                        TintBlizzButtonTextures(vis, false, hovered and 1.12 or 1.02, hovered and 1.06 or 1.0, hovered and 1.02 or 0.96)
-                    elseif variant == "danger" then
+                    if variant == "danger" then
                         TintBlizzButtonTextures(vis, false, hovered and 0.96 or 0.84, 0.38, 0.36)
                     else
-                        -- Authentic WoW Forever red/gold UIPanelButtonTemplate look
-                        TintBlizzButtonTextures(vis, false, hovered and 1.06 or 0.94, hovered and 1.04 or 0.92, hovered and 1.04 or 0.92)
+                        TintBlizzButtonTextures(vis, false, hovered and 1.12 or 1.02, hovered and 1.06 or 1.0, hovered and 1.02 or 0.96)
                     end
                 end
                 if btn._scPushed and btn:IsEnabled() then
@@ -613,28 +720,84 @@ local function ApplyButtonColors(btn, hovered)
                     elseif variant == "danger" then
                         btn.label:SetTextColor(1.0, 0.82, 0.78)
                     else
-                        btn.label:SetTextColor(1.0, 0.82, 0.0)
+                        btn.label:SetTextColor(1.0, 0.92, 0.68)
                     end
                 end
             end
             vis:Show()
+            if btn._scBtnGloss then btn._scBtnGloss:Hide() end
             return
         end
     end
 
     if btn._blizzBtn then btn._blizzBtn:Hide() end
     if btn._blizzTabFrame then btn._blizzTabFrame:Hide() end
+    if variant == "nav" then
+        local parent = btn._textLayer or btn
+        if btn.label then
+            btn.label:ClearAllPoints()
+            btn.label:SetPoint("LEFT", parent, "LEFT", btn._scNavIcon and 28 or 12, 0)
+            btn.label:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+            btn.label:SetJustifyH("LEFT")
+            btn.label:SetWordWrap(false)
+        end
+        if not btn._scNavIndicator then
+            local ind = btn:CreateTexture(nil, "OVERLAY", nil, 2)
+            ind:SetWidth(3)
+            ind:SetPoint("TOPLEFT", btn, "TOPLEFT", 1, -3)
+            ind:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 1, 3)
+            btn._scNavIndicator = ind
+        end
+        local bgNav, brNav, txtNav
+        if not btn:IsEnabled() then
+            bgNav = { 0.06, 0.055, 0.050, 0.55 }
+            brNav = { 0.16, 0.15, 0.14, 0.30 }
+            txtNav = p.textDim
+            btn._scNavIndicator:Hide()
+        elseif active then
+            bgNav = isBlizz and { 0.24, 0.17, 0.07, 0.95 } or p.accentDim
+            brNav = isBlizz and { 0.84, 0.66, 0.24, 0.90 } or p.accentBorder
+            txtNav = { 1.0, 0.96, 0.82 }
+            local ic = isBlizz and { 0.98, 0.78, 0.20 } or (p.accentBorder or { 0.35, 0.78, 1.0 })
+            btn._scNavIndicator:SetColorTexture(ic[1], ic[2], ic[3], 1.0)
+            btn._scNavIndicator:Show()
+        elseif hovered then
+            bgNav = isBlizz and { 0.16, 0.13, 0.09, 0.90 } or p.rowHoverBg
+            brNav = isBlizz and { 0.52, 0.42, 0.22, 0.75 } or p.surfaceBorder
+            txtNav = { 1.0, 0.92, 0.65 }
+            btn._scNavIndicator:SetColorTexture(0.75, 0.60, 0.24, 0.55)
+            btn._scNavIndicator:Show()
+        else
+            bgNav = isBlizz and { 0.085, 0.078, 0.070, 0.78 } or { 0.08, 0.09, 0.12, 0.65 }
+            brNav = isBlizz and { 0.26, 0.22, 0.15, 0.55 } or { 0.16, 0.20, 0.26, 0.55 }
+            txtNav = isBlizz and { 0.88, 0.82, 0.68 } or p.textMuted
+            btn._scNavIndicator:Hide()
+        end
+        ApplyBackdropSpec(btn, BACKDROP_SPEC, bgNav, brNav, false)
+        if btn.label then
+            btn.label:SetTextColor(txtNav[1], txtNav[2], txtNav[3])
+        end
+        if btn._scBtnGloss then btn._scBtnGloss:Hide() end
+        return
+    elseif btn._scNavIndicator then
+        btn._scNavIndicator:Hide()
+    end
+
     SyncBlizzTextOffset(btn, 0, 0)
 
     local bg, border, textColor
     if not btn:IsEnabled() then
-        bg = p.insetBg
-        border = p.surfaceBorder
+        bg = isBlizz and { 0.07, 0.065, 0.06, 0.88 } or p.insetBg
+        border = isBlizz and { 0.24, 0.21, 0.16, 0.75 } or p.surfaceBorder
         textColor = p.textDim
-    elseif variant == "primary" or active then
+    elseif variant == "primary" or (active and not isBlizz) then
         bg = hovered and p.accent or p.accentDim
         border = p.accentBorder
-        textColor = active and p.text or p.text
+        textColor = p.text
+    elseif active and isBlizz then
+        bg = hovered and { 0.28, 0.21, 0.09, 0.98 } or { 0.21, 0.16, 0.07, 0.96 }
+        border = { 0.90, 0.72, 0.26, 1.0 }
+        textColor = { 1.0, 0.95, 0.78 }
     elseif variant == "danger" then
         bg = hovered and p.dangerHoverBg or p.dangerBg
         border = p.dangerBorder
@@ -644,9 +807,20 @@ local function ApplyButtonColors(btn, hovered)
         border = p.surfaceBorder
         textColor = hovered and p.text or p.textMuted
     elseif variant == "ghost" then
-        bg = hovered and p.rowHoverBg or { 0, 0, 0, 0 }
-        border = hovered and p.surfaceBorder or { 0, 0, 0, 0 }
-        textColor = hovered and p.text or p.textMuted
+        if btn._scHelpRing then
+            bg = { 0, 0, 0, 0 }
+            border = { 0, 0, 0, 0 }
+            textColor = hovered and { 1.0, 0.95, 0.72 } or { 0.84, 0.72, 0.38 }
+        else
+            bg = hovered and (isBlizz and { 0.22, 0.17, 0.09, 0.85 } or p.rowHoverBg) or { 0, 0, 0, 0 }
+            border = hovered and (isBlizz and { 0.68, 0.54, 0.22, 0.85 } or p.surfaceBorder) or { 0, 0, 0, 0 }
+            textColor = hovered and (isBlizz and { 1.0, 0.90, 0.55 } or p.text) or p.textMuted
+        end
+    elseif isBlizz then
+        -- Sleek Modern Blizzard Charcoal-Bronze Matte Button (replaces archaic red boxes on default utility buttons)
+        bg = hovered and { 0.20, 0.17, 0.12, 0.98 } or { 0.12, 0.11, 0.095, 0.96 }
+        border = hovered and { 0.84, 0.66, 0.24, 1.0 } or { 0.40, 0.34, 0.21, 0.92 }
+        textColor = hovered and { 1.0, 0.96, 0.82 } or { 0.94, 0.86, 0.64 }
     else
         bg = hovered and p.btnHoverBg or p.btnBg
         border = hovered and p.accentBorder or p.btnBorder
@@ -654,6 +828,27 @@ local function ApplyButtonColors(btn, hovered)
     end
 
     ApplyBackdropSpec(btn, BACKDROP_SPEC, bg, border, false)
+    local bw = btn:GetWidth() or 0
+    local bh = btn:GetHeight() or 0
+    if variant ~= "ghost" and btn:IsEnabled() and bw >= 32 and bh >= 18 then
+        if not btn._scBtnGloss then
+            local gloss = btn:CreateTexture(nil, "ARTWORK", nil, 1)
+            gloss:SetPoint("TOPLEFT", btn, "TOPLEFT", 2, -1)
+            gloss:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -2, -1)
+            btn._scBtnGloss = gloss
+        end
+        if variant == "tab" and active then
+            btn._scBtnGloss:SetHeight(2)
+            local ac = p.accentBorder or { 0.35, 0.78, 1.0 }
+            btn._scBtnGloss:SetColorTexture(ac[1], ac[2], ac[3], 0.95)
+        else
+            btn._scBtnGloss:SetHeight(1)
+            btn._scBtnGloss:SetColorTexture(1, 0.95, 0.82, (variant == "primary" or hovered) and 0.20 or 0.09)
+        end
+        btn._scBtnGloss:Show()
+    elseif btn._scBtnGloss then
+        btn._scBtnGloss:Hide()
+    end
     if btn.label then
         btn.label:SetTextColor(textColor[1], textColor[2], textColor[3])
     end
@@ -793,7 +988,11 @@ function Theme:SetButtonActive(btn, active, variant)
     ApplyButtonColors(btn, false)
 end
 
---- Update a ColorTexture status indicator for a character state.
+local STATUS_AWAY_RGB = { 0.96, 0.76, 0.22 }
+local STATUS_BUSY_RGB = { 0.92, 0.36, 0.36 }
+local STATUS_APP_RGB  = { 0.44, 0.70, 0.96 }
+
+--- Update a ColorTexture or circular dot texture for a character state.
 function Theme:ApplyStatusColor(tex, status)
     if not tex then
         return
@@ -807,13 +1006,17 @@ function Theme:ApplyStatusColor(tex, status)
     elseif status == "nearby" then
         c = p.nearby
     elseif status == "away" then
-        c = { 0.96, 0.76, 0.22 }
+        c = STATUS_AWAY_RGB
     elseif status == "busy" then
-        c = { 0.92, 0.36, 0.36 }
+        c = STATUS_BUSY_RGB
     elseif status == "app" then
-        c = { 0.44, 0.70, 0.96 }
+        c = STATUS_APP_RGB
     end
-    tex:SetColorTexture(c[1], c[2], c[3], 1)
+    if tex._scKeepTexture then
+        tex:SetVertexColor(c[1], c[2], c[3], 1)
+    else
+        tex:SetColorTexture(c[1], c[2], c[3], 1)
+    end
 end
 
 local function ApplyInputBackdrop(target, focused, hovered, textTarget)
@@ -1314,8 +1517,33 @@ end
 
 --- Create a standardized '?' help micro-button beside an option or feature bar.
 function Theme:CreateHelpButton(parent, title, whatText, howText, size)
-    local btn = self:CreateButton(parent, size or 18, size or 18, "?", "default")
+    local sz = size or 16
+    local btn = self:CreateButton(parent, sz, sz, "?", "ghost")
+    btn:SetHitRectInsets(-3, -3, -3, -3)
+
+    local ring = btn:CreateTexture(nil, "BACKGROUND", nil, 1)
+    ring:SetAllPoints()
+    ring:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
+    ring:SetVertexColor(0.28, 0.24, 0.17, 0.65)
+    btn._scHelpRing = ring
+
+    local inner = btn:CreateTexture(nil, "BACKGROUND", nil, 2)
+    inner:SetPoint("TOPLEFT", 1, -1)
+    inner:SetPoint("BOTTOMRIGHT", -1, 1)
+    inner:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
+    inner:SetVertexColor(0.09, 0.085, 0.075, 0.95)
+    btn._scHelpInner = inner
+
+    if btn.label then
+        btn.label:SetTextColor(0.84, 0.72, 0.38)
+    end
+
     btn:HookScript("OnEnter", function(selfBtn)
+        ring:SetVertexColor(0.95, 0.76, 0.26, 0.95)
+        inner:SetVertexColor(0.18, 0.14, 0.08, 0.98)
+        if selfBtn.label then
+            selfBtn.label:SetTextColor(1.0, 0.95, 0.72)
+        end
         GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
         GameTooltip:AddLine(title or L["Help"], 0.35, 0.72, 1.0, true)
@@ -1327,7 +1555,12 @@ function Theme:CreateHelpButton(parent, title, whatText, howText, size)
         GameTooltip:AddLine(L["Click ? to keep this help open."], 0.58, 0.65, 0.74, true)
         GameTooltip:Show()
     end)
-    btn:HookScript("OnLeave", function()
+    btn:HookScript("OnLeave", function(selfBtn)
+        ring:SetVertexColor(0.28, 0.24, 0.17, 0.65)
+        inner:SetVertexColor(0.09, 0.085, 0.075, 0.95)
+        if selfBtn.label then
+            selfBtn.label:SetTextColor(0.84, 0.72, 0.38)
+        end
         GameTooltip:Hide()
     end)
     btn:SetScript("OnClick", function()
@@ -1336,7 +1569,7 @@ function Theme:CreateHelpButton(parent, title, whatText, howText, size)
     end)
     self:RegisterListener(function()
         if btn:IsVisible() then
-            self:StyleButton(btn, "default")
+            self:StyleButton(btn, "ghost")
         else
             btn._scThemeKey = nil
         end
@@ -1986,7 +2219,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     end
 
     local thumb = CreateFrame("Button", nil, track)
-    thumb:SetWidth(8)
+    thumb:SetWidth(6)
     thumb:SetHeight(32)
     thumb:SetPoint("TOP", 0, 0)
     thumb.tex = thumb:CreateTexture(nil, "ARTWORK")
@@ -2017,23 +2250,20 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
         local isBlizz = Theme:IsBlizzard(p)
         viewport:ClearAllPoints()
         track:ClearAllPoints()
+        if scrollUpBtn then scrollUpBtn:Hide() end
+        if scrollDownBtn then scrollDownBtn:Hide() end
         if isBlizz then
-            local hasArrows = (scrollUpBtn ~= nil and scrollDownBtn ~= nil)
-            viewport:SetPoint("TOPLEFT", 5, -5)
-            viewport:SetPoint("BOTTOMRIGHT", hasArrows and -20 or -16, 5)
-            track:SetWidth(10)
-            track:SetPoint("TOPRIGHT", -5, hasArrows and -20 or -5)
-            track:SetPoint("BOTTOMRIGHT", -5, hasArrows and 20 or 5)
-            if scrollUpBtn then scrollUpBtn:Show() end
-            if scrollDownBtn then scrollDownBtn:Show() end
+            viewport:SetPoint("TOPLEFT", 3, -3)
+            viewport:SetPoint("BOTTOMRIGHT", -13, 3)
+            track:SetWidth(6)
+            track:SetPoint("TOPRIGHT", -4, -4)
+            track:SetPoint("BOTTOMRIGHT", -4, 4)
         else
             viewport:SetPoint("TOPLEFT", 2, -2)
-            viewport:SetPoint("BOTTOMRIGHT", -14, 2)
-            track:SetWidth(8)
+            viewport:SetPoint("BOTTOMRIGHT", -12, 2)
+            track:SetWidth(6)
             track:SetPoint("TOPRIGHT", -3, -4)
             track:SetPoint("BOTTOMRIGHT", -3, 4)
-            if scrollUpBtn then scrollUpBtn:Hide() end
-            if scrollDownBtn then scrollDownBtn:Hide() end
         end
         if track.SetBackdrop then
             track:SetBackdrop(FLAT_BACKDROP_SPEC)
@@ -2067,6 +2297,15 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
             local row = createRowFn(viewport, idx, list.rowHeight)
             row:SetHeight(list.rowHeight)
             row._scIndex = idx
+            row._scIsListRow = true
+            if row.CreateTexture and not row._scRowSep then
+                local rSep = row:CreateTexture(nil, "ARTWORK", nil, 0)
+                rSep:SetHeight(1)
+                rSep:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 6, 0)
+                rSep:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -6, 0)
+                rSep:SetColorTexture(1, 1, 1, 0.05)
+                row._scRowSep = rSep
+            end
             list.rows[idx] = row
         end
     end

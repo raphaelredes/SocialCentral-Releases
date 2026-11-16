@@ -21,8 +21,11 @@ end
 
 local function AddSectionHeader(parent, text, anchorTo, yOffset, helpTitle, helpWhat, helpHow)
     local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    fs:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, yOffset or -14)
+    fs:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, yOffset or -20)
     fs:SetText(text)
+    if ns.Theme and ns.Theme.DecorateSectionHeader then
+        ns.Theme:DecorateSectionHeader(parent, fs, 420)
+    end
     if helpTitle then
         HelpBtn(parent, fs, helpTitle, helpWhat, helpHow)
     end
@@ -176,7 +179,7 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 3330)
+    content:SetSize(590, 3480)
     scrollFrame:SetScrollChild(content)
     scrollFrame:SetScript("OnSizeChanged", function(self)
         local w = math.max(460, (self:GetWidth() or 590) - 10)
@@ -1244,10 +1247,46 @@ local function BuildPanel()
         L["Uncheck for silent visual alerts only."]
     )
 
+    local spotterMapPinsCb = CreateCheckbox(
+        content,
+        L["Show detected targets on Minimap and World Map"],
+        spotterSoundCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterMapPins ~= false end,
+        function(checked)
+            ns.db.settings.spotterMapPins = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Map Pins"],
+        L["Displays a small icon on the Minimap and World Map indicating the location of tracked targets and peers sharing their coordinates."],
+        L["Uncheck to hide target pins from your map and minimap."]
+    )
+
+    local spotterSharePosCb = CreateCheckbox(
+        content,
+        L["Share my map position with Guild and Friends"],
+        spotterMapPinsCb,
+        -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.spotterSharePosition == true end,
+        function(checked)
+            ns.db.settings.spotterSharePosition = checked
+            if not checked and C_ChatInfo and C_ChatInfo.SendAddonMessage and IsInGuild and IsInGuild()
+                and not (InCombatLockdown and InCombatLockdown())
+                and not (UnitAffectingCombat and UnitAffectingCombat("player"))
+                and not (ns.Clan and (ns.Clan.isStoppedThisSession or (ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked()))) then
+                pcall(C_ChatInfo.SendAddonMessage, "OpenMapLoc", "L0", "GUILD")
+            end
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Spotter Share Position"],
+        L["Broadcasts your map coordinates periodically to guildmates and friends using SocialCentral or OpenMap so they can see your position on their map."],
+        L["Only broadcasts outside instances and combat. Uncheck to stop sharing your location."]
+    )
+
     local buffsHeader = AddSectionHeader(
         content,
         L["World Buffs (Classic & Forever)"],
-        spotterSoundCb,
+        spotterSharePosCb,
         -14,
         L["Help: World Buffs"],
         L["Tracks active Classic World Buffs, detects city drop announcements in real time, and lets you report your current buffs to party, raid, or guild."],

@@ -129,10 +129,21 @@ local function ScanGuild(onlineCtx, dirCtx, wlObsMap)
     local inGuild = Safe.Value(IsInGuild and IsInGuild()) == true
     local info = Store.guildInfo
     info.inGuild = inGuild
+    local rosterRanks = Store.guildRosterRanks
+    if type(rosterRanks) ~= "table" then
+        rosterRanks = {}
+        Store.guildRosterRanks = rosterRanks
+    else
+        wipe(rosterRanks)
+    end
     if not inGuild or not GetGuildRosterInfo then
         info.name, info.motd, info.onlineCount, info.totalCount = nil, nil, 0, 0
+        info.myRankIndex, info.myRankName, info.isGuildLeader = nil, nil, false
         return
     end
+    info.isGuildLeader = (IsGuildLeader and Safe.Value(Safe.Call(IsGuildLeader)) == true) or false
+    info.myRankIndex = nil
+    info.myRankName = nil
 
     local liveGuildName = Safe.String(Safe.Call(GetGuildInfo, "player"))
     if liveGuildName and liveGuildName ~= "" then
@@ -152,59 +163,85 @@ local function ScanGuild(onlineCtx, dirCtx, wlObsMap)
     local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
 
     for i = 1, total do
-        local okG, name, rankName, _, level, classLoc, area, note, _, online, status, classFile, _, _, _, _, _, guid = pcall(GetGuildRosterInfo, i)
+        local okG, name, rankName, rankIndex, level, classLoc, area, note, _, online, status, classFile, _, _, _, _, _, guid = pcall(GetGuildRosterInfo, i)
         if okG then
             name = Safe.String(name)
             guid = Safe.String(guid)
+            local cleanRankName = Safe.String(rankName) or ""
+            local cleanRankIdx = Safe.Number(rankIndex)
+            local cleanLevel = Safe.Number(level) or 0
+            local cleanArea = Safe.String(area) or ""
+            local cleanNote = Safe.String(note)
+            local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
+            local cleanStatus = Safe.Number(status) or 0
             local isOnline = (online == true or online == 1)
-            if name and not Compat.IsMe(name, guid) then
-                local parsed = Compat.ParseCharacterName(name)
-                if parsed then
-                    if guid and Compat.CacheForeverFullName then
-                        Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+            local isMe = name and Compat.IsMe(name, guid)
+            local parsed = name and Compat.ParseCharacterName(name) or nil
+            if parsed and parsed.lookupKey then
+                rosterRanks[parsed.lookupKey] = {
+                    rankIndex = cleanRankIdx,
+                    rankName = cleanRankName,
+                    guid = guid,
+                    displayName = parsed.displayName,
+                    lookupKey = parsed.lookupKey,
+                    level = cleanLevel,
+                    classFile = cleanClass,
+                    area = cleanArea,
+                    note = cleanNote or "",
+                    statusFlag = cleanStatus,
+                    online = isOnline,
+                    isSelf = isMe,
+                    rosterIndex = i,
+                }
+                if isMe then
+                    info.myRankIndex = cleanRankIdx
+                    info.myRankName = cleanRankName
+                    if cleanRankIdx == 0 then
+                        info.isGuildLeader = true
                     end
-                    if Compat.CacheGuildMember then
-                        Compat.CacheGuildMember(guid, parsed.firstName, parsed.displayName)
+                end
+            end
+            if parsed and not isMe then
+                if guid and Compat.CacheForeverFullName then
+                    Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                end
+                if Compat.CacheGuildMember then
+                    Compat.CacheGuildMember(guid, parsed.firstName, parsed.displayName)
+                end
+                if parsed.surname and Store.MigrateSocialSurnameRecords then
+                    Store:MigrateSocialSurnameRecords(parsed.firstName, parsed.lookupKey)
+                end
+                if isOnline then
+                    onlineCount = onlineCount + 1
+                    local patch = {
+                        displayName = parsed.displayName,
+                        lookupKey = parsed.lookupKey,
+                        guid = guid,
+                        level = cleanLevel,
+                        classFile = cleanClass,
+                        area = cleanArea,
+                        guild = info.name,
+                        rankName = cleanRankName,
+                        rankIndex = cleanRankIdx,
+                        guildNote = cleanNote,
+                        statusFlag = cleanStatus,
+                        afk = cleanStatus == 1,
+                        dnd = cleanStatus == 2,
+                        online = true,
+                        samePool = true,
+                        sameFaction = true,
+                        bnetState = "wow_forever",
+                        sources = { guild = true },
+                    }
+                    local keyOnline = FindMergeKey(onlineCtx, guid or ("char:" .. parsed.lookupKey), guid, nil, parsed.lookupKey, true)
+                    MergeEntry(onlineCtx, keyOnline, patch)
+                    local keyDir = FindMergeKey(dirCtx, guid or ("char:" .. parsed.lookupKey), guid, nil, parsed.lookupKey, true)
+                    MergeEntry(dirCtx, keyDir, patch)
+                    if hasWatchlist and wlObsMap then
+                        QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
                     end
-                    if parsed.surname and Store.MigrateSocialSurnameRecords then
-                        Store:MigrateSocialSurnameRecords(parsed.firstName, parsed.lookupKey)
-                    end
-                    local cleanArea = Safe.String(area) or ""
-                    local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
-                    local cleanLevel = Safe.Number(level)
-                    if isOnline then
-                        onlineCount = onlineCount + 1
-                        local cleanStatus = Safe.Number(status) or 0
-                        local cleanNote = Safe.String(note)
-                        local patch = {
-                            displayName = parsed.displayName,
-                            lookupKey = parsed.lookupKey,
-                            guid = guid,
-                            level = cleanLevel,
-                            classFile = cleanClass,
-                            area = cleanArea,
-                            guild = info.name,
-                            rankName = Safe.String(rankName),
-                            guildNote = cleanNote,
-                            statusFlag = cleanStatus,
-                            afk = cleanStatus == 1,
-                            dnd = cleanStatus == 2,
-                            online = true,
-                            samePool = true,
-                            sameFaction = true,
-                            bnetState = "wow_forever",
-                            sources = { guild = true },
-                        }
-                        local keyOnline = FindMergeKey(onlineCtx, guid or ("char:" .. parsed.lookupKey), guid, nil, parsed.lookupKey, true)
-                        MergeEntry(onlineCtx, keyOnline, patch)
-                        local keyDir = FindMergeKey(dirCtx, guid or ("char:" .. parsed.lookupKey), guid, nil, parsed.lookupKey, true)
-                        MergeEntry(dirCtx, keyDir, patch)
-                        if hasWatchlist and wlObsMap then
-                            QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
-                        end
-                    elseif hasWatchlist and wlObsMap then
-                        QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, false, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
-                    end
+                elseif hasWatchlist and wlObsMap then
+                    QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, false, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
                 end
             elseif isOnline and name then
                 onlineCount = onlineCount + 1

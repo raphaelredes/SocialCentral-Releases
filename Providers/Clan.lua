@@ -682,17 +682,35 @@ local function EnqueueIntelPacket(payload)
     return true
 end
 
-function Clan:CanEditClanManagement()
-    local isOfficer = IsPlayerGuildOfficer()
-    if isOfficer then
-        return true, true
+local function EvaluateRankRule(isGM, isNativeOfficer, rankIndex, rankName, mode, maxRank)
+    if isGM then
+        return true
     end
-    if not (IsInGuild and IsInGuild()) then
-        return false, false
+    if mode == "ALL" then
+        return true
     end
-    local bucket = Store:GetClanScopeData()
-    local info = bucket.clanInfo
-    return (info and info.editMode == "ALL") and true or false, false
+    if mode == "OFFICERS" then
+        if isNativeOfficer ~= nil then
+            return isNativeOfficer == true
+        end
+        if rankIndex ~= nil and rankIndex <= 2 then
+            return true
+        end
+        if type(rankName) == "string" and rankName ~= "" then
+            local rn = rankName:lower()
+            if rn:find("officer", 1, true) or rn:find("oficial", 1, true)
+                or rn:find("leader", 1, true) or rn:find("lider", 1, true)
+                or rn:find("guild master", 1, true) or rn == "gm"
+            then
+                return true
+            end
+        end
+        return false
+    end
+    if mode == "RANK" then
+        return rankIndex ~= nil and rankIndex <= (tonumber(maxRank) or 0)
+    end
+    return false
 end
 
 function Clan:IsGuildLeader()
@@ -702,14 +720,461 @@ function Clan:IsGuildLeader()
     if IsGuildLeader and Safe.Value(Safe.Call(IsGuildLeader)) == true then
         return true
     end
+    local info = Store and Store.guildInfo
+    if info and info.isGuildLeader == true then
+        return true
+    end
+    if info and info.myRankIndex == 0 then
+        return true
+    end
     if C_GuildInfo and C_GuildInfo.GetGuildRankOrder and UnitGUID then
         local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
         if myGuid then
             local rank = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
-            if rank and (rank == 0 or rank == 1) then
+            if rank == 0 then
                 return true
             end
         end
+    end
+    return false
+end
+
+function Clan:GetMemberGuildRank(lookupKey)
+    if not (IsInGuild and IsInGuild()) or not lookupKey or lookupKey == "" then
+        return nil, nil, nil, nil
+    end
+    local rosterRanks = Store and Store.guildRosterRanks
+    local r = rosterRanks and rosterRanks[lookupKey]
+    if type(r) == "table" and r.rankIndex ~= nil then
+        return r.rankIndex, r.rankName, r.guid, r.rosterIndex
+    end
+    local liveRow = Store and Store.socialByLookup and Store.socialByLookup[lookupKey]
+    if liveRow and liveRow.sources and liveRow.sources.guild == true and liveRow.rankIndex ~= nil then
+        return liveRow.rankIndex, liveRow.rankName, liveRow.guid, nil
+    end
+    if GetNumGuildMembers and GetGuildRosterInfo then
+        local total = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
+        for i = 1, total do
+            local okG, fullName, rankName, rankIndex, _, _, _, _, _, _, _, _, _, _, _, _, _, guid = pcall(GetGuildRosterInfo, i)
+            if okG and fullName then
+                local cleanName = Safe.String(fullName)
+                if cleanName then
+                    local lKey
+                    if Compat.ParseCharacterFields then
+                        local _, _, k = Compat.ParseCharacterFields(cleanName)
+                        lKey = k
+                    else
+                        local p = Compat.ParseCharacterName(cleanName)
+                        lKey = p and p.lookupKey
+                    end
+                    if lKey == lookupKey then
+                        return Safe.Number(rankIndex), Safe.String(rankName) or "", Safe.String(guid), i
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil, nil, nil
+end
+
+function Clan:GetSelfGuildRank()
+    local inGuild = (IsInGuild and Safe.Value(Safe.Call(IsInGuild)) == true) or false
+    local info = Store and Store.guildInfo or {}
+    local isGM = self:IsGuildLeader()
+    local myIdx = info.myRankIndex
+    local myName = info.myRankName
+    if inGuild and myIdx == nil then
+        local _, myKey = ResolveSelfIdentity()
+        if myKey then
+            local idx, rName = self:GetMemberGuildRank(myKey)
+            myIdx = idx
+            myName = rName or myName
+        end
+    end
+    if inGuild and myIdx == nil and C_GuildInfo and C_GuildInfo.GetGuildRankOrder and UnitGUID then
+        local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
+        if myGuid then
+            myIdx = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
+        end
+    end
+    if inGuild and (not myName or myName == "") and myIdx ~= nil and GuildControlGetRankName then
+        myName = Safe.String(Safe.Call(GuildControlGetRankName, myIdx + 1)) or myName
+    end
+
+    local canEditOfficerNote = inGuild and ((C_GuildInfo and C_GuildInfo.CanEditOfficerNote and Safe.Value(Safe.Call(C_GuildInfo.CanEditOfficerNote)) == true)
+        or (CanEditOfficerNote and Safe.Value(Safe.Call(CanEditOfficerNote)) == true) or false)
+    local canViewOfficerNote = inGuild and ((C_GuildInfo and C_GuildInfo.CanViewOfficerNote and Safe.Value(Safe.Call(C_GuildInfo.CanViewOfficerNote)) == true)
+        or (CanViewOfficerNote and Safe.Value(Safe.Call(CanViewOfficerNote)) == true) or false)
+    local canEditMOTD = inGuild and ((CanEditMOTD and Safe.Value(Safe.Call(CanEditMOTD)) == true)
+        or (C_GuildInfo and C_GuildInfo.CanEditMOTD and Safe.Value(Safe.Call(C_GuildInfo.CanEditMOTD)) == true) or false)
+    local canEditGuildInfo = inGuild and ((CanEditGuildInfo and Safe.Value(Safe.Call(CanEditGuildInfo)) == true)
+        or (C_GuildInfo and C_GuildInfo.CanEditGuildInfo and Safe.Value(Safe.Call(C_GuildInfo.CanEditGuildInfo)) == true) or false)
+    local canEditPublicNote = inGuild and ((CanEditPublicNote and Safe.Value(Safe.Call(CanEditPublicNote)) == true)
+        or (C_GuildInfo and C_GuildInfo.CanEditPublicNote and Safe.Value(Safe.Call(C_GuildInfo.CanEditPublicNote)) == true) or false)
+    local canInvite = inGuild and ((C_GuildInfo and C_GuildInfo.CanGuildInvite and Safe.Value(Safe.Call(C_GuildInfo.CanGuildInvite)) == true)
+        or (CanGuildInvite and Safe.Value(Safe.Call(CanGuildInvite)) == true) or false)
+    local canPromote = inGuild and ((C_GuildInfo and C_GuildInfo.CanGuildPromote and Safe.Value(Safe.Call(C_GuildInfo.CanGuildPromote)) == true)
+        or (CanGuildPromote and Safe.Value(Safe.Call(CanGuildPromote)) == true) or false)
+    local canDemote = inGuild and ((C_GuildInfo and C_GuildInfo.CanGuildDemote and Safe.Value(Safe.Call(C_GuildInfo.CanGuildDemote)) == true)
+        or (CanGuildDemote and Safe.Value(Safe.Call(CanGuildDemote)) == true) or false)
+    local canEditCalendar = inGuild and ((CanEditGuildEvent and Safe.Value(Safe.Call(CanEditGuildEvent)) == true) or false)
+
+    return {
+        inGuild = inGuild,
+        rankIndex = myIdx,
+        rankName = myName or "",
+        isGuildLeader = isGM,
+        isOfficer = isGM or canEditOfficerNote or canEditMOTD or canEditGuildInfo or IsPlayerGuildOfficer(),
+        canEditMOTD = canEditMOTD,
+        canEditGuildInfo = canEditGuildInfo,
+        canEditOfficerNote = canEditOfficerNote,
+        canViewOfficerNote = canViewOfficerNote,
+        canEditPublicNote = canEditPublicNote,
+        canInvite = canInvite,
+        canPromote = canPromote,
+        canDemote = canDemote,
+        canEditCalendar = canEditCalendar,
+    }
+end
+
+function Clan:GetGuildRanks()
+    local ranks = {}
+    if not (IsInGuild and IsInGuild()) then
+        return ranks
+    end
+    local countsTotal = {}
+    local countsOnline = {}
+    local nameFallback = {}
+    if Store and type(Store.guildRosterRanks) == "table" then
+        for _, m in pairs(Store.guildRosterRanks) do
+            if type(m) == "table" and m.rankIndex ~= nil then
+                local idx = m.rankIndex
+                countsTotal[idx] = (countsTotal[idx] or 0) + 1
+                if m.online then
+                    countsOnline[idx] = (countsOnline[idx] or 0) + 1
+                end
+                if m.rankName and m.rankName ~= "" and not nameFallback[idx] then
+                    nameFallback[idx] = m.rankName
+                end
+            end
+        end
+    end
+
+    local numRanks = GuildControlGetNumRanks and Safe.Number(Safe.Call(GuildControlGetNumRanks)) or 0
+    if numRanks and numRanks > 0 then
+        for orderIdx = 1, math.min(10, numRanks) do
+            local rIdx = orderIdx - 1
+            local rName = (GuildControlGetRankName and Safe.String(Safe.Call(GuildControlGetRankName, orderIdx))) or nameFallback[rIdx] or (L["Rank"] .. " " .. tostring(orderIdx))
+            table.insert(ranks, {
+                rankOrder = orderIdx,
+                rankIndex = rIdx,
+                name = rName,
+                totalMembers = countsTotal[rIdx] or 0,
+                onlineMembers = countsOnline[rIdx] or 0,
+                isLeader = (rIdx == 0),
+            })
+        end
+    else
+        local maxSeen = -1
+        for idx in pairs(nameFallback) do
+            if idx > maxSeen then maxSeen = idx end
+        end
+        for rIdx = 0, math.max(0, maxSeen) do
+            if nameFallback[rIdx] or (countsTotal[rIdx] or 0) > 0 then
+                table.insert(ranks, {
+                    rankOrder = rIdx + 1,
+                    rankIndex = rIdx,
+                    name = nameFallback[rIdx] or (rIdx == 0 and L["Guild Leader"] or (L["Rank"] .. " " .. tostring(rIdx + 1))),
+                    totalMembers = countsTotal[rIdx] or 0,
+                    onlineMembers = countsOnline[rIdx] or 0,
+                    isLeader = (rIdx == 0),
+                })
+            end
+        end
+    end
+    return ranks
+end
+
+local function GetRankLabelByIndex(ranks, rankIdx)
+    local target = tonumber(rankIdx) or 0
+    for _, r in ipairs(ranks or {}) do
+        if r.rankIndex == target then
+            return r.name
+        end
+    end
+    return (L["Rank"] or "Rank") .. " " .. tostring(target + 1)
+end
+
+local function IsSenderAuthorizedForPolicy(self, lookupKey, mode, maxRank)
+    if not (IsInGuild and IsInGuild()) or not lookupKey or lookupKey == "" then
+        return false
+    end
+    local total = GetNumGuildMembers and Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
+    local rankIdx, rankName = self:GetMemberGuildRank(lookupKey)
+    if rankIdx == nil then
+        -- Grace only while roster hasn't hydrated at login
+        return (not total or total <= 0)
+    end
+    return EvaluateRankRule(rankIdx == 0, nil, rankIdx, rankName, mode, maxRank)
+end
+
+function Clan:GetGuildHierarchyPolicy()
+    local bucket = Store:GetClanScopeData()
+    local h = bucket.hierarchy or {}
+    return {
+        rev = h.rev or 0,
+        updatedAt = h.updatedAt or 0,
+        updatedBy = h.updatedBy or "",
+        diplomacyMode = (h.diplomacyMode == "OFFICERS" or h.diplomacyMode == "RANK") and h.diplomacyMode or "LEADER",
+        diplomacyMaxRank = math.max(0, math.min(9, tonumber(h.diplomacyMaxRank) or 1)),
+        infoMode = (h.infoMode == "LEADER" or h.infoMode == "RANK" or h.infoMode == "ALL") and h.infoMode or "OFFICERS",
+        infoMaxRank = math.max(0, math.min(9, tonumber(h.infoMaxRank) or 1)),
+        eventModMode = (h.eventModMode == "LEADER" or h.eventModMode == "RANK") and h.eventModMode or "OFFICERS",
+        eventModMaxRank = math.max(0, math.min(9, tonumber(h.eventModMaxRank) or 1)),
+        allianceMinRank = (tonumber(h.allianceMinRank) and tonumber(h.allianceMinRank) >= 0) and math.min(9, tonumber(h.allianceMinRank)) or -1,
+    }
+end
+
+function Clan:CanConfigureHierarchy()
+    return self:IsGuildLeader()
+end
+
+function Clan:GetRuleAuthoritySummary(mode, maxRank)
+    if mode == "ALL" then
+        return L["All Guild Members"]
+    elseif mode == "OFFICERS" then
+        return L["Leader & Game Officers"]
+    elseif mode == "RANK" then
+        local rName = GetRankLabelByIndex(self:GetGuildRanks(), maxRank or 1)
+        return string.format(L["Up to Rank: %s"], rName)
+    end
+    return L["Guild Leader Only"]
+end
+
+function Clan:GetDiplomacyAuthoritySummary()
+    local pol = self:GetGuildHierarchyPolicy()
+    return self:GetRuleAuthoritySummary(pol.diplomacyMode, pol.diplomacyMaxRank)
+end
+
+function Clan:CanManageDiplomacy()
+    if not (IsInGuild and IsInGuild()) then
+        return false, L["No guild"]
+    end
+    local selfRank = self:GetSelfGuildRank()
+    local pol = self:GetGuildHierarchyPolicy()
+    local allowed = EvaluateRankRule(selfRank.isGuildLeader, selfRank.isOfficer, selfRank.rankIndex, selfRank.rankName, pol.diplomacyMode, pol.diplomacyMaxRank)
+    return allowed, self:GetRuleAuthoritySummary(pol.diplomacyMode, pol.diplomacyMaxRank)
+end
+
+function Clan:CanModerateEvents()
+    if not (IsInGuild and IsInGuild()) then
+        return false
+    end
+    local selfRank = self:GetSelfGuildRank()
+    local pol = self:GetGuildHierarchyPolicy()
+    return EvaluateRankRule(selfRank.isGuildLeader, selfRank.isOfficer, selfRank.rankIndex, selfRank.rankName, pol.eventModMode, pol.eventModMaxRank)
+end
+
+function Clan:CanEditClanManagement()
+    if not (IsInGuild and IsInGuild()) then
+        return false, false
+    end
+    local selfRank = self:GetSelfGuildRank()
+    local pol = self:GetGuildHierarchyPolicy()
+    local allowed = EvaluateRankRule(selfRank.isGuildLeader, selfRank.isOfficer, selfRank.rankIndex, selfRank.rankName, pol.infoMode, pol.infoMaxRank)
+    return allowed, selfRank.isOfficer
+end
+
+function Clan:SaveGuildHierarchyPolicy(patch)
+    if not (IsInGuild and IsInGuild()) then
+        ns:Print(L["No guild"])
+        return false
+    end
+    if not self:IsGuildLeader() then
+        ns:Print(L["Only the Guild Leader can configure Guild Hierarchy & Rank Permissions."])
+        return false
+    end
+    local bucket = Store:GetClanScopeData()
+    local h = bucket.hierarchy
+    if type(patch) == "table" then
+        if patch.diplomacyMode == "LEADER" or patch.diplomacyMode == "OFFICERS" or patch.diplomacyMode == "RANK" then
+            h.diplomacyMode = patch.diplomacyMode
+        end
+        if patch.diplomacyMaxRank ~= nil then
+            h.diplomacyMaxRank = math.max(0, math.min(9, tonumber(patch.diplomacyMaxRank) or 1))
+        end
+        if patch.infoMode == "LEADER" or patch.infoMode == "OFFICERS" or patch.infoMode == "RANK" or patch.infoMode == "ALL" then
+            h.infoMode = patch.infoMode
+            if bucket.clanInfo then
+                bucket.clanInfo.editMode = (h.infoMode == "ALL") and "ALL" or "OFFICERS"
+            end
+        end
+        if patch.infoMaxRank ~= nil then
+            h.infoMaxRank = math.max(0, math.min(9, tonumber(patch.infoMaxRank) or 1))
+        end
+        if patch.eventModMode == "LEADER" or patch.eventModMode == "OFFICERS" or patch.eventModMode == "RANK" then
+            h.eventModMode = patch.eventModMode
+        end
+        if patch.eventModMaxRank ~= nil then
+            h.eventModMaxRank = math.max(0, math.min(9, tonumber(patch.eventModMaxRank) or 1))
+        end
+        if patch.allianceMinRank ~= nil then
+            local ar = tonumber(patch.allianceMinRank)
+            h.allianceMinRank = (ar and ar >= 0 and ar <= 9) and ar or -1
+        end
+    end
+
+    local nextRev = math.max(time(), (h.rev or 0) + 1)
+    h.rev = nextRev
+    h.updatedAt = time()
+    h.updatedBy = ResolveSelfIdentity()
+
+    local tok = ComputeGuildScopeToken()
+    if tok ~= "" and ns.db and ns.db.settings and ns.db.settings.clanSync then
+        EnqueueIntelPacket(("CHIR~%s~%d~%s~%d~%s~%d~%s~%d~%d"):format(
+            tok,
+            nextRev,
+            h.diplomacyMode,
+            h.diplomacyMaxRank,
+            h.infoMode,
+            h.infoMaxRank,
+            h.eventModMode,
+            h.eventModMaxRank,
+            h.allianceMinRank
+        ))
+    end
+    ns:Emit("CLAN_UPDATED")
+    ns:Emit("CLAN_DIPLOMACY_UPDATED")
+    ns:Emit("CLAN_HIERARCHY_UPDATED")
+    return true
+end
+
+function Clan:PromoteMember(lookupKey, targetName, targetGuid)
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print(L["Unavailable during combat."])
+        return false
+    end
+    local selfRank = self:GetSelfGuildRank()
+    if not selfRank.canPromote and not selfRank.isGuildLeader then
+        ns:Print(L["Your guild rank does not have permission to promote members."])
+        return false
+    end
+    local curIdx, _, resolvedGuid = self:GetMemberGuildRank(lookupKey)
+    local guid = targetGuid or resolvedGuid
+    if curIdx and curIdx <= 1 then
+        ns:Print(L["Cannot promote to Guild Leader using quick promote."])
+        return false
+    end
+    if C_GuildInfo and C_GuildInfo.SetGuildRankOrder and guid and curIdx and curIdx > 1 then
+        local nextOrder = curIdx - 1
+        local allowed = (not C_GuildInfo.IsGuildRankAssignmentAllowed) or Safe.Value(Safe.Call(C_GuildInfo.IsGuildRankAssignmentAllowed, guid, nextOrder)) == true
+        if allowed then
+            local ok = pcall(C_GuildInfo.SetGuildRankOrder, guid, nextOrder)
+            if ok then
+                if C_GuildInfo.GuildRoster then pcall(C_GuildInfo.GuildRoster) end
+                return true
+            end
+        end
+    end
+    if _G.GuildPromote and targetName and targetName ~= "" then
+        local ok = pcall(_G.GuildPromote, targetName)
+        if ok then
+            if C_GuildInfo and C_GuildInfo.GuildRoster then pcall(C_GuildInfo.GuildRoster) end
+            return true
+        end
+    end
+    return false
+end
+
+function Clan:DemoteMember(lookupKey, targetName, targetGuid)
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print(L["Unavailable during combat."])
+        return false
+    end
+    local selfRank = self:GetSelfGuildRank()
+    if not selfRank.canDemote and not selfRank.isGuildLeader then
+        ns:Print(L["Your guild rank does not have permission to demote members."])
+        return false
+    end
+    local curIdx, _, resolvedGuid = self:GetMemberGuildRank(lookupKey)
+    local guid = targetGuid or resolvedGuid
+    if curIdx and curIdx == 0 then
+        ns:Print(L["Cannot demote the Guild Leader."])
+        return false
+    end
+    local ranks = self:GetGuildRanks()
+    local maxIdx = (#ranks > 0) and (#ranks - 1) or 9
+    if C_GuildInfo and C_GuildInfo.SetGuildRankOrder and guid and curIdx ~= nil and curIdx < maxIdx then
+        local nextOrder = curIdx + 1
+        local allowed = (not C_GuildInfo.IsGuildRankAssignmentAllowed) or Safe.Value(Safe.Call(C_GuildInfo.IsGuildRankAssignmentAllowed, guid, nextOrder)) == true
+        if allowed then
+            local ok = pcall(C_GuildInfo.SetGuildRankOrder, guid, nextOrder)
+            if ok then
+                if C_GuildInfo.GuildRoster then pcall(C_GuildInfo.GuildRoster) end
+                return true
+            end
+        end
+    end
+    if _G.GuildDemote and targetName and targetName ~= "" then
+        local ok = pcall(_G.GuildDemote, targetName)
+        if ok then
+            if C_GuildInfo and C_GuildInfo.GuildRoster then pcall(C_GuildInfo.GuildRoster) end
+            return true
+        end
+    end
+    return false
+end
+
+function Clan:SetMemberRank(lookupKey, targetGuid, targetRankIndex)
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print(L["Unavailable during combat."])
+        return false
+    end
+    local _, _, resolvedGuid = self:GetMemberGuildRank(lookupKey)
+    local guid = targetGuid or resolvedGuid
+    local order = tonumber(targetRankIndex)
+    if not (guid and order and order >= 1) then
+        return false
+    end
+    if C_GuildInfo and C_GuildInfo.SetGuildRankOrder then
+        if C_GuildInfo.IsGuildRankAssignmentAllowed and Safe.Value(Safe.Call(C_GuildInfo.IsGuildRankAssignmentAllowed, guid, order)) ~= true then
+            ns:Print(L["Your guild rank cannot assign that rank."])
+            return false
+        end
+        local ok = pcall(C_GuildInfo.SetGuildRankOrder, guid, order)
+        if ok then
+            if C_GuildInfo.GuildRoster then pcall(C_GuildInfo.GuildRoster) end
+            return true
+        end
+    end
+    return false
+end
+
+function Clan:SetMemberPublicNote(lookupKey, rawNote)
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print(L["Unavailable during combat."])
+        return false
+    end
+    if not self:CanEditMyGuildNote() then
+        ns:Print(L["Your guild rank cannot edit Guild Public Notes."])
+        return false
+    end
+    local _, _, _, rosterIdx = self:GetMemberGuildRank(lookupKey)
+    if not rosterIdx then
+        ns:Print(L["Guild roster not loaded yet."])
+        return false
+    end
+    local noteText = (Compat.CleanInput and Compat.CleanInput(rawNote or "") or tostring(rawNote or "")):sub(1, 31)
+    local ok = false
+    if C_GuildInfo and C_GuildInfo.SetNote then
+        ok = pcall(C_GuildInfo.SetNote, rosterIdx, noteText, true)
+    elseif GuildRosterSetPublicNote then
+        ok = pcall(GuildRosterSetPublicNote, rosterIdx, noteText)
+    end
+    if ok then
+        if C_GuildInfo and C_GuildInfo.GuildRoster then pcall(C_GuildInfo.GuildRoster) end
+        ns:Emit("CLAN_UPDATED")
+        return true
     end
     return false
 end
@@ -804,6 +1269,13 @@ function Clan:IsMemberAllianceAuthorized(lookupKey)
         end
         if all.whitelist and all.whitelist[lookupKey] == true then
             return true
+        end
+        local minRank = bucket.hierarchy and tonumber(bucket.hierarchy.allianceMinRank)
+        if minRank and minRank >= 0 then
+            local mRankIdx = self:GetMemberGuildRank(lookupKey)
+            if mRankIdx ~= nil and mRankIdx <= minRank then
+                return true
+            end
         end
     end
     return false
@@ -997,8 +1469,19 @@ function Clan:SaveClanInfo(summary, schedule, rules, contacts, editMode)
     info.schedule = Compat.CleanPayloadField(schedule or "", 55)
     info.rules = Compat.CleanPayloadField(rules or "", 115)
     info.contacts = Compat.CleanPayloadField(contacts or "", 60)
-    if isOfficer and (editMode == "ALL" or editMode == "OFFICERS") then
+    if self:IsGuildLeader() and (editMode == "LEADER" or editMode == "OFFICERS" or editMode == "ALL") then
+        info.editMode = (editMode == "ALL") and "ALL" or "OFFICERS"
+        if bucket.hierarchy then
+            bucket.hierarchy.infoMode = editMode
+            bucket.hierarchy.rev = math.max(time(), (bucket.hierarchy.rev or 0) + 1)
+            bucket.hierarchy.updatedAt = time()
+            bucket.hierarchy.updatedBy = myName
+        end
+    elseif isOfficer and (editMode == "ALL" or editMode == "OFFICERS") then
         info.editMode = editMode
+        if bucket.hierarchy and (bucket.hierarchy.infoMode == "ALL" or bucket.hierarchy.infoMode == "OFFICERS") then
+            bucket.hierarchy.infoMode = editMode
+        end
     end
     info.rev = nextRev
     info.updatedAt = time()
@@ -1020,9 +1503,24 @@ function Clan:SaveClanInfo(summary, schedule, rules, contacts, editMode)
             info.rules,
             info.contacts
         ))
+        if self:IsGuildLeader() and bucket.hierarchy then
+            local h = bucket.hierarchy
+            EnqueueIntelPacket(("CHIR~%s~%d~%s~%d~%s~%d~%s~%d~%d"):format(
+                tok,
+                h.rev or nextRev,
+                h.diplomacyMode or "LEADER",
+                h.diplomacyMaxRank or 1,
+                h.infoMode or "OFFICERS",
+                h.infoMaxRank or 1,
+                h.eventModMode or "OFFICERS",
+                h.eventModMaxRank or 1,
+                h.allianceMinRank or -1
+            ))
+        end
     end
     ns:Emit("CLAN_UPDATED")
     ns:Emit("CLAN_DIPLOMACY_UPDATED")
+    ns:Emit("CLAN_HIERARCHY_UPDATED")
     return true
 end
 
@@ -1061,6 +1559,15 @@ end
 
 function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
     local inGuild = Safe.Value(IsInGuild and IsInGuild()) == true
+    if not inGuild then
+        ns:Print(L["No guild"])
+        return false
+    end
+    local canDip, authSummary = self:CanManageDiplomacy()
+    if not canDip then
+        ns:Print(L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authSummary or L["Guild Leader Only"]))
+        return false
+    end
     local cleanGuild = Compat.CleanPayloadField(rawGuildName or "", 40)
     local key = NormalizeGuildKey(cleanGuild)
     if cleanGuild == "" or key == "" then
@@ -1075,7 +1582,6 @@ function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
     local cleanStance = (stance == "ALLY" or stance == "ENEMY") and stance or "NEUTRAL"
     local cleanReason = Compat.CleanPayloadField(reason or "", 48)
     local cleanFaction = (faction == "Alliance" or faction == "Horde") and faction or ""
-    local canEdit = inGuild and self:CanEditClanManagement() or false
     local bucket = Store:GetClanScopeData()
     local dip = bucket.diplomacy
     local nextRev = math.max(time(), (dip.rev or 0) + 1)
@@ -1091,27 +1597,23 @@ function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
         reason = cleanReason,
         faction = cleanFaction,
         addedBy = myName,
-        localOnly = not canEdit,
+        localOnly = false,
         rev = nextRev,
         updatedAt = time(),
     }
 
-    if canEdit then
-        local tok = ComputeGuildScopeToken()
-        if tok ~= "" and ns.db and ns.db.settings and ns.db.settings.clanSync then
-            EnqueueIntelPacket(("CDIP~%s~%s~%d~%s~%s~%s~%s~%s"):format(
-                tok,
-                ns.version or "0.0.0",
-                nextRev,
-                cleanStance,
-                key:sub(1, 32),
-                cleanGuild,
-                cleanFaction,
-                cleanReason
-            ))
-        end
-    else
-        ns:Print(L["Saved locally in your Clan radar (officer mode prevents overwriting guild sync)."])
+    local tok = ComputeGuildScopeToken()
+    if tok ~= "" and ns.db and ns.db.settings and ns.db.settings.clanSync then
+        EnqueueIntelPacket(("CDIP~%s~%s~%d~%s~%s~%s~%s~%s"):format(
+            tok,
+            ns.version or "0.0.0",
+            nextRev,
+            cleanStance,
+            key:sub(1, 32),
+            cleanGuild,
+            cleanFaction,
+            cleanReason
+        ))
     end
 
     ns:Emit("CLAN_UPDATED")
@@ -1125,9 +1627,9 @@ function Clan:RemoveGuildDiplomacy(guildKey)
     local existing = bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[guildKey]
     if not existing then return false end
 
-    local canEdit = self:CanEditClanManagement()
-    if not existing.localOnly and not canEdit then
-        ns:Print(L["Only guild officers can remove synced Clan Diplomacy entries."])
+    local canDip, authSummary = self:CanManageDiplomacy()
+    if not canDip then
+        ns:Print(L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authSummary or L["Guild Leader Only"]))
         return false
     end
 
@@ -1135,7 +1637,7 @@ function Clan:RemoveGuildDiplomacy(guildKey)
     local nextRev = math.max(time(), (bucket.diplomacy.rev or 0) + 1)
     bucket.diplomacy.rev = nextRev
 
-    if canEdit and not existing.localOnly then
+    if not existing.localOnly then
         local tok = ComputeGuildScopeToken()
         if tok ~= "" and ns.db and ns.db.settings and ns.db.settings.clanSync then
             EnqueueIntelPacket(("CDEL~%s~%s~%d~%s"):format(tok, ns.version or "0.0.0", nextRev, guildKey:sub(1, 32)))
@@ -1154,9 +1656,24 @@ function Clan:BroadcastFullIntel()
     local tok = ComputeGuildScopeToken()
     if tok == "" then return false end
 
+    if self:IsGuildLeader() then
+        local h = self:GetGuildHierarchyPolicy()
+        EnqueueIntelPacket(("CHIR~%s~%d~%s~%d~%s~%d~%s~%d~%d"):format(
+            tok,
+            h.rev or 0,
+            h.diplomacyMode,
+            h.diplomacyMaxRank,
+            h.infoMode,
+            h.infoMaxRank,
+            h.eventModMode,
+            h.eventModMaxRank,
+            h.allianceMinRank
+        ))
+    end
+
     local info = self:GetClanInfo()
     local canEdit = self:CanEditClanManagement()
-    if info.summary ~= "" or info.rules ~= "" or info.schedule ~= "" or info.contacts ~= "" then
+    if canEdit and (info.summary ~= "" or info.rules ~= "" or info.schedule ~= "" or info.contacts ~= "") then
         EnqueueIntelPacket(("CINF~%s~%s~%d~%s~%s~%s"):format(
             tok,
             ns.version or "0.0.0",
@@ -1172,7 +1689,7 @@ function Clan:BroadcastFullIntel()
             Compat.CleanPayloadField(info.contacts or "", 60)
         ))
     end
-    if canEdit then
+    if self:CanManageDiplomacy() then
         local sentCount = 0
         for _, g in ipairs(self:GetDiplomacyList("all")) do
             if not g.localOnly and sentCount < 10 then
@@ -1201,7 +1718,12 @@ function Clan:RequestIntelSync()
     if tok == "" then return false end
     local info = self:GetClanInfo()
     local bucket = Store:GetClanScopeData()
-    return self:SendGuildSync(("CREQ~%s~%d~%d"):format(tok, info.rev or 0, (bucket.diplomacy and bucket.diplomacy.rev) or 0))
+    return self:SendGuildSync(("CREQ~%s~%d~%d~%d"):format(
+        tok,
+        info.rev or 0,
+        (bucket.diplomacy and bucket.diplomacy.rev) or 0,
+        (bucket.hierarchy and bucket.hierarchy.rev) or 0
+    ))
 end
 
 function Clan:GetActiveScopeToken()
@@ -1297,7 +1819,8 @@ function Clan:ToggleEventOpen(eventId)
     local evt = bucket.events[eventId]
     if not evt then return false end
     local _, myKey = ResolveSelfIdentity()
-    if not (myKey and evt.creatorKey == myKey) then
+    local isCreator = (myKey ~= nil and evt.creatorKey == myKey)
+    if not isCreator and not self:CanModerateEvents() then
         ns:Print(L["Only the group creator can open or close this Clan listing."])
         return false
     end
@@ -1395,9 +1918,10 @@ function Clan:RemoveEvent(eventId)
     if not evt then return false end
     local _, myKey = ResolveSelfIdentity()
     local isCreator = (myKey ~= nil and evt.creatorKey == myKey)
+    local canMod = self:CanModerateEvents()
 
     bucket.events[eventId] = nil
-    if isCreator then
+    if isCreator or canMod then
         self:SendGuildSync("DEL~" .. Compat.CleanPayloadField(eventId, 16))
     end
     ns:Emit("CLAN_UPDATED")
@@ -3186,28 +3710,105 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter)
     return out
 end
 
-function Clan:GetMergedGuildMembers(query)
+function Clan:GetGuildPresentClasses()
+    local classes = {}
+    local seen = {}
+    if Store and type(Store.guildRosterRanks) == "table" then
+        for _, rec in pairs(Store.guildRosterRanks) do
+            if type(rec) == "table" and rec.classFile and rec.classFile ~= "" and not seen[rec.classFile] then
+                seen[rec.classFile] = true
+                local locName = (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[rec.classFile]) or rec.classFile
+                classes[#classes + 1] = { id = rec.classFile, label = locName }
+            end
+        end
+    end
+    table.sort(classes, function(a, b) return (a.label or "") < (b.label or "") end)
+    return classes
+end
+
+function Clan:GetMergedGuildMembers(query, opts)
     local bucket = Store:GetClanScopeData()
     local q = (type(query) == "string" and query ~= "") and query:lower() or nil
+    opts = type(opts) == "table" and opts or {}
+    local statusFilter = opts.statusFilter or "all"
+    local rankFilter = opts.rankFilter
+    if rankFilter == "all" or rankFilter == "" then rankFilter = nil end
+    local classFilter = opts.classFilter
+    if classFilter == "all" or classFilter == "" then classFilter = nil end
+    local sortBy = opts.sortBy or "level_desc"
+
     local out = {}
     local seen = {}
     local nowTs = time()
+    local socialByLookup = GetGuildSocialLookupMap()
 
     local function PushIfMatches(row)
+        if statusFilter == "online" and not row.online then
+            return
+        elseif statusFilter == "offline" and row.online then
+            return
+        elseif statusFilter == "sc" and not row.hasAddon then
+            return
+        elseif statusFilter == "lfg" and (not row.tag or row.tag == "NONE") then
+            return
+        end
+        if rankFilter ~= nil and row.rankIndex ~= rankFilter then
+            return
+        end
+        if classFilter ~= nil and row.classFile ~= classFilter then
+            return
+        end
         if not q then
             out[#out + 1] = row
             return
         end
-        local hay = ((row.displayName or "") .. " " .. (row.rankName or "") .. " " .. (row.area or "") .. " " .. (row.note or "") .. " " .. (row.tag or "")):lower()
+        local clsLoc = (row.classFile and LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[row.classFile]) or row.classFile or ""
+        local hay = ((row.displayName or "") .. " " .. (row.rankName or "") .. " " .. clsLoc .. " " .. (row.area or "") .. " " .. (row.note or "") .. " " .. (row.tag or "")):lower()
         if hay:find(q, 1, true) then
             out[#out + 1] = row
         end
     end
 
+    if Store and type(Store.guildRosterRanks) == "table" then
+        for key, rec in pairs(Store.guildRosterRanks) do
+            if type(rec) == "table" and rec.displayName then
+                local live = GetLiveGuildRowFromMap(socialByLookup, key)
+                local peer = bucket.peers and bucket.peers[key]
+                local isOnline = (live and live.online == true) or (rec.online == true)
+                local isMe = rec.isSelf == true
+                local resolvedTag = (isMe and bucket.myTag) or (peer and peer.tag) or "NONE"
+                local resolvedNote = (isMe and bucket.myNote and bucket.myNote ~= "" and bucket.myNote)
+                    or (peer and peer.note and peer.note ~= "" and peer.note)
+                    or (live and live.note and live.note ~= "" and live.note)
+                    or rec.note or ""
+                local row = {
+                    lookupKey = key,
+                    displayName = (live and live.displayName) or rec.displayName,
+                    version = isMe and ns.version or (peer and peer.version or nil),
+                    tag = IsValidTag(resolvedTag) and resolvedTag or "NONE",
+                    note = resolvedNote,
+                    rankName = (live and live.rankName and live.rankName ~= "" and live.rankName) or rec.rankName or "",
+                    rankIndex = (live and live.rankIndex ~= nil) and live.rankIndex or rec.rankIndex,
+                    guid = (live and live.guid) or rec.guid,
+                    rosterIndex = rec.rosterIndex,
+                    level = (live and live.level and live.level > 0 and live.level) or rec.level or 0,
+                    classFile = (live and live.classFile) or rec.classFile,
+                    area = (live and live.area and live.area ~= "" and live.area) or rec.area or "",
+                    online = isOnline,
+                    isSelf = isMe,
+                    hasAddon = isMe or (peer ~= nil) or (ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(key)),
+                    updatedAt = (peer and peer.updatedAt) or (isOnline and nowTs or 0),
+                }
+                seen[key] = true
+                PushIfMatches(row)
+            end
+        end
+    end
+
     if type(Store.social) == "table" then
         for _, live in pairs(Store.social) do
-            if type(live) == "table" and live.sources and live.sources.guild == true then
-                local peer = live.lookupKey and bucket.peers[live.lookupKey]
+            if type(live) == "table" and live.sources and live.sources.guild == true and live.lookupKey and not seen[live.lookupKey] then
+                local peer = bucket.peers and bucket.peers[live.lookupKey]
                 local row = {
                     lookupKey = live.lookupKey,
                     displayName = live.displayName,
@@ -3215,14 +3816,16 @@ function Clan:GetMergedGuildMembers(query)
                     tag = peer and IsValidTag(peer.tag) and peer.tag or "NONE",
                     note = (peer and peer.note and peer.note ~= "" and peer.note) or live.note or "",
                     rankName = live.rankName or "",
-                    level = live.level,
+                    rankIndex = live.rankIndex,
+                    guid = live.guid,
+                    level = live.level or 0,
                     classFile = live.classFile,
                     area = live.area or "",
                     online = true,
                     hasAddon = (peer ~= nil) or (ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(live.lookupKey)),
                     updatedAt = (peer and peer.updatedAt) or nowTs,
                 }
-                if live.lookupKey then seen[live.lookupKey] = true end
+                seen[live.lookupKey] = true
                 PushIfMatches(row)
             end
         end
@@ -3237,7 +3840,8 @@ function Clan:GetMergedGuildMembers(query)
                 tag = IsValidTag(peer.tag) and peer.tag or "NONE",
                 note = peer.note or "",
                 rankName = "",
-                level = nil,
+                rankIndex = nil,
+                level = 0,
                 classFile = peer.classFile,
                 area = "",
                 online = false,
@@ -3249,9 +3853,23 @@ function Clan:GetMergedGuildMembers(query)
 
     table.sort(out, function(a, b)
         if a.online ~= b.online then return a.online end
-        if a.hasAddon ~= b.hasAddon then return a.hasAddon end
-        if a.tag ~= b.tag and (a.tag == "LFG" or a.tag == "MPLUS" or b.tag == "LFG" or b.tag == "MPLUS") then
-            return (a.tag == "LFG" or a.tag == "MPLUS")
+        if sortBy == "rank" then
+            local ra, rb = a.rankIndex or 99, b.rankIndex or 99
+            if ra ~= rb then return ra < rb end
+            if (a.level or 0) ~= (b.level or 0) then return (a.level or 0) > (b.level or 0) end
+        elseif sortBy == "name" then
+            if (a.displayName or "") ~= (b.displayName or "") then
+                return (a.displayName or "") < (b.displayName or "")
+            end
+        elseif sortBy == "zone" then
+            local za, zb = a.area or "", b.area or ""
+            if za ~= zb then return za < zb end
+            if (a.level or 0) ~= (b.level or 0) then return (a.level or 0) > (b.level or 0) end
+        else -- "level_desc" (default: Online first, then Level high -> low, then Rank)
+            local la, lb = tonumber(a.level) or 0, tonumber(b.level) or 0
+            if la ~= lb then return la > lb end
+            local ra, rb = a.rankIndex or 99, b.rankIndex or 99
+            if ra ~= rb then return ra < rb end
         end
         return (a.displayName or "") < (b.displayName or "")
     end)
@@ -3686,10 +4304,13 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
     elseif cmd == "EVS" then
         local eventId = Compat.CleanPayloadField(parts[2] or "", 16)
         local evt = bucket.events[eventId]
-        if evt and evt.creatorKey == parsed.lookupKey then
-            evt.isOpen = parts[3] ~= "0"
-            evt.updatedAt = now
-            QueueClanEmit(0.6)
+        if evt then
+            local pol = Clan:GetGuildHierarchyPolicy()
+            if evt.creatorKey == parsed.lookupKey or IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.eventModMode, pol.eventModMaxRank) then
+                evt.isOpen = parts[3] ~= "0"
+                evt.updatedAt = now
+                QueueClanEmit(0.6)
+            end
         end
 
     elseif cmd == "PRF" then
@@ -3764,12 +4385,15 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
     elseif cmd == "DEL" then
         local eventId = Compat.CleanPayloadField(parts[2] or "", 16)
         local evt = bucket.events[eventId]
-        if evt and evt.creatorKey == parsed.lookupKey then
-            bucket.events[eventId] = nil
-            QueueClanEmit(0.5)
+        if evt then
+            local pol = Clan:GetGuildHierarchyPolicy()
+            if evt.creatorKey == parsed.lookupKey or IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.eventModMode, pol.eventModMaxRank) then
+                bucket.events[eventId] = nil
+                QueueClanEmit(0.5)
+            end
         end
 
-    elseif cmd == "CINF" or cmd == "CINF2" or cmd == "CDIP" or cmd == "CDEL" or cmd == "CREQ" then
+    elseif cmd == "CINF" or cmd == "CINF2" or cmd == "CDIP" or cmd == "CDEL" or cmd == "CREQ" or cmd == "CHIR" then
         -- Strict multi-layer anti-leakage guard: scope token + active guild roster verification
         local myTok = ComputeGuildScopeToken()
         local pktTok = parts[2] or ""
@@ -3777,7 +4401,44 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             return
         end
 
-        if cmd == "CINF" then
+        if cmd == "CHIR" then
+            if not IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, "LEADER", 0) then
+                return
+            end
+            local rev = tonumber(parts[3]) or 0
+            local h = bucket.hierarchy or {}
+            if rev >= (h.rev or 0) then
+                local dMode = (parts[4] == "OFFICERS" or parts[4] == "RANK") and parts[4] or "LEADER"
+                local dMax = math.max(0, math.min(9, tonumber(parts[5]) or 1))
+                local iMode = (parts[6] == "LEADER" or parts[6] == "RANK" or parts[6] == "ALL") and parts[6] or "OFFICERS"
+                local iMax = math.max(0, math.min(9, tonumber(parts[7]) or 1))
+                local eMode = (parts[8] == "LEADER" or parts[8] == "RANK") and parts[8] or "OFFICERS"
+                local eMax = math.max(0, math.min(9, tonumber(parts[9]) or 1))
+                local aMin = tonumber(parts[10])
+                aMin = (aMin and aMin >= 0 and aMin <= 9) and aMin or -1
+                bucket.hierarchy = {
+                    rev = rev,
+                    updatedAt = now,
+                    updatedBy = parsed.displayName,
+                    diplomacyMode = dMode,
+                    diplomacyMaxRank = dMax,
+                    infoMode = iMode,
+                    infoMaxRank = iMax,
+                    eventModMode = eMode,
+                    eventModMaxRank = eMax,
+                    allianceMinRank = aMin,
+                }
+                bucket.clanInfo = bucket.clanInfo or {}
+                bucket.clanInfo.editMode = (iMode == "ALL") and "ALL" or "OFFICERS"
+                ns:Emit("CLAN_UPDATED")
+                ns:Emit("CLAN_DIPLOMACY_UPDATED")
+                ns:Emit("CLAN_HIERARCHY_UPDATED")
+            end
+        elseif cmd == "CINF" then
+            local pol = Clan:GetGuildHierarchyPolicy()
+            if not IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.infoMode, pol.infoMaxRank) then
+                return
+            end
             local ver = parts[3]
             local rev = tonumber(parts[4]) or 0
             local editMode = (parts[5] == "ALL") and "ALL" or "OFFICERS"
@@ -3798,6 +4459,10 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 ns:Emit("CLAN_DIPLOMACY_UPDATED")
             end
         elseif cmd == "CINF2" then
+            local pol = Clan:GetGuildHierarchyPolicy()
+            if not IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.infoMode, pol.infoMaxRank) then
+                return
+            end
             local rev = tonumber(parts[3]) or 0
             local rules = Compat.CleanPayloadField(parts[4] or "", 115)
             local contacts = Compat.CleanPayloadField(parts[5] or "", 60)
@@ -3812,6 +4477,10 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 ns:Emit("CLAN_DIPLOMACY_UPDATED")
             end
         elseif cmd == "CDIP" then
+            local pol = Clan:GetGuildHierarchyPolicy()
+            if not IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.diplomacyMode, pol.diplomacyMaxRank) then
+                return
+            end
             local ver = parts[3]
             local rev = tonumber(parts[4]) or 0
             local stance = (parts[5] == "ALLY" or parts[5] == "ENEMY") and parts[5] or "NEUTRAL"
@@ -3847,6 +4516,10 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 end
             end
         elseif cmd == "CDEL" then
+            local pol = Clan:GetGuildHierarchyPolicy()
+            if not IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.diplomacyMode, pol.diplomacyMaxRank) then
+                return
+            end
             local rev = tonumber(parts[4]) or 0
             local gKey = NormalizeGuildKey(parts[5] or "")
             if gKey ~= "" and bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[gKey] then
@@ -3862,9 +4535,11 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         elseif cmd == "CREQ" then
             local peerInfoRev = tonumber(parts[3]) or 0
             local peerDipRev = tonumber(parts[4]) or 0
+            local peerHirRev = tonumber(parts[5]) or 0
             local myInfoRev = (bucket.clanInfo and bucket.clanInfo.rev) or 0
             local myDipRev = (bucket.diplomacy and bucket.diplomacy.rev) or 0
-            if (myInfoRev > peerInfoRev or myDipRev > peerDipRev) and (GetTime() - (Clan.lastIntelReplyAt or 0)) >= 25 then
+            local myHirRev = (bucket.hierarchy and bucket.hierarchy.rev) or 0
+            if (myInfoRev > peerInfoRev or myDipRev > peerDipRev or myHirRev > peerHirRev) and (GetTime() - (Clan.lastIntelReplyAt or 0)) >= 25 then
                 Clan.lastIntelReplyAt = GetTime()
                 local d = 1.0 + math.random() * 2.5
                 C_Timer.After(d, function()

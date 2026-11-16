@@ -16,6 +16,7 @@ local Spotter = {
     lastAlert = nil,
     lastScopeToken = nil,
     plateBadges = setmetatable({}, { __mode = "k" }), -- [plateFrame] = badgeFrame
+    peerPositions = {},  -- [senderKey] = { name, mapID, x, y, classFile, level, at, channel }
     _pruneTimerActive = false,
     _batchFlushQueued = false,
     _batchEmitDirty = false,
@@ -879,6 +880,17 @@ local function UpdateEntryLocation(entry, unit)
                 directUnitPos = true
                 coordsText = string.format("%.1f, %.1f", ux * 100, uy * 100)
             end
+        end
+    end
+
+    if not directUnitPos and Spotter and Spotter.peerPositions then
+        local p = Spotter.peerPositions[entry.key] or (entry.displayName and Spotter.peerPositions[entry.displayName])
+        if p and (GetTime() - (p.at or 0)) < 120 then
+            mapID = p.mapID
+            targetX = p.x
+            targetY = p.y
+            coordsText = string.format("%.1f, %.1f", p.x * 100, p.y * 100)
+            directUnitPos = true
         end
     end
 
@@ -2836,6 +2848,16 @@ function Spotter:GetTargetKinematics(entry)
             end
         end
 
+        if not entry._anchorMapX and Spotter.peerPositions then
+            local p = Spotter.peerPositions[entry.key] or (entry.displayName and Spotter.peerPositions[entry.displayName])
+            if p and (nowClock - (p.at or 0)) < 120 then
+                entry._anchorMapID = p.mapID
+                entry._anchorMapX = p.x
+                entry._anchorMapY = p.y
+                entry.coordsText = string.format("%.1f, %.1f", p.x * 100, p.y * 100)
+            end
+        end
+
         -- 3. Visible nameplate screen projection vector (only when non-restricted nameplate is visible in viewport)
         local screenRadial
         if plate and IsPlateAnchorSafe(plate) then
@@ -3149,6 +3171,7 @@ function Spotter:RegisterEvents()
             "CHAT_MSG_YELL",
             "CHAT_MSG_EMOTE",
             "CHAT_MSG_TEXT_EMOTE",
+            "CHAT_MSG_ADDON",
         }
         for _, ev in ipairs(events) do
             pcall(self._eventFrame.RegisterEvent, self._eventFrame, ev)
@@ -3194,7 +3217,132 @@ local function ScheduleReindexRefresh(allowVisiblePlateRefresh)
     end)
 end
 
+local lastBroadcastAt = 0
+local lastBroadcastMap = nil
+local lastBroadcastX = nil
+local lastBroadcastY = nil
+
+local function BroadcastPlayerPosition()
+    if not (ns.db and ns.db.settings and ns.db.settings.spotterSharePosition) then
+        return
+    end
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        return
+    end
+    if ns.Clan and (ns.Clan.isStoppedThisSession or (ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked())) then
+        return
+    end
+    if C_ChatInfo and type(C_ChatInfo.InChatMessagingLockdown) == "function" then
+        local okLock, locked = pcall(C_ChatInfo.InChatMessagingLockdown)
+        if okLock and locked == true then return end
+    end
+    if Safe.Value(IsInInstance()) then return end
+    if not IsInGuild() then return end
+
+    local now = GetTime()
+    if ns.Clan and ns.Clan.backoffUntil and now < ns.Clan.backoffUntil then
+        return
+    end
+    local mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
+    if not mapID then return end
+    local pos = Safe.Call(C_Map.GetPlayerMapPosition, mapID, "player")
+    if not pos then return end
+    local x, y = Safe.XY(pos)
+    if not (x and y and type(x) == "number" and type(y) == "number" and x > 0 and y > 0 and x < 1 and y < 1) then
+        return
+    end
+
+    local moved = (mapID ~= lastBroadcastMap) or (not lastBroadcastX) or (math.abs(x - lastBroadcastX) > 0.002) or (math.abs(y - lastBroadcastY) > 0.002)
+    local minGap = moved and 10 or 60
+    if (now - lastBroadcastAt) < minGap then return end
+
+    lastBroadcastAt = now
+    lastBroadcastMap = mapID
+    lastBroadcastX = x
+    lastBroadcastY = y
+
+    local _, myClass = UnitClass("player")
+    myClass = Safe.String(myClass) or "WARRIOR"
+    local myLevel = Safe.Number(Safe.Call(UnitLevel, "player")) or 0
+
+    local sendFn = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
+    if sendFn then
+        local function HandleResult(ok, res)
+            if ok and Enum and Enum.SendAddonMessageResult and res == Enum.SendAddonMessageResult.AddonMessageThrottle and ns.Clan then
+                ns.Clan.throttleStrike = (ns.Clan.throttleStrike or 0) + 1
+                ns.Clan.backoffUntil = now + 12
+                if ns.Clan.throttleStrike >= 3 then
+                    ns.Clan.isStoppedThisSession = true
+                end
+            end
+        end
+        local ok1, res1 = pcall(sendFn, "SCentral1", ("POS~%d~%.4f~%.4f~%s~%d"):format(mapID, x, y, myClass, myLevel), "GUILD")
+        HandleResult(ok1, res1)
+        if not (ns.Clan and ns.Clan.isStoppedThisSession) then
+            local ok2, res2 = pcall(sendFn, "OpenMapLoc", ("L1\t%d\t%.4f\t%.4f\t%s\t%d"):format(mapID, x, y, myClass, myLevel), "GUILD")
+            HandleResult(ok2, res2)
+        end
+    end
+end
+
+function Spotter:HandleIncomingPosition(prefix, text, channel, sender)
+    if prefix ~= "OpenMapLoc" and prefix ~= "SCentral1" then return end
+    if Safe.IsSecret(text) or Safe.IsSecret(sender) or type(text) ~= "string" or type(sender) ~= "string" then return end
+    if channel ~= "GUILD" and channel ~= "WHISPER" then return end
+
+    local parsedSender = Compat.ParseCharacterName(sender)
+    if not parsedSender or not parsedSender.lookupKey or Compat.IsMe(parsedSender.displayName) then return end
+    local senderKey = parsedSender.lookupKey
+    local senderName = parsedSender.displayName
+
+    local mapID, x, y, classFile, level
+    if prefix == "OpenMapLoc" then
+        local kind, m, tx, ty, c, lvl = strsplit("\t", text, 6)
+        if kind == "L0" then
+            self.peerPositions[senderKey] = nil
+            ns:Emit("SPOTTER_PEER_POSITIONS_UPDATED")
+            return
+        elseif kind == "L1" then
+            mapID = tonumber(m)
+            x = tonumber(tx)
+            y = tonumber(ty)
+            classFile = c and c:match("^%u+$")
+            level = tonumber(lvl)
+        else
+            return
+        end
+    elseif prefix == "SCentral1" and text:sub(1, 4) == "POS~" then
+        local _, m, tx, ty, c, lvl = strsplit("~", text, 6)
+        mapID = tonumber(m)
+        x = tonumber(tx)
+        y = tonumber(ty)
+        classFile = c and c:match("^%u+$")
+        level = tonumber(lvl)
+    else
+        return
+    end
+
+    if mapID and x and y and x >= 0 and x <= 1 and y >= 0 and y <= 1 then
+        self.peerPositions[senderKey] = {
+            name = senderName,
+            mapID = mapID,
+            x = x,
+            y = y,
+            classFile = classFile,
+            level = level,
+            at = GetTime(),
+            channel = channel,
+        }
+        ns:Emit("SPOTTER_PEER_POSITIONS_UPDATED")
+    end
+end
+
 function Spotter:Init()
+    if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+        pcall(C_ChatInfo.RegisterAddonMessagePrefix, "OpenMapLoc")
+    elseif RegisterAddonMessagePrefix then
+        pcall(RegisterAddonMessagePrefix, "OpenMapLoc")
+    end
     self.lastScopeToken = ns.Clan and ns.Clan.GetActiveScopeToken and ns.Clan:GetActiveScopeToken() or ""
 
     if not self._eventFrame then
@@ -3319,6 +3467,10 @@ function Spotter:Init()
                 end
             elseif event == "CHAT_MSG_SAY" or event == "CHAT_MSG_YELL" or event == "CHAT_MSG_EMOTE" or event == "CHAT_MSG_TEXT_EMOTE" then
                 Spotter:InspectChatSighting(arg2, arg12)
+            elseif event == "CHAT_MSG_ADDON" then
+                if arg1 == "OpenMapLoc" or arg1 == "SCentral1" then
+                    Spotter:HandleIncomingPosition(arg1, arg2, arg3, arg4)
+                end
             end
         end)
         self._eventFrame = ef
@@ -3368,6 +3520,17 @@ function Spotter:Init()
         ns:On("SOCIAL_UPDATED", OnSocialOrDiplomacyChanged)
         ns:On("WATCHLIST_UPDATED", OnSocialOrDiplomacyChanged)
         ns:On("CLAN_DIPLOMACY_UPDATED", OnSocialOrDiplomacyChanged)
+    end
+
+    if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+        pcall(C_ChatInfo.RegisterAddonMessagePrefix, "OpenMapLoc")
+        pcall(C_ChatInfo.RegisterAddonMessagePrefix, "SCentral1")
+    end
+
+    if not self._broadcastTicker and C_Timer and C_Timer.NewTicker then
+        self._broadcastTicker = C_Timer.NewTicker(3, function()
+            BroadcastPlayerPosition()
+        end)
     end
 
     if self:IsEnabled() then

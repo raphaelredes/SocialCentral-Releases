@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.10"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.10" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.11"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.11" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -132,6 +132,8 @@ local DEFAULTS = {
         spotterPromptAnswered = true, -- keep HUD clutter-free without unsolicited confirmation popups
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
         spotterNameplateBadges = false, -- default off to keep world nameplates uncluttered (user can opt in)
+        spotterSharePosition = false,   -- opt-in: broadcast map position to guild/friends (OpenMap & SocialCentral compatible)
+        spotterMapPins = true,          -- show detected targets and shared positions as pins on Minimap & World Map
         spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
         worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
         worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
@@ -246,6 +248,14 @@ local function HandleSlash(raw)
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then
             ns.SpotterHUD:Toggle()
         end
+    elseif cmd == "toast" or cmd == "test" or cmd == "notify" then
+        if rest == "radar" or rest == "hud" or rest == "spotter" then
+            if ns.SpotterHUD and ns.SpotterHUD.Toggle then
+                ns.SpotterHUD:Toggle()
+            end
+        elseif ns.NotificationToast and ns.NotificationToast.ShowTestNotification then
+            ns.NotificationToast:ShowTestNotification(rest)
+        end
     elseif cmd == "resetpos" or cmd == "reset" then
         if ns.Theme and ns.Theme.ResetAllWindowPositions then
             ns.Theme:ResetAllWindowPositions()
@@ -266,6 +276,7 @@ local function HandleSlash(raw)
         ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"])
         ns:Print("  |cffffd200/sc hub|r — %s", L["Unified Hub (/sc hub)"])
         ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"])
+        ns:Print("  |cffffd200/sc toast [invite|friend|watchlist|buff|queue|clear]|r — %s", L["Test Notification Toast"])
         ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
         ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Next"])
         ns:Print("  |cffffd200/sc resetpos|r — %s", L["Reset Window Positions"])

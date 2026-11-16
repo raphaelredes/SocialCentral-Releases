@@ -84,6 +84,9 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
         title:SetJustifyH("LEFT")
         title:SetWordWrap(false)
         m.title = title
+        if Theme.DecorateSectionHeader then
+            Theme:DecorateSectionHeader(m, title, 360)
+        end
 
         local topCloseBtn = Theme:CreateButton(m, 22, 20, "X", "default")
         topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
@@ -1143,9 +1146,17 @@ function SocialPanels:CreateGroupPanel(parent)
         row:SetHeight(rowHeight)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-        row.dot = row:CreateTexture(nil, "ARTWORK")
-        row.dot:SetSize(7, 7)
+        row.statusBar = row:CreateTexture(nil, "ARTWORK", nil, 1)
+        row.statusBar:SetWidth(3)
+        row.statusBar:SetPoint("TOPLEFT", row, "TOPLEFT", 2, -4)
+        row.statusBar:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 2, 4)
+        row.statusBar:SetColorTexture(0.35, 0.78, 1.0, 0.85)
+
+        row.dot = row:CreateTexture(nil, "ARTWORK", nil, 2)
+        row.dot:SetSize(9, 9)
         row.dot:SetPoint("LEFT", 10, 6)
+        row.dot:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
+        row.dot._scKeepTexture = true
 
         row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         row.nameText:SetPoint("TOPLEFT", 24, -5)
@@ -1298,9 +1309,19 @@ function SocialPanels:CreateGroupPanel(parent)
         row.subText:SetText(table.concat(subParts, "  ·  "))
 
         if panel._view == "current" then
-            Theme:ApplyStatusColor(row.dot, item.online ~= false and "online" or "offline")
+            local st = item.online ~= false and "online" or "offline"
+            Theme:ApplyStatusColor(row.dot, st)
+            if row.statusBar then
+                Theme:ApplyStatusColor(row.statusBar, st)
+                row.statusBar:SetAlpha(item.online ~= false and 0.90 or 0.25)
+            end
         else
-            Theme:ApplyStatusColor(row.dot, item.inCurrentGroup and "online" or "nearby")
+            local st = item.inCurrentGroup and "online" or "nearby"
+            Theme:ApplyStatusColor(row.dot, st)
+            if row.statusBar then
+                Theme:ApplyStatusColor(row.statusBar, st)
+                row.statusBar:SetAlpha(0.85)
+            end
         end
 
         if panel._view == "current" and item.isMe then
@@ -1706,14 +1727,20 @@ function SocialPanels:CreateChatPanel(parent)
         r:SetHeight(rowHeight)
         r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
+        r.selBar = r:CreateTexture(nil, "ARTWORK", nil, 1)
+        r.selBar:SetWidth(3)
+        r.selBar:SetPoint("TOPLEFT", r, "TOPLEFT", 2, -4)
+        r.selBar:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", 2, 4)
+        r.selBar:Hide()
+
         r.title = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.title:SetPoint("TOPLEFT", 8, -5)
+        r.title:SetPoint("TOPLEFT", 10, -5)
         r.title:SetPoint("RIGHT", -8, 0)
         r.title:SetJustifyH("LEFT")
         r.title:SetWordWrap(false)
 
         r.sub = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        r.sub:SetPoint("BOTTOMLEFT", 8, 5)
+        r.sub:SetPoint("BOTTOMLEFT", 10, 5)
         r.sub:SetPoint("RIGHT", -8, 0)
         r.sub:SetJustifyH("LEFT")
         r.sub:SetWordWrap(false)
@@ -1759,6 +1786,19 @@ function SocialPanels:CreateChatPanel(parent)
         r._item = item
         local isSel = ns.Chat and ns.Chat.activeThreadKey == item.key
         Theme:ApplyBackdrop(r, isSel and "surface" or ((idx % 2 == 1) and "row" or "rowAlt"), pal)
+        if r.selBar then
+            local hasUnread = (not item.muted and item.unread and item.unread > 0)
+            if isSel then
+                local ac = pal.accentBorder or { 0.88, 0.70, 0.25 }
+                r.selBar:SetColorTexture(ac[1], ac[2], ac[3], 1.0)
+                r.selBar:Show()
+            elseif hasUnread then
+                r.selBar:SetColorTexture(0.24, 0.85, 0.45, 0.90)
+                r.selBar:Show()
+            else
+                r.selBar:Hide()
+            end
+        end
 
         local tagMap = {
             WHISPER = "|cffd2a8ff[W]|r ",
@@ -1787,6 +1827,12 @@ function SocialPanels:CreateChatPanel(parent)
     rightHdr:SetPoint("TOPLEFT", 8, -6)
     rightHdr:SetPoint("TOPRIGHT", -8, -6)
     rightHdr:SetHeight(24)
+
+    local rightHdrSep = rightCard:CreateTexture(nil, "ARTWORK", nil, 1)
+    rightHdrSep:SetHeight(1)
+    rightHdrSep:SetPoint("TOPLEFT", rightHdr, "BOTTOMLEFT", 0, -2)
+    rightHdrSep:SetPoint("TOPRIGHT", rightHdr, "BOTTOMRIGHT", 0, -2)
+    rightHdrSep:SetColorTexture(0.68, 0.54, 0.24, 0.35)
 
     local hdrTitle = rightHdr:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     hdrTitle:SetPoint("LEFT", 2, 0)
@@ -1989,6 +2035,16 @@ function SocialPanels:CreateChatPanel(parent)
             ns.Chat:OpenOfficialChatForThread(k)
         end
     end)
+    btnOfficialDest:SetScript("OnEnter", function(selfBtn)
+        local tipText = selfBtn._scFullTooltip
+        if not tipText or tipText == "" then return end
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText(tipText, 1, 0.9, 0.55, 1, true)
+        GameTooltip:Show()
+    end)
+    btnOfficialDest:SetScript("OnLeave", function()
+        if GameTooltip:IsOwned(btnOfficialDest) then GameTooltip:Hide() end
+    end)
 
     local officialHint = officialBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     officialHint:SetPoint("LEFT", 2, 0)
@@ -2142,12 +2198,12 @@ function SocialPanels:CreateChatPanel(parent)
 
             local compactRight = (rightCard:GetWidth() or panel:GetWidth() or 500) < 430
             if compactRight then
-                Theme:AutoFitButton(btnLeaveRoom, 46, 10, 88)
-                Theme:AutoFitButton(btnRoomInvite, 46, 10, 92)
-                Theme:AutoFitButton(btnTargetCard, 46, 10, 88)
-                Theme:AutoFitButton(btnPinLoc, 46, 10, 94)
-                Theme:AutoFitButton(btnMuteThread, 46, 10, 88)
-                Theme:AutoFitButton(btnCopyThread, 44, 10, 80)
+                Theme:AutoFitButton(btnLeaveRoom, 46, 10, 92)
+                Theme:AutoFitButton(btnRoomInvite, 46, 10, 96)
+                Theme:AutoFitButton(btnTargetCard, 46, 10, 90)
+                Theme:AutoFitButton(btnPinLoc, 46, 10, 98)
+                Theme:AutoFitButton(btnMuteThread, 46, 12, 108)
+                Theme:AutoFitButton(btnCopyThread, 44, 10, 84)
             else
                 Theme:AutoFitButton(btnLeaveRoom, 60, 16, 110)
                 Theme:AutoFitButton(btnRoomInvite, 72, 16, 120)
@@ -2255,18 +2311,35 @@ function SocialPanels:CreateChatPanel(parent)
                 end
                 local compactBar = (rightCard:GetWidth() or panel:GetWidth() or 500) < 430
                 local maxBtnW = compactBar
-                    and math.max(96, math.min(200, math.floor(barW * 0.50)))
+                    and math.max(96, math.min(188, math.floor(barW * 0.48)))
                     or math.max(120, math.min(270, math.floor(barW * 0.56)))
                 local pendingOpen = ns.Chat and ns.Chat.pendingOfficialOpen and ns.Chat.pendingOfficialOpen[activeKey]
-                local btnLabel = (destInfo and destInfo.buttonText) or L["Open Chat"]
+                local fullLabel = (destInfo and destInfo.buttonText) or L["Open Chat"]
+                local btnLabel = compactBar and ((destInfo and destInfo.compactButtonText) or fullLabel) or fullLabel
                 if pState.state == "checking" and pendingOpen then
-                    btnLabel = L["Verifying addon... (click for /w)"]
+                    fullLabel = L["Verifying addon... (click for /w)"]
+                    btnLabel = compactBar and L["Checking... (/w)"] or fullLabel
                 end
+                btnOfficialDest._scFullTooltip = fullLabel
                 Theme:SetButtonText(btnOfficialDest, btnLabel)
-                Theme:AutoFitButton(btnOfficialDest, compactBar and 90 or 110, compactBar and 12 or 18, maxBtnW)
+                Theme:AutoFitButton(btnOfficialDest, compactBar and 84 or 110, compactBar and 12 or 18, maxBtnW)
                 btnOfficialDest:SetEnabled(destInfo ~= nil)
                 officialHint:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-                if pState.state == "channel" then
+                if compactBar then
+                    if pState.state == "channel" then
+                        officialHint:SetText(L["WoW channel — send via chat:"])
+                    elseif pState.state == "disabled" then
+                        officialHint:SetText(L["Direct chat off — use WoW:"])
+                    elseif pState.state == "checking" then
+                        officialHint:SetText(L["Checking addon... or use WoW:"])
+                    elseif pState.state == "offline" then
+                        officialHint:SetText(L["Offline — send via WoW:"])
+                    elseif pState.state == "unverified" then
+                        officialHint:SetText(L["Peer lacks addon — use WoW:"])
+                    else
+                        officialHint:SetText(L["Verify addon or send via WoW:"])
+                    end
+                elseif pState.state == "channel" then
                     officialHint:SetText(L["Protected WoW channel — click button to write in chat:"])
                 elseif pState.state == "disabled" then
                     officialHint:SetText(L["Enable 'Addon Direct Chat' in Settings or send via WoW:"])
@@ -2484,9 +2557,20 @@ function SocialPanels:CreateBuffsPanel(parent)
         row:SetHeight(rowHeight)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-        row.icon = row:CreateTexture(nil, "ARTWORK")
-        row.icon:SetSize(36, 36)
-        row.icon:SetPoint("LEFT", 8, 0)
+        row.activeBar = row:CreateTexture(nil, "ARTWORK", nil, 1)
+        row.activeBar:SetWidth(3)
+        row.activeBar:SetPoint("TOPLEFT", row, "TOPLEFT", 2, -4)
+        row.activeBar:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 2, 4)
+
+        row.iconFrame = row:CreateTexture(nil, "ARTWORK", nil, 1)
+        row.iconFrame:SetSize(38, 38)
+        row.iconFrame:SetPoint("LEFT", 9, 0)
+        row.iconFrame:SetColorTexture(0.45, 0.36, 0.18, 0.95)
+
+        row.icon = row:CreateTexture(nil, "ARTWORK", nil, 2)
+        row.icon:SetSize(34, 34)
+        row.icon:SetPoint("CENTER", row.iconFrame, "CENTER", 0, 0)
+        row.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
 
         row.btnReport = Theme:CreateButton(row, 84, 22, L["Report"], "default")
         Theme:AutoFitButton(row.btnReport, 74, 14, 120)
@@ -2549,10 +2633,14 @@ function SocialPanels:CreateBuffsPanel(parent)
             row.title:SetText("|cffffd200" .. item.name .. "|r" .. activeBadge)
             row.btnReport:Show()
             Theme:SetButtonText(row.btnReport, L["Report"])
+            if row.activeBar then row.activeBar:SetColorTexture(0.24, 0.88, 0.46, 0.95) end
+            if row.iconFrame then row.iconFrame:SetColorTexture(0.24, 0.88, 0.46, 1.0) end
         else
             local inactiveBadge = " |cff8b949e[" .. L["Inactive"] .. "]|r"
             row.title:SetText("|cffffffff" .. item.name .. "|r" .. inactiveBadge)
             row.btnReport:Hide()
+            if row.activeBar then row.activeBar:SetColorTexture(0.50, 0.42, 0.24, 0.25) end
+            if row.iconFrame then row.iconFrame:SetColorTexture(0.42, 0.34, 0.20, 0.70) end
         end
         if row._lastActiveAnchor ~= isActive then
             row._lastActiveAnchor = isActive
@@ -3097,6 +3185,7 @@ function SocialPanels:CreateAltsPanel(parent)
         for c = 1, 18 do
             local cell = CreateFrame("Button", nil, row, "BackdropTemplate")
             cell:SetSize(34, 34)
+            cell._scNoStone = true
             Theme:ApplyBackdrop(cell, "inset")
 
             local tex = cell:CreateTexture(nil, "ARTWORK")
@@ -3104,6 +3193,12 @@ function SocialPanels:CreateAltsPanel(parent)
             tex:SetPoint("BOTTOMRIGHT", -2, 2)
             tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
             cell.icon = tex
+
+            local hl = cell:CreateTexture(nil, "HIGHLIGHT")
+            hl:SetPoint("TOPLEFT", 2, -2)
+            hl:SetPoint("BOTTOMRIGHT", -2, 2)
+            hl:SetColorTexture(1, 0.92, 0.65, 0.16)
+            hl:SetBlendMode("ADD")
 
             local eqLbl = cell:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
             eqLbl:SetPoint("TOPLEFT", 3, -2)

@@ -23,6 +23,8 @@ local SpotterHUD = {
     _hasSmoothAngle = false,
     _kinematicsElapsed = 0,
     _combatKinElapsed = 0,
+    minimapPins = {},
+    worldMapPins = {},
 }
 
 local HUD_WIDTH = 248
@@ -48,25 +50,7 @@ local function GetSpotterTotalCount()
 end
 
 local function RotateArrowTexture(tex, angleRad)
-    if not tex then return end
-    local a = angleRad or 0
-    if tex.SetRotation then
-        tex:SetRotation(a)
-        return
-    end
-    if tex.SetTexCoord then
-        local s = math.sqrt(2)
-        local cosA = math.cos(a)
-        local sinA = math.sin(a)
-        local function corner(cx, cy)
-            return 0.5 + (cx * cosA - cy * sinA) / s, 0.5 + (cx * sinA + cy * cosA) / s
-        end
-        local ulx, uly = corner(-0.5, -0.5)
-        local llx, lly = corner(-0.5, 0.5)
-        local urx, ury = corner(0.5, -0.5)
-        local lrx, lry = corner(0.5, 0.5)
-        tex:SetTexCoord(ulx, uly, llx, lly, urx, ury, lrx, lry)
-    end
+    -- Compass arrow removed in favor of Minimap/WorldMap pins and pure distance calculator
 end
 
 local function ShowHUDTooltip(owner, titleText, line1, line2)
@@ -133,23 +117,29 @@ local function OpenTargetContextMenu(anchor, entry)
         end)
 
         if entry.guild and entry.guild ~= "" and entry.stance ~= "SAME" and ns.Clan then
-            if entry.stance ~= "ENEMY" then
-                root:CreateButton(L["Mark Guild as Enemy"], function()
-                    ns.Clan:SetGuildStance(entry.guild, "ENEMY", entry.reason or "")
-                end)
-            end
-            if entry.stance ~= "ALLY" then
-                root:CreateButton(L["Mark Guild as Ally"], function()
-                    ns.Clan:SetGuildStance(entry.guild, "ALLY", entry.reason or "")
-                end)
-            end
-            root:CreateButton(L["Remove Guild Diplomacy"], function()
-                if ns.UI and ns.UI.OpenDiplomacyModal then
-                    ns.UI:OpenDiplomacyModal(entry.guild, entry.stance, nil)
-                elseif ns.Clan then
-                    ns.Clan:SetGuildStance(entry.guild, "NEUTRAL", "")
+            local canDip = ns.Clan.CanManageDiplomacy and ns.Clan:CanManageDiplomacy()
+            if canDip then
+                if entry.stance ~= "ENEMY" then
+                    root:CreateButton(L["Mark Guild as Enemy"], function()
+                        ns.Clan:SetGuildStance(entry.guild, "ENEMY", entry.reason or "")
+                    end)
                 end
-            end)
+                if entry.stance ~= "ALLY" then
+                    root:CreateButton(L["Mark Guild as Ally"], function()
+                        ns.Clan:SetGuildStance(entry.guild, "ALLY", entry.reason or "")
+                    end)
+                end
+                root:CreateButton(L["Remove Guild Diplomacy"], function()
+                    if ns.UI and ns.UI.OpenDiplomacyModal then
+                        ns.UI:OpenDiplomacyModal(entry.guild, entry.stance, nil)
+                    elseif ns.Clan then
+                        ns.Clan:SetGuildStance(entry.guild, "NEUTRAL", "")
+                    end
+                end)
+            else
+                local authTxt = (ns.Clan.GetDiplomacyAuthoritySummary and ns.Clan:GetDiplomacyAuthoritySummary()) or L["Guild Leader Only"]
+                root:CreateTitle("|cff8b949e" .. L["Diplomacy"] .. ": " .. authTxt .. "|r")
+            end
         end
 
         root:CreateButton(L["Dismiss Target"], function()
@@ -312,16 +302,7 @@ end
 SpotterHUD.HandleTargetClick = HandleTargetClick
 
 local function FormatBearingText(angleRad)
-    if not angleRad then return L["Nearby"] end
-    local absA = math.abs(angleRad)
-    if absA <= 0.42 then
-        return L["Ahead"]
-    elseif absA >= 2.35 then
-        return L["Behind"]
-    elseif angleRad > 0 then
-        return L["To your left"]
-    end
-    return L["To your right"]
+    return L["Nearby"]
 end
 
 local function ShortestAngleDelta(fromA, toA)
@@ -346,62 +327,410 @@ local function ApplyCircleMask(parent, tex, size)
     tex:AddMaskTexture(mask)
 end
 
-local function CreateRadarArrowBox(parentFrame, leftOffset)
-    local arrowBox = CreateFrame("Frame", nil, parentFrame)
-    arrowBox:SetSize(36, 36)
-    arrowBox:SetPoint("LEFT", leftOffset or 4, 0)
-    arrowBox:EnableMouse(false)
-    if arrowBox.SetClipsChildren then
-        arrowBox:SetClipsChildren(false)
+local function ShowHUDPinTooltip(owner, entry)
+    if not (GameTooltip and entry) then return end
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:ClearLines()
+
+    local classHex = Compat.ClassHex and Compat.ClassHex(entry.classFile) or "|cffffffff"
+    local stanceVal = entry.stance or "SAME"
+    local colHex = ns.Spotter and ns.Spotter:GetStanceColor(stanceVal).hex or "|cffffff00"
+    local stanceTag = stanceVal == "ENEMY" and L["ENEMY"]
+        or (stanceVal == "BLOCKED" and L["BLOCKED"])
+        or (stanceVal == "WATCHLIST" and L["WATCHLIST"])
+        or (stanceVal == "FRIEND" and L["FRIEND"])
+        or (stanceVal == "ALLY" and L["ALLY"] or L["CLAN"])
+
+    local lvlPart = (entry.level and entry.level > 0) and (" (" .. entry.level .. ")") or ""
+    local title = string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, entry.displayName or "?", lvlPart)
+    GameTooltip:AddLine(title, 1, 1, 1)
+
+    if entry.guild and entry.guild ~= "" then
+        GameTooltip:AddLine("<" .. entry.guild .. ">", 0.9, 0.82, 0.5)
     end
 
-    -- Thin stance-colored outer circular border (clean white-masked ring, never black-on-black)
-    local outerRing = arrowBox:CreateTexture(nil, "ARTWORK", nil, 0)
+    local loc = entry.fullLocationText or entry.locationText or entry.zone or ""
+    if loc ~= "" then
+        GameTooltip:AddLine(L["Location"] .. ": " .. loc, 0.75, 0.85, 0.95)
+    end
+
+    if entry.lastDistText and entry.lastDistText ~= "" then
+        GameTooltip:AddDoubleLine(L["Distance"], entry.lastDistText, 0.65, 0.72, 0.80, 0.35, 0.85, 0.45)
+    end
+
+    if entry.coordsText and entry.coordsText ~= "" then
+        GameTooltip:AddDoubleLine(L["Coordinates"], entry.coordsText, 0.65, 0.72, 0.80, 0.95, 0.85, 0.35)
+    end
+
+    GameTooltip:AddLine(L["Left-click: Target player"], 0.45, 0.85, 1.0)
+    GameTooltip:Show()
+end
+
+local reusableSrcVec2D = CreateVector2D and CreateVector2D(0, 0) or nil
+local reusableTargetVec2D = CreateVector2D and CreateVector2D(0, 0) or nil
+local reusablePinTargets = {}
+local reusablePinSeen = {}
+local reusablePeerPool = {}
+local reusableMinimapCtx = {}
+local OUTDOOR_ZOOM_RADII = { [0] = 233, [1] = 200, [2] = 166, [3] = 133, [4] = 100, [5] = 66 }
+local DOT_CIRCLE_TEX = "Interface\\AddOns\\SocialCentral\\Media\\dot"
+
+local function ProjectCoordsToMap(srcMapID, srcX, srcY, destMapID)
+    if not (srcMapID and srcX and srcY and destMapID) then return nil, nil end
+    if srcMapID == destMapID then
+        return srcX, srcY
+    end
+    if C_Map and C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D then
+        local vec = reusableSrcVec2D
+        if vec and vec.SetXY then
+            vec:SetXY(srcX, srcY)
+        else
+            vec = CreateVector2D(srcX, srcY)
+        end
+        local ok1, inst, worldPos = pcall(C_Map.GetWorldPosFromMapPos, srcMapID, vec)
+        if ok1 and inst and worldPos then
+            local ok2, outMapID, outPos = pcall(C_Map.GetMapPosFromWorldPos, inst, worldPos, destMapID)
+            if ok2 and outMapID == destMapID and outPos then
+                local px = outPos.GetXY and select(1, outPos:GetXY()) or outPos.x
+                local py = outPos.GetXY and select(2, outPos:GetXY()) or outPos.y
+                if px and py and px >= 0.005 and px <= 0.995 and py >= 0.005 and py <= 0.995 then
+                    return px, py
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function PrepareMinimapContext()
+    local ctx = reusableMinimapCtx
+    ctx.valid = false
+    if not (Minimap and Minimap:IsShown()) then
+        return ctx
+    end
+
+    local mapRadius = 100
+    if C_Minimap and C_Minimap.GetViewRadius then
+        local okR, vr = pcall(C_Minimap.GetViewRadius)
+        if okR and vr and vr > 10 then
+            mapRadius = vr
+        end
+    else
+        local zoom = Minimap:GetZoom() or 0
+        mapRadius = OUTDOOR_ZOOM_RADII[zoom] or 100
+    end
+    ctx.mapRadius = mapRadius
+    ctx.miniW = (Minimap:GetWidth() or 140) / 2
+    ctx.miniH = (Minimap:GetHeight() or 140) / 2
+
+    if not (C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition and CreateVector2D and C_Map.GetWorldPosFromMapPos) then
+        return ctx
+    end
+
+    local playerMapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
+    if not playerMapID then return ctx end
+    local pPos = Safe.Call(C_Map.GetPlayerMapPosition, playerMapID, "player")
+    if not pPos then return ctx end
+    local px = pPos.GetXY and select(1, pPos:GetXY()) or pPos.x
+    local py = pPos.GetXY and select(2, pPos:GetXY()) or pPos.y
+    if not (px and py) then return ctx end
+
+    local pVec = reusableSrcVec2D
+    if pVec and pVec.SetXY then
+        pVec:SetXY(px, py)
+    else
+        pVec = CreateVector2D(px, py)
+    end
+    local ok1, pInst, pWorld = pcall(C_Map.GetWorldPosFromMapPos, playerMapID, pVec)
+    if not (ok1 and pInst and pWorld) then
+        return ctx
+    end
+
+    ctx.pInst = pInst
+    ctx.pWorldX = pWorld.x
+    ctx.pWorldY = pWorld.y
+    ctx.rotate = GetCVar and GetCVar("rotateMinimap") == "1"
+    if ctx.rotate and GetPlayerFacing then
+        local facing = GetPlayerFacing() or 0
+        ctx.sinF = math.sin(facing)
+        ctx.cosF = math.cos(facing)
+    end
+    ctx.valid = true
+    return ctx
+end
+
+local function ProjectCoordsToMinimapWithContext(ctx, srcMapID, srcX, srcY)
+    if not (ctx and ctx.valid and srcMapID and srcX and srcY) then
+        return nil, nil, false
+    end
+
+    local tVec = reusableTargetVec2D
+    if tVec and tVec.SetXY then
+        tVec:SetXY(srcX, srcY)
+    else
+        tVec = CreateVector2D(srcX, srcY)
+    end
+    local ok2, tInst, tWorld = pcall(C_Map.GetWorldPosFromMapPos, srcMapID, tVec)
+    if not (ok2 and tInst and tInst == ctx.pInst and tWorld) then
+        return nil, nil, false
+    end
+
+    local dNorth = tWorld.x - ctx.pWorldX
+    local dWest = tWorld.y - ctx.pWorldY
+    local xDist = -dWest  -- yards East (+right)
+    local yDist = dNorth  -- yards North (+up)
+
+    if ctx.rotate and ctx.sinF and ctx.cosF then
+        local rx = xDist * ctx.cosF - yDist * ctx.sinF
+        local ry = xDist * ctx.sinF + yDist * ctx.cosF
+        xDist, yDist = rx, ry
+    end
+
+    local normX = xDist / ctx.mapRadius
+    local normY = yDist / ctx.mapRadius
+    local normDistSq = normX * normX + normY * normY
+    local maxRatio = 0.88
+    local onEdge = false
+
+    if normDistSq > (maxRatio * maxRatio) then
+        local normDist = math.sqrt(normDistSq)
+        if normDist > 0 then
+            normX = (normX / normDist) * maxRatio
+            normY = (normY / normDist) * maxRatio
+        end
+        onEdge = true
+    end
+
+    return normX * ctx.miniW, normY * ctx.miniH, onEdge
+end
+
+local function AcquireMinimapPin(idx)
+    SpotterHUD.minimapPins = SpotterHUD.minimapPins or {}
+    local pin = SpotterHUD.minimapPins[idx]
+    if pin then return pin end
+
+    pin = CreateFrame("Button", "SocialCentralSpotterMiniPin" .. idx, Minimap, "SecureActionButtonTemplate")
+    pin:SetSize(14, 14)
+    pin:RegisterForClicks("AnyUp")
+    pin:SetAttribute("useOnKeyDown", false)
+    pin:SetFrameStrata("MEDIUM")
+    pin:SetFrameLevel((Minimap:GetFrameLevel() or 10) + 15)
+
+    local solidBg = pin:CreateTexture(nil, "BACKGROUND", nil, -8)
+    solidBg:SetSize(14, 14)
+    solidBg:SetPoint("CENTER")
+    solidBg:SetTexture(DOT_CIRCLE_TEX)
+    solidBg:SetVertexColor(0.06, 0.08, 0.12, 1.0)
+    pin._solidOpaqueBg = solidBg
+
+    local outerRing = pin:CreateTexture(nil, "ARTWORK", nil, 0)
+    outerRing:SetSize(14, 14)
+    outerRing:SetPoint("CENTER")
+    outerRing:SetTexture(DOT_CIRCLE_TEX)
+    outerRing:SetVertexColor(0.98, 0.80, 0.24, 1.0)
+    pin.outerRing = outerRing
+
+    local icon = pin:CreateTexture(nil, "OVERLAY", nil, 1)
+    icon:SetSize(10, 10)
+    icon:SetPoint("CENTER")
+    icon:SetTexture(RADAR_FALLBACK_ICON)
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    ApplyCircleMask(pin, icon, 10)
+    pin.icon = icon
+
+    pin:SetScript("OnEnter", function(selfPin)
+        if selfPin.entry then
+            ShowHUDPinTooltip(selfPin, selfPin.entry)
+        end
+    end)
+    pin:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    pin:SetScript("PostClick", function(selfPin)
+        if selfPin.entry then
+            SpotterHUD.focusedKey = selfPin.entry.key
+            SpotterHUD:Refresh()
+        end
+    end)
+
+    SpotterHUD.minimapPins[idx] = pin
+    return pin
+end
+
+local function AcquireWorldMapPin(canvas, idx)
+    SpotterHUD.worldMapPins = SpotterHUD.worldMapPins or {}
+    local pin = SpotterHUD.worldMapPins[idx]
+    if pin then return pin end
+
+    pin = CreateFrame("Button", "SocialCentralSpotterWorldPin" .. idx, canvas, "SecureActionButtonTemplate")
+    pin:SetSize(18, 18)
+    pin:RegisterForClicks("AnyUp")
+    pin:SetAttribute("useOnKeyDown", false)
+    pin:SetFrameLevel(math.max(2050, (canvas:GetFrameLevel() or 2000) + 40))
+
+    local solidBg = pin:CreateTexture(nil, "BACKGROUND", nil, -8)
+    solidBg:SetSize(18, 18)
+    solidBg:SetPoint("CENTER")
+    solidBg:SetTexture(DOT_CIRCLE_TEX)
+    solidBg:SetVertexColor(0.06, 0.08, 0.12, 1.0)
+    pin._solidOpaqueBg = solidBg
+
+    local outerRing = pin:CreateTexture(nil, "ARTWORK", nil, 0)
+    outerRing:SetSize(18, 18)
+    outerRing:SetPoint("CENTER")
+    outerRing:SetTexture(DOT_CIRCLE_TEX)
+    outerRing:SetVertexColor(0.98, 0.80, 0.24, 1.0)
+    pin.outerRing = outerRing
+
+    local icon = pin:CreateTexture(nil, "OVERLAY", nil, 1)
+    icon:SetSize(14, 14)
+    icon:SetPoint("CENTER")
+    icon:SetTexture(RADAR_FALLBACK_ICON)
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    ApplyCircleMask(pin, icon, 14)
+    pin.icon = icon
+
+    pin:SetScript("OnEnter", function(selfPin)
+        if selfPin.entry then
+            ShowHUDPinTooltip(selfPin, selfPin.entry)
+        end
+    end)
+    pin:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    pin:SetScript("PostClick", function(selfPin)
+        if selfPin.entry then
+            SpotterHUD.focusedKey = selfPin.entry.key
+            SpotterHUD:Refresh()
+        end
+    end)
+
+    SpotterHUD.worldMapPins[idx] = pin
+    return pin
+end
+
+local function GetPlottableTargets()
+    wipe(reusablePinTargets)
+    wipe(reusablePinSeen)
+
+    if ns.Spotter and ns.Spotter.GetActiveTargets then
+        local spotterTargets = ns.Spotter:GetActiveTargets("ALL")
+        if spotterTargets then
+            for i = 1, #spotterTargets do
+                local entry = spotterTargets[i]
+                if entry and entry.key and not reusablePinSeen[entry.key] then
+                    reusablePinSeen[entry.key] = true
+                    reusablePinTargets[#reusablePinTargets + 1] = entry
+                end
+            end
+        end
+    end
+
+    if ns.Spotter and ns.Spotter.peerPositions then
+        local now = GetTime()
+        for senderName, p in pairs(ns.Spotter.peerPositions) do
+            if p and p.mapID and p.x and p.y and (now - (p.at or 0)) < 150 then
+                if not reusablePinSeen[senderName] then
+                    reusablePinSeen[senderName] = true
+                    local stance = "SAME"
+                    if ns.Watchlist and ns.Watchlist.IsOnWatchlist and ns.Watchlist:IsOnWatchlist(senderName) then
+                        stance = "WATCHLIST"
+                    elseif ns.Compat and ns.Compat.IsFriend and ns.Compat.IsFriend(senderName) then
+                        stance = "FRIEND"
+                    end
+                    local entry = reusablePeerPool[senderName]
+                    if not entry then
+                        entry = {
+                            key = senderName,
+                            displayName = senderName,
+                            unitName = senderName,
+                            isPeer = true,
+                        }
+                        reusablePeerPool[senderName] = entry
+                    end
+                    entry.stance = stance
+                    entry.classFile = p.classFile
+                    entry.level = p.level
+                    if entry._anchorMapX ~= p.x or entry._anchorMapY ~= p.y then
+                        entry._anchorMapX = p.x
+                        entry._anchorMapY = p.y
+                        entry.coordsText = string.format("%.1f, %.1f", p.x * 100, p.y * 100)
+                    end
+                    entry._anchorMapID = p.mapID
+                    reusablePinTargets[#reusablePinTargets + 1] = entry
+                end
+            end
+        end
+    end
+
+    return reusablePinTargets
+end
+
+local function CreateRadarBadgeBox(parentFrame, leftOffset)
+    local badgeBox = CreateFrame("Frame", nil, parentFrame)
+    badgeBox:SetSize(36, 36)
+    badgeBox:SetPoint("LEFT", leftOffset or 4, 0)
+    badgeBox:EnableMouse(false)
+    if badgeBox.SetClipsChildren then
+        badgeBox:SetClipsChildren(false)
+    end
+
+    -- Soft radial bloom aura behind stance ring
+    local badgeGlow = badgeBox:CreateTexture(nil, "BACKGROUND", nil, 1)
+    badgeGlow:SetSize(48, 48)
+    badgeGlow:SetPoint("CENTER")
+    badgeGlow:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\toast-glow")
+    badgeGlow:SetVertexColor(0.98, 0.80, 0.24, 0.38)
+    badgeBox.badgeGlow = badgeGlow
+
+    -- Thin stance-colored outer circular border
+    local outerRing = badgeBox:CreateTexture(nil, "ARTWORK", nil, 0)
     outerRing:SetSize(34, 34)
     outerRing:SetPoint("CENTER")
     outerRing:SetTexture(WHITE8X8)
     outerRing:SetVertexColor(0.98, 0.80, 0.24, 0.90)
-    ApplyCircleMask(arrowBox, outerRing, 34)
-    arrowBox.outerRing = outerRing
+    ApplyCircleMask(badgeBox, outerRing, 34)
+    badgeBox.outerRing = outerRing
 
-    local arrowAura = arrowBox:CreateTexture(nil, "ARTWORK", nil, 1)
-    arrowAura:SetSize(30, 30)
-    arrowAura:SetPoint("CENTER")
-    arrowAura:SetTexture(WHITE8X8)
-    arrowAura:SetVertexColor(0.08, 0.11, 0.16, 0.96)
-    ApplyCircleMask(arrowBox, arrowAura, 30)
-    arrowBox.aura = arrowAura
+    local aura = badgeBox:CreateTexture(nil, "ARTWORK", nil, 1)
+    aura:SetSize(30, 30)
+    aura:SetPoint("CENTER")
+    aura:SetTexture(WHITE8X8)
+    aura:SetVertexColor(0.08, 0.11, 0.16, 0.96)
+    ApplyCircleMask(badgeBox, aura, 30)
+    badgeBox.aura = aura
 
-    local arrowTex = arrowBox:CreateTexture(nil, "OVERLAY", nil, 2)
+    local arrowTex = badgeBox:CreateTexture(nil, "OVERLAY", nil, 2)
     arrowTex:SetSize(28, 28)
     arrowTex:SetPoint("CENTER")
-    arrowTex:SetTexture(ARROW_TEX)
-    arrowBox.arrowTex = arrowTex
+    arrowTex:Hide()
+    badgeBox.arrowTex = arrowTex
 
-    local noSignalDot = arrowBox:CreateTexture(nil, "OVERLAY", nil, 1)
+    local noSignalDot = badgeBox:CreateTexture(nil, "OVERLAY", nil, 1)
     noSignalDot:SetSize(26, 26)
     noSignalDot:SetPoint("CENTER")
     noSignalDot:SetTexture(RADAR_FALLBACK_ICON)
     noSignalDot:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    ApplyCircleMask(arrowBox, noSignalDot, 26)
-    noSignalDot:Hide()
-    arrowBox.noSignalDot = noSignalDot
+    ApplyCircleMask(badgeBox, noSignalDot, 26)
+    noSignalDot:Show()
+    badgeBox.noSignalDot = noSignalDot
 
-    local noSignalBlip = arrowBox:CreateTexture(nil, "OVERLAY", nil, 3)
+    local noSignalBlip = badgeBox:CreateTexture(nil, "OVERLAY", nil, 3)
     noSignalBlip:SetSize(10, 10)
-    noSignalBlip:SetPoint("BOTTOMRIGHT", arrowBox, "BOTTOMRIGHT", -1, 1)
+    noSignalBlip:SetPoint("BOTTOMRIGHT", badgeBox, "BOTTOMRIGHT", -1, 1)
     noSignalBlip:SetTexture(WHITE8X8)
     noSignalBlip:SetVertexColor(0.98, 0.80, 0.24, 1.0)
-    ApplyCircleMask(arrowBox, noSignalBlip, 10)
-    noSignalBlip:Hide()
-    arrowBox.noSignalBlip = noSignalBlip
+    ApplyCircleMask(badgeBox, noSignalBlip, 10)
+    noSignalBlip:Show()
+    badgeBox.noSignalBlip = noSignalBlip
 
-    parentFrame.arrowBox = arrowBox
+    parentFrame.arrowBox = badgeBox
     parentFrame.arrowTex = arrowTex
     parentFrame.noSignalDot = noSignalDot
     parentFrame.noSignalBlip = noSignalBlip
-    return arrowBox
+    return badgeBox
 end
+local CreateRadarArrowBox = CreateRadarBadgeBox
 
 function SpotterHUD:BuildFrame()
     if self.frame then return self.frame end
@@ -426,6 +755,13 @@ function SpotterHUD:BuildFrame()
     stanceBar:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 2, 2)
     stanceBar:SetColorTexture(0.98, 0.80, 0.24, 1)
     f.stanceBar = stanceBar
+
+    local topBevel = f:CreateTexture(nil, "BORDER", nil, 1)
+    topBevel:SetHeight(1)
+    topBevel:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -3)
+    topBevel:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -3)
+    topBevel:SetColorTexture(1, 0.90, 0.65, 0.16)
+    f._topBevel = topBevel
 
     -- Main clickable Arrow Pill (SecureActionButtonTemplate: selects target on screen & opens Interaction Drawer)
     local compassBar = CreateFrame("Button", "SocialCentralSpotterCompass", f, "SecureActionButtonTemplate,BackdropTemplate")
@@ -487,9 +823,6 @@ function SpotterHUD:BuildFrame()
                 l1 = (l1 ~= "") and (l1 .. "\n" .. L["Location"] .. ": " .. locTxt) or (L["Location"] .. ": " .. locTxt)
             end
             local tipFooter = L["Left-click: Target player  |  Right-click: Actions"]
-            if selfBtn.noSignalDot and selfBtn.noSignalDot:IsShown() then
-                tipFooter = tipFooter .. "\n" .. L["Arrow requires Nameplates (Shift+V / V) or Party/Raid."]
-            end
             ShowHUDTooltip(
                 selfBtn,
                 e.displayName or "?",
@@ -557,6 +890,11 @@ function SpotterHUD:BuildFrame()
     if actionPanel.SetClipsChildren then
         actionPanel:SetClipsChildren(true)
     end
+    local drawerSep = actionPanel:CreateTexture(nil, "ARTWORK", nil, 1)
+    drawerSep:SetHeight(1)
+    drawerSep:SetPoint("TOPLEFT", actionPanel, "TOPLEFT", 6, 0)
+    drawerSep:SetPoint("TOPRIGHT", actionPanel, "TOPRIGHT", -6, 0)
+    drawerSep:SetColorTexture(0.68, 0.56, 0.28, 0.35)
     f.actionPanel = actionPanel
 
     local promptFs = actionPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -622,7 +960,10 @@ function SpotterHUD:BuildFrame()
         local e = SpotterHUD._compassEntry
         if not e then return end
         if e.stance == "ENEMY" then
-            if ns.UI and ns.UI.OpenDiplomacyModal and e.guild and e.guild ~= "" then
+            if ns.Clan and ns.Clan.CanManageDiplomacy and not ns.Clan:CanManageDiplomacy() then
+                local authTxt = (ns.Clan.GetDiplomacyAuthoritySummary and ns.Clan:GetDiplomacyAuthoritySummary()) or L["Guild Leader Only"]
+                ns:Print(L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authTxt))
+            elseif ns.UI and ns.UI.OpenDiplomacyModal and e.guild and e.guild ~= "" then
                 ns.UI:OpenDiplomacyModal(e.guild, e.stance, nil)
             end
         elseif e.stance == "BLOCKED" then
@@ -670,17 +1011,12 @@ function SpotterHUD:BuildFrame()
 end
 
 function SpotterHUD:SyncTickerState(kin)
-    local interval = 1.0
-    if kin and kin.hasAngle then
-        interval = 0.066
-    elseif kin and kin.unit then
-        interval = 0.25
-    end
+    local interval = 0.5
     self._tickerInterval = interval
 
     if not self._mainOnUpdateFn then
         self._mainOnUpdateFn = function(_, elapsed)
-            local stepInterval = SpotterHUD._tickerInterval or 0.25
+            local stepInterval = SpotterHUD._tickerInterval or 0.5
             SpotterHUD._kinematicsElapsed = (SpotterHUD._kinematicsElapsed or 0) + elapsed
             if SpotterHUD._kinematicsElapsed >= stepInterval then
                 local dt = SpotterHUD._kinematicsElapsed
@@ -691,7 +1027,7 @@ function SpotterHUD:SyncTickerState(kin)
     end
     if not self._combatOnUpdateFn then
         self._combatOnUpdateFn = function(_, elapsed)
-            local stepInterval = SpotterHUD._tickerInterval or 0.25
+            local stepInterval = SpotterHUD._tickerInterval or 0.5
             SpotterHUD._combatKinElapsed = (SpotterHUD._combatKinElapsed or 0) + elapsed
             if SpotterHUD._combatKinElapsed >= stepInterval then
                 local dt = SpotterHUD._combatKinElapsed
@@ -929,129 +1265,328 @@ local function ResetCompassBarDirtyState(bar)
     bar._visDistDead = nil
 end
 
-local function ApplyCompassBarVisuals(bar, entry, kin, smoothAngle)
+local function ApplyCompassBarVisuals(bar, entry, kin)
     if not bar then return end
 
     local stanceVal = entry.stance or "SAME"
     local isDead = entry.dead == true
     local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
-    local hasAngle = kin and kin.hasAngle == true
 
-    if hasAngle then
-        if bar._visHasAngle ~= true then
-            bar._visHasAngle = true
-            bar._visDead = nil
-            bar._visClassFile = nil
-            bar._visBlipDead = nil
-            bar._visBlipStance = nil
-            if bar.noSignalDot then bar.noSignalDot:Hide() end
-            if bar.noSignalBlip then bar.noSignalBlip:Hide() end
-            if bar.arrowTex then bar.arrowTex:Show() end
-        end
-        local angleVal = smoothAngle or 0
-        if not bar._visAngle or math.abs(bar._visAngle - angleVal) > 0.002 then
-            bar._visAngle = angleVal
-            RotateArrowTexture(bar.arrowTex, angleVal)
-        end
-    else
-        if bar._visHasAngle ~= false then
-            bar._visHasAngle = false
-            bar._visAngle = nil
-            if bar.arrowTex then bar.arrowTex:Hide() end
-            if bar.noSignalDot then bar.noSignalDot:Show() end
-            if bar.noSignalBlip then bar.noSignalBlip:Show() end
-        end
-        local classFileVal = entry.classFile or false
-        if (bar._visDead ~= isDead or bar._visClassFile ~= classFileVal) and bar.noSignalDot then
-            bar._visDead = isDead
-            bar._visClassFile = classFileVal
-            local coords = classFileVal and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFileVal]
-            if coords then
-                bar.noSignalDot:SetTexture(CLASS_SPRITE_TEX)
-                bar.noSignalDot:SetTexCoord(coords[1] + 0.015, coords[2] - 0.015, coords[3] + 0.015, coords[4] - 0.015)
-                if isDead then
-                    bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.70)
-                else
-                    bar.noSignalDot:SetVertexColor(1, 1, 1, 1)
-                end
-            else
-                bar.noSignalDot:SetTexture(RADAR_FALLBACK_ICON)
-                bar.noSignalDot:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-                if isDead then
-                    bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.70)
-                else
-                    bar.noSignalDot:SetVertexColor(1, 1, 1, 0.95)
-                end
-            end
-        end
-        if bar.noSignalBlip and (bar._visBlipDead ~= isDead or bar._visBlipStance ~= stanceVal) then
-            bar._visBlipDead = isDead
-            bar._visBlipStance = stanceVal
+    if bar.arrowTex then
+        bar.arrowTex:Hide()
+    end
+    if bar.noSignalDot then
+        bar.noSignalDot:Show()
+    end
+    if bar.noSignalBlip then
+        bar.noSignalBlip:Show()
+    end
+
+    local classFileVal = entry.classFile or false
+    if (bar._visDead ~= isDead or bar._visClassFile ~= classFileVal) and bar.noSignalDot then
+        bar._visDead = isDead
+        bar._visClassFile = classFileVal
+        local coords = classFileVal and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFileVal]
+        if coords then
+            bar.noSignalDot:SetTexture(CLASS_SPRITE_TEX)
+            bar.noSignalDot:SetTexCoord(coords[1] + 0.015, coords[2] - 0.015, coords[3] + 0.015, coords[4] - 0.015)
             if isDead then
-                bar.noSignalBlip:SetVertexColor(0.50, 0.50, 0.50, 0.70)
+                bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.70)
             else
-                bar.noSignalBlip:SetVertexColor(rgb[1], rgb[2], rgb[3], 1.0)
+                bar.noSignalDot:SetVertexColor(1, 1, 1, 1)
+            end
+        else
+            bar.noSignalDot:SetTexture(RADAR_FALLBACK_ICON)
+            bar.noSignalDot:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            if isDead then
+                bar.noSignalDot:SetVertexColor(0.55, 0.55, 0.55, 0.70)
+            else
+                bar.noSignalDot:SetVertexColor(1, 1, 1, 0.95)
             end
         end
     end
 
-    local isAhead = (not isDead) and hasAngle and math.abs(kin.angle or 0) <= 0.42
-    if bar._visTintDead ~= isDead
-        or bar._visTintHasAngle ~= hasAngle
-        or bar._visTintAhead ~= isAhead
-        or bar._visTintStance ~= stanceVal
-    then
+    if bar.noSignalBlip and (bar._visBlipDead ~= isDead or bar._visBlipStance ~= stanceVal) then
+        bar._visBlipDead = isDead
+        bar._visBlipStance = stanceVal
+        if isDead then
+            bar.noSignalBlip:SetVertexColor(0.50, 0.50, 0.50, 0.70)
+        else
+            bar.noSignalBlip:SetVertexColor(rgb[1], rgb[2], rgb[3], 1.0)
+        end
+    end
+
+    if bar._visTintDead ~= isDead or bar._visTintStance ~= stanceVal then
         bar._visTintDead = isDead
-        bar._visTintHasAngle = hasAngle
-        bar._visTintAhead = isAhead
         bar._visTintStance = stanceVal
         if isDead then
             if bar.arrowBox and bar.arrowBox.outerRing then
                 bar.arrowBox.outerRing:SetVertexColor(0.45, 0.45, 0.45, 0.75)
             end
+            if bar.arrowBox and bar.arrowBox.badgeGlow then
+                bar.arrowBox.badgeGlow:SetVertexColor(0.45, 0.45, 0.45, 0.16)
+            end
             if bar.arrowBox and bar.arrowBox.aura then
                 bar.arrowBox.aura:SetVertexColor(0.08, 0.09, 0.12, 0.95)
             end
-            if bar.arrowTex and bar.arrowTex.SetVertexColor then
-                bar.arrowTex:SetVertexColor(0.55, 0.55, 0.55, 0.65)
-            end
         else
             if bar.arrowBox and bar.arrowBox.outerRing then
-                bar.arrowBox.outerRing:SetVertexColor(rgb[1], rgb[2], rgb[3], hasAngle and 0.95 or 0.90)
+                bar.arrowBox.outerRing:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.95)
+            end
+            if bar.arrowBox and bar.arrowBox.badgeGlow then
+                bar.arrowBox.badgeGlow:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.42)
             end
             if bar.arrowBox and bar.arrowBox.aura then
                 bar.arrowBox.aura:SetVertexColor(0.07, 0.09, 0.14, 0.96)
             end
-            if bar.arrowTex and bar.arrowTex.SetVertexColor then
-                if isAhead then
-                    bar.arrowTex:SetVertexColor(0.35, 1.0, 0.58, 1)
-                else
-                    bar.arrowTex:SetVertexColor(1, 1, 1, 1)
+        end
+    end
+
+    -- Pure Distance Calculator (Color coded by proximity)
+    local distNum = (kin and kin.distYards) or entry.lastDistYards
+    local distStr
+    if isDead then
+        distStr = "|cff888888" .. L["Dead"] .. "|r"
+    elseif distNum and type(distNum) == "number" and distNum > 0 then
+        if distNum <= 10 then
+            distStr = string.format("|cff4ade80~%dm|r", distNum)
+        elseif distNum <= 25 then
+            distStr = string.format("|cff86efac%dm|r", distNum)
+        elseif distNum <= 40 then
+            distStr = string.format("|cfffde047%dm|r", distNum)
+        elseif distNum <= 60 then
+            distStr = string.format("|cfffb923c%dm|r", distNum)
+        else
+            distStr = string.format("|cff94a3b8>%dm|r", distNum)
+        end
+    else
+        local rawText = (kin and kin.distText) or entry.lastDistText or L["Nearby"]
+        distStr = "|cff58d8ff" .. rawText .. "|r"
+    end
+
+    local zoneShort = (entry.subZone and entry.subZone ~= "") and entry.subZone or ""
+    local locPart = (zoneShort ~= "") and (" |cff8b949e· " .. zoneShort .. "|r") or ""
+    local coordsPart = entry.coordsText and (" |cff64748b(" .. entry.coordsText .. ")|r") or ""
+    local distOut = distStr .. locPart .. coordsPart
+
+    if bar._visDistOut ~= distOut then
+        bar._visDistOut = distOut
+        bar.distFs:SetText(distOut)
+    end
+end
+
+function SpotterHUD:UpdateMapPins()
+    local s = ns.db and ns.db.settings
+    local enabled = not s or s.spotterMapPins ~= false
+    if not enabled then
+        if self.minimapPins then
+            for i = 1, #self.minimapPins do self.minimapPins[i]:Hide() end
+        end
+        if self.worldMapPins then
+            for i = 1, #self.worldMapPins do self.worldMapPins[i]:Hide() end
+        end
+        return
+    end
+
+    local miniShown = Minimap and Minimap:IsShown()
+    local worldShown = _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()
+    if not (miniShown or worldShown) then
+        if self.minimapPins then
+            for i = 1, #self.minimapPins do self.minimapPins[i]:Hide() end
+        end
+        if self.worldMapPins then
+            for i = 1, #self.worldMapPins do self.worldMapPins[i]:Hide() end
+        end
+        return
+    end
+
+    local targets = GetPlottableTargets()
+    if miniShown then
+        self:UpdateMinimapPinsInternal(targets)
+    elseif self.minimapPins then
+        for i = 1, #self.minimapPins do self.minimapPins[i]:Hide() end
+    end
+    if worldShown then
+        self:UpdateWorldMapPinsInternal(targets)
+    elseif self.worldMapPins then
+        for i = 1, #self.worldMapPins do self.worldMapPins[i]:Hide() end
+    end
+end
+
+function SpotterHUD:UpdateMinimapPinsInternal(targets)
+    local miniIdx = 0
+    local inCombat = InCombatLockdown and InCombatLockdown()
+    local ctx = PrepareMinimapContext()
+
+    if ctx.valid then
+        for i = 1, #targets do
+            local entry = targets[i]
+            local mapID = entry._anchorMapID
+            local mx = entry._anchorMapX
+            local my = entry._anchorMapY
+
+            local offX, offY, onEdge
+            if mapID and mx and my then
+                offX, offY, onEdge = ProjectCoordsToMinimapWithContext(ctx, mapID, mx, my)
+            elseif entry._kinematics and entry._kinematics.distYards and entry._kinematics.angle then
+                local distY = entry._kinematics.distYards
+                local a = entry._kinematics.angle
+                local xYards = -math.sin(a) * distY
+                local yYards = math.cos(a) * distY
+                local nX = xYards / ctx.mapRadius
+                local nY = yYards / ctx.mapRadius
+                local dSq = nX * nX + nY * nY
+                local maxR = 0.88
+                if dSq > (maxR * maxR) then
+                    local d = math.sqrt(dSq)
+                    if d > 0 then nX = (nX / d) * maxR; nY = (nY / d) * maxR end
+                    onEdge = true
                 end
+                offX, offY = nX * ctx.miniW, nY * ctx.miniH
+            end
+
+            if offX and offY then
+                miniIdx = miniIdx + 1
+                local pin = AcquireMinimapPin(miniIdx)
+                local roundedX = math.floor(offX * 2 + 0.5) * 0.5
+                local roundedY = math.floor(offY * 2 + 0.5) * 0.5
+                if pin._lastOffX ~= roundedX or pin._lastOffY ~= roundedY then
+                    pin._lastOffX = roundedX
+                    pin._lastOffY = roundedY
+                    pin:ClearAllPoints()
+                    pin:SetPoint("CENTER", Minimap, "CENTER", roundedX, roundedY)
+                end
+                pin.entry = entry
+
+                local stanceVal = entry.stance or "SAME"
+                if pin._lastStance ~= stanceVal or pin._lastOnEdge ~= onEdge then
+                    pin._lastStance = stanceVal
+                    pin._lastOnEdge = onEdge
+                    local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
+                    if pin.outerRing then
+                        pin.outerRing:SetVertexColor(rgb[1], rgb[2], rgb[3], onEdge and 0.75 or 1.0)
+                    end
+                end
+
+                local classFileVal = entry.classFile or "NONE"
+                if pin._lastClassFile ~= classFileVal then
+                    pin._lastClassFile = classFileVal
+                    local coords = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFileVal]
+                    if coords then
+                        pin.icon:SetTexture(CLASS_SPRITE_TEX)
+                        pin.icon:SetTexCoord(coords[1] + 0.015, coords[2] - 0.015, coords[3] + 0.015, coords[4] - 0.015)
+                    else
+                        pin.icon:SetTexture(RADAR_FALLBACK_ICON)
+                        pin.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                    end
+                end
+
+                if not inCombat then
+                    local curUnit = entry.unit or ""
+                    local curDisp = entry.displayName or ""
+                    if pin._lastMacroKey ~= entry.key or pin._lastMacroUnit ~= curUnit or pin._lastMacroDisp ~= curDisp then
+                        pin._lastMacroKey = entry.key
+                        pin._lastMacroUnit = curUnit
+                        pin._lastMacroDisp = curDisp
+                        ApplySecureMacroAttributes(pin, entry, entry.unit)
+                    end
+                end
+                pin:Show()
             end
         end
     end
 
-    local distTextVal = kin.distText or L["Nearby"]
-    local bearing = hasAngle and FormatBearingText(kin.angle) or L["Nearby"]
-    local zoneShort = (entry.subZone and entry.subZone ~= "") and entry.subZone or ""
-    if bar._visDistText ~= distTextVal
-        or bar._visBearing ~= bearing
-        or bar._visSubZone ~= zoneShort
-        or bar._visDistDead ~= isDead
-    then
-        bar._visDistText = distTextVal
-        bar._visBearing = bearing
-        bar._visSubZone = zoneShort
-        bar._visDistDead = isDead
-        local locPart = (zoneShort ~= "") and (" |cff8b949e· " .. zoneShort .. "|r") or ""
-        local distOut
-        if isDead then
-            distOut = string.format("|cff888888%s|r |cff8b949e· %s|r%s", L["Dead"], bearing, locPart)
-        else
-            distOut = string.format("|cff58d8ff%s|r |cffffd100· %s|r%s", distTextVal, bearing, locPart)
+    if self.minimapPins then
+        for i = miniIdx + 1, #self.minimapPins do
+            self.minimapPins[i]:Hide()
         end
-        bar.distFs:SetText(distOut)
+    end
+end
+
+function SpotterHUD:UpdateWorldMapPinsInternal(targets)
+    local mapFrame = _G.WorldMapFrame
+    if not (mapFrame and mapFrame.IsShown and mapFrame:IsShown()) then
+        if self.worldMapPins then
+            for i = 1, #self.worldMapPins do self.worldMapPins[i]:Hide() end
+        end
+        return
+    end
+
+    local canvas = mapFrame.GetCanvas and mapFrame:GetCanvas()
+    local currentMapID = mapFrame.GetMapID and mapFrame:GetMapID()
+    if not (canvas and currentMapID) then return end
+
+    local cw, ch = canvas:GetWidth() or 0, canvas:GetHeight() or 0
+    if cw < 40 or ch < 40 then return end
+
+    local inCombat = InCombatLockdown and InCombatLockdown()
+    local worldIdx = 0
+
+    for i = 1, #targets do
+        local entry = targets[i]
+        local mapID = entry._anchorMapID
+        local mx = entry._anchorMapX
+        local my = entry._anchorMapY
+        if mapID and mx and my then
+            local px, py = ProjectCoordsToMap(mapID, mx, my, currentMapID)
+            if px and py then
+                worldIdx = worldIdx + 1
+                local pin = AcquireWorldMapPin(canvas, worldIdx)
+                if pin:GetParent() ~= canvas then
+                    pin:SetParent(canvas)
+                    pin._lastOffX = nil
+                end
+                local offX = math.floor(px * cw * 2 + 0.5) * 0.5
+                local offY = math.floor(-py * ch * 2 + 0.5) * 0.5
+                if pin._lastOffX ~= offX or pin._lastOffY ~= offY then
+                    pin._lastOffX = offX
+                    pin._lastOffY = offY
+                    pin:ClearAllPoints()
+                    pin:SetPoint("CENTER", canvas, "TOPLEFT", offX, offY)
+                end
+                pin.entry = entry
+
+                local stanceVal = entry.stance or "SAME"
+                if pin._lastStance ~= stanceVal then
+                    pin._lastStance = stanceVal
+                    local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
+                    if pin.outerRing then
+                        pin.outerRing:SetVertexColor(rgb[1], rgb[2], rgb[3], 1.0)
+                    end
+                end
+
+                local classFileVal = entry.classFile or "NONE"
+                if pin._lastClassFile ~= classFileVal then
+                    pin._lastClassFile = classFileVal
+                    local coords = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFileVal]
+                    if coords then
+                        pin.icon:SetTexture(CLASS_SPRITE_TEX)
+                        pin.icon:SetTexCoord(coords[1] + 0.015, coords[2] - 0.015, coords[3] + 0.015, coords[4] - 0.015)
+                    else
+                        pin.icon:SetTexture(RADAR_FALLBACK_ICON)
+                        pin.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                    end
+                end
+
+                if not inCombat then
+                    local curUnit = entry.unit or ""
+                    local curDisp = entry.displayName or ""
+                    if pin._lastMacroKey ~= entry.key or pin._lastMacroUnit ~= curUnit or pin._lastMacroDisp ~= curDisp then
+                        pin._lastMacroKey = entry.key
+                        pin._lastMacroUnit = curUnit
+                        pin._lastMacroDisp = curDisp
+                        ApplySecureMacroAttributes(pin, entry, entry.unit)
+                    end
+                end
+                pin:Show()
+            end
+        end
+    end
+
+    if self.worldMapPins then
+        for i = worldIdx + 1, #self.worldMapPins do
+            self.worldMapPins[i]:Hide()
+        end
     end
 end
 
@@ -1060,6 +1595,13 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
     local cf = self.combatArrowFrame
     local mainCompassActive = f and f:IsShown() and f.compassBar and f.compassBar:IsShown()
     local combatCompassActive = cf and cf:IsShown()
+
+    local now = GetTime and GetTime() or 0
+    if snap or not self._lastMapPinsAt or (now - self._lastMapPinsAt) >= 1.5 then
+        self._lastMapPinsAt = now
+        self:UpdateMapPins()
+    end
+
     if not (mainCompassActive or combatCompassActive) then
         self:SyncTickerState(nil)
         return
@@ -1099,20 +1641,6 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
         end
     end
 
-    if kin.hasAngle and kin.angle then
-        local targetAngle = kin.angle
-        if snap or not self._hasSmoothAngle then
-            self._smoothAngle = targetAngle
-            self._hasSmoothAngle = true
-        else
-            local step = math.min(1, (dt or 0.05) * 14)
-            self._smoothAngle = self._smoothAngle + ShortestAngleDelta(self._smoothAngle, targetAngle) * step
-        end
-    else
-        self._hasSmoothAngle = false
-        self._smoothAngle = 0
-    end
-
     if entry and entry.key ~= self._lastCompassEntryKey then
         self._lastCompassEntryKey = entry.key
         ResetCompassBarDirtyState(f and f.compassBar)
@@ -1120,7 +1648,7 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
     end
 
     if mainCompassActive then
-        ApplyCompassBarVisuals(f.compassBar, entry, kin, self._smoothAngle)
+        ApplyCompassBarVisuals(f.compassBar, entry, kin)
         if f.actionPanel and f.actionPanel:IsShown() and f.actionPanel.promptFs then
             local guildAndLoc = entry.guild and ("<" .. entry.guild .. ">") or ""
             if entry.locationText and entry.locationText ~= "" then
@@ -1134,7 +1662,7 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
         end
     end
     if combatCompassActive then
-        ApplyCompassBarVisuals(cf, entry, kin, self._smoothAngle)
+        ApplyCompassBarVisuals(cf, entry, kin)
         if cf.subFs then
             local guildAndLoc = entry.guild and ("<" .. entry.guild .. ">") or L["Target Radar"]
             if entry.locationText and entry.locationText ~= "" then
@@ -1734,10 +2262,15 @@ function SpotterHUD:Init()
         ns:On("SPOTTER_UPDATED", function()
             if (SpotterHUD.frame and SpotterHUD.frame:IsShown()) or (SpotterHUD.combatArrowFrame and SpotterHUD.combatArrowFrame:IsShown()) or GetSpotterTotalCount() > 0 then
                 SpotterHUD:Refresh()
+            else
+                SpotterHUD:UpdateMapPins()
             end
         end)
         ns:On("SPOTTER_ALERT", function(alert)
             SpotterHUD:OnAlert(alert)
+        end)
+        ns:On("SPOTTER_PEER_POSITIONS_UPDATED", function()
+            SpotterHUD:UpdateMapPins()
         end)
         ns:On("SETTINGS_UPDATED", function()
             if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
@@ -1745,11 +2278,28 @@ function SpotterHUD:Init()
             elseif SpotterHUD.frame then
                 SpotterHUD:UpdateAppearance()
             end
+            SpotterHUD:UpdateMapPins()
         end)
         if Theme and Theme.RegisterListener then
             Theme:RegisterListener(function()
                 if SpotterHUD.frame then
                     SpotterHUD:UpdateAppearance()
+                end
+            end)
+        end
+
+        if _G.WorldMapFrame and _G.WorldMapFrame.HookScript then
+            _G.WorldMapFrame:HookScript("OnShow", function()
+                SpotterHUD:UpdateMapPins()
+            end)
+        end
+
+        if C_Timer and C_Timer.NewTicker then
+            C_Timer.NewTicker(1.5, function()
+                local s = ns.db and ns.db.settings
+                if s and s.spotterMapPins == false then return end
+                if (_G.WorldMapFrame and _G.WorldMapFrame:IsShown()) or (Minimap and Minimap:IsShown()) then
+                    SpotterHUD:UpdateMapPins()
                 end
             end)
         end

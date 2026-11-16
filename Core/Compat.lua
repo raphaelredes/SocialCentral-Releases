@@ -1071,11 +1071,21 @@ function Compat.BuildForeverTargetCandidates(raw)
         end
     end
 
+    -- WoW C-engine WHISPER addon routing addresses characters primarily by core firstName
+    -- (no spaces), with Forever two-word full name, hyphenated name, and shard-qualified fallbacks.
+    push(parsed.firstName)
     if parsed.surname and parsed.surname ~= "" then
         push(parsed.firstName .. " " .. parsed.surname)
         push(parsed.firstName .. "-" .. parsed.surname)
     end
-    push(parsed.firstName)
+    local ownRealm = Compat.Realm()
+    if ownRealm and ownRealm ~= "" then
+        push(parsed.firstName .. "-" .. ownRealm)
+    end
+    local cleanRaw = Compat.CleanInput(raw)
+    if cleanRaw and cleanRaw ~= "" then
+        push(cleanRaw)
+    end
     return out
 end
 

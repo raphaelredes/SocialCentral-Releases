@@ -1578,6 +1578,12 @@ local function CreateLfgRow(parent)
     row.activityFs:SetJustifyH("LEFT")
     row.activityFs:SetWordWrap(false)
 
+    row._scSep = row:CreateTexture(nil, "ARTWORK", nil, 1)
+    row._scSep:SetHeight(1)
+    row._scSep:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 8, 0)
+    row._scSep:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -8, 0)
+    row._scSep:SetColorTexture(0.68, 0.56, 0.28, 0.16)
+
     row:SetScript("OnClick", function(selfRow, btn)
         local it = selfRow._item
         if not it then return end
@@ -3720,6 +3726,13 @@ function LFGFrameTab:AttachWorldMapButton()
         pill:SetBackdropColor(0.06, 0.05, 0.04, 1.0)
         pill:SetBackdropBorderColor(0.72, 0.58, 0.25, 1.0)
     end
+
+    local pillBevel = pill:CreateTexture(nil, "BORDER", nil, 1)
+    pillBevel:SetHeight(1)
+    pillBevel:SetPoint("TOPLEFT", pill, "TOPLEFT", 6, -3)
+    pillBevel:SetPoint("TOPRIGHT", pill, "TOPRIGHT", -6, -3)
+    pillBevel:SetColorTexture(1.0, 0.86, 0.42, 0.28)
+    pill._topBevel = pillBevel
 
     pill.emblem = pill:CreateTexture(nil, "ARTWORK")
     pill.emblem:SetSize(16, 16)
