@@ -22,21 +22,38 @@ local loginMonoAt = (GetTime and GetTime()) or 0
 local hasInitialScan = false
 
 local prevWowOnline = {}
+local prevBNetWatchlistOnline = {}
 local friendAlertLastAt = {}
 local pendingBNetInvites = {}
 
-local guildObsScratch = { source = "guild" }
-local friendObsScratch = { source = "friend" }
-local bnetObsScratch = { source = "bnet" }
 local presenceScratch = {}
 
-local function PopulateAndSyncWatchlist(scratch, displayName, online, level, classFile, area, guildName)
-    scratch.online = online
-    scratch.level = level
-    scratch.classFile = classFile
-    scratch.area = area
-    scratch.guild = guildName
-    Store:SyncWatchlistObservation(displayName, scratch)
+local function QueueWatchlistObs(wlObsMap, lookupKey, displayName, online, level, classFile, area, guildName, source)
+    if not wlObsMap or not lookupKey or lookupKey == "" or not displayName or displayName == "" then
+        return
+    end
+    local rec = wlObsMap[lookupKey]
+    if not rec then
+        wlObsMap[lookupKey] = {
+            lookupKey = lookupKey,
+            displayName = displayName,
+            online = online == true,
+            level = (level and level > 0) and level or nil,
+            classFile = classFile,
+            area = (area and area ~= "") and area or nil,
+            guild = (guildName and guildName ~= "") and guildName or nil,
+            source = source,
+        }
+    else
+        if online == true then
+            rec.online = true
+            rec.source = source or rec.source
+        end
+        if level and level > 0 then rec.level = level end
+        if classFile then rec.classFile = classFile end
+        if area and area ~= "" then rec.area = area end
+        if guildName and guildName ~= "" then rec.guild = guildName end
+    end
 end
 
 local function TouchPresence(lookupKey, seenNow, area, classFile, level)
@@ -108,7 +125,7 @@ local function NewScanContext()
     }
 end
 
-local function ScanGuild(onlineCtx, dirCtx)
+local function ScanGuild(onlineCtx, dirCtx, wlObsMap)
     local inGuild = Safe.Value(IsInGuild and IsInGuild()) == true
     local info = Store.guildInfo
     info.inGuild = inGuild
@@ -182,11 +199,11 @@ local function ScanGuild(onlineCtx, dirCtx)
                         MergeEntry(onlineCtx, keyOnline, patch)
                         local keyDir = FindMergeKey(dirCtx, guid or ("char:" .. parsed.lookupKey), guid, nil, parsed.lookupKey, true)
                         MergeEntry(dirCtx, keyDir, patch)
-                        if hasWatchlist then
-                            PopulateAndSyncWatchlist(guildObsScratch, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, info.name or "")
+                        if hasWatchlist and wlObsMap then
+                            QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
                         end
-                    elseif hasWatchlist then
-                        PopulateAndSyncWatchlist(guildObsScratch, parsed.displayName, false, cleanLevel, cleanClass, cleanArea, info.name or "")
+                    elseif hasWatchlist and wlObsMap then
+                        QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, false, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
                     end
                 end
             elseif isOnline and name then
@@ -198,7 +215,7 @@ local function ScanGuild(onlineCtx, dirCtx)
     info.onlineCount = onlineCount
 end
 
-local function ProcessCharacterFriendRecord(onlineCtx, dirCtx, hasWatchlist, now, rawName, guid, isOnline, cleanLevel, cleanClass, cleanArea, cleanNote, isAfk, isDnd)
+local function ProcessCharacterFriendRecord(onlineCtx, dirCtx, wlObsMap, hasWatchlist, now, rawName, guid, isOnline, cleanLevel, cleanClass, cleanArea, cleanNote, isAfk, isDnd)
     if not rawName or Compat.IsMe(rawName, guid) then
         return
     end
@@ -248,12 +265,12 @@ local function ProcessCharacterFriendRecord(onlineCtx, dirCtx, hasWatchlist, now
         MergeEntry(onlineCtx, onKey, patch)
     end
 
-    if hasWatchlist then
-        PopulateAndSyncWatchlist(friendObsScratch, parsed.displayName, isOnline == true, cleanLevel, cleanClass, cleanArea, nil)
+    if hasWatchlist and wlObsMap then
+        QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, isOnline == true, cleanLevel, cleanClass, cleanArea, nil, "friend")
     end
 end
 
-local function ScanCharacterFriends(onlineCtx, dirCtx)
+local function ScanCharacterFriends(onlineCtx, dirCtx, wlObsMap)
     local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
     local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
     local now = time()
@@ -268,7 +285,7 @@ local function ScanCharacterFriends(onlineCtx, dirCtx)
                 local isOnline = Safe.Value(f.connected) == true
                 local cleanClass = Compat.ClassFileFromLocalized(Safe.String(f.className)) or (Compat.ClassFileFromGuid and Compat.ClassFileFromGuid(guid))
                 ProcessCharacterFriendRecord(
-                    onlineCtx, dirCtx, hasWatchlist, now,
+                    onlineCtx, dirCtx, wlObsMap, hasWatchlist, now,
                     rawName, guid, isOnline,
                     Safe.Number(f.level),
                     cleanClass,
@@ -288,7 +305,7 @@ local function ScanCharacterFriends(onlineCtx, dirCtx)
                 local isAfk = (cleanStatus == "<AFK>" or (CHAT_FLAG_AFK and cleanStatus == CHAT_FLAG_AFK))
                 local isDnd = (cleanStatus == "<DND>" or (CHAT_FLAG_DND and cleanStatus == CHAT_FLAG_DND))
                 ProcessCharacterFriendRecord(
-                    onlineCtx, dirCtx, hasWatchlist, now,
+                    onlineCtx, dirCtx, wlObsMap, hasWatchlist, now,
                     Safe.String(rawName), nil, (connected == true or connected == 1),
                     Safe.Number(level),
                     Compat.ClassFileFromLocalized(Safe.String(classLoc)),
@@ -343,7 +360,7 @@ local function PickBestBNetGameAccount(friendIndex, account)
     return best
 end
 
-local function ScanBattleNet(onlineCtx, dirCtx)
+local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnline)
     if not (BNGetNumFriends and C_BattleNet and C_BattleNet.GetFriendAccountInfo) then return end
     local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
     local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
@@ -447,8 +464,13 @@ local function ScanBattleNet(onlineCtx, dirCtx)
                 if bnetState == "wow_forever" and parsed then
                     local onKey = FindMergeKey(onlineCtx, defaultKey, guid, patch.bnetAccountID, parsed.lookupKey, true)
                     MergeEntry(onlineCtx, onKey, patch)
-                    if hasWatchlist and samePool and sameFaction then
-                        PopulateAndSyncWatchlist(bnetObsScratch, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, nil)
+                    if samePool and sameFaction then
+                        if nextBNetWatchlistOnline then
+                            nextBNetWatchlistOnline[parsed.lookupKey] = parsed.displayName
+                        end
+                        if hasWatchlist and wlObsMap then
+                            QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, nil, "bnet")
+                        end
                     end
                 end
             end
@@ -468,10 +490,12 @@ end
 
 local function CheckFriendOnlineTransitions(dirMap)
     local nextWow = {}
+    local isGuildWatchFn = Store and Store.IsGuildLoginNotifyEnabled
     for _, row in pairs(dirMap) do
         local isFriend = row.sources and (row.sources.friend or row.sources.bnet)
-        local isWoWOnline = row.online == true and (row.sources.friend or row.bnetState == "wow_forever")
-        if isFriend and isWoWOnline then
+        local isOptedGuild = row.sources and row.sources.guild and row.lookupKey and isGuildWatchFn and isGuildWatchFn(Store, row.lookupKey)
+        local isWoWOnline = row.online == true and (row.sources.friend or row.sources.guild or row.bnetState == "wow_forever")
+        if (isFriend or isOptedGuild) and isWoWOnline then
             local aKey = GetAlertTargetKey(row)
             if aKey then
                 nextWow[aKey] = true
@@ -481,11 +505,13 @@ local function CheckFriendOnlineTransitions(dirMap)
 
     local monoNow = (GetTime and GetTime()) or 0
     local settings = ns.db and ns.db.settings
-    local alertMode = settings and settings.friendOnlineAlertMode or "favorites"
+    local alertMode = settings and settings.friendOnlineAlertMode or "all"
+    local inGrace = (not hasInitialScan) or ((monoNow - loginMonoAt) < FRIEND_LOGIN_GRACE_SEC)
+    local notifiedByLookup = {}
 
-    if not hasInitialScan or (monoNow - loginMonoAt) < FRIEND_LOGIN_GRACE_SEC or alertMode == "off" then
+    if inGrace or alertMode == "off" then
         prevWowOnline = nextWow
-        return
+        return notifiedByLookup, inGrace
     end
 
     local now = time()
@@ -493,22 +519,28 @@ local function CheckFriendOnlineTransitions(dirMap)
 
     for _, row in pairs(dirMap) do
         local isFriend = row.sources and (row.sources.friend or row.sources.bnet)
-        local isWoWOnline = row.online == true and (row.sources.friend or row.bnetState == "wow_forever")
-        if isFriend and isWoWOnline then
+        local isOptedGuild = row.sources and row.sources.guild and row.lookupKey and isGuildWatchFn and isGuildWatchFn(Store, row.lookupKey)
+        local isWoWOnline = row.online == true and (row.sources.friend or row.sources.guild or row.bnetState == "wow_forever")
+        if (isFriend or isOptedGuild) and isWoWOnline then
             local aKey = GetAlertTargetKey(row)
             if aKey and not prevWowOnline[aKey] then
+                local wlEntry = row.lookupKey and wl and wl[row.lookupKey]
+                local isMuted = Store.IsPlayerNotifyMuted and Store:IsPlayerNotifyMuted(row.lookupKey, wlEntry, row.bnetAccountID)
                 local isFav = row.bnetFavorite == true or (row.lookupKey and Store.IsSocialFavorite and Store:IsSocialFavorite(row.lookupKey))
-                local shouldNotify = (alertMode == "all") or (alertMode == "favorites" and isFav)
+                local shouldNotify = (not isMuted) and (isOptedGuild or alertMode == "all" or (alertMode == "favorites" and isFav))
                 if shouldNotify then
                     local lastAlert = friendAlertLastAt[aKey]
-                    local wlEntry = row.lookupKey and wl and wl[row.lookupKey]
-                    local wlRecent = wlEntry and wlEntry.lastAlertAt and (now - wlEntry.lastAlertAt) < 12
-                    if (not lastAlert or (now - lastAlert) >= FRIEND_ALERT_DEBOUNCE) and not wlRecent then
+                    if not lastAlert or (now - lastAlert) >= FRIEND_ALERT_DEBOUNCE then
                         friendAlertLastAt[aKey] = now
                         local shownName = row.displayName or row.bnetName or "?"
                         local areaTxt = (row.area and row.area ~= "") and row.area or L["Online"]
-                        local srcTag = row.sources.bnet and not row.sources.friend and L["Battle.net"] or L["Friend Online"]
+                        local srcTag = isOptedGuild and not isFriend and L["Guild"]
+                            or (row.sources.bnet and not row.sources.friend and L["Battle.net"])
+                            or L["Friend Online"]
 
+                        local didToast = false
+                        local didChat = false
+                        local didSound = false
                         if settings.friendOnlineAlertToast ~= false then
                             ns:Emit("ADDON_MESSAGE_NOTIFY", {
                                 id = "friend:" .. aKey .. ":" .. tostring(now),
@@ -521,6 +553,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                                 ts = now,
                                 priority = 1,
                             })
+                            didToast = true
                         end
                         if settings.friendOnlineAlertChat == true then
                             local hex = Compat.ClassHex(row.classFile)
@@ -529,12 +562,21 @@ local function CheckFriendOnlineTransitions(dirMap)
                                 and L["%s came online (%s) %s"]:format(hex .. shownName .. "|r", areaTxt, link)
                                 or L["%s came online %s"]:format(hex .. shownName .. "|r", link)
                             ns:Print("%s", lineText)
+                            didChat = true
                         end
                         if settings.friendOnlineAlertSound ~= false and PlaySound and SOUNDKIT then
                             local sid = SOUNDKIT.UI_BNET_TOAST or SOUNDKIT.TELL_MESSAGE
                             if sid then
                                 pcall(PlaySound, sid, "Master")
+                                didSound = true
                             end
+                        end
+                        if row.lookupKey and row.lookupKey ~= "" then
+                            notifiedByLookup[row.lookupKey] = {
+                                toast = didToast,
+                                chat = didChat,
+                                sound = didSound,
+                            }
                         end
                     end
                 end
@@ -543,6 +585,7 @@ local function CheckFriendOnlineTransitions(dirMap)
     end
 
     prevWowOnline = nextWow
+    return notifiedByLookup, false
 end
 
 local function BuildDirectoryStats(onlineMap, dirMap, inviteCount)
@@ -601,10 +644,22 @@ function Social:Scan()
 
     local onlineCtx = NewScanContext()
     local dirCtx = NewScanContext()
+    local wlObsMap = {}
+    local nextBNetWatchlistOnline = {}
     for _, scanner in ipairs(SCANNERS) do
-        local ok, err = pcall(scanner, onlineCtx, dirCtx)
+        local ok, err = pcall(scanner, onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnline)
         if not ok and geterrorhandler then geterrorhandler()(err) end
     end
+
+    local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
+    if type(wlTable) == "table" and next(wlTable) ~= nil then
+        for lookupKey, prevDispName in pairs(prevBNetWatchlistOnline) do
+            if not onlineCtx.byLookup[lookupKey] and not wlObsMap[lookupKey] then
+                QueueWatchlistObs(wlObsMap, lookupKey, prevDispName, false, nil, nil, nil, nil, "bnet")
+            end
+        end
+    end
+    prevBNetWatchlistOnline = nextBNetWatchlistOnline
 
     Store.social = onlineCtx.map
     Store.socialByLookup = onlineCtx.byLookup
@@ -650,7 +705,17 @@ function Social:Scan()
     self._dirStats = stats
     self._dirRevision = (self._dirRevision or 0) + 1
 
-    CheckFriendOnlineTransitions(dirCtx.map)
+    local notifiedByLookup, inGrace = CheckFriendOnlineTransitions(dirCtx.map)
+    for lookupKey, obs in pairs(wlObsMap) do
+        local nInfo = notifiedByLookup and notifiedByLookup[lookupKey]
+        Store:SyncWatchlistObservation(obs.displayName, obs, {
+            suppressAlert = inGrace,
+            suppressToast = nInfo and nInfo.toast == true,
+            suppressChat = nInfo and nInfo.chat == true,
+            suppressSound = nInfo and nInfo.sound == true,
+            allowUnknownTransition = not inGrace,
+        })
+    end
     hasInitialScan = true
 
     ns:Emit("SOCIAL_UPDATED")

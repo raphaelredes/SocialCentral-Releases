@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.9"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.9" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.10"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.10" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -78,12 +78,14 @@ local DEFAULTS = {
         sortBy = "status",          -- "status" | "name" | "recent"
         socialSortBy = "smart",     -- "smart" | "name" | "level" | "lastSeen"
         socialShowOffline = true,   -- show offline Character/BNet friends in Social directory
-        friendOnlineAlertMode = "favorites", -- "off" | "favorites" | "all"
+        friendOnlineAlertMode = "all", -- "all" | "favorites" | "off"
         friendOnlineAlertToast = true,       -- show compact floating toast when friends come online
         friendOnlineAlertChat = false,       -- optional extra chat summary line on friend login
         friendOnlineAlertSound = true,       -- subtle audio chime when friend online toast fires
+        friendAlertAllMigrated = false,      -- one-time default upgrade from v0.2.9 favorites-only mode
         alerts = {
             chat = true,
+            toast = true,
             sound = false,
         },
         minimap = {
@@ -290,6 +292,19 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         SocialCentralDB.settings.spotterPromptAnswered = true
         SocialCentralDB.settings.spotterV2Migrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.friendAlertAllMigrated ~= true then
+        -- Upgrade v0.2.9 default "favorites" -> "all" once so login toasts appear unless user mutes/disables manually.
+        if SocialCentralDB.settings.friendOnlineAlertMode == "favorites" then
+            SocialCentralDB.settings.friendOnlineAlertMode = "all"
+        end
+        if SocialCentralDB.settings.friendOnlineAlertToast == nil then
+            SocialCentralDB.settings.friendOnlineAlertToast = true
+        end
+        if type(SocialCentralDB.settings.alerts) == "table" and SocialCentralDB.settings.alerts.toast == nil then
+            SocialCentralDB.settings.alerts.toast = true
+        end
+        SocialCentralDB.settings.friendAlertAllMigrated = true
+    end
     ns.db = SocialCentralDB
     ns.charDb = SocialCentralCharDB
     ns.UnregisterEvent(boot, "ADDON_LOADED")
@@ -366,7 +381,7 @@ function ns:NavigateToModule(modName, opts)
     end
 
     pendingNavigation = nil
-    if (opts.socialFilter or opts.socialSearch) and ns.UI and ns.UI.SetSocialNavigation then
+    if (opts.socialFilter or opts.socialSearch or opts.watchlistSearch ~= nil) and ns.UI and ns.UI.SetSocialNavigation then
         ns.UI:SetSocialNavigation(opts)
     end
     if opts.clanRightView and ns.Clan and ns.Clan.SetPreferredRightView then

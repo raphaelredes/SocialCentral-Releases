@@ -35,6 +35,7 @@ local KIND_RGB = {
     SCOUT       = { 0.96, 0.28, 0.28 },
     WORLDBUFF   = { 0.98, 0.62, 0.22 },
     FRIEND_ONLINE = { 0.32, 0.84, 0.56 },
+    WATCHLIST_ONLINE = { 0.96, 0.72, 0.24 },
 }
 
 local function FormatCooldownKey(item)
@@ -83,6 +84,10 @@ local function NavigateForItem(item)
     elseif k == "FRIEND_ONLINE" then
         if ns.NavigateToModule then
             ns:NavigateToModule("social", { socialSearch = item.searchHint or "" })
+        end
+    elseif k == "WATCHLIST_ONLINE" then
+        if ns.NavigateToModule then
+            ns:NavigateToModule("watchlist", { watchlistSearch = item.searchHint or "" })
         end
     elseif k == "CLAN_EVENT" or k == "CLAN_SIGNUP" then
         if ns.NavigateToModule then
@@ -346,6 +351,10 @@ function Toast:PushNotification(item)
     local s = ns.db and ns.db.settings
     if item.kind == "FRIEND_ONLINE" then
         if s and s.friendOnlineAlertToast == false then
+            return
+        end
+    elseif item.kind == "WATCHLIST_ONLINE" then
+        if s and s.alerts and s.alerts.toast == false then
             return
         end
     else

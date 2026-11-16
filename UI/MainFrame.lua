@@ -66,8 +66,9 @@ function UI:SetSocialNavigation(opts)
     if opts.socialFilter and opts.socialFilter ~= "" then
         socialFilter = opts.socialFilter
     end
-    if opts.socialSearch ~= nil then
-        local clean = Compat.CleanInput(opts.socialSearch) or ""
+    local q = opts.socialSearch ~= nil and opts.socialSearch or opts.watchlistSearch
+    if q ~= nil then
+        local clean = Compat.CleanInput(q) or ""
         searchQuery = clean
         if searchBox and searchBox.SetText then
             searchBox:SetText(clean)
@@ -1754,6 +1755,120 @@ function UI:OpenAllianceManagementModal()
     OpenAllianceManagementModal()
 end
 
+local BELL_ON_TEX = "Interface\\AddOns\\SocialCentral\\Media\\bell-on"
+local BELL_OFF_TEX = "Interface\\AddOns\\SocialCentral\\Media\\bell-off"
+
+local function GetRowNotifyBellState(tab, item)
+    if not item or (tab ~= "watchlist" and tab ~= "social") then
+        return false, false, nil
+    end
+    local settings = ns.db and ns.db.settings
+    local lookupKey = (tab == "watchlist") and (item.id or item.lookupKey) or item.lookupKey
+    local isMuted = ns.Store and ns.Store.IsPlayerNotifyMuted
+        and ns.Store:IsPlayerNotifyMuted(lookupKey, (tab == "watchlist") and item or nil, item.bnetAccountID)
+        or false
+
+    if tab == "watchlist" then
+        local alerts = settings and settings.alerts
+        local globalActive = (not alerts) or (alerts.toast ~= false or alerts.chat == true)
+        if not globalActive then
+            return true, false, L["Watchlist login alerts are disabled globally in Settings."]
+        elseif isMuted then
+            return true, false, L["Login alerts muted for this player. Click to enable."]
+        end
+        return true, true, L["Login alerts active for this player. Click to mute."]
+    end
+
+    local isFriend = item.sources and (item.sources.friend == true or item.sources.bnet == true)
+    local isWatched = lookupKey and ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(lookupKey)
+    local isGuildOnly = (not isFriend) and (not isWatched) and (item.sources and item.sources.guild == true)
+
+    if isGuildOnly then
+        local guildOn = lookupKey and ns.Store and ns.Store.IsGuildLoginNotifyEnabled and ns.Store:IsGuildLoginNotifyEnabled(lookupKey)
+        local alertMode = (settings and settings.friendOnlineAlertMode) or "all"
+        local globalActive = (not settings) or (settings.friendOnlineAlertToast ~= false or settings.friendOnlineAlertChat == true)
+        if alertMode == "off" or not globalActive then
+            return true, false, L["Friend/Guild login alerts are disabled globally in Settings."]
+        elseif guildOn and not isMuted then
+            return true, true, L["Login alerts active for this guildmate. Click to mute."]
+        end
+        return true, false, L["Guildmate login alerts are off by default. Click the bell to enable notifications for this player."]
+    end
+
+    local alertMode = (settings and settings.friendOnlineAlertMode) or "all"
+    local globalActive = (not settings) or (settings.friendOnlineAlertToast ~= false or settings.friendOnlineAlertChat == true)
+    if isWatched and settings and settings.alerts and (settings.alerts.toast ~= false or settings.alerts.chat == true) then
+        globalActive = true
+    end
+
+    if alertMode == "off" or not globalActive then
+        return true, false, L["Friend online alerts are disabled globally in Settings."]
+    elseif isMuted then
+        return true, false, L["Login alerts muted for this player. Click to enable."]
+    elseif alertMode == "favorites" then
+        local isFav = item.bnetFavorite == true or (lookupKey ~= nil and ns.Store and ns.Store.IsSocialFavorite and ns.Store:IsSocialFavorite(lookupKey))
+        if not isFav then
+            return true, false, L["Favorites Only mode active in Settings. Click the bell to favorite and enable alerts for this player."]
+        end
+    end
+    return true, true, L["Login alerts active for this player. Click to mute."]
+end
+
+local function ToggleRowNotifyBell(tab, item)
+    if not item or not ns.Store then return end
+    local settings = ns.db and ns.db.settings
+    local lookupKey = (tab == "watchlist") and (item.id or item.lookupKey) or item.lookupKey
+    local isMuted = ns.Store.IsPlayerNotifyMuted
+        and ns.Store:IsPlayerNotifyMuted(lookupKey, (tab == "watchlist") and item or nil, item.bnetAccountID)
+        or false
+
+    if tab == "watchlist" then
+        local nextMuted = not isMuted
+        if ns.Store.SetPlayerNotifyMuted then
+            ns.Store:SetPlayerNotifyMuted(lookupKey or item.displayName, nextMuted, item.bnetAccountID)
+        end
+        if type(item) == "table" then
+            item.notifyMuted = nextMuted and true or nil
+        end
+        UI:QueueRefresh(true)
+        return
+    end
+
+    local isFriend = item.sources and (item.sources.friend == true or item.sources.bnet == true)
+    local isWatched = lookupKey and ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(lookupKey)
+    local isGuildOnly = (not isFriend) and (not isWatched) and (item.sources and item.sources.guild == true)
+
+    if isGuildOnly and lookupKey then
+        local curGuildOn = ns.Store.IsGuildLoginNotifyEnabled and ns.Store:IsGuildLoginNotifyEnabled(lookupKey)
+        if ns.Store.SetGuildLoginNotifyEnabled then
+            ns.Store:SetGuildLoginNotifyEnabled(lookupKey, not curGuildOn)
+        end
+        UI:QueueRefresh(true)
+        return
+    end
+
+    local alertMode = (settings and settings.friendOnlineAlertMode) or "all"
+    if alertMode == "favorites" then
+        local isFav = item.bnetFavorite == true or (lookupKey ~= nil and ns.Store.IsSocialFavorite and ns.Store:IsSocialFavorite(lookupKey))
+        if not isFav and not isMuted then
+            local nextFav = true
+            if lookupKey and ns.Store.ToggleSocialFavorite then
+                nextFav = ns.Store:ToggleSocialFavorite(lookupKey)
+            end
+            if item.sources and item.sources.bnet and item.bnetAccountID and Compat.SetBNetFriendFavorite then
+                Compat.SetBNetFriendFavorite(item.bnetAccountID, nextFav)
+            end
+            UI:QueueRefresh(true)
+            return
+        end
+    end
+
+    if ns.Store.SetPlayerNotifyMuted then
+        ns.Store:SetPlayerNotifyMuted(lookupKey or item.displayName, not isMuted, item.bnetAccountID)
+    end
+    UI:QueueRefresh(true)
+end
+
 local function OpenRowMenu(row, item, tabOverride)
     if not (MenuUtil and MenuUtil.CreateContextMenu and item) then
         return
@@ -1787,6 +1902,10 @@ local function OpenRowMenu(row, item, tabOverride)
                     ns.Watchlist:PinToFriends(item.id)
                 end
             end)
+            local _, bellActive = GetRowNotifyBellState("watchlist", item)
+            root:CreateButton(bellActive and L["Mute Login Alerts"] or L["Enable Login Alerts"], function()
+                ToggleRowNotifyBell("watchlist", item)
+            end)
         elseif tab == "social" or tab == "nearby" then
             if tab == "social" and (charKey or (item.sources and item.sources.bnet and item.bnetAccountID)) then
                 root:CreateButton(isFav and ("|cffffd24d*|r " .. L["Unfavorite"]) or L["Favorite"], function()
@@ -1798,6 +1917,10 @@ local function OpenRowMenu(row, item, tabOverride)
                         Compat.SetBNetFriendFavorite(item.bnetAccountID, nextFav)
                     end
                     UI:QueueRefresh(false)
+                end)
+                local _, bellActive = GetRowNotifyBellState("social", item)
+                root:CreateButton(bellActive and L["Mute Login Alerts"] or L["Enable Login Alerts"], function()
+                    ToggleRowNotifyBell("social", item)
                 end)
             end
 
@@ -1938,7 +2061,37 @@ local function CreateListRow(parent, _, rowHeight)
 
     row.dot = row:CreateTexture(nil, "ARTWORK")
     row.dot:SetSize(8, 8)
-    row.dot:SetPoint("LEFT", 10, 6)
+    row.dot:SetPoint("LEFT", 9, 6)
+
+    row.btnNotifyBell = CreateFrame("Button", nil, row)
+    row.btnNotifyBell:SetSize(16, 16)
+    row.btnNotifyBell:SetPoint("TOPLEFT", 21, -4)
+    row.btnNotifyBell:SetHitRectInsets(-3, -3, -3, -3)
+    row.btnNotifyBell.tex = row.btnNotifyBell:CreateTexture(nil, "ARTWORK")
+    row.btnNotifyBell.tex:SetAllPoints()
+    row.btnNotifyBell:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    row.btnNotifyBell:SetScript("OnClick", function()
+        if not row._item then return end
+        local tab = row._item._tab or activeTab
+        ToggleRowNotifyBell(tab, row._item)
+    end)
+    row.btnNotifyBell:SetScript("OnEnter", function(selfBell)
+        if not row._item or not GameTooltip then return end
+        local tab = row._item._tab or activeTab
+        local shown, active, tipText = GetRowNotifyBellState(tab, row._item)
+        if not shown then return end
+        GameTooltip:SetOwner(selfBell, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:SetText(active and L["Login Alerts Active"] or L["Login Alerts Muted"], 1, 1, 1)
+        if tipText then
+            GameTooltip:AddLine(tipText, 0.85, 0.88, 0.92, true)
+        end
+        GameTooltip:Show()
+    end)
+    row.btnNotifyBell:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    row.btnNotifyBell:Hide()
 
     row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     row.nameText:SetPoint("TOPLEFT", 26, -5)
@@ -2201,6 +2354,14 @@ local function UpdateListRow(row, item, idx, palette)
     row.btnWhisper:Hide()
     row.btnAction:Hide()
 
+    local showBell, bellActive = GetRowNotifyBellState(tab, item)
+    if showBell and row.btnNotifyBell then
+        row.btnNotifyBell.tex:SetTexture(bellActive and BELL_ON_TEX or BELL_OFF_TEX)
+        row.btnNotifyBell:Show()
+    elseif row.btnNotifyBell then
+        row.btnNotifyBell:Hide()
+    end
+
     if row.SetClipsChildren then
         row:SetClipsChildren(true)
     end
@@ -2368,10 +2529,12 @@ local function UpdateListRow(row, item, idx, palette)
     end
 
     local anchorKey = leftMostAnchor or false
-    if row._lastLeftAnchor ~= anchorKey then
+    local bellKey = showBell == true
+    if row._lastLeftAnchor ~= anchorKey or row._lastBellShown ~= bellKey then
         row._lastLeftAnchor = anchorKey
+        row._lastBellShown = bellKey
         row.nameText:ClearAllPoints()
-        row.nameText:SetPoint("TOPLEFT", 26, -5)
+        row.nameText:SetPoint("TOPLEFT", bellKey and 41 or 26, -5)
         row.subText:ClearAllPoints()
         row.subText:SetPoint("BOTTOMLEFT", 26, 5)
         if leftMostAnchor then

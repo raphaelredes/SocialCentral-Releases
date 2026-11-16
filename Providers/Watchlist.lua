@@ -243,20 +243,33 @@ function Watchlist:Add(rawName, note)
     end
 
     local cleanNote = Compat.CleanInput(note or "") or ""
+    local dirEntry = ns.Social and ns.Social.GetDirectoryEntry and ns.Social:GetDirectoryEntry(parsed.lookupKey)
+    local initStatus = "unknown"
+    if dirEntry then
+        if dirEntry.online and (dirEntry.bnetState == "wow_forever" or (dirEntry.sources and (dirEntry.sources.friend or dirEntry.sources.guild))) then
+            initStatus = "online"
+        elseif (not dirEntry.online) or (dirEntry.sources and (dirEntry.sources.friend or dirEntry.sources.guild)) then
+            initStatus = "offline"
+        end
+    end
+
     list[parsed.lookupKey] = {
         id = parsed.lookupKey,
         displayName = parsed.displayName,
         firstName = parsed.firstName,
         surname = parsed.surname,
         note = cleanNote,
-        status = "unknown",
-        source = nil,
-        level = nil,
-        classFile = nil,
-        area = nil,
-        guild = nil,
-        lastChecked = nil,
-        lastSeen = nil,
+        status = initStatus,
+        source = (initStatus == "online" and dirEntry and dirEntry.sources)
+            and ((dirEntry.sources.friend and "friend") or (dirEntry.sources.guild and "guild") or (dirEntry.sources.bnet and "bnet"))
+            or nil,
+        level = dirEntry and dirEntry.level or nil,
+        classFile = dirEntry and dirEntry.classFile or nil,
+        area = dirEntry and dirEntry.area or nil,
+        guild = dirEntry and dirEntry.guild or nil,
+        guid = dirEntry and dirEntry.guid or nil,
+        lastChecked = dirEntry and time() or nil,
+        lastSeen = (initStatus == "online") and time() or (dirEntry and dirEntry.lastSeen) or nil,
         addedAt = time(),
     }
 

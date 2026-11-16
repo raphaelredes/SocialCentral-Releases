@@ -5,6 +5,14 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-11-15
+### Added
+- **Per-Player Notification Bell Toggle & Unified Watchlist/Friend Login Toasts (`Media/bell-on.tga`, `Media/bell-off.tga`, `Core/Init.lua`, `Core/Store.lua`, `Providers/Social.lua`, `Providers/Watchlist.lua`, `UI/NotificationToast.lua`, `UI/MainFrame.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**
+  - Added clickable **Bell (`bell-on.tga`) / Slashed Bell (`bell-off.tga`)** notification icon right beside each character name in window `O` (`Watchlist` & `Social` lists) plus right-click menu mute toggles so players can silence or enable login Toasts per person in one click (and opt in per-guildmate without guild-wide spam).
+  - Upgraded `Store:NotifyWatchlistOnline` to emit floating top-of-screen `WATCHLIST_ONLINE` Toasts by default (`alerts.toast = true`), and upgraded default `friendOnlineAlertMode` from `"favorites"` to `"all"` (`friendAlertAllMigrated` one-time migration) so Friends, Battle.net, and Watchlist login Toasts appear automatically unless manually muted or disabled.
+### Fixed
+- Fixed Watchlist `NotifyWatchlistOnline` suppressing `FRIEND_ONLINE` top-of-screen Toasts when the same player existed in both Friends and Watchlist, fixed Battle.net disconnect status reset on Watchlist entries (`prevBNetWatchlistOnline`), initialized newly added Watchlist entries cleanly from `Social:GetDirectoryEntry`, and coordinated `CheckFriendOnlineTransitions` + `SyncWatchlistObservation` to eliminate duplicate alerts and `"unknown"` transition misses.
+
 ## [0.2.9] - 2026-11-15
 ### Added
 - **Unified Friends Directory, Online Alerts, Native Notes & Favorites Overhaul (`Core/Init.lua`, `Core/Compat.lua`, `Core/Store.lua`, `Providers/Social.lua`, `UI/Theme.lua`, `UI/NotificationToast.lua`, `UI/SocialPanels.lua`, `UI/MainFrame.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**

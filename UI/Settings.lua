@@ -176,7 +176,7 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 3280)
+    content:SetSize(590, 3330)
     scrollFrame:SetScrollChild(content)
     scrollFrame:SetScript("OnSizeChanged", function(self)
         local w = math.max(460, (self:GetWidth() or 590) - 10)
@@ -451,16 +451,38 @@ local function BuildPanel()
             if ns.db and ns.db.settings.alerts then
                 ns.db.settings.alerts.chat = checked
             end
+            if ns.UI and ns.UI.QueueRefresh then
+                ns.UI:QueueRefresh(false)
+            end
         end,
         L["Help: Watchlist Online Alerts"],
         L["Prints a local chat notification whenever a Watchlist character transitions from offline to online."],
         L["Triggered safely when /who, Friends, Guild, Battle.net, or Nearby spots a watched friend online (120s anti-spam debounce)."]
     )
 
+    local watchToastCb = CreateCheckbox(
+        content,
+        L["Show floating Toast when Watchlist player comes online"],
+        alertCb,
+        -6,
+        function() return not ns.db or not ns.db.settings.alerts or ns.db.settings.alerts.toast ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings.alerts then
+                ns.db.settings.alerts.toast = checked
+            end
+            if ns.UI and ns.UI.QueueRefresh then
+                ns.UI:QueueRefresh(false)
+            end
+        end,
+        L["Help: Watchlist Toast Alert"],
+        L["Displays a compact floating Notification Toast at the top of the screen when a watched player transitions online (outside muted rows)."],
+        L["Uncheck to stop floating Watchlist toasts globally, or click the bell icon beside any name in the Social/Watchlist window (O) to mute per player."]
+    )
+
     local soundCb = CreateCheckbox(
         content,
         L["Play sound on Watchlist online alert"],
-        alertCb,
+        watchToastCb,
         -6,
         function() return ns.db and ns.db.settings.alerts and ns.db.settings.alerts.sound end,
         function(checked)
@@ -480,17 +502,20 @@ local function BuildPanel()
         -12,
         L["Help: Friend Online Alerts"],
         L["Notifies you cleanly when Character Friends or Battle.net friends enter World of Warcraft: Forever, after an 8-second post-login grace window and 120-second anti-spam cooldown."],
-        L["Choose Favorites Only (recommended), All Friends, or Off; customize popup Toast, chat line, and sound below."]
+        L["Enabled for All Friends by default; mute specific players via the bell icon in the Social (O) list, or switch to Favorites Only or Off below."]
     )
 
     local friendAlertModeRow = CreateChoiceRow(content, friendAlertHeader, -6, {
-        { value = "favorites", label = L["Favorites Only"], width = 166 },
         { value = "all", label = L["All Friends"], width = 152 },
+        { value = "favorites", label = L["Favorites Only"], width = 166 },
         { value = "off", label = L["Off"], width = 112 },
     }, function()
-        return ns.db and ns.db.settings.friendOnlineAlertMode or "favorites"
+        return ns.db and ns.db.settings.friendOnlineAlertMode or "all"
     end, function(val)
         ns.db.settings.friendOnlineAlertMode = val
+        if ns.UI and ns.UI.QueueRefresh then
+            ns.UI:QueueRefresh(false)
+        end
     end)
 
     local friendToastCb = CreateCheckbox(
@@ -501,6 +526,9 @@ local function BuildPanel()
         function() return not ns.db or not ns.db.settings or ns.db.settings.friendOnlineAlertToast ~= false end,
         function(checked)
             ns.db.settings.friendOnlineAlertToast = checked
+            if ns.UI and ns.UI.QueueRefresh then
+                ns.UI:QueueRefresh(false)
+            end
         end,
         L["Help: Friend Online Toast"],
         L["Displays a compact floating Notification Toast when a tracked Favorite or Friend logs into WoW: Forever."],
@@ -515,6 +543,9 @@ local function BuildPanel()
         function() return ns.db and ns.db.settings.friendOnlineAlertChat == true end,
         function(checked)
             ns.db.settings.friendOnlineAlertChat = checked
+            if ns.UI and ns.UI.QueueRefresh then
+                ns.UI:QueueRefresh(false)
+            end
         end,
         L["Help: Friend Online Chat"],
         L["Prints an extra local SocialCentral chat line with a clickable [Social] link whenever a friend alert fires."],

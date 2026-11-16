@@ -195,19 +195,42 @@ function Store:GetTotalAltsGold(poolOnly)
     return total
 end
 
-function Store:NotifyWatchlistOnline(entry)
-    if not entry then return end
+function Store:NotifyWatchlistOnline(entry, opts)
+    if not entry then return false end
+    if opts and opts.suppressAlert then return false end
     local alerts = ns.db and ns.db.settings and ns.db.settings.alerts
-    if not alerts then return end
+    if not alerts then return false end
+    if self.IsPlayerNotifyMuted and self:IsPlayerNotifyMuted(entry.id or entry.displayName, entry) then
+        return false
+    end
 
     -- Debounce duplicate login alerts per character within 120 seconds.
     local now = time()
     if entry.lastAlertAt and (now - entry.lastAlertAt) < 120 then
-        return
+        return false
     end
     entry.lastAlertAt = now
 
-    if alerts.chat then
+    local didAny = false
+    if alerts.toast ~= false and not (opts and opts.suppressToast) then
+        local L = ns.L or {}
+        ns:Emit("ADDON_MESSAGE_NOTIFY", {
+            id = "watchlist:" .. tostring(entry.id or entry.displayName or "?") .. ":" .. tostring(now),
+            kind = "WATCHLIST_ONLINE",
+            sourceTag = L["Watchlist"] or "Watchlist",
+            sender = entry.displayName or "?",
+            senderClass = entry.classFile,
+            text = (entry.area and entry.area ~= "")
+                and ((L["Online"] or "Online") .. " · " .. entry.area)
+                or (L["Is now online in WoW: Forever"] or "Is now online in WoW: Forever"),
+            searchHint = entry.displayName or "",
+            ts = now,
+            priority = 1,
+        })
+        didAny = true
+    end
+
+    if alerts.chat and not (opts and opts.suppressChat) then
         local hex = Compat.ClassHex(entry.classFile)
         local label = hex .. (entry.displayName or "") .. "|r"
         if entry.area and entry.area ~= "" then
@@ -215,14 +238,17 @@ function Store:NotifyWatchlistOnline(entry)
         else
             ns:Print(ns.L["%s is now online!"]:format(label))
         end
+        didAny = true
     end
 
-    if alerts.sound and PlaySound and SOUNDKIT then
-        local soundId = SOUNDKIT.TELL_MESSAGE or SOUNDKIT.UI_BNET_TOAST
+    if alerts.sound and not (opts and opts.suppressSound) and PlaySound and SOUNDKIT then
+        local soundId = SOUNDKIT.UI_BNET_TOAST or SOUNDKIT.TELL_MESSAGE
         if soundId then
             pcall(PlaySound, soundId, "Master")
         end
+        didAny = true
     end
+    return didAny
 end
 
 function Store:InvalidateWatchlistIndex()
@@ -230,7 +256,7 @@ function Store:InvalidateWatchlistIndex()
 end
 
 -- Cross-pollinate Watchlist rows whenever live Social or Nearby detects a watched player.
-function Store:SyncWatchlistObservation(rawName, data)
+function Store:SyncWatchlistObservation(rawName, data, opts)
     local list = self:GetWatchlistTable()
     if next(list) == nil then return end
     local parsed = Compat.ParseCharacterName(rawName)
@@ -308,8 +334,9 @@ function Store:SyncWatchlistObservation(rawName, data)
         if data.online then
             entry.lastSeen = now
             entry.lastChecked = now
-            if prevStatus == "offline" then
-                self:NotifyWatchlistOnline(entry)
+            local allowUnknown = opts and opts.allowUnknownTransition == true and (now - (entry.addedAt or 0)) >= 3
+            if not (opts and opts.suppressAlert) and (prevStatus == "offline" or (prevStatus == "unknown" and allowUnknown)) then
+                self:NotifyWatchlistOnline(entry, opts)
             end
         end
         changed = true
@@ -390,6 +417,8 @@ function Store:GetResolvedSocialMeta(rawNameOrKey)
         note = (direct.note and direct.note ~= "") and direct.note or mainMeta.note,
         flag = direct.flag or mainMeta.flag,
         favorite = (direct.favorite == true) or (mainMeta.favorite == true) or nil,
+        notifyMuted = direct.notifyMuted == true and true or nil,
+        notifyGuild = direct.notifyGuild == true and true or nil,
         updatedAt = direct.updatedAt or mainMeta.updatedAt,
     }
 end
@@ -421,7 +450,13 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
     if patch.favorite ~= nil then
         rec.favorite = (patch.favorite == true) and true or nil
     end
-    if not rec.folder and not rec.mainName and not rec.note and not rec.flag and not rec.favorite then
+    if patch.notifyMuted ~= nil then
+        rec.notifyMuted = (patch.notifyMuted == true) and true or nil
+    end
+    if patch.notifyGuild ~= nil then
+        rec.notifyGuild = (patch.notifyGuild == true) and true or nil
+    end
+    if not rec.folder and not rec.mainName and not rec.note and not rec.flag and not rec.favorite and not rec.notifyMuted and not rec.notifyGuild then
         tbl[key] = nil
     else
         rec.updatedAt = time()
@@ -613,6 +648,68 @@ function Store:ToggleSocialFavorite(rawNameOrKey)
     end
     ns:Emit("SOCIAL_UPDATED")
     return nextFav
+end
+
+-- Session-only mute map for Battle.net accounts without a character name (never persisted to SavedVariables).
+Store._sessionBNetNotifyMuted = Store._sessionBNetNotifyMuted or {}
+
+function Store:IsPlayerNotifyMuted(rawNameOrKey, wlEntry, bnetAccountID)
+    if type(wlEntry) == "table" and wlEntry.notifyMuted == true then
+        return true
+    end
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if key then
+        local wlTbl = self:GetWatchlistTable()
+        local w = wlTbl and wlTbl[key]
+        if type(w) == "table" and w.notifyMuted == true then
+            return true
+        end
+        local meta = self:GetSocialMeta(key)
+        if type(meta) == "table" and meta.notifyMuted == true then
+            return true
+        end
+    end
+    if bnetAccountID and self._sessionBNetNotifyMuted[bnetAccountID] == true then
+        return true
+    end
+    return false
+end
+
+function Store:SetPlayerNotifyMuted(rawNameOrKey, muted, bnetAccountID)
+    local isMuted = (muted == true)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if key then
+        local wlTbl = self:GetWatchlistTable()
+        local w = wlTbl and wlTbl[key]
+        if type(w) == "table" then
+            w.notifyMuted = isMuted and true or nil
+        end
+        self:SetSocialMeta(key, { notifyMuted = isMuted })
+        ns:Emit("WATCHLIST_UPDATED")
+    end
+    if bnetAccountID then
+        self._sessionBNetNotifyMuted[bnetAccountID] = isMuted and true or nil
+        ns:Emit("SOCIAL_UPDATED")
+    end
+    return isMuted
+end
+
+function Store:IsGuildLoginNotifyEnabled(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return false end
+    local meta = self:GetSocialMeta(key)
+    return type(meta) == "table" and meta.notifyGuild == true and meta.notifyMuted ~= true
+end
+
+function Store:SetGuildLoginNotifyEnabled(rawNameOrKey, enabled)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return false end
+    local on = (enabled == true)
+    self:SetSocialMeta(key, {
+        notifyGuild = on,
+        notifyMuted = false,
+    })
+    return on
 end
 
 function Store:GetRecentCompanionsTable(forcePrune)
