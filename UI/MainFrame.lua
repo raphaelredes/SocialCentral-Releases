@@ -6158,7 +6158,29 @@ local function BuildMainFrame()
             btn:SetPoint("LEFT", prevTab, "RIGHT", 4, 0)
         end
         btn:SetScript("OnEnter", function(self)
-            if self._scTruncated and GameTooltip then
+            if not GameTooltip then return end
+            if def.id == "chat" and ns.Chat and ns.Chat.GetUnreadSummary then
+                local summary = ns.Chat:GetUnreadSummary()
+                if summary and (summary.totalDirect or 0) > 0 then
+                    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                    GameTooltip:ClearLines()
+                    GameTooltip:AddDoubleLine(L["Unread Messages (Direct)"], tostring(summary.totalDirect), 1.0, 0.42, 0.42, 1.0, 0.85, 0.35)
+                    if summary.senders then
+                        local shown = 0
+                        for _, item in ipairs(summary.senders) do
+                            if shown >= 5 then break end
+                            GameTooltip:AddDoubleLine("  " .. tostring(item.title or "?"), tostring(item.unread or 0), 0.90, 0.94, 0.98, 1.0, 0.42, 0.42)
+                            shown = shown + 1
+                        end
+                    end
+                    if (summary.invites or 0) > 0 then
+                        GameTooltip:AddDoubleLine("  " .. L["Room Invite"], tostring(summary.invites), 0.58, 0.88, 0.98, 1.0, 0.85, 0.35)
+                    end
+                    GameTooltip:Show()
+                    return
+                end
+            end
+            if self._scTruncated then
                 GameTooltip:SetOwner(self, "ANCHOR_TOP")
                 GameTooltip:SetText(self._scFullText or self:GetText() or "")
                 GameTooltip:Show()
@@ -6180,10 +6202,6 @@ local function BuildMainFrame()
                 ns.Clan:RefreshGameCalendar(false)
                 if ns.Clan.ClearNotificationCount then
                     ns.Clan:ClearNotificationCount()
-                end
-            elseif def.id == "chat" and ns.Chat then
-                if ns.Chat.activeThreadKey and ns.Chat.MarkThreadRead then
-                    ns.Chat:MarkThreadRead(ns.Chat.activeThreadKey)
                 end
             elseif def.id == "group" and ns.Group then
                 ns.Group:Scan()
@@ -7007,7 +7025,16 @@ function UI:Refresh(resetScroll)
     }
 
     for id, info in pairs(tabButtons) do
-        local label = counts[id] and string.format("%s (%d)", info.baseLabel, counts[id]) or info.baseLabel
+        local label
+        if counts[id] then
+            if id == "chat" then
+                label = string.format("%s |cffff5555(%d)|r", info.baseLabel, counts[id])
+            else
+                label = string.format("%s (%d)", info.baseLabel, counts[id])
+            end
+        else
+            label = info.baseLabel
+        end
         info.btn._scFullText = label
         Theme:SetButtonText(info.btn, label)
         Theme:SetButtonActive(info.btn, activeTab == id, "tab")
@@ -7256,10 +7283,6 @@ local function TriggerTabRefresh(tabId)
         ns.Clan:RefreshGameCalendar(false)
         if ns.Clan.ClearNotificationCount then
             ns.Clan:ClearNotificationCount()
-        end
-    elseif tabId == "chat" and ns.Chat then
-        if ns.Chat.activeThreadKey and ns.Chat.MarkThreadRead then
-            ns.Chat:MarkThreadRead(ns.Chat.activeThreadKey)
         end
     elseif tabId == "group" and ns.Group then
         ns.Group:Scan()

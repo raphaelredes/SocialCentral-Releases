@@ -884,7 +884,10 @@ local function UpdateEntryLocation(entry, unit)
     end
 
     if not directUnitPos and Spotter and Spotter.peerPositions then
-        local p = Spotter.peerPositions[entry.key] or (entry.displayName and Spotter.peerPositions[entry.displayName])
+        local firstLower = entry.firstName and entry.firstName:lower()
+        local p = Spotter.peerPositions[entry.key]
+            or (firstLower and Spotter.peerPositions[firstLower])
+            or (entry.displayName and Spotter.peerPositions[entry.displayName])
         if p and (GetTime() - (p.at or 0)) < 120 then
             mapID = p.mapID
             targetX = p.x
@@ -2794,13 +2797,15 @@ function Spotter:GetTargetKinematics(entry)
             entry.unitName = uName
         end
 
-        local canQueryWorldCoords = (not IsInInstanceFast()) and (IsGroupUnitToken(unit) or GetCachedGroupUnitToken(entry.key, entry.guid) ~= nil)
+        local groupUnit = (IsGroupUnitToken(unit) and unit) or GetCachedGroupUnitToken(entry.key, entry.guid)
+        local canQueryWorldCoords = (not IsInInstanceFast()) and (groupUnit ~= nil)
         if canQueryWorldCoords then
+            local coordUnit = groupUnit or unit
             local facing = GetPlayerFacing and Safe.Number(Safe.Call(GetPlayerFacing)) or 0
             -- 1. Engine-level world position when accessible (open-world group units)
             if UnitPosition then
                 local okP, py, px, _, pMap = pcall(UnitPosition, "player")
-                local okT, ty, tx, _, tMap = pcall(UnitPosition, unit)
+                local okT, ty, tx, _, tMap = pcall(UnitPosition, coordUnit)
                 if not okP then py, px, pMap = nil, nil, nil end
                 if not okT then ty, tx, tMap = nil, nil, nil end
                 py, px, pMap = Safe.Number(py), Safe.Number(px), Safe.Number(pMap)
@@ -2808,6 +2813,9 @@ function Spotter:GetTargetKinematics(entry)
                 if py and px and ty and tx and pMap and pMap == tMap then
                     local dy = ty - py
                     local dx = tx - px
+                    entry._exactWorldNorth = dy
+                    entry._exactWorldWest = dx
+                    entry._exactWorldAt = nowClock
                     if math.abs(dx) > 0.01 or math.abs(dy) > 0.01 then
                         distYards = math.floor(math.sqrt(dx * dx + dy * dy) + 0.5)
                         local worldAngle = math.atan2(dx, dy)
@@ -2817,30 +2825,32 @@ function Spotter:GetTargetKinematics(entry)
                 end
             end
 
-            -- 2. Map coordinate vector fallback (open-world group units)
-            if not angle and C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
+            -- 2. Map coordinate vector (always populate when open-world group coords exist)
+            if C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
                 local mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
                 if mapID then
                     local px, py = GetUnitOrPlayerMapXY(mapID, "player")
-                    local tx, ty = GetUnitOrPlayerMapXY(mapID, unit)
-                    if px and py and tx and ty then
+                    local tx, ty = GetUnitOrPlayerMapXY(mapID, coordUnit)
+                    if tx and ty then
                         entry._anchorMapID = mapID
                         entry._anchorMapX = tx
                         entry._anchorMapY = ty
                         entry.coordsText = string.format("%.1f, %.1f", tx * 100, ty * 100)
-                        local northDelta = py - ty
-                        local westDelta = px - tx
-                        if math.abs(northDelta) > 0.00001 or math.abs(westDelta) > 0.00001 then
-                            local worldAngle = math.atan2(westDelta, northDelta)
-                            angle = NormalizeAngleRad(worldAngle - facing)
-                            entry._lastWorldHeading = worldAngle
+                        if not angle and px and py then
+                            local northDelta = py - ty
+                            local westDelta = px - tx
+                            if math.abs(northDelta) > 0.00001 or math.abs(westDelta) > 0.00001 then
+                                local worldAngle = math.atan2(westDelta, northDelta)
+                                angle = NormalizeAngleRad(worldAngle - facing)
+                                entry._lastWorldHeading = worldAngle
+                            end
                         end
                     end
                 end
             end
 
             if not distYards and UnitDistanceSquared then
-                local dSq, checked = Safe.Call(UnitDistanceSquared, unit)
+                local dSq, checked = Safe.Call(UnitDistanceSquared, coordUnit)
                 dSq = Safe.Number(dSq)
                 if Safe.Value(checked) == true and dSq and dSq >= 0 then
                     distYards = math.floor(math.sqrt(dSq) + 0.5)
@@ -2849,7 +2859,10 @@ function Spotter:GetTargetKinematics(entry)
         end
 
         if not entry._anchorMapX and Spotter.peerPositions then
-            local p = Spotter.peerPositions[entry.key] or (entry.displayName and Spotter.peerPositions[entry.displayName])
+            local firstLower = entry.firstName and entry.firstName:lower()
+            local p = Spotter.peerPositions[entry.key]
+                or (firstLower and Spotter.peerPositions[firstLower])
+                or (entry.displayName and Spotter.peerPositions[entry.displayName])
             if p and (nowClock - (p.at or 0)) < 120 then
                 entry._anchorMapID = p.mapID
                 entry._anchorMapX = p.x
@@ -2913,6 +2926,10 @@ function Spotter:GetTargetKinematics(entry)
     kin.unit = unit
     kin.hasAngle = (angle ~= nil)
     kin.angle = angle and NormalizeAngleRad(angle) or nil
+    if kin.angle then
+        entry._lastKnownAngle = kin.angle
+        entry._lastKnownAngleAt = nowClock
+    end
     kin.distYards = distYards or entry.lastDistYards
     kin.distText = distText or entry.lastDistText or L["Nearby"]
     kin.exact = (distYards ~= nil)
@@ -3245,9 +3262,13 @@ local function BroadcastPlayerPosition()
     end
     local mapID = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
     if not mapID then return end
-    local pos = Safe.Call(C_Map.GetPlayerMapPosition, mapID, "player")
-    if not pos then return end
-    local x, y = Safe.XY(pos)
+    local x, y = GetUnitOrPlayerMapXY(mapID, "player")
+    if not (x and y) then
+        local pos = Safe.Call(C_Map.GetPlayerMapPosition, mapID, "player")
+        if pos then
+            x, y = Safe.XY(pos)
+        end
+    end
     if not (x and y and type(x) == "number" and type(y) == "number" and x > 0 and y > 0 and x < 1 and y < 1) then
         return
     end
@@ -3267,20 +3288,13 @@ local function BroadcastPlayerPosition()
 
     local sendFn = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
     if sendFn then
-        local function HandleResult(ok, res)
-            if ok and Enum and Enum.SendAddonMessageResult and res == Enum.SendAddonMessageResult.AddonMessageThrottle and ns.Clan then
-                ns.Clan.throttleStrike = (ns.Clan.throttleStrike or 0) + 1
-                ns.Clan.backoffUntil = now + 12
-                if ns.Clan.throttleStrike >= 3 then
-                    ns.Clan.isStoppedThisSession = true
-                end
-            end
-        end
         local ok1, res1 = pcall(sendFn, "SCentral1", ("POS~%d~%.4f~%.4f~%s~%d"):format(mapID, x, y, myClass, myLevel), "GUILD")
-        HandleResult(ok1, res1)
-        if not (ns.Clan and ns.Clan.isStoppedThisSession) then
-            local ok2, res2 = pcall(sendFn, "OpenMapLoc", ("L1\t%d\t%.4f\t%.4f\t%s\t%d"):format(mapID, x, y, myClass, myLevel), "GUILD")
-            HandleResult(ok2, res2)
+        if ok1 and Enum and Enum.SendAddonMessageResult and res1 == Enum.SendAddonMessageResult.AddonMessageThrottle and ns.Clan then
+            ns.Clan.throttleStrike = (ns.Clan.throttleStrike or 0) + 1
+            ns.Clan.backoffUntil = now + 12
+            if ns.Clan.throttleStrike >= 3 then
+                ns.Clan.isStoppedThisSession = true
+            end
         end
     end
 end
@@ -3292,14 +3306,41 @@ function Spotter:HandleIncomingPosition(prefix, text, channel, sender)
 
     local parsedSender = Compat.ParseCharacterName(sender)
     if not parsedSender or not parsedSender.lookupKey or Compat.IsMe(parsedSender.displayName) then return end
+    if not parsedSender.surname then
+        local fullRec = Compat.LookupForeverFullName and Compat.LookupForeverFullName(nil, parsedSender.firstName, false)
+        local resolvedParsed = fullRec and fullRec.fullName and Compat.ParseCharacterName(fullRec.fullName)
+        if resolvedParsed and resolvedParsed.surname then
+            parsedSender = resolvedParsed
+        elseif ns.Store and type(ns.Store.guildRosterRanks) == "table" then
+            local wantFirst = parsedSender.firstName:lower()
+            local matchCount, matchDisp = 0, nil
+            for _, rk in pairs(ns.Store.guildRosterRanks) do
+                if type(rk) == "table" and rk.displayName and not rk.isSelf then
+                    local _, fn = Compat.ParseCharacterFields(rk.displayName)
+                    if fn and fn:lower() == wantFirst then
+                        matchCount = matchCount + 1
+                        matchDisp = rk.displayName
+                        if matchCount > 1 then break end
+                    end
+                end
+            end
+            if matchCount == 1 and matchDisp then
+                parsedSender = Compat.ParseCharacterName(matchDisp) or parsedSender
+            end
+        end
+    end
     local senderKey = parsedSender.lookupKey
     local senderName = parsedSender.displayName
+    local firstLower = parsedSender.firstName and parsedSender.firstName:lower()
 
     local mapID, x, y, classFile, level
     if prefix == "OpenMapLoc" then
         local kind, m, tx, ty, c, lvl = strsplit("\t", text, 6)
         if kind == "L0" then
             self.peerPositions[senderKey] = nil
+            if firstLower and firstLower ~= senderKey and self.peerPositions[firstLower] and self.peerPositions[firstLower].key == senderKey then
+                self.peerPositions[firstLower] = nil
+            end
             ns:Emit("SPOTTER_PEER_POSITIONS_UPDATED")
             return
         elseif kind == "L1" then
@@ -3323,7 +3364,9 @@ function Spotter:HandleIncomingPosition(prefix, text, channel, sender)
     end
 
     if mapID and x and y and x >= 0 and x <= 1 and y >= 0 and y <= 1 then
-        self.peerPositions[senderKey] = {
+        local rec = {
+            key = senderKey,
+            firstLower = firstLower,
             name = senderName,
             mapID = mapID,
             x = x,
@@ -3333,6 +3376,17 @@ function Spotter:HandleIncomingPosition(prefix, text, channel, sender)
             at = GetTime(),
             channel = channel,
         }
+        self.peerPositions[senderKey] = rec
+        if firstLower and firstLower ~= senderKey then
+            self.peerPositions[firstLower] = rec
+        end
+        local existingEntry = self.entries[senderKey]
+        if existingEntry then
+            existingEntry._anchorMapID = mapID
+            existingEntry._anchorMapX = x
+            existingEntry._anchorMapY = y
+            existingEntry.coordsText = string.format("%.1f, %.1f", x * 100, y * 100)
+        end
         ns:Emit("SPOTTER_PEER_POSITIONS_UPDATED")
     end
 end

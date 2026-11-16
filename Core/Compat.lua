@@ -47,6 +47,18 @@ function Safe.Bool(value)
     return value
 end
 
+function Safe.XY(pos)
+    if not Safe.CanAccess(pos) or type(pos) ~= "table" then return nil, nil end
+    local x, y = Safe.Number(pos.x), Safe.Number(pos.y)
+    if (not x or not y) and type(pos.GetXY) == "function" then
+        local ok, rx, ry = pcall(pos.GetXY, pos)
+        if ok then
+            x, y = Safe.Number(rx), Safe.Number(ry)
+        end
+    end
+    return x, y
+end
+
 function Safe.Call(fn, ...)
     if type(fn) ~= "function" then return nil end
     local ok, a, b, c = pcall(fn, ...)
@@ -1071,20 +1083,24 @@ function Compat.BuildForeverTargetCandidates(raw)
         end
     end
 
-    -- WoW C-engine WHISPER addon routing addresses characters primarily by core firstName
-    -- (no spaces), with Forever two-word full name, hyphenated name, and shard-qualified fallbacks.
-    push(parsed.firstName)
-    if parsed.surname and parsed.surname ~= "" then
-        push(parsed.firstName .. " " .. parsed.surname)
-        push(parsed.firstName .. "-" .. parsed.surname)
+    local firstName = parsed.firstName
+    local surname = parsed.surname
+    if (not surname or surname == "") and firstName and Compat.LookupForeverFullName then
+        local fullRec = Compat.LookupForeverFullName(nil, firstName, false)
+        if fullRec and fullRec.surname and fullRec.surname ~= "" then
+            firstName = fullRec.firstName or firstName
+            surname = fullRec.surname
+        end
     end
-    local ownRealm = Compat.Realm()
-    if ownRealm and ownRealm ~= "" then
-        push(parsed.firstName .. "-" .. ownRealm)
-    end
-    local cleanRaw = Compat.CleanInput(raw)
-    if cleanRaw and cleanRaw ~= "" then
-        push(cleanRaw)
+
+    -- On WoW: Forever (16001), characters with surnames are addressed as "FirstName Surname"
+    -- (or "FirstName-Surname", which the server maps "-" -> " "). Never append "-CAMWOW...Realm..."
+    -- shard suffixes because the server maps "-" to a space and treats the shard label as a surname.
+    if surname and surname ~= "" then
+        push(firstName .. " " .. surname)
+        push(firstName .. "-" .. surname)
+    else
+        push(firstName)
     end
     return out
 end

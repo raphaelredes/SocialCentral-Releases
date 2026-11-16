@@ -5,6 +5,41 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-11-16
+### Added
+- **Social (`O`) Side-Tab & Unread Conversations Identification (`UI/LFGFrameTab.lua`, `UI/MainFrame.lua`, `UI/SocialPanels.lua`, `Providers/Chat.lua`, `Locales/Locale.lua`):**
+  - Smart routing on the Social (`O`) side tab: clicking the SocialCentral side tab when unread messages exist jumps straight to the **Conversations** tab instead of Watchlist, and hovering it displays a live breakdown of unread senders and counts plus pending room invites.
+  - Added an **Unread** filter option (`Unread`) and a quick one-click **Unread (`N`)** toggle button in the Conversations top bar, plus a **Mark Read** button in the active conversation header and automatic mark-read when clicking a conversation row or focusing the reply input.
+  - Upgraded conversation rows with a crimson unread pill badge pinned to the right edge (never truncated by long names), a left unread dot and crimson accent bar, and brighter message preview text.
+  - Highlighted the `Chat` (`Conversas`) tab counter in crimson-red with an unread sender tooltip so unread messages stand out clearly from total-count tabs like `Watchlist` and `Social`.
+- **Persistent Addon Peer Registry & Automatic Login Handshake (`Providers/Chat.lua`, `Providers/Social.lua`, `Providers/Clan.lua`, `Providers/Watchlist.lua`, `UI/SocialPanels.lua`, `Locales/Locale.lua`):**
+  - Unified `SocialCentralDB.addonPeers` (60-day TTL, 500 entries) and `clan.peers` into a persistent registry so friends and guildmates who have run SocialCentral remain recognized across `/reload`, relogs, and offline transitions without requiring repeated manual verification clicks before chatting.
+  - Added silent Battle.net login auto-discovery (`PLAYER_ENTERING_WORLD` after 10s, out-of-combat, strictly over silent `C_BattleNet.SendGameData`, `>= 8s` spacing, cap 25), safe 1-shot incoming `/w` reply verification (`allowWhisperReply`) to unlock in-addon direct chat automatically without chat system errors, and passive Guild P2P gossip digests (up to 8 recent guild peers bundled inside existing probabilistic `VR~` version packets).
+  - Unified Battle.net and character `WHISPER` threads (`FindLinkedDirectThread` across opens, incoming `/w`, Battle.net whispers, and addon replies) so conversations with friends switching between Battle.net and character whisper do not split into duplicate rows.
+  - Enriched mouseover player tooltips with passive `[SocialCentral · Registered]` indicators and automatic Allied/Enemy Guild tags.
+- **Target Radar Coordinate Sharing Upgrade & Optional Blizzard 3D Pin (`Core/Init.lua`, `UI/ClanSpotterHUD.lua`, `Locales/Locale.lua`):**
+  - Added a one-time profile migration (`spotterSharePosV1Migrated`) enabling guild/friend map coordinate sharing (`spotterSharePosition = true`) on existing profiles automatically.
+  - Added an optional **Mark / Clear 3D Waypoint** toggle in the Target Radar right-click context menu using native `C_Map.SetUserWaypoint` + `C_SuperTrack` for targets with map coordinates (throttled `>= 1.5s`, auto-clearing under `8m` or on target dismiss/clear).
+
+### Changed
+- **Chat & Peer Detection CPU/Memory Optimization (`Providers/Chat.lua`, `Providers/Clan.lua`):**
+  - Replaced per-render Battle.net friend/account scans (`FindBNetWoWGameAccount*`, `ResolveBNetSender`) with an event-invalidated `O(1)` lookup cache (`EnsureBNetLookupCache`, 4s TTL), added dirty caching to unread thread and invite counters (`GetUnreadSummary`, `GetUnreadDirectCount`), pooled `GetThreadsList` item tables, throttled message deduplication sweeps (`>= 30s`), memoized `GetPeerAddonState` and parsed character targets, eliminated wrapper table allocations in `GetSavedPeerRecord`, pre-compiled `CHAT_MSG_SYSTEM` matching with a 10s active-probe fast-exit, and added `O(1)` Forever full-name resolution prior to Guild Roster scans in `ProcessPeerVersion`.
+
+### Fixed
+- **Forever (`16001`) Surname & Shard Whisper Routing (`Core/Compat.lua`, `Providers/Chat.lua`):**
+  - Fixed `"FirstName Surname"` characters (such as `"Aiden Dell"`) triggering `No player named '<FirstName>'` or `No player named '<FirstName> CAMWOW...Realm...'` system errors when sending addon packets: stripped `-CAMWOW...Realm...` shard suffixes across `BuildForeverTargetCandidates`, `EnsureBNetLookupCache`, `RecordResolvedWhisperTarget`, and `HandleIncomingAddonPacket`, addressed two-word characters via `"FirstName Surname"` / `"FirstName-Surname"`, sent both `WHISPER` and `C_BattleNet.SendGameData` cleanly in `SendDirectPacket`, and matched space-mapped system errors on rejection.
+- **Target Radar & Chat Non-Addon Peer Exceptions (`Providers/Chat.lua`, `Providers/Social.lua`, `UI/SocialPanels.lua`, `UI/ClanSpotterHUD.lua`):**
+  - Replaced unsolicited background `DPING` whisper probes and 1.5s auto-open delays with strict exception handling for players without SocialCentral: `ShouldAutoProbe` now probes only previously registered peers, login discovery sends strictly over Battle.net GameData for saved peers, `VerifyBeforeOfficialSend` opens `/w` immediately on user click, the chat composer stays visible with an instant `/w` action/placeholder for non-addon peers, and the Radar `Whisper` button routes directly to `/w` when the target lacks SocialCentral.
+  - Separated Target Radar Minimap pins cleanly between exact group/peer coordinates and non-addon proximity targets: coordinate-less targets skip `C_Map`/`GetPlayerFacing()` lookups entirely (500ms idle cadence) and display on a zero-spin fixed upper Minimap proximity arc with a compact `<distance>m` badge.
+- **Target Radar Minimap Circle Pin & Action Drawer (`Core/Compat.lua`, `Core/Init.lua`, `UI/ClanSpotterHUD.lua`, `Providers/ClanSpotter.lua`):**
+  - Fixed Minimap target pins spinning around the Minimap when turning the character by locking non-coordinate target headings/positions in world space instead of adding live `GetPlayerFacing()` to relative screen bearings on every tick.
+  - Added `Safe.XY`, enabled `spotterSharePosition = true` by default, fixed `UnitPosition` / `C_Map` group token resolution in `GetTargetKinematics`, and resolved Forever first-name guild position broadcasts (`POS~` / `OpenMapLoc`) to full `"FirstName Surname"` keys so nearby/group/guild targets plot accurately on the Minimap and update smoothly (`0.15s` HUD pin cadence).
+  - Enlarged Minimap target pins to `16x16` with stance glow halos above Minimap overlays and widened `HUD_WIDTH` (`268px`) so localized drawer buttons (`Sussurrar`, `Convidar`) no longer truncate.
+- **Direct Addon Peer Verification & Battle.net/WHISPER Dual Transport (`Providers/Chat.lua`):**
+  - Fixed `SendRoomPacket` treating boolean `false` or unconfirmed `C_BattleNet.SendGameData` returns as delivered and skipping `WHISPER` addon routing completely (affecting both Battle.net threads and Character threads linked to a Battle.net friend).
+  - Updated `DPING` / `DPONG` handshakes to send via both `WHISPER` Forever target candidates and `C_BattleNet.SendGameData` (until a confirmed `BN_CHAT_MSG_ADDON` reply proves Battle.net GameData delivery), added `msgId` deduplication for incoming `DM`/`DPIN` packets, and kept `FirstName` / `BN_WHISPER` / `WHISPER` thread reconciliation unified so verifying from either tab activates in-addon direct chat reliably.
+  - Preserved unread conversation badges when switching to the `Chat` tab instead of silently clearing the active thread's unread count before the user inspects or clicks the conversation.
+
 ## [0.2.11] - 2026-11-16
 ### Added
 - **Game-Native Guild Hierarchy, Rank Ladder & Leadership Controls (`Core/Store.lua`, `Providers/Social.lua`, `Providers/Clan.lua`, `UI/MainFrame.lua`, `UI/ClanSpotterHUD.lua`, `Locales/Locale.lua`):**

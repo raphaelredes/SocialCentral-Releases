@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.11"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.11" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.12"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.12" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -132,9 +132,10 @@ local DEFAULTS = {
         spotterPromptAnswered = true, -- keep HUD clutter-free without unsolicited confirmation popups
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
         spotterNameplateBadges = false, -- default off to keep world nameplates uncluttered (user can opt in)
-        spotterSharePosition = false,   -- opt-in: broadcast map position to guild/friends (OpenMap & SocialCentral compatible)
+        spotterSharePosition = true,    -- share map position with guild/friends so radar pins lock in world space
         spotterMapPins = true,          -- show detected targets and shared positions as pins on Minimap & World Map
         spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
+        spotterSharePosV1Migrated = false, -- one-time upgrade enabling shared map coords on existing profiles
         worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
         worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
         worldBuffsMapPins = true,   -- show minimalist World Buff pins & hover summary on World Map (M)
@@ -317,6 +318,10 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         SocialCentralDB.settings.friendAlertAllMigrated = true
     end
     ns.db = SocialCentralDB
+    if SocialCentralDB.settings and SocialCentralDB.settings.spotterSharePosV1Migrated ~= true then
+        SocialCentralDB.settings.spotterSharePosition = true
+        SocialCentralDB.settings.spotterSharePosV1Migrated = true
+    end
     ns.charDb = SocialCentralCharDB
     ns.UnregisterEvent(boot, "ADDON_LOADED")
 end)

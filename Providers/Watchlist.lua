@@ -903,8 +903,15 @@ local function AppendPlayerTooltipLines(tooltip)
     end
     local comp = Store and Store.GetRecentCompanion and Store:GetRecentCompanion(fullName)
     local isPeer = ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(lookupKey)
+    local savedPeer = (not isPeer) and ns.Chat and ns.Chat.GetSavedPeerRecord and ns.Chat:GetSavedPeerRecord(lookupKey) or nil
+    local unitGuild = GetGuildInfo and Safe.String(Safe.Call(GetGuildInfo, unit))
+    local guildStance = (unitGuild and unitGuild ~= "" and ns.Clan and ns.Clan.LookupGuildStance)
+        and ns.Clan:LookupGuildStance(unitGuild) or nil
+    if guildStance ~= "ENEMY" and guildStance ~= "ALLY" then
+        guildStance = nil
+    end
 
-    if not meta and not wl and not comp and not isPeer then
+    if not meta and not wl and not comp and not isPeer and not savedPeer and not guildStance then
         return
     end
 
@@ -946,8 +953,16 @@ local function AppendPlayerTooltipLines(tooltip)
         tooltip:AddLine(compText, 0.55, 0.80, 1.0, true)
     end
 
+    if guildStance == "ENEMY" then
+        tooltip:AddLine("|cffff4d4d[" .. L["ENEMY"] .. "]|r <" .. unitGuild .. ">", 1.0, 0.35, 0.35)
+    elseif guildStance == "ALLY" then
+        tooltip:AddLine("|cff49c6ff[" .. L["ALLY"] .. "]|r <" .. unitGuild .. ">", 0.35, 0.78, 1.0)
+    end
+
     if isPeer then
         tooltip:AddLine("|cff3fb950[SocialCentral]|r", 0.30, 0.88, 0.48)
+    elseif savedPeer then
+        tooltip:AddLine("|cff58a6ff[SocialCentral · " .. L["Registered"] .. "]|r", 0.35, 0.65, 1.0)
     end
 
     pcall(tooltip.Show, tooltip)

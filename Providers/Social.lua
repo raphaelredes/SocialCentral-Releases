@@ -564,6 +564,17 @@ local function CheckFriendOnlineTransitions(dirMap)
                 local wlEntry = row.lookupKey and wl and wl[row.lookupKey]
                 local isMuted = Store.IsPlayerNotifyMuted and Store:IsPlayerNotifyMuted(row.lookupKey, wlEntry, row.bnetAccountID)
                 local isFav = row.bnetFavorite == true or (row.lookupKey and Store.IsSocialFavorite and Store:IsSocialFavorite(row.lookupKey))
+                if ns.Chat and ns.Chat.QueuePoliteDiscoveryPing and row.bnetAccountID then
+                    local isSavedPeer = row.lookupKey and ns.Chat.GetSavedPeerRecord and ns.Chat:GetSavedPeerRecord(row.lookupKey)
+                    if isSavedPeer then
+                        ns.Chat:QueuePoliteDiscoveryPing({
+                            targetName = row.hasCharacterName ~= false and row.displayName or nil,
+                            bnetAccountID = row.bnetAccountID,
+                            lookupKey = row.lookupKey,
+                            guid = row.guid,
+                        })
+                    end
+                end
                 local shouldNotify = (not isMuted) and (isOptedGuild or alertMode == "all" or (alertMode == "favorites" and isFav))
                 if shouldNotify then
                     local lastAlert = friendAlertLastAt[aKey]

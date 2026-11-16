@@ -380,16 +380,17 @@ local function UpdateSideTabBadge(tab, count)
     end
     if not tab.scUnreadBadge then
         local b = CreateFrame("Frame", nil, tab, "BackdropTemplate")
-        b:SetSize(16, 14)
+        b:SetSize(18, 15)
         b:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -2, 3)
         b:SetFrameLevel((tab:GetFrameLevel() or 60) + 4)
+        b:EnableMouse(false)
         if b.SetBackdrop then
             b:SetBackdrop({
                 bgFile = "Interface\\Buttons\\WHITE8X8",
                 edgeFile = "Interface\\Buttons\\WHITE8X8",
                 edgeSize = 1,
             })
-            b:SetBackdropColor(0.84, 0.18, 0.22, 1.0)
+            b:SetBackdropColor(0.86, 0.16, 0.22, 1.0)
             b:SetBackdropBorderColor(0.08, 0.10, 0.14, 1.0)
         end
         local txt = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
@@ -398,9 +399,10 @@ local function UpdateSideTabBadge(tab, count)
         b.text = txt
         tab.scUnreadBadge = b
     end
-    local lbl = n > 9 and "9+" or tostring(n)
+    local lbl = n > 99 and "99+" or tostring(n)
     tab.scUnreadBadge.text:SetText(lbl)
-    tab.scUnreadBadge:SetWidth(n > 9 and 20 or 16)
+    local bw = (n > 99 and 26) or (n > 9 and 22) or 18
+    tab.scUnreadBadge:SetSize(bw, 15)
     tab.scUnreadBadge:SetFrameLevel((tab:GetFrameLevel() or 60) + 4)
     tab.scUnreadBadge:Show()
 end
@@ -2848,14 +2850,49 @@ function LFGFrameTab:EnsureSocialSideTab()
             L["SocialCentral: Watchlist, Social & Nearby"],
             L["View Watchlist (/who), Social folders, Battle.net/Guild friends, and Nearby players right inside Blizzard's Social window."],
             function()
+                local socialUnread = ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))) or 0
+                local targetTab = (socialUnread > 0) and "chat" or "watchlist"
                 if ns.UI then
-                    ns.UI:OpenEmbedded(parent, { "watchlist", "social", "nearby", "chat" }, "watchlist")
+                    ns.UI:OpenEmbedded(parent, { "watchlist", "social", "nearby", "chat" }, targetTab)
                 end
-                if ns.Watchlist and ns.Watchlist.AutoCheckNextFromHardwareClick then
+                if targetTab == "watchlist" and ns.Watchlist and ns.Watchlist.AutoCheckNextFromHardwareClick then
                     ns.Watchlist:AutoCheckNextFromHardwareClick()
                 end
             end
         )
+        self.socialTab:SetScript("OnEnter", function(selfBtn)
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(L["SocialCentral: Watchlist, Social & Chat"], 0.35, 0.72, 1.0)
+            local summary = ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
+            local unreadDirect = summary and summary.totalDirect or 0
+            if unreadDirect > 0 then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddDoubleLine(L["Unread Messages (Direct)"], tostring(unreadDirect), 1.0, 0.42, 0.42, 1.0, 0.85, 0.35)
+                if summary.senders then
+                    local shown = 0
+                    for _, item in ipairs(summary.senders) do
+                        if shown >= 5 then break end
+                        GameTooltip:AddDoubleLine("  " .. tostring(item.title or "?"), tostring(item.unread or 0), 0.90, 0.94, 0.98, 1.0, 0.42, 0.42)
+                        shown = shown + 1
+                    end
+                end
+                if (summary.invites or 0) > 0 then
+                    GameTooltip:AddDoubleLine("  " .. L["Room Invite"], tostring(summary.invites), 0.58, 0.88, 0.98, 1.0, 0.85, 0.35)
+                end
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(L["Click to open Conversations"], 0.40, 0.92, 0.55, true)
+            else
+                GameTooltip:AddLine(L["View Watchlist (/who), Social folders, Battle.net/Guild friends, and Nearby players right inside Blizzard's Social window."], 0.85, 0.88, 0.92, true)
+                if ns.Watchlist and ns.Watchlist.GetStats then
+                    local on = ns.Watchlist:GetStats()
+                    local socOnline = ns.Social and ns.Social.GetCount and ns.Social:GetCount("all") or 0
+                    GameTooltip:AddLine(" ")
+                    GameTooltip:AddDoubleLine(L["Watchlist"] .. " (" .. L["Online"] .. ")", tostring(on or 0), 0.78, 0.84, 0.92, 0.40, 0.92, 0.55)
+                    GameTooltip:AddDoubleLine(L["Social"] .. " (" .. L["Online"] .. ")", tostring(socOnline or 0), 0.78, 0.84, 0.92, 0.58, 0.88, 0.98)
+                end
+            end
+            GameTooltip:Show()
+        end)
     end
 
     self.socialTab:ClearAllPoints()

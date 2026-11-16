@@ -34,6 +34,15 @@ local Chat = {
     lastDirectSendAt = 0,
     lastChimeAt = 0,
     activeTempChannel = nil,
+    _unreadDirty = true,
+    _unreadDirectCache = 0,
+    _unreadSummaryDirty = true,
+    _unreadSummaryCache = nil,
+    _unreadSummaryChanFlag = false,
+    _peerStateGen = 0,
+    _lastCandidateTrackAt = 0,
+    _lastDirectDedupPruneAt = 0,
+    _lastAllianceDedupPruneAt = 0,
 }
 
 ns.Chat = Chat
@@ -53,8 +62,25 @@ local SOUND_COOLDOWN = 2.0
 local PING_TIMEOUT = 5.0
 local HISTORY_TTL_SECONDS = 30 * 86400
 local MAX_SAVED_THREADS = 80
-local PEER_TTL_SECONDS = 30 * 86400
-local MAX_SAVED_PEERS = 200
+local PEER_TTL_SECONDS = 60 * 86400
+local MAX_SAVED_PEERS = 500
+local DISCOVERY_PING_INTERVAL = 8.0
+local BNET_CACHE_TTL = 4.0
+local ERR_NOT_FOUND_PATTERN = _G.ERR_CHAT_PLAYER_NOT_FOUND_S and ("^" .. _G.ERR_CHAT_PLAYER_NOT_FOUND_S:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1"):gsub("%%%%s", ".*"))
+
+local STATIC_NONE_STATE = { state = "none", verified = false }
+local STATIC_ROOM_STATE = { state = "room", verified = true }
+local STATIC_ALLIANCE_STATE = { state = "alliance", verified = true, slash = "/al " }
+local STATIC_DISABLED_STATE = { state = "disabled", verified = false }
+
+function Chat:InvalidateUnreadCache()
+    self._unreadDirty = true
+    self._unreadSummaryDirty = true
+end
+
+function Chat:BumpPeerStateGen()
+    self._peerStateGen = (self._peerStateGen or 0) + 1
+end
 
 local STATIC_CHANNEL_ORDER = {
     ["ch:party"] = { titleKey = "Party", kind = "PARTY", slash = "/p ", order = 1 },
@@ -247,6 +273,8 @@ function Chat:SetThreadMuted(threadKey, state)
     else
         ns.db.settings.chatMutedThreads[threadKey] = nil
     end
+    self:InvalidateUnreadCache()
+    self:BumpPeerStateGen()
     ns:Emit("CHAT_UPDATED")
     return true
 end
@@ -261,6 +289,7 @@ function Chat:MarkAllRead()
     for _, t in pairs(self.threads) do
         t.unread = 0
     end
+    self:InvalidateUnreadCache()
     ns:Emit("CHAT_UPDATED")
 end
 
@@ -438,6 +467,7 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     if incoming and not isViewing and not isMuted then
         if (not isPublic) or allowChannelUnread then
             thread.unread = (thread.unread or 0) + 1
+            Chat:InvalidateUnreadCache()
         end
         if not silent then
             PlayIncomingChime(thread.kind, thread.key)
@@ -594,12 +624,18 @@ function Chat:LoadSavedHistory()
             end
         end
     end
+    self:InvalidateUnreadCache()
 end
 
 function Chat:GetUnreadSummary()
     local s = ns.db and ns.db.settings
     local mirrorOn = s and s.chatMirrorChannels == true
     local allowChanUnread = s and s.chatChannelUnread == true
+    local chanFlag = (mirrorOn and allowChanUnread) and true or false
+    if not self._unreadSummaryDirty and self._unreadSummaryCache and self._unreadSummaryChanFlag == chanFlag then
+        return self._unreadSummaryCache
+    end
+
     local direct, roomsUnread, invites, channels = 0, 0, 0, 0
     local senders = {}
 
@@ -607,7 +643,7 @@ function Chat:GetUnreadSummary()
         local u = t.unread or 0
         if u > 0 and not self:IsThreadMuted(key) then
             if IsPublicChannelKind(t.kind) then
-                if mirrorOn and allowChanUnread then
+                if chanFlag then
                     channels = channels + u
                 end
             elseif t.kind == "ROOM" then
@@ -646,7 +682,7 @@ function Chat:GetUnreadSummary()
     end)
 
     local totalDirect = direct + roomsUnread + invites
-    return {
+    local summary = {
         direct = direct,
         rooms = roomsUnread,
         invites = invites,
@@ -655,6 +691,12 @@ function Chat:GetUnreadSummary()
         total = totalDirect + channels,
         senders = senders,
     }
+    self._unreadSummaryCache = summary
+    self._unreadSummaryChanFlag = chanFlag
+    self._unreadSummaryDirty = false
+    self._unreadDirectCache = totalDirect
+    self._unreadDirty = false
+    return summary
 end
 
 local function CountUnreadThreadsAndInvites(self, includeChannels)
@@ -691,24 +733,34 @@ local function CountUnreadThreadsAndInvites(self, includeChannels)
 end
 
 function Chat:GetUnreadDirectCount()
-    return CountUnreadThreadsAndInvites(self, false)
+    if not self._unreadDirty and self._unreadDirectCache ~= nil then
+        return self._unreadDirectCache
+    end
+    local count = CountUnreadThreadsAndInvites(self, false)
+    self._unreadDirectCache = count
+    self._unreadDirty = false
+    return count
 end
 
 function Chat:GetTotalUnread(includeChannels)
-    return CountUnreadThreadsAndInvites(self, includeChannels == true)
+    if includeChannels ~= true then
+        return self:GetUnreadDirectCount()
+    end
+    return self:GetUnreadSummary().total
 end
 
 function Chat:MarkThreadRead(threadKey)
     local t = threadKey and self.threads[threadKey]
     if t and (t.unread or 0) > 0 then
         t.unread = 0
+        self:InvalidateUnreadCache()
         ns:Emit("CHAT_UPDATED")
     end
 end
 
-function Chat:SetActiveThread(threadKey)
+function Chat:SetActiveThread(threadKey, skipMarkRead)
     self.activeThreadKey = threadKey
-    if threadKey then
+    if threadKey and not skipMarkRead then
         self:MarkThreadRead(threadKey)
     end
 end
@@ -759,7 +811,9 @@ function Chat:GetThreadsList(kindFilter)
         end
 
         if include and kindFilter and kindFilter ~= "all" then
-            if kindFilter == "whispers" then
+            if kindFilter == "unread" then
+                include = (not self:IsThreadMuted(key)) and ((t.unread or 0) > 0)
+            elseif kindFilter == "whispers" then
                 include = (t.kind == "WHISPER" or t.kind == "BN_WHISPER")
             elseif kindFilter == "guild" then
                 include = (t.kind == "GUILD" or t.kind == "OFFICER")
@@ -777,21 +831,25 @@ function Chat:GetThreadsList(kindFilter)
         if include then
             local lastMsg = t.messages and t.messages[#t.messages]
             local isMuted = self:IsThreadMuted(key)
-            table.insert(out, {
-                key = t.key,
-                kind = t.kind,
-                title = STATIC_CHANNEL_ORDER[t.key] and L[STATIC_CHANNEL_ORDER[t.key].titleKey] or t.title,
-                targetName = t.targetName,
-                bnetAccountID = t.bnetAccountID,
-                bnetName = t.bnetName,
-                classFile = t.classFile,
-                roomId = t.roomId,
-                unread = isMuted and 0 or (t.unread or 0),
-                muted = isMuted,
-                lastAt = t.lastAt or 0,
-                preview = lastMsg and lastMsg.text or "",
-                count = t.messages and #t.messages or 0,
-            })
+            local item = t._listItem
+            if not item then
+                item = {}
+                t._listItem = item
+            end
+            item.key = t.key
+            item.kind = t.kind
+            item.title = STATIC_CHANNEL_ORDER[t.key] and L[STATIC_CHANNEL_ORDER[t.key].titleKey] or t.title
+            item.targetName = t.targetName
+            item.bnetAccountID = t.bnetAccountID
+            item.bnetName = t.bnetName
+            item.classFile = t.classFile
+            item.roomId = t.roomId
+            item.unread = isMuted and 0 or (t.unread or 0)
+            item.muted = isMuted
+            item.lastAt = t.lastAt or 0
+            item.preview = lastMsg and lastMsg.text or ""
+            item.count = t.messages and #t.messages or 0
+            table.insert(out, item)
         end
     end
 
@@ -815,13 +873,45 @@ function Chat:GetThreadMessages(threadKey)
     return t and t.messages or {}
 end
 
+local function FindLinkedDirectThread(parsed, bnetAccountID)
+    if bnetAccountID then
+        local bnThread = Chat.threads["bn:" .. tostring(bnetAccountID)]
+        if bnThread then return bnThread end
+    end
+    if parsed and parsed.lookupKey then
+        local wThread = Chat.threads["w:" .. parsed.lookupKey]
+        if wThread then return wThread end
+        for _, t in pairs(Chat.threads) do
+            if type(t) == "table" and t.kind == "BN_WHISPER" then
+                if bnetAccountID and t.bnetAccountID == bnetAccountID then
+                    return t
+                end
+                if t.targetName then
+                    local tp = Compat.ParseCharacterName(t.targetName)
+                    if tp and tp.lookupKey == parsed.lookupKey then
+                        return t
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 function Chat:EnsureWhisperThread(rawTarget, classFile)
     local parsed = Compat.ParseCharacterName(rawTarget)
     if not parsed then return nil end
-    local key = "w:" .. parsed.lookupKey
-    local t = EnsureThread(key, "WHISPER", parsed.displayName, {
+    local resolvedClass = classFile or LookupClassFromCache(parsed.lookupKey)
+    local _, _, bnAccName, bnAccId = FindBNetWoWGameAccountByChar(parsed)
+    local existing = FindLinkedDirectThread(parsed, bnAccId)
+    local key = existing and existing.key or ("w:" .. parsed.lookupKey)
+    local kind = existing and existing.kind or "WHISPER"
+    local title = (existing and existing.title and existing.title ~= "" and existing.title) or parsed.displayName
+    local t = EnsureThread(key, kind, title, {
         targetName = parsed.displayName,
-        classFile = classFile or LookupClassFromCache(parsed.lookupKey),
+        bnetAccountID = bnAccId or (existing and existing.bnetAccountID),
+        bnetName = bnAccName or (existing and existing.bnetName),
+        classFile = resolvedClass,
     })
     ns:Emit("CHAT_UPDATED")
     return t
@@ -845,6 +935,7 @@ function Chat:ClearHistory(threadKey)
             if hist then hist[key] = nil end
         end
     end
+    self:InvalidateUnreadCache()
     ns:Emit("CHAT_UPDATED")
 end
 
@@ -875,9 +966,14 @@ end
 
 local function RecordResolvedWhisperTarget(lookupKey, rawSender)
     if type(lookupKey) ~= "string" or lookupKey == "" then return end
-    local clean = Compat.CleanInput(rawSender)
+    local parsed = Compat.ParseCharacterName(rawSender)
+    local clean = (parsed and parsed.displayName) or Compat.FormatForeverTarget(rawSender)
     if not clean or clean == "" then return end
     Chat.resolvedWhisperTargets = Chat.resolvedWhisperTargets or {}
+    local existing = Chat.resolvedWhisperTargets[lookupKey]
+    if type(existing) == "string" and existing:find(" ", 1, true) and parsed and not parsed.surname then
+        return
+    end
     local count = 0
     for _ in pairs(Chat.resolvedWhisperTargets) do
         count = count + 1
@@ -899,14 +995,16 @@ local function RecordThrottleStrike()
     end
 end
 
-local function BuildOrderedWhisperCandidates(targetChar, candidateOffset)
+local function BuildOrderedWhisperCandidates(targetChar, candidateOffset, extraCandidates)
     local parsed = Compat.ParseCharacterName(targetChar)
+    local wantSurname = parsed and parsed.surname ~= nil and parsed.surname ~= ""
     local ordered, seen = {}, {}
     local monoNow = GetTime and GetTime() or 0
     local rejected = Chat.rejectedWhisperTargets
 
     local function pushUnique(v)
         if type(v) ~= "string" or v == "" or seen[v] then return end
+        if wantSurname and not v:find("[%s%-]") then return end
         seen[v] = true
         local exp = rejected and rejected[v]
         if exp and monoNow < exp then
@@ -917,12 +1015,31 @@ local function BuildOrderedWhisperCandidates(targetChar, candidateOffset)
 
     local resolved = parsed and Chat.resolvedWhisperTargets and Chat.resolvedWhisperTargets[parsed.lookupKey]
     if resolved then
-        pushUnique(resolved)
+        local rParsed = Compat.ParseCharacterName(resolved)
+        if rParsed and rParsed.displayName then
+            pushUnique(rParsed.displayName)
+        else
+            pushUnique(resolved)
+        end
     end
 
     local baseCandidates = Compat.BuildForeverTargetCandidates(targetChar)
+    if type(extraCandidates) == "table" then
+        for _, ec in ipairs(extraCandidates) do
+            if type(ec) == "string" and ec ~= "" then
+                for _, subCand in ipairs(Compat.BuildForeverTargetCandidates(ec)) do
+                    baseCandidates[#baseCandidates + 1] = subCand
+                end
+            end
+        end
+    end
     if #baseCandidates == 0 then
-        baseCandidates = { targetChar }
+        local cleanFallback = Compat.FormatForeverTarget(targetChar)
+        if cleanFallback and cleanFallback ~= "" then
+            baseCandidates = { cleanFallback }
+        else
+            baseCandidates = { targetChar }
+        end
     end
 
     local off = tonumber(candidateOffset) or 0
@@ -947,8 +1064,19 @@ local function BuildOrderedWhisperCandidates(targetChar, candidateOffset)
     return ordered
 end
 
+local function TrackSentWhisperCandidates(trackKey, lookupKey, sentList, monoNow)
+    if not trackKey or not sentList or #sentList == 0 then return end
+    Chat._lastCandidateTrackAt = monoNow
+    Chat.lastWhisperCandidates = Chat.lastWhisperCandidates or {}
+    Chat.lastWhisperCandidates[trackKey] = {
+        candidates = sentList,
+        lookupKey = lookupKey,
+        at = monoNow,
+    }
+end
+
 -- Helper to send a bounded SCentral1 addon payload over WHISPER / BNet GameData.
-local function SendRoomPacket(targetChar, bnetGameAccId, payload, candidateOffset)
+local function SendRoomPacket(targetChar, bnetGameAccId, payload, candidateOffset, opts)
     local canSend, lockReason = GuardAddonMessaging(false)
     if not canSend then
         return false, lockReason or "locked"
@@ -964,128 +1092,264 @@ local function SendRoomPacket(targetChar, bnetGameAccId, payload, candidateOffse
         return false, "too_long"
     end
 
-    if bnetGameAccId and C_BattleNet and C_BattleNet.SendGameData then
+    opts = type(opts) == "table" and opts or {}
+    local bnetConfirmed = bnetGameAccId and Chat.sessionBNetPeers and Chat.sessionBNetPeers[bnetGameAccId] ~= nil
+    local bnetSentOk = false
+
+    if bnetGameAccId and C_BattleNet and C_BattleNet.SendGameData and opts.allowBNet ~= false then
         local ok, res = pcall(C_BattleNet.SendGameData, bnetGameAccId, PREFIX, payload)
         if ok then
-            if Enum and Enum.SendAddonMessageResult and type(res) == "number" and res ~= Enum.SendAddonMessageResult.Success then
-                if res == Enum.SendAddonMessageResult.AddonMessageThrottle then
+            if Enum and Enum.SendAddonMessageResult and type(res) == "number" then
+                if res == Enum.SendAddonMessageResult.Success then
+                    bnetSentOk = true
+                elseif res == Enum.SendAddonMessageResult.AddonMessageThrottle then
                     RecordThrottleStrike()
+                    if not targetChar or targetChar == "" then
+                        return false, "throttled"
+                    end
                 end
-            else
-                return true
+            elseif res ~= false then
+                bnetSentOk = true
             end
         end
+    end
+
+    -- Only rely exclusively on BNet GameData if BNet addon delivery was already confirmed
+    -- in this session or if no character WHISPER target exists.
+    if bnetSentOk and (bnetConfirmed or not targetChar or targetChar == "") and not opts.sendAllCandidates then
+        return true, "BNET"
     end
 
     local sendFn = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
     if targetChar and targetChar ~= "" and sendFn then
-        local candidates = BuildOrderedWhisperCandidates(targetChar, candidateOffset)
+        local parsed = Compat.ParseCharacterName(targetChar)
+        local resolved = parsed and Chat.resolvedWhisperTargets and Chat.resolvedWhisperTargets[parsed.lookupKey]
+        local resolvedRejected = resolved and Chat.rejectedWhisperTargets and Chat.rejectedWhisperTargets[resolved] and monoNow < Chat.rejectedWhisperTargets[resolved]
+        if resolvedRejected then
+            Chat.resolvedWhisperTargets[parsed.lookupKey] = nil
+            resolved = nil
+        end
+
+        local candidates = BuildOrderedWhisperCandidates(targetChar, candidateOffset, opts.extraCandidates)
+        local sendAll = (opts.sendAllCandidates == true and opts.forceAllCandidates == true)
+        local maxToSend = sendAll and math.min(2, #candidates) or 1
+        local sentList = {}
         local lastErr = "failed"
-        for _, candidate in ipairs(candidates) do
+        local restrictedCount = 0
+
+        for idx, candidate in ipairs(candidates) do
             local ok, res = pcall(sendFn, PREFIX, payload, "WHISPER", candidate)
             if ok then
                 if Enum and Enum.SendAddonMessageResult and type(res) == "number" then
                     if res == Enum.SendAddonMessageResult.Success then
-                        return true, candidate
+                        sentList[#sentList + 1] = candidate
+                        if #sentList >= maxToSend then
+                            break
+                        end
                     elseif res == Enum.SendAddonMessageResult.AddonMessageThrottle then
                         RecordThrottleStrike()
-                        return false, "throttled"
+                        TrackSentWhisperCandidates(opts.trackCandidateKey, parsed and parsed.lookupKey, sentList, monoNow)
+                        if #sentList > 0 then
+                            return true, sentList[1], sentList
+                        end
+                        return bnetSentOk, bnetSentOk and "BNET" or "throttled"
                     elseif Enum.SendAddonMessageResult.AddonsRestricted and res == Enum.SendAddonMessageResult.AddonsRestricted then
                         lastErr = "restricted"
+                        restrictedCount = restrictedCount + 1
                     else
                         lastErr = "failed"
                     end
                 elseif res ~= false then
-                    return true, candidate
+                    sentList[#sentList + 1] = candidate
+                    if #sentList >= maxToSend then
+                        break
+                    end
                 end
             end
+            if not sendAll and #sentList > 0 then
+                break
+            end
+        end
+
+        if #sentList > 0 then
+            TrackSentWhisperCandidates(opts.trackCandidateKey, parsed and parsed.lookupKey, sentList, monoNow)
+            return true, sentList[1], sentList
+        end
+        if bnetSentOk then
+            return true, "BNET"
+        end
+        if restrictedCount > 0 then
+            return false, "restricted"
         end
         return false, lastErr
     end
 
+    if bnetSentOk then
+        return true, "BNET"
+    end
     return false, "failed"
 end
 
-local function FindBNetWoWGameAccount(idOrGameId)
-    if not idOrGameId or not (C_BattleNet and C_BattleNet.GetFriendAccountInfo and C_BattleNet.GetFriendNumGameAccounts) then
-        return nil
+local bnetCache = {
+    at = -999,
+    byId = {},
+    byGameId = {},
+    byGuid = {},
+    byLookup = {},
+    anyById = {},
+    anyByGameId = {},
+}
+
+local function WipeTable(t)
+    if wipe then
+        wipe(t)
+    else
+        for k in pairs(t) do t[k] = nil end
     end
+end
+
+function Chat:InvalidateBNetCache()
+    bnetCache.at = -999
+    self:BumpPeerStateGen()
+end
+
+local function EnsureBNetLookupCache()
+    local monoNow = GetTime and GetTime() or 0
+    if (monoNow - (bnetCache.at or -999)) < BNET_CACHE_TTL then
+        return bnetCache
+    end
+    bnetCache.at = monoNow
+    WipeTable(bnetCache.byId)
+    WipeTable(bnetCache.byGameId)
+    WipeTable(bnetCache.byGuid)
+    WipeTable(bnetCache.byLookup)
+    WipeTable(bnetCache.anyById)
+    WipeTable(bnetCache.anyByGameId)
+
+    if not (C_BattleNet and C_BattleNet.GetFriendAccountInfo) then
+        return bnetCache
+    end
+
+    local wowProg = BNET_CLIENT_WOW or "WoW"
     local num = Safe.Number(Safe.Call(BNGetNumFriends)) or 0
+    local hasNumGameAcc = (C_BattleNet.GetFriendNumGameAccounts and C_BattleNet.GetFriendGameAccountInfo) ~= nil
+
+    local function processGameAcc(accId, accName, gi)
+        if type(gi) ~= "table" then return end
+        local gId = Safe.Number(gi.gameAccountID)
+        local gGuid = Safe.String(gi.playerGuid)
+        local charName = Safe.String(gi.characterName)
+        local realmName = Safe.String(gi.realmName)
+        local charParsed = charName and Compat.ParseCharacterName(charName)
+        if charParsed and not charParsed.surname and Compat.LookupForeverFullName then
+            local fullRec = Compat.LookupForeverFullName(gGuid, charParsed.firstName, false)
+            if fullRec and fullRec.fullName then
+                charParsed = Compat.ParseCharacterName(fullRec.fullName) or charParsed
+            end
+        end
+        local fullChar = charParsed and charParsed.displayName or charName
+        if fullChar and realmName and realmName ~= "" and not (Compat.IsForeverShardLabel and Compat.IsForeverShardLabel(realmName)) then
+            if not fullChar:find("-", 1, true) then
+                fullChar = fullChar .. "-" .. realmName
+            end
+        end
+
+        local isOnline = Safe.Value(gi.isOnline) == true
+        local isWoW = Safe.String(gi.clientProgram) == wowProg
+        local score = (isOnline and isWoW) and ((not WOW_PROJECT_ID or Safe.Value(gi.wowProjectID) == WOW_PROJECT_ID) and 100 or 50) or 0
+
+        local rec = {
+            gId = gId,
+            accId = accId,
+            accName = accName,
+            fullChar = fullChar,
+            score = score,
+        }
+
+        if gId and not bnetCache.anyByGameId[gId] then
+            bnetCache.anyByGameId[gId] = rec
+        end
+        if accId and not bnetCache.anyById[accId] then
+            bnetCache.anyById[accId] = rec
+        end
+
+        if isOnline and isWoW then
+            if gId then
+                local prevG = bnetCache.byGameId[gId]
+                if not prevG or score > prevG.score then
+                    bnetCache.byGameId[gId] = rec
+                end
+                bnetCache.anyByGameId[gId] = rec
+            end
+            if accId then
+                local prevA = bnetCache.byId[accId]
+                if not prevA or score > prevA.score then
+                    bnetCache.byId[accId] = rec
+                end
+                bnetCache.anyById[accId] = rec
+            end
+            if gId then
+                if gGuid and not bnetCache.byGuid[gGuid] then
+                    bnetCache.byGuid[gGuid] = rec
+                end
+                if charParsed and charParsed.lookupKey and not bnetCache.byLookup[charParsed.lookupKey] then
+                    bnetCache.byLookup[charParsed.lookupKey] = rec
+                end
+            end
+        end
+    end
+
     for i = 1, num do
         local acc = Safe.Call(C_BattleNet.GetFriendAccountInfo, i)
         if acc then
             local accId = Safe.Number(acc.bnetAccountID)
-            local gCount = Safe.Number(Safe.Call(C_BattleNet.GetFriendNumGameAccounts, i)) or 0
-            for g = 1, gCount do
-                local gi = Safe.Call(C_BattleNet.GetFriendGameAccountInfo, i, g)
-                local gId = gi and Safe.Number(gi.gameAccountID)
-                if gi and (accId == idOrGameId or gId == idOrGameId) and Safe.Value(gi.isOnline) and gi.clientProgram == BNET_CLIENT_WOW then
-                    local charName = Safe.String(gi.characterName)
-                    local realmName = Safe.String(gi.realmName)
-                    local fullChar = (charName and realmName and realmName ~= "") and (charName .. "-" .. realmName) or charName
-                    return gId, fullChar, Safe.String(acc.accountName), accId
+            local accName = Safe.String(acc.accountName)
+            local anyGi = false
+            if hasNumGameAcc then
+                local gCount = Safe.Number(Safe.Call(C_BattleNet.GetFriendNumGameAccounts, i)) or 0
+                for g = 1, gCount do
+                    local gi = Safe.Call(C_BattleNet.GetFriendGameAccountInfo, i, g)
+                    if type(gi) == "table" then
+                        anyGi = true
+                        processGameAcc(accId, accName, gi)
+                    end
                 end
             end
+            if not anyGi and type(acc.gameAccountInfo) == "table" then
+                processGameAcc(accId, accName, acc.gameAccountInfo)
+            end
         end
+    end
+    return bnetCache
+end
+
+local function FindBNetWoWGameAccount(idOrGameId)
+    if not idOrGameId then return nil end
+    local cache = EnsureBNetLookupCache()
+    local rec = cache.byGameId[idOrGameId] or cache.byId[idOrGameId]
+    if rec then
+        return rec.gId, rec.fullChar, rec.accName, rec.accId
     end
     return nil
 end
 
 -- Locate an online Battle.net WoW friend matching an exact GUID or full Forever character lookupKey.
 local function FindBNetWoWGameAccountByChar(parsed, guidHint)
-    if not (C_BattleNet and C_BattleNet.GetFriendAccountInfo and C_BattleNet.GetFriendNumGameAccounts) then
-        return nil
-    end
     if not parsed and not guidHint then return nil end
-    local wantLookup = parsed and parsed.lookupKey or nil
-    local num = Safe.Number(Safe.Call(BNGetNumFriends)) or 0
-    for i = 1, num do
-        local acc = Safe.Call(C_BattleNet.GetFriendAccountInfo, i)
-        if acc then
-            local accId = Safe.Number(acc.bnetAccountID)
-            local gCount = Safe.Number(Safe.Call(C_BattleNet.GetFriendNumGameAccounts, i)) or 0
-            for g = 1, gCount do
-                local gi = Safe.Call(C_BattleNet.GetFriendGameAccountInfo, i, g)
-                if gi and Safe.Value(gi.isOnline) and gi.clientProgram == BNET_CLIENT_WOW then
-                    local gId = Safe.Number(gi.gameAccountID)
-                    local gGuid = Safe.String(gi.playerGuid)
-                    local charName = Safe.String(gi.characterName)
-                    local charParsed = charName and Compat.ParseCharacterName(charName)
-                    local guidMatch = (guidHint and gGuid and gGuid == guidHint)
-                    local nameMatch = (wantLookup and charParsed and charParsed.lookupKey == wantLookup)
-                    if gId and (guidMatch or nameMatch) then
-                        local realmName = Safe.String(gi.realmName)
-                        local fullChar = (charName and realmName and realmName ~= "") and (charName .. "-" .. realmName) or charName
-                        return gId, fullChar, Safe.String(acc.accountName), accId
-                    end
-                end
-            end
-        end
+    local cache = EnsureBNetLookupCache()
+    local rec = (guidHint and cache.byGuid[guidHint]) or (parsed and parsed.lookupKey and cache.byLookup[parsed.lookupKey])
+    if rec then
+        return rec.gId, rec.fullChar, rec.accName, rec.accId
     end
     return nil
 end
 
 local function ResolveBNetSender(bnGameAccId)
-    if not bnGameAccId or not (C_BattleNet and C_BattleNet.GetFriendAccountInfo and C_BattleNet.GetFriendNumGameAccounts) then
-        return nil
-    end
-    local num = Safe.Number(Safe.Call(BNGetNumFriends)) or 0
-    for i = 1, num do
-        local acc = Safe.Call(C_BattleNet.GetFriendAccountInfo, i)
-        if acc then
-            local accId = Safe.Number(acc.bnetAccountID)
-            local gCount = Safe.Number(Safe.Call(C_BattleNet.GetFriendNumGameAccounts, i)) or 0
-            for g = 1, gCount do
-                local gi = Safe.Call(C_BattleNet.GetFriendGameAccountInfo, i, g)
-                local gId = gi and Safe.Number(gi.gameAccountID)
-                if gi and (gId == bnGameAccId or accId == bnGameAccId) then
-                    local charName = Safe.String(gi.characterName)
-                    local realmName = Safe.String(gi.realmName)
-                    local fullChar = (charName and realmName and realmName ~= "") and (charName .. "-" .. realmName) or charName
-                    return accId, Safe.String(acc.accountName), fullChar
-                end
-            end
-        end
+    if not bnGameAccId then return nil end
+    local cache = EnsureBNetLookupCache()
+    local rec = cache.anyByGameId[bnGameAccId] or cache.anyById[bnGameAccId]
+    if rec then
+        return rec.accId, rec.accName, rec.fullChar
     end
     return nil
 end
@@ -1205,6 +1469,7 @@ function Chat:AcceptRoomInvite(roomId)
     local payload = string.format("RMJ|%s|%s|1", roomId, NonEmptyField(meDisplay, 32, meDisplay))
     local bnetGameId = room.hostBNetGameId
     SendRoomPacket(room.host, bnetGameId, payload)
+    self:InvalidateUnreadCache()
     ns:Emit("CHAT_UPDATED")
     return true
 end
@@ -1219,6 +1484,7 @@ function Chat:DeclineRoomInvite(roomId)
         SendRoomPacket(room.host, room.hostBNetGameId, payload)
     end
     rooms[roomId] = nil
+    self:InvalidateUnreadCache()
     ns:Emit("CHAT_UPDATED")
 end
 
@@ -1246,6 +1512,7 @@ function Chat:LeaveRoom(roomId)
     if self.activeThreadKey == ("room:" .. roomId) then
         self.activeThreadKey = nil
     end
+    self:InvalidateUnreadCache()
     ns:Emit("CHAT_UPDATED")
 end
 
@@ -1313,9 +1580,12 @@ function Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText
     local nowTs = GetTime and GetTime() or time()
     self.seenAllianceMsgs = self.seenAllianceMsgs or {}
     if msgId and msgId ~= "" then
-        for k, seenAt in pairs(self.seenAllianceMsgs) do
-            if (nowTs - (seenAt or 0)) > 120 then
-                self.seenAllianceMsgs[k] = nil
+        if (nowTs - (self._lastAllianceDedupPruneAt or 0)) >= 30 then
+            self._lastAllianceDedupPruneAt = nowTs
+            for k, seenAt in pairs(self.seenAllianceMsgs) do
+                if (nowTs - (seenAt or 0)) > 120 then
+                    self.seenAllianceMsgs[k] = nil
+                end
             end
         end
         if self.seenAllianceMsgs[msgId] then
@@ -1451,24 +1721,31 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
     local parsed = targetChar and Compat.ParseCharacterName(targetChar)
     if parsed and not Compat.IsMe(parsed.displayName) then
         local keysToUpdate = { parsed.lookupKey }
+        local seenKeys = { [parsed.lookupKey] = true }
         local reconciledDisplay = {}
-        local isDirectAddonPacket = (sourceTag == "DPING" or sourceTag == "DPONG" or sourceTag == "DM" or sourceTag == "DMA" or sourceTag == "DPIN" or sourceTag == "RM" or sourceTag == "RMI" or sourceTag == "RMJ" or sourceTag == "RML")
-        if isDirectAddonPacket then
+        local isConfirmedReply = (sourceTag == "DPONG" or sourceTag == "DM" or sourceTag == "DMA" or sourceTag == "DPIN")
+        local isDirectAddonPacket = isConfirmedReply or (sourceTag == "DPING" or sourceTag == "RM" or sourceTag == "RMI" or sourceTag == "RMJ" or sourceTag == "RML")
+        -- Only lock a WHISPER target candidate once we receive an actual reply/message or a non-sharded sender.
+        if isConfirmedReply or (isDirectAddonPacket and parsed.surname) then
             RecordResolvedWhisperTarget(parsed.lookupKey, targetChar)
         end
 
-        -- Reconcile Forever "FirstName" addon replies against open/recently probed "FirstName Surname" threads.
+        -- Reconcile Forever "FirstName" addon replies against open/recently probed "FirstName Surname" threads
+        -- (both WHISPER and BN_WHISPER threads).
         if not parsed.surname then
             local firstLower = parsed.firstName:lower()
             for tKey, t in pairs(self.threads) do
-                if type(t) == "table" and t.kind == "WHISPER" then
-                    local tParsed = Compat.ParseCharacterName(t.targetName or t.title or "")
+                if type(t) == "table" and (t.kind == "WHISPER" or t.kind == "BN_WHISPER") then
+                    local tParsed = Compat.ParseCharacterName(t.targetName or (t.kind == "WHISPER" and t.title) or "")
                     if tParsed and tParsed.lookupKey ~= parsed.lookupKey and tParsed.firstName:lower() == firstLower then
                         local recentProbe = self.probeSentAt and self.probeSentAt[tKey] and ((monoNow - self.probeSentAt[tKey]) <= 25)
                         if (self.pendingProbes and self.pendingProbes[tKey]) or (self.pendingOfficialOpen and self.pendingOfficialOpen[tKey]) or self.activeThreadKey == tKey or recentProbe then
-                            keysToUpdate[#keysToUpdate + 1] = tParsed.lookupKey
+                            if not seenKeys[tParsed.lookupKey] then
+                                seenKeys[tParsed.lookupKey] = true
+                                keysToUpdate[#keysToUpdate + 1] = tParsed.lookupKey
+                            end
                             reconciledDisplay[tParsed.lookupKey] = tParsed.displayName
-                            if isDirectAddonPacket then
+                            if isConfirmedReply then
                                 RecordResolvedWhisperTarget(tParsed.lookupKey, targetChar)
                             end
                         end
@@ -1492,6 +1769,23 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
             end
             if self.probeFailures then self.probeFailures["w:" .. lk] = nil end
             if self.probeAttemptIndex then self.probeAttemptIndex["w:" .. lk] = nil end
+
+            -- Also clear pending/failed probe state on any matching BN_WHISPER or WHISPER thread for this character.
+            for tKey, t in pairs(self.threads) do
+                if type(t) == "table" and (t.kind == "BN_WHISPER" or t.kind == "WHISPER") then
+                    local tParsed = Compat.ParseCharacterName(t.targetName or (t.kind == "WHISPER" and t.title) or "")
+                    if tParsed and tParsed.lookupKey == lk then
+                        if self.pendingProbes then self.pendingProbes[tKey] = nil end
+                        if self.pendingOfficialOpen and self.pendingOfficialOpen[tKey] then
+                            self.pendingOfficialOpen[tKey] = nil
+                            verifiedWithPendingOpen = true
+                        end
+                        if self.probeFailures then self.probeFailures[tKey] = nil end
+                        if self.probeAttemptIndex then self.probeAttemptIndex[tKey] = nil end
+                    end
+                end
+            end
+
             if savedPeers then
                 if savedPeers[lk] == nil then
                     addedSavedPeer = true
@@ -1528,6 +1822,8 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
                 source = sourceTag or "BN_ADDON",
             }
             self.seenOnlineChars[charParsed.lookupKey] = now
+            if self.pendingProbes then self.pendingProbes["w:" .. charParsed.lookupKey] = nil end
+            if self.probeFailures then self.probeFailures["w:" .. charParsed.lookupKey] = nil end
         end
         if bnetAccId and self.pendingProbes then
             self.pendingProbes["bn:" .. tostring(bnetAccId)] = nil
@@ -1546,38 +1842,128 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
         local who = (parsed and parsed.displayName) or targetChar or "?"
         ns:Print(string.format(L["%s has SocialCentral active! In-addon chat activated."], who))
     end
+    self:BumpPeerStateGen()
     ns:Emit("CHAT_UPDATED")
+end
+
+-- Persist passive guild peer discoveries to the SavedVariables registry without marking them live online.
+function Chat:RecordPassiveSavedPeer(lookupKey, displayName, version, seenTs)
+    if not lookupKey or lookupKey == "" or not self:IsDirectChatEnabled() then
+        return false
+    end
+    local savedPeers = GetAddonPeersScopeTable()
+    if not savedPeers then
+        return false
+    end
+    local now = time()
+    local stamp = tonumber(seenTs) or now
+    if stamp > now then stamp = now end
+    local existing = savedPeers[lookupKey]
+    if type(existing) == "table" then
+        local prevTs = tonumber(existing.lastSeenAt) or 0
+        if stamp < prevTs then
+            return false
+        end
+    end
+    local cleanName = Compat.CleanPayloadField(displayName, 48)
+    local niceName = (cleanName ~= "" and cleanName:lower() ~= lookupKey) and cleanName
+        or (existing and type(existing.name) == "string" and existing.name ~= "" and existing.name)
+        or (cleanName ~= "" and cleanName)
+        or lookupKey
+    local cleanVer = (type(version) == "string" and version ~= "") and Compat.CleanPayloadField(version, 24) or nil
+    savedPeers[lookupKey] = {
+        name = niceName,
+        version = cleanVer or (existing and existing.version) or "SC",
+        lastSeenAt = stamp,
+    }
+    if not existing and CountHashKeys(savedPeers) > MAX_SAVED_PEERS then
+        PruneSavedScopeTable(savedPeers, PEER_TTL_SECONDS, MAX_SAVED_PEERS, GetPeerStamp)
+    end
+    self:BumpPeerStateGen()
+    return true
+end
+
+function Chat:GetSavedPeerRecord(lookupKey)
+    if not lookupKey or lookupKey == "" then return nil end
+    local now = time()
+    local best, bestTs = nil, -1
+    local savedPeers = GetAddonPeersScopeTable()
+    local rec = savedPeers and savedPeers[lookupKey]
+    if type(rec) == "table" then
+        local ts = tonumber(rec.lastSeenAt) or 0
+        if ts <= 0 or (now - ts) <= PEER_TTL_SECONDS then
+            best = rec
+            bestTs = ts
+        end
+    end
+    local clanBucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+    local clanPeers = clanBucket and clanBucket.peers
+    local cRec = clanPeers and clanPeers[lookupKey]
+    if type(cRec) == "table" then
+        local cTs = tonumber(cRec.updatedAt) or 0
+        if cTs <= 0 or (now - cTs) <= PEER_TTL_SECONDS then
+            if (not best) or cTs > bestTs then
+                best = cRec
+                bestTs = cTs
+            end
+        end
+    end
+    return best
 end
 
 function Chat:GetPeerAddonState(threadKey)
     local t = threadKey and self.threads[threadKey]
     if not t then
-        return { state = "none", verified = false }
+        return STATIC_NONE_STATE
     end
     if t.kind == "ROOM" then
-        return { state = "room", verified = true }
+        return STATIC_ROOM_STATE
     end
     if t.kind == "ALLIANCE" then
-        return { state = "alliance", verified = true, slash = "/al " }
+        return STATIC_ALLIANCE_STATE
     end
     if IsPublicChannelKind(t.kind) then
-        local meta = STATIC_CHANNEL_ORDER[threadKey]
-        return { state = "channel", verified = false, slash = meta and meta.slash or t.slash }
+        if not t._channelState then
+            local meta = STATIC_CHANNEL_ORDER[threadKey]
+            t._channelState = { state = "channel", verified = false, slash = meta and meta.slash or t.slash }
+        end
+        return t._channelState
     end
 
     if not self:IsDirectChatEnabled() then
-        return { state = "disabled", verified = false }
+        return STATIC_DISABLED_STATE
+    end
+
+    local monoNow = GetTime and GetTime() or time()
+    if t._peerState and t._peerStateGen == (self._peerStateGen or 0) and (monoNow - (t._peerStateAt or 0)) < 0.25 then
+        return t._peerState
     end
 
     local bnetGameAccId, bnetChar
-    if t.kind == "BN_WHISPER" and t.bnetAccountID then
-        bnetGameAccId, bnetChar = FindBNetWoWGameAccount(t.bnetAccountID)
-        if bnetChar then
-            t.targetName = bnetChar
+    if t.bnetAccountID then
+        local gId, gChar = FindBNetWoWGameAccount(t.bnetAccountID)
+        if t.kind == "BN_WHISPER" then
+            bnetGameAccId, bnetChar = gId, gChar
+            if bnetChar then
+                t.targetName = bnetChar
+            end
+        elseif gId then
+            local rawCand = t.targetName or t.title
+            local rawParsed = rawCand and Compat.ParseCharacterName(rawCand)
+            local gParsed = gChar and Compat.ParseCharacterName(gChar)
+            if (gParsed and rawParsed and gParsed.lookupKey == rawParsed.lookupKey) or not rawParsed then
+                bnetGameAccId, bnetChar = gId, gChar
+            end
         end
     end
 
-    local parsed = Compat.ParseCharacterName(bnetChar or t.targetName or (t.kind == "WHISPER" and t.title or ""))
+    local rawTargetChar = bnetChar or t.targetName or (t.kind == "WHISPER" and t.title or "")
+    if t._targetParsedRaw ~= rawTargetChar then
+        t._targetParsedRaw = rawTargetChar
+        t._targetParsed = Compat.ParseCharacterName(rawTargetChar)
+    end
+    local parsed = t._targetParsed
+
     if t.kind == "WHISPER" and not bnetGameAccId and parsed then
         local guidHint
         if Store then
@@ -1601,69 +1987,92 @@ function Chat:GetPeerAddonState(threadKey)
 
     local sess = parsed and self.sessionPeers[parsed.lookupKey]
     local bnSess = bnetGameAccId and self.sessionBNetPeers[bnetGameAccId]
-    local savedPeers = GetAddonPeersScopeTable()
-    local prevSaved = parsed and savedPeers and savedPeers[parsed.lookupKey]
+    local prevSaved = parsed and self:GetSavedPeerRecord(parsed.lookupKey)
+    local prevLastSeen = prevSaved and (tonumber(prevSaved.lastSeenAt) or tonumber(prevSaved.updatedAt)) or nil
+    local prevVer = prevSaved and prevSaved.version
     local online = IsCharacterOnlineOrReachable(parsed, t.kind == "BN_WHISPER" and t.bnetAccountID or nil)
+    local resolvedTarget = parsed and parsed.displayName or t.targetName
 
+    local st
     if not online then
-        return {
+        st = {
             state = "offline",
             verified = false,
             knownAddon = (sess ~= nil or bnSess ~= nil or prevSaved ~= nil),
-            version = (sess and sess.version) or (bnSess and bnSess.version) or (prevSaved and prevSaved.version),
-            targetChar = parsed and parsed.displayName or t.targetName,
+            version = (sess and sess.version) or (bnSess and bnSess.version) or prevVer,
+            lastSeenAt = prevLastSeen,
+            targetChar = resolvedTarget,
+            rawTargetChar = rawTargetChar,
             bnetGameAccId = bnetGameAccId,
         }
-    end
-
-    if sess or bnSess then
-        return {
+    elseif sess or bnSess then
+        st = {
             state = "verified",
             verified = true,
             version = (bnSess and bnSess.version) or (sess and sess.version) or "SC",
             verifiedAt = (bnSess and bnSess.verifiedAt) or (sess and sess.verifiedAt),
             source = (bnSess and bnSess.source) or (sess and sess.source),
             knownAddon = true,
-            targetChar = parsed and parsed.displayName or t.targetName,
+            targetChar = resolvedTarget,
+            rawTargetChar = rawTargetChar,
             bnetGameAccId = bnetGameAccId,
         }
+    else
+        local probeKey = t.key
+        local pendingAt = self.pendingProbes and self.pendingProbes[probeKey]
+        local isChecking = pendingAt and (monoNow - pendingAt) < PING_TIMEOUT
+
+        if prevSaved then
+            st = {
+                state = "registered",
+                verified = true,
+                fromRegistry = true,
+                confirming = isChecking == true,
+                knownAddon = true,
+                version = prevVer or "SC",
+                lastSeenAt = prevLastSeen,
+                targetChar = resolvedTarget,
+                rawTargetChar = rawTargetChar,
+                bnetGameAccId = bnetGameAccId,
+            }
+        elseif isChecking then
+            st = {
+                state = "checking",
+                verified = false,
+                knownAddon = false,
+                targetChar = resolvedTarget,
+                rawTargetChar = rawTargetChar,
+                bnetGameAccId = bnetGameAccId,
+            }
+        else
+            local failInfo = self.probeFailures and self.probeFailures[probeKey]
+            if failInfo then
+                st = {
+                    state = "unverified",
+                    verified = false,
+                    knownAddon = false,
+                    reason = failInfo,
+                    targetChar = resolvedTarget,
+                    rawTargetChar = rawTargetChar,
+                    bnetGameAccId = bnetGameAccId,
+                }
+            else
+                st = {
+                    state = "unprobed",
+                    verified = false,
+                    knownAddon = false,
+                    targetChar = resolvedTarget,
+                    rawTargetChar = rawTargetChar,
+                    bnetGameAccId = bnetGameAccId,
+                }
+            end
+        end
     end
 
-    local probeKey = t.key
-    local monoNow = GetTime and GetTime() or time()
-    local pendingAt = self.pendingProbes and self.pendingProbes[probeKey]
-    if pendingAt and (monoNow - pendingAt) < PING_TIMEOUT then
-        return {
-            state = "checking",
-            verified = false,
-            knownAddon = prevSaved ~= nil,
-            version = prevSaved and prevSaved.version or nil,
-            targetChar = parsed and parsed.displayName or t.targetName,
-            bnetGameAccId = bnetGameAccId,
-        }
-    end
-
-    local failInfo = self.probeFailures and self.probeFailures[probeKey]
-    if failInfo then
-        return {
-            state = "unverified",
-            verified = false,
-            knownAddon = prevSaved ~= nil,
-            version = prevSaved and prevSaved.version or nil,
-            reason = failInfo,
-            targetChar = parsed and parsed.displayName or t.targetName,
-            bnetGameAccId = bnetGameAccId,
-        }
-    end
-
-    return {
-        state = "unprobed",
-        verified = false,
-        knownAddon = prevSaved ~= nil,
-        version = prevSaved and prevSaved.version or nil,
-        targetChar = parsed and parsed.displayName or t.targetName,
-        bnetGameAccId = bnetGameAccId,
-    }
+    t._peerState = st
+    t._peerStateGen = self._peerStateGen or 0
+    t._peerStateAt = monoNow
+    return st
 end
 
 function Chat:IsPeerVerified(threadKey)
@@ -1687,9 +2096,8 @@ function Chat:GetLookupKeyAddonBadge(lookupKey)
     if self:IsLookupKeyVerified(lookupKey) then
         return " |cff3fb950[SC]|r"
     end
-    local savedPeers = GetAddonPeersScopeTable()
-    local rec = savedPeers and savedPeers[lookupKey]
-    if type(rec) == "table" and (time() - (rec.lastSeenAt or 0)) <= (14 * 86400) then
+    local rec = self:GetSavedPeerRecord(lookupKey)
+    if rec then
         return " |cff8ab4f8[SC*]|r"
     end
     return ""
@@ -1752,6 +2160,14 @@ function Chat:OpenOfficialChatForThread(threadKey, optionalDraft)
     local prefix
     if t.kind == "WHISPER" and t.targetName then
         if clean == "" then
+            if t.bnetAccountID and t.bnetName then
+                local parsedTarget = Compat.ParseCharacterName(t.targetName)
+                local bnetGId = select(1, FindBNetWoWGameAccount(t.bnetAccountID))
+                if bnetGId and (not IsCharacterOnlineOrReachable(parsedTarget, nil)) then
+                    Compat.BNetWhisper(t.bnetName, t.targetName or t.title)
+                    return true
+                end
+            end
             Compat.Whisper(t.targetName)
             return true
         end
@@ -1786,7 +2202,7 @@ function Chat:ProbePeerAddon(threadKey, force)
     end
 
     local state = self:GetPeerAddonState(threadKey)
-    if state.verified then
+    if state.verified and state.state ~= "registered" then
         return true, "verified"
     end
     if state.state == "offline" then
@@ -1813,15 +2229,15 @@ function Chat:ProbePeerAddon(threadKey, force)
 
     local attemptOffset = self.probeAttemptIndex[threadKey] or 0
     local payload = "DPING|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
-    local sent, errOrCand
-    if t.kind == "BN_WHISPER" and state.bnetGameAccId then
-        sent, errOrCand = SendRoomPacket(nil, state.bnetGameAccId, payload, attemptOffset)
-        if not sent and state.targetChar then
-            sent, errOrCand = SendRoomPacket(state.targetChar, nil, payload, attemptOffset)
-        end
-    else
-        sent, errOrCand = SendRoomPacket(state.targetChar or t.targetName, state.bnetGameAccId, payload, attemptOffset)
-    end
+    local target = state.targetChar or t.targetName
+    local extra = (state.rawTargetChar and state.rawTargetChar ~= target) and { state.rawTargetChar } or nil
+    local sent, errOrCand = SendRoomPacket(target, state.bnetGameAccId, payload, attemptOffset, {
+        sendAllCandidates = false,
+        forceAllCandidates = false,
+        allowBNet = (state.bnetGameAccId ~= nil),
+        trackCandidateKey = threadKey,
+        extraCandidates = extra,
+    })
 
     PruneProbeTracking(self, monoNow)
     self.probeSentAt[threadKey] = monoNow
@@ -1829,13 +2245,14 @@ function Chat:ProbePeerAddon(threadKey, force)
         local err = errOrCand or "failed"
         self.probeFailures[threadKey] = err
         self.pendingProbes[threadKey] = nil
+        self:BumpPeerStateGen()
         if force then
             if err == "throttled" then
                 ns:Print(L["Addon messaging was throttled briefly; please try again in a few seconds."])
             elseif err == "restricted" then
                 ns:Print(L["The game server blocked this addon verification packet."])
             else
-                ns:Print(L["Could not send verification packet to %s right now."]:format(state.targetChar or t.targetName or "?"))
+                ns:Print(L["Could not send verification packet to %s right now."]:format(target or "?"))
             end
         end
         ns:Emit("CHAT_UPDATED")
@@ -1845,10 +2262,12 @@ function Chat:ProbePeerAddon(threadKey, force)
     -- Advance candidate offset for the next manual retry in case this Forever format gets dropped.
     self.probeAttemptIndex[threadKey] = attemptOffset + 1
     if type(errOrCand) == "string" and errOrCand ~= "" then
+        self._lastCandidateTrackAt = monoNow
         self.lastProbeCandidate[threadKey] = { candidate = errOrCand, at = monoNow }
     end
     self.probeFailures[threadKey] = nil
     self.pendingProbes[threadKey] = monoNow
+    self:BumpPeerStateGen()
 
     -- Pure UI timeout expiry only (never sends addon packets from a timer).
     if C_Timer and C_Timer.After then
@@ -1856,10 +2275,12 @@ function Chat:ProbePeerAddon(threadKey, force)
         C_Timer.After(PING_TIMEOUT + 0.1, function()
             if Chat.pendingProbes and Chat.pendingProbes[threadKey] == expectedSentAt then
                 Chat.pendingProbes[threadKey] = nil
+                Chat:BumpPeerStateGen()
                 local afterState = Chat:GetPeerAddonState(threadKey)
                 if not afterState.verified then
                     Chat.probeFailures = Chat.probeFailures or {}
                     Chat.probeFailures[threadKey] = "timeout"
+                    Chat:BumpPeerStateGen()
                 end
                 ns:Emit("CHAT_UPDATED")
             end
@@ -1876,15 +2297,164 @@ function Chat:ShouldAutoProbe(threadKey)
     end
     local st = self:GetPeerAddonState(threadKey)
     if not st then return false end
-    if st.state == "unprobed" then
-        return true
-    end
-    if st.state == "unverified" then
-        local monoNow = GetTime and GetTime() or time()
-        local lastSent = (self.probeSentAt and self.probeSentAt[threadKey]) or 0
-        return (monoNow - lastSent) >= 15
+    if st.state == "registered" then
+        self.autoProbedRegistered = self.autoProbedRegistered or {}
+        if not self.autoProbedRegistered[threadKey] then
+            self.autoProbedRegistered[threadKey] = true
+            return true
+        end
     end
     return false
+end
+
+local function DrainDiscoveryQueue()
+    Chat._discoveryTimerActive = false
+    local queue = Chat.discoveryQueue
+    if not queue or #queue == 0 then return end
+    if not Chat:IsDirectChatEnabled() or (ns.db and ns.db.settings and ns.db.settings.versionCheck == false) then
+        wipe(queue)
+        return
+    end
+    if ns.Clan and ns.Clan.isStoppedThisSession then
+        wipe(queue)
+        return
+    end
+
+    local monoNow = GetTime and GetTime() or time()
+    local elapsed = monoNow - (Chat.lastDiscoveryPingAt or 0)
+    if elapsed < DISCOVERY_PING_INTERVAL then
+        if C_Timer and C_Timer.After then
+            Chat._discoveryTimerActive = true
+            C_Timer.After(DISCOVERY_PING_INTERVAL - elapsed + 0.2, DrainDiscoveryQueue)
+        end
+        return
+    end
+
+    local canSend = GuardAddonMessaging(false)
+    if not canSend then
+        if C_Timer and C_Timer.After then
+            Chat._discoveryTimerActive = true
+            C_Timer.After(DISCOVERY_PING_INTERVAL, DrainDiscoveryQueue)
+        end
+        return
+    end
+
+    local item = table.remove(queue, 1)
+    if item then
+        local lk = item.lookupKey
+        if not (lk and Chat:IsLookupKeyVerified(lk)) then
+            local bnetGId
+            if item.bnetAccountID then
+                bnetGId = select(1, FindBNetWoWGameAccount(item.bnetAccountID))
+            elseif item.parsed then
+                bnetGId = select(1, FindBNetWoWGameAccountByChar(item.parsed, item.guid))
+            end
+            local payload = "DPING|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+            if bnetGId and not (Chat.sessionBNetPeers and Chat.sessionBNetPeers[bnetGId]) then
+                Chat.lastDiscoveryPingAt = monoNow
+                SendRoomPacket(nil, bnetGId, payload, 0, {
+                    allowBNet = true,
+                })
+            elseif item.allowWhisperReply and item.targetName and item.targetName ~= "" then
+                -- Only reply-probe live incoming whispers (1 candidate max, zero periodic probes).
+                Chat.lastDiscoveryPingAt = monoNow
+                SendRoomPacket(item.targetName, nil, payload, 0, {
+                    allowBNet = false,
+                    sendAllCandidates = false,
+                    trackCandidateKey = item.trackKey,
+                })
+            end
+        end
+    end
+
+    if #queue > 0 and C_Timer and C_Timer.After then
+        Chat._discoveryTimerActive = true
+        C_Timer.After(DISCOVERY_PING_INTERVAL + 0.2, DrainDiscoveryQueue)
+    end
+end
+
+function Chat:QueuePoliteDiscoveryPing(opts)
+    if type(opts) ~= "table" or not self:IsDirectChatEnabled() then
+        return false
+    end
+    if ns.db and ns.db.settings and ns.db.settings.versionCheck == false then
+        return false
+    end
+    if ns.Clan and ns.Clan.isStoppedThisSession then
+        return false
+    end
+    if not GuardAddonMessaging(false) then
+        return false
+    end
+
+    local parsed = opts.targetName and Compat.ParseCharacterName(opts.targetName) or nil
+    local lk = opts.lookupKey or (parsed and parsed.lookupKey)
+    if lk and self:IsLookupKeyVerified(lk) then
+        return false
+    end
+
+    local dedupKey = lk or (opts.bnetAccountID and ("bn:" .. tostring(opts.bnetAccountID)))
+    if not dedupKey or dedupKey == "" then
+        return false
+    end
+    self.discoveryPingedThisSession = self.discoveryPingedThisSession or {}
+    if self.discoveryPingedThisSession[dedupKey] then
+        return false
+    end
+    self.discoveryPingedThisSession[dedupKey] = true
+
+    self.discoveryQueue = self.discoveryQueue or {}
+    if #self.discoveryQueue >= 25 then
+        return false
+    end
+    self.discoveryQueue[#self.discoveryQueue + 1] = {
+        targetName = (parsed and parsed.displayName) or opts.targetName,
+        parsed = parsed,
+        lookupKey = lk,
+        bnetAccountID = opts.bnetAccountID,
+        guid = opts.guid,
+        allowWhisperReply = opts.allowWhisperReply == true,
+        trackKey = "disc:" .. dedupKey,
+    }
+    if not self._discoveryTimerActive then
+        local monoNow = GetTime and GetTime() or time()
+        local waitSec = math.max(0.5, DISCOVERY_PING_INTERVAL - (monoNow - (self.lastDiscoveryPingAt or 0)))
+        if C_Timer and C_Timer.After then
+            self._discoveryTimerActive = true
+            C_Timer.After(waitSec, DrainDiscoveryQueue)
+        else
+            DrainDiscoveryQueue()
+        end
+    end
+    return true
+end
+
+function Chat:QueueLoginBNetDiscovery()
+    if not self:IsDirectChatEnabled() then return 0 end
+    if ns.db and ns.db.settings and ns.db.settings.versionCheck == false then return 0 end
+    if ns.Clan and ns.Clan.isStoppedThisSession then return 0 end
+    if not GuardAddonMessaging(false) then return 0 end
+
+    local cache = EnsureBNetLookupCache()
+    local queued = 0
+    local seenAcc = {}
+    for _, rec in pairs(cache.byId) do
+        if type(rec) == "table" and rec.accId and not seenAcc[rec.accId] then
+            seenAcc[rec.accId] = true
+            local charParsed = rec.fullChar and Compat.ParseCharacterName(rec.fullChar) or nil
+            local lk = charParsed and charParsed.lookupKey or nil
+            if not (lk and self:IsLookupKeyVerified(lk)) and not (rec.gId and self.sessionBNetPeers and self.sessionBNetPeers[rec.gId]) then
+                if self:QueuePoliteDiscoveryPing({
+                    targetName = rec.fullChar,
+                    lookupKey = lk,
+                    bnetAccountID = rec.accId,
+                }) then
+                    queued = queued + 1
+                end
+            end
+        end
+    end
+    return queued
 end
 
 function Chat:VerifyBeforeOfficialSend(threadKey)
@@ -1892,62 +2462,18 @@ function Chat:VerifyBeforeOfficialSend(threadKey)
     if not t then return false end
 
     self.pendingOfficialOpen = self.pendingOfficialOpen or {}
+    self.pendingOfficialOpen[threadKey] = nil
     if STATIC_CHANNEL_ORDER[threadKey] or (t.kind ~= "WHISPER" and t.kind ~= "BN_WHISPER") or not self:IsDirectChatEnabled() then
-        self.pendingOfficialOpen[threadKey] = nil
         return self:OpenOfficialChatForThread(threadKey)
     end
 
     local st = self:GetPeerAddonState(threadKey)
-    if st.verified then
-        self.pendingOfficialOpen[threadKey] = nil
+    if st and st.verified then
         ns:Emit("CHAT_UPDATED")
         return true
     end
 
-    if st.state == "offline" then
-        self.pendingOfficialOpen[threadKey] = nil
-        return self:OpenOfficialChatForThread(threadKey)
-    end
-
-    local monoNow = GetTime and GetTime() or time()
-    local lastSent = (self.probeSentAt and self.probeSentAt[threadKey]) or 0
-    if st.state == "checking" or (st.state == "unverified" and (monoNow - lastSent) < 15) then
-        self.pendingOfficialOpen[threadKey] = nil
-        ns:Emit("CHAT_UPDATED")
-        return self:OpenOfficialChatForThread(threadKey)
-    end
-
-    local ok, status = self:ProbePeerAddon(threadKey, true)
-    if ok and status == "verified" then
-        self.pendingOfficialOpen[threadKey] = nil
-        ns:Emit("CHAT_UPDATED")
-        return true
-    end
-
-    if ok then
-        local sentAt = (self.probeSentAt and self.probeSentAt[threadKey]) or monoNow
-        self.pendingOfficialOpen[threadKey] = sentAt
-        ns:Emit("CHAT_UPDATED")
-        if C_Timer and C_Timer.After then
-            C_Timer.After(1.5, function()
-                if Chat.pendingOfficialOpen and Chat.pendingOfficialOpen[threadKey] == sentAt then
-                    Chat.pendingOfficialOpen[threadKey] = nil
-                    if not Chat:IsPeerVerified(threadKey) then
-                        ns:Emit("CHAT_UPDATED")
-                        if not (InCombatLockdown and InCombatLockdown()) then
-                            Chat:OpenOfficialChatForThread(threadKey)
-                        end
-                    end
-                end
-            end)
-        end
-        return true
-    end
-
-    if status ~= "combat" and status ~= "lockdown" then
-        return self:OpenOfficialChatForThread(threadKey)
-    end
-    return false
+    return self:OpenOfficialChatForThread(threadKey)
 end
 
 function Chat:OpenDirectConversation(opts)
@@ -1958,11 +2484,16 @@ function Chat:OpenDirectConversation(opts)
         local gId, fullChar, accName, canonId = FindBNetWoWGameAccount(bnetId)
         local resolvedId = canonId or bnetId
         local bnetName = Safe.String(opts.bnetName) or accName or ("BNet #" .. tostring(resolvedId))
-        t = EnsureThread("bn:" .. tostring(resolvedId), "BN_WHISPER", bnetName, {
+        local charParsed = fullChar and Compat.ParseCharacterName(fullChar)
+        local linked = FindLinkedDirectThread(charParsed, resolvedId)
+        local threadKey = linked and linked.key or ("bn:" .. tostring(resolvedId))
+        local threadKind = linked and linked.kind or "BN_WHISPER"
+        local threadTitle = (linked and linked.kind == "WHISPER" and linked.title) or bnetName
+        t = EnsureThread(threadKey, threadKind, threadTitle, {
             bnetAccountID = resolvedId,
             bnetName = bnetName,
-            targetName = fullChar or opts.targetName,
-            classFile = opts.classFile,
+            targetName = fullChar or opts.targetName or (linked and linked.targetName),
+            classFile = opts.classFile or (charParsed and LookupClassFromCache(charParsed.lookupKey)),
         })
         if gId and self.sessionBNetPeers[gId] and t then
             -- Already known active via BNet session table.
@@ -1978,6 +2509,28 @@ function Chat:OpenDirectConversation(opts)
     end
     ns:Emit("CHAT_UPDATED")
     return t.key
+end
+
+local function SendDirectPacket(self, t, state, payload)
+    local bnetConfirmed = state.bnetGameAccId and self.sessionBNetPeers and self.sessionBNetPeers[state.bnetGameAccId] ~= nil
+    local target = state.targetChar or t.targetName
+    local extra = (state.rawTargetChar and state.rawTargetChar ~= target) and { state.rawTargetChar } or nil
+    local sendOpts = {
+        trackCandidateKey = t.key,
+        extraCandidates = extra,
+        allowBNet = (state.bnetGameAccId ~= nil),
+    }
+    if bnetConfirmed then
+        local sent = SendRoomPacket(nil, state.bnetGameAccId, payload, nil, sendOpts)
+        if not sent and target then
+            sent = SendRoomPacket(target, nil, payload, nil, sendOpts)
+        end
+        return sent
+    end
+    if (target and target ~= "") or state.bnetGameAccId then
+        return SendRoomPacket(target, state.bnetGameAccId, payload, nil, sendOpts)
+    end
+    return false
 end
 
 function Chat:SendDirectMessage(threadKey, rawText)
@@ -2021,15 +2574,7 @@ function Chat:SendDirectMessage(threadKey, rawText)
     end
     local payload = "DM|" .. msgId .. "|" .. senderShort .. "|" .. cleanText
 
-    local sent
-    if t.kind == "BN_WHISPER" and state.bnetGameAccId then
-        sent = SendRoomPacket(nil, state.bnetGameAccId, payload)
-        if not sent and state.targetChar then
-            sent = SendRoomPacket(state.targetChar, nil, payload)
-        end
-    else
-        sent = SendRoomPacket(state.targetChar or t.targetName, state.bnetGameAccId, payload)
-    end
+    local sent = SendDirectPacket(self, t, state, payload)
 
     if not sent then
         ns:Print(L["Unable to send addon message right now; peer may be offline or throttled."])
@@ -2089,15 +2634,7 @@ function Chat:SendLocationPing(threadKey)
     local msgId = NextMsgId()
     local payload = string.format("DPIN|%s|%s|%s|%d|%d", msgId, senderShort, zone, px, py)
 
-    local sent
-    if t.kind == "BN_WHISPER" and state.bnetGameAccId then
-        sent = SendRoomPacket(nil, state.bnetGameAccId, payload)
-        if not sent and state.targetChar then
-            sent = SendRoomPacket(state.targetChar, nil, payload)
-        end
-    else
-        sent = SendRoomPacket(state.targetChar or t.targetName, state.bnetGameAccId, payload)
-    end
+    local sent = SendDirectPacket(self, t, state, payload)
     if not sent then
         ns:Print(L["Unable to send addon message right now; peer may be offline or throttled."])
         return false
@@ -2182,17 +2719,40 @@ function Chat:LeaveTempWoWChannel(rawName)
     return false
 end
 
+local function IsDuplicateDirectMsg(senderKey, msgId)
+    if not msgId or msgId == "" then return false end
+    Chat.seenDirectMsgIds = Chat.seenDirectMsgIds or {}
+    local nowClock = (GetTime and GetTime()) or 0
+    if (nowClock - (Chat._lastDirectDedupPruneAt or 0)) >= 30 then
+        Chat._lastDirectDedupPruneAt = nowClock
+        for k, ts in pairs(Chat.seenDirectMsgIds) do
+            if type(ts) ~= "number" or (nowClock > ts and (nowClock - ts) > 120) then
+                Chat.seenDirectMsgIds[k] = nil
+            end
+        end
+    end
+    local dedupKey = tostring(senderKey or "?") .. ":" .. tostring(msgId)
+    if Chat.seenDirectMsgIds[dedupKey] then
+        return true
+    end
+    Chat.seenDirectMsgIds[dedupKey] = nowClock
+    return false
+end
+
 local function EnsureIncomingDirectThread(senderRaw, bnGameAccId)
     if bnGameAccId then
         local bnetAccId, accountName, fullChar = ResolveBNetSender(bnGameAccId)
         if bnetAccId then
             local charParsed = fullChar and Compat.ParseCharacterName(fullChar)
             local cls = charParsed and LookupClassFromCache(charParsed.lookupKey)
-            local title = accountName or fullChar or ("BNet #" .. tostring(bnetAccId))
-            return EnsureThread("bn:" .. tostring(bnetAccId), "BN_WHISPER", title, {
+            local linked = FindLinkedDirectThread(charParsed, bnetAccId)
+            local key = linked and linked.key or ("bn:" .. tostring(bnetAccId))
+            local kind = linked and linked.kind or "BN_WHISPER"
+            local title = (linked and linked.kind == "WHISPER" and linked.title) or accountName or fullChar or ("BNet #" .. tostring(bnetAccId))
+            return EnsureThread(key, kind, title, {
                 bnetAccountID = bnetAccId,
                 bnetName = accountName,
-                targetName = fullChar,
+                targetName = fullChar or (linked and linked.targetName),
                 classFile = cls,
             }), charParsed
         end
@@ -2200,9 +2760,29 @@ local function EnsureIncomingDirectThread(senderRaw, bnGameAccId)
 
     local parsedSender = senderRaw and Compat.ParseCharacterName(Safe.String(senderRaw) or "")
     if parsedSender and not Compat.IsMe(parsedSender.displayName) then
+        local active = Chat.activeThreadKey and Chat.threads[Chat.activeThreadKey]
+        if active and (active.kind == "WHISPER" or active.kind == "BN_WHISPER") then
+            local actParsed = Compat.ParseCharacterName(active.targetName or (active.kind == "WHISPER" and active.title) or "")
+            if actParsed and (actParsed.lookupKey == parsedSender.lookupKey or ((not parsedSender.surname) and actParsed.firstName:lower() == parsedSender.firstName:lower())) then
+                return active, actParsed
+            end
+        end
+        local _, _, bnAccName, bnAccId = FindBNetWoWGameAccountByChar(parsedSender)
+        local linked = FindLinkedDirectThread(parsedSender, bnAccId)
+        if linked then
+            local cls = LookupClassFromCache(parsedSender.lookupKey)
+            return EnsureThread(linked.key, linked.kind, linked.title, {
+                targetName = parsedSender.displayName,
+                bnetAccountID = bnAccId or linked.bnetAccountID,
+                bnetName = bnAccName or linked.bnetName,
+                classFile = cls,
+            }), parsedSender
+        end
         local cls = LookupClassFromCache(parsedSender.lookupKey)
         return EnsureThread("w:" .. parsedSender.lookupKey, "WHISPER", parsedSender.displayName, {
             targetName = parsedSender.displayName,
+            bnetAccountID = bnAccId,
+            bnetName = bnAccName,
             classFile = cls,
         }), parsedSender
     end
@@ -2216,12 +2796,14 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
     local op = payload:match("^([^|]+)|")
     if not op then return end
 
-    local cleanSenderStr = senderRaw and Compat.CleanInput(Safe.String(senderRaw) or "")
-    local parsedSender = cleanSenderStr and Compat.ParseCharacterName(cleanSenderStr)
+    local rawSenderClean = senderRaw and Compat.CleanInput(Safe.String(senderRaw) or "")
+    local parsedSender = rawSenderClean and Compat.ParseCharacterName(rawSenderClean)
+    local cleanSenderStr = (parsedSender and parsedSender.displayName) or rawSenderClean
     if parsedSender and Compat.IsMe(parsedSender.displayName) then
         return
     end
-    if parsedSender and cleanSenderStr then
+    local isConfirmedReply = (op == "DPONG" or op == "DMA" or op == "DM" or op == "DPIN")
+    if parsedSender and cleanSenderStr and (isConfirmedReply or parsedSender.surname) then
         RecordResolvedWhisperTarget(parsedSender.lookupKey, cleanSenderStr)
     end
 
@@ -2238,11 +2820,15 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
             if pongKey and (monoNow - (Chat.pongSentAt[pongKey] or 0)) >= PONG_COOLDOWN then
                 Chat.pongSentAt[pongKey] = monoNow
                 local replyPayload = "DPONG|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
-                if bnGameAccId then
-                    SendRoomPacket(nil, bnGameAccId, replyPayload)
-                elseif parsedSender then
-                    SendRoomPacket(cleanSenderStr or parsedSender.displayName, nil, replyPayload)
-                end
+                local targetForPong = (parsedSender and parsedSender.displayName) or cleanSenderStr
+                local extraPong = (cleanSenderStr and cleanSenderStr ~= targetForPong) and { cleanSenderStr } or nil
+                SendRoomPacket(targetForPong, bnGameAccId, replyPayload, nil, {
+                    sendAllCandidates = true,
+                    forceAllCandidates = not (parsedSender and Chat.resolvedWhisperTargets and Chat.resolvedWhisperTargets[parsedSender.lookupKey]),
+                    allowBNet = (bnGameAccId ~= nil),
+                    trackCandidateKey = pongKey,
+                    extraCandidates = extraPong,
+                })
             end
         end
         return
@@ -2279,15 +2865,11 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
             if mId and nackKey and (monoNow - (Chat.nackSentAt[nackKey] or 0)) >= NACK_COOLDOWN and not (ns.Clan and ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked()) then
                 Chat.nackSentAt[nackKey] = monoNow
                 local nackPayload = "DMA|" .. mId .. "|0|off"
-                if bnGameAccId then
-                    SendRoomPacket(nil, bnGameAccId, nackPayload)
-                elseif parsedSender then
-                    SendRoomPacket(cleanSenderStr or parsedSender.displayName, nil, nackPayload)
-                end
+                SendRoomPacket(cleanSenderStr or (parsedSender and parsedSender.displayName), bnGameAccId, nackPayload)
             end
             return
         end
-        Chat:MarkPeerVerified(parsedSender and parsedSender.displayName or senderRaw, bnGameAccId, nil, op)
+        Chat:MarkPeerVerified(cleanSenderStr or (parsedSender and parsedSender.displayName) or senderRaw, bnGameAccId, nil, op)
         local t, charParsed = EnsureIncomingDirectThread(senderRaw, bnGameAccId)
         if not t then return end
 
@@ -2310,20 +2892,22 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
             formattedMsg = string.format(L["[Location: %s]"], coordStr)
         end
 
-        local cls = (charParsed and LookupClassFromCache(charParsed.lookupKey)) or t.classFile
-        local skipPersist = (t.kind == "BN_WHISPER")
-        AppendMessage(t, displaySender, formattedMsg, true, cls, skipPersist, false, {
-            viaAddon = true,
-            deliveryMsgId = msgId,
-        })
+        local dedupSender = (parsedSender and parsedSender.lookupKey) or tostring(bnGameAccId or t.key)
+        local isDup = IsDuplicateDirectMsg(dedupSender, msgId)
+        if not isDup then
+            local cls = (charParsed and LookupClassFromCache(charParsed.lookupKey)) or t.classFile
+            local skipPersist = (t.kind == "BN_WHISPER")
+            AppendMessage(t, displaySender, formattedMsg, true, cls, skipPersist, false, {
+                viaAddon = true,
+                deliveryMsgId = msgId,
+            })
+        end
 
         if msgId and not (ns.Clan and ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked()) then
             local ackPayload = "DMA|" .. msgId
-            if bnGameAccId then
-                SendRoomPacket(nil, bnGameAccId, ackPayload)
-            elseif parsedSender then
-                SendRoomPacket(cleanSenderStr or parsedSender.displayName, nil, ackPayload)
-            end
+            SendRoomPacket(cleanSenderStr or (parsedSender and parsedSender.displayName), bnGameAccId, ackPayload, nil, {
+                allowBNet = (bnGameAccId ~= nil),
+            })
         end
         return
     end
@@ -2366,6 +2950,7 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
         local hostDisp = (hostParsed and hostParsed.displayName) or (hostParsed and hostParsed.firstName) or "Friend"
         local openLink = "|Haddon:SCentral:room:" .. roomId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
         ns:Print("%s", string.format(L["Private room invite from %s: %s %s"], hostDisp, title, openLink))
+        Chat:InvalidateUnreadCache()
         ns:Emit("ADDON_MESSAGE_NOTIFY", {
             id = "rmi:" .. roomId,
             kind = "RMI",
@@ -2491,15 +3076,30 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             end
             map[parsed.lookupKey] = nowSeen
         end
-        local key = "w:" .. parsed.lookupKey
+        local _, _, bnAccName, bnAccId = FindBNetWoWGameAccountByChar(parsed, guid)
+        local linked = FindLinkedDirectThread(parsed, bnAccId)
+        local key = linked and linked.key or ("w:" .. parsed.lookupKey)
+        local kind = linked and linked.kind or "WHISPER"
+        local title = (linked and linked.title and linked.title ~= "" and linked.title) or parsed.displayName
         local cls = LookupClassFromCache(parsed.lookupKey, guid)
-        local t = EnsureThread(key, "WHISPER", parsed.displayName, {
+        local t = EnsureThread(key, kind, title, {
             targetName = parsed.displayName,
+            bnetAccountID = bnAccId or (linked and linked.bnetAccountID),
+            bnetName = bnAccName or (linked and linked.bnetName),
             classFile = cls,
         })
         local _, _, myFirst = GetMyInfo()
         local senderLabel = incoming and parsed.firstName or (myFirst or L["Me"])
-        AppendMessage(t, senderLabel, text, incoming, incoming and cls or nil, false, not incoming)
+        AppendMessage(t, senderLabel, text, incoming, incoming and cls or nil, (kind ~= "WHISPER"), not incoming)
+        if incoming and not Compat.IsMe(parsed.displayName) and Chat:IsDirectChatEnabled() then
+            Chat:QueuePoliteDiscoveryPing({
+                targetName = parsed.displayName,
+                lookupKey = parsed.lookupKey,
+                bnetAccountID = bnAccId,
+                guid = guid,
+                allowWhisperReply = true,
+            })
+        end
         return
     end
 
@@ -2507,16 +3107,25 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
         -- 11th arg after author is presenceID / bnSenderID (13th total arg -> index 11 in varargs).
         local presenceID = Safe.Number(select(11, ...))
         local author = Safe.String(authorRaw) or ("BNet #" .. tostring(presenceID or "?"))
-        local _, fullChar = FindBNetWoWGameAccount(presenceID)
-        local key = "bn:" .. tostring(presenceID or author:lower())
-        local t = EnsureThread(key, "BN_WHISPER", author, {
-            bnetAccountID = presenceID,
+        local _, fullChar, _, canonId = FindBNetWoWGameAccount(presenceID)
+        local resolvedBNetId = canonId or presenceID
+        local charParsed = fullChar and Compat.ParseCharacterName(fullChar)
+        local linked = FindLinkedDirectThread(charParsed, resolvedBNetId)
+        local key = linked and linked.key or ("bn:" .. tostring(resolvedBNetId or author:lower()))
+        local kind = linked and linked.kind or "BN_WHISPER"
+        local title = (linked and linked.kind == "WHISPER" and linked.title) or author
+        local cls = charParsed and LookupClassFromCache(charParsed.lookupKey)
+        local t = EnsureThread(key, kind, title, {
+            bnetAccountID = resolvedBNetId,
             bnetName = author,
-            targetName = fullChar,
+            targetName = fullChar or (linked and linked.targetName),
+            classFile = cls,
         })
         local _, _, myFirst = GetMyInfo()
-        local senderLabel = incoming and author or (myFirst or L["Me"])
-        AppendMessage(t, senderLabel, text, incoming, nil, true, not incoming)
+        local useCharLabel = (kind == "WHISPER" and charParsed ~= nil)
+        local senderLabel = incoming and (useCharLabel and charParsed.firstName or author) or (myFirst or L["Me"])
+        local skipPersist = not useCharLabel
+        AppendMessage(t, senderLabel, text, incoming, useCharLabel and cls or nil, skipPersist, not incoming)
         return
     end
 
@@ -2591,22 +3200,96 @@ function Chat:Init()
         end
     end)
 
+    for _, ev in ipairs({
+        "BN_FRIEND_INFO_CHANGED",
+        "BN_FRIEND_ACCOUNT_ONLINE",
+        "BN_FRIEND_ACCOUNT_OFFLINE",
+        "BN_CONNECTED",
+        "BN_DISCONNECTED",
+    }) do
+        ns.RegisterEvent(self, ev, function()
+            self:InvalidateBNetCache()
+        end)
+    end
+
+    for _, ev in ipairs({
+        "FRIENDLIST_UPDATE",
+        "GUILD_ROSTER_UPDATE",
+    }) do
+        ns.RegisterEvent(self, ev, function()
+            self:BumpPeerStateGen()
+        end)
+    end
+
+    if not ERR_NOT_FOUND_PATTERN and _G.ERR_CHAT_PLAYER_NOT_FOUND_S then
+        ERR_NOT_FOUND_PATTERN = "^" .. _G.ERR_CHAT_PLAYER_NOT_FOUND_S:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1"):gsub("%%%%s", ".*")
+    end
+
     -- Disqualify Forever WHISPER candidate strings that the server explicitly reports as not playing.
     ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, msgRaw)
         if Safe.IsSecret(msgRaw) then return end
-        local msg = Safe.String(msgRaw)
-        if not msg or msg == "" or not Chat.lastProbeCandidate then return end
         local monoNow = GetTime and GetTime() or 0
-        for tKey, rec in pairs(Chat.lastProbeCandidate) do
-            if type(rec) == "table" and rec.candidate and (monoNow - (rec.at or 0)) <= 4.0 then
-                if msg:find(rec.candidate, 1, true) and (_G.ERR_CHAT_PLAYER_NOT_FOUND_S == nil or msg:find("^" .. _G.ERR_CHAT_PLAYER_NOT_FOUND_S:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1"):gsub("%%%%s", ".*")) or msg:lower():find("not currently playing") or msg:lower():find("no player named") or msg:lower():find("nenhum jogador")) then
-                    Chat.rejectedWhisperTargets = Chat.rejectedWhisperTargets or {}
-                    Chat.rejectedWhisperTargets[rec.candidate] = monoNow + 60
+        if (monoNow - (Chat._lastCandidateTrackAt or 0)) > 10 then return end
+
+        local msg = Safe.String(msgRaw)
+        if not msg or msg == "" then return end
+        local lowerMsg = msg:lower()
+        local looksNotFound = (ERR_NOT_FOUND_PATTERN and msg:find(ERR_NOT_FOUND_PATTERN))
+            or lowerMsg:find("not currently playing", 1, true)
+            or lowerMsg:find("no player named", 1, true)
+            or lowerMsg:find("nenhum jogador", 1, true)
+            or lowerMsg:find("ningún jugador", 1, true)
+            or lowerMsg:find("ningun jugador", 1, true)
+        if not looksNotFound then return end
+
+        local function rejectCand(cand, lookupKey)
+            if not cand or cand == "" then return false end
+            local matched = msg:find(cand, 1, true)
+            if not matched and cand:find("-", 1, true) then
+                matched = msg:find((cand:gsub("%-", " ")), 1, true)
+            end
+            if not matched then
+                return false
+            end
+            Chat.rejectedWhisperTargets = Chat.rejectedWhisperTargets or {}
+            Chat.rejectedWhisperTargets[cand] = monoNow + 60
+            if lookupKey and Chat.resolvedWhisperTargets and Chat.resolvedWhisperTargets[lookupKey] == cand then
+                Chat.resolvedWhisperTargets[lookupKey] = nil
+            end
+            return true
+        end
+
+        if Chat.lastProbeCandidate then
+            for tKey, rec in pairs(Chat.lastProbeCandidate) do
+                if type(rec) == "table" and rec.candidate and (monoNow - (rec.at or 0)) <= 4.0 then
+                    if rejectCand(rec.candidate) then
+                        Chat.lastProbeCandidate[tKey] = nil
+                    end
+                elseif type(rec) == "table" and (monoNow - (rec.at or 0)) > 10 then
                     Chat.lastProbeCandidate[tKey] = nil
                 end
-            elseif type(rec) == "table" and (monoNow - (rec.at or 0)) > 10 then
-                Chat.lastProbeCandidate[tKey] = nil
             end
+        end
+        if Chat.lastWhisperCandidates then
+            for tKey, rec in pairs(Chat.lastWhisperCandidates) do
+                if type(rec) == "table" and type(rec.candidates) == "table" and (monoNow - (rec.at or 0)) <= 4.0 then
+                    for _, cand in ipairs(rec.candidates) do
+                        rejectCand(cand, rec.lookupKey)
+                    end
+                elseif type(rec) == "table" and (monoNow - (rec.at or 0)) > 10 then
+                    Chat.lastWhisperCandidates[tKey] = nil
+                end
+            end
+        end
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        if Chat._loginBNetScanScheduled then return end
+        Chat._loginBNetScanScheduled = true
+        if C_Timer and C_Timer.After then
+            C_Timer.After(10.0, function()
+                Chat:QueueLoginBNetDiscovery()
+            end)
         end
     end)
 

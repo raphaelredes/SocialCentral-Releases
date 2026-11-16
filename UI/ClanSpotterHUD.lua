@@ -27,7 +27,7 @@ local SpotterHUD = {
     worldMapPins = {},
 }
 
-local HUD_WIDTH = 248
+local HUD_WIDTH = 268
 local PILL_H = 48
 local ACTION_H = 52
 local ARROW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\arrow"
@@ -142,7 +142,25 @@ local function OpenTargetContextMenu(anchor, entry)
             end
         end
 
+        if entry._anchorMapID and entry._anchorMapX and entry._anchorMapY
+            and C_Map and C_Map.SetUserWaypoint and UiMapPoint and UiMapPoint.CreateFromCoordinates
+        then
+            local hasNativeWp = (SpotterHUD._nativeWaypointKey == entry.key)
+            root:CreateButton(hasNativeWp and L["Clear 3D Waypoint"] or L["Mark 3D Waypoint"], function()
+                if SpotterHUD._nativeWaypointKey == entry.key then
+                    SpotterHUD:ClearNativeWaypoint()
+                else
+                    SpotterHUD._nativeWaypointKey = entry.key
+                    SpotterHUD._nativeWaypointMapId = nil
+                    SpotterHUD:SyncNativeWaypoint(entry, true)
+                end
+            end)
+        end
+
         root:CreateButton(L["Dismiss Target"], function()
+            if SpotterHUD._nativeWaypointKey == entry.key then
+                SpotterHUD:ClearNativeWaypoint()
+            end
             if ns.Spotter then
                 ns.Spotter:DismissTarget(entry.key)
             end
@@ -402,7 +420,7 @@ local function ProjectCoordsToMap(srcMapID, srcX, srcY, destMapID)
     return nil, nil
 end
 
-local function PrepareMinimapContext()
+local function PrepareMinimapContext(needWorldCoords)
     local ctx = reusableMinimapCtx
     ctx.valid = false
     if not (Minimap and Minimap:IsShown()) then
@@ -422,6 +440,19 @@ local function PrepareMinimapContext()
     ctx.mapRadius = mapRadius
     ctx.miniW = (Minimap:GetWidth() or 140) / 2
     ctx.miniH = (Minimap:GetHeight() or 140) / 2
+    ctx.hasWorldCoords = false
+    ctx.valid = true
+
+    if needWorldCoords == false then
+        return ctx
+    end
+
+    ctx.rotate = GetCVar and GetCVar("rotateMinimap") == "1"
+    ctx.facing = (GetPlayerFacing and Safe.Number(Safe.Call(GetPlayerFacing))) or 0
+    if ctx.rotate then
+        ctx.sinF = math.sin(ctx.facing)
+        ctx.cosF = math.cos(ctx.facing)
+    end
 
     if not (C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition and CreateVector2D and C_Map.GetWorldPosFromMapPos) then
         return ctx
@@ -449,18 +480,40 @@ local function PrepareMinimapContext()
     ctx.pInst = pInst
     ctx.pWorldX = pWorld.x
     ctx.pWorldY = pWorld.y
-    ctx.rotate = GetCVar and GetCVar("rotateMinimap") == "1"
-    if ctx.rotate and GetPlayerFacing then
-        local facing = GetPlayerFacing() or 0
-        ctx.sinF = math.sin(facing)
-        ctx.cosF = math.cos(facing)
-    end
-    ctx.valid = true
+    ctx.hasWorldCoords = true
     return ctx
 end
 
+local function ProjectDeltaToMinimap(ctx, dNorth, dWest, maxRatio)
+    local xYards = -dWest  -- yards East (+right)
+    local yYards = dNorth  -- yards North (+up)
+
+    if ctx.rotate and ctx.sinF and ctx.cosF then
+        local rx = xYards * ctx.cosF - yYards * ctx.sinF
+        local ry = xYards * ctx.sinF + yYards * ctx.cosF
+        xYards, yYards = rx, ry
+    end
+
+    local normX = xYards / ctx.mapRadius
+    local normY = yYards / ctx.mapRadius
+    local normDistSq = normX * normX + normY * normY
+    local cap = maxRatio or 0.86
+    local onEdge = false
+
+    if normDistSq > (cap * cap) then
+        local normDist = math.sqrt(normDistSq)
+        if normDist > 0 then
+            normX = (normX / normDist) * cap
+            normY = (normY / normDist) * cap
+        end
+        onEdge = true
+    end
+
+    return normX * ctx.miniW, normY * ctx.miniH, onEdge
+end
+
 local function ProjectCoordsToMinimapWithContext(ctx, srcMapID, srcX, srcY)
-    if not (ctx and ctx.valid and srcMapID and srcX and srcY) then
+    if not (ctx and ctx.valid and ctx.hasWorldCoords and srcMapID and srcX and srcY) then
         return nil, nil, false
     end
 
@@ -475,33 +528,7 @@ local function ProjectCoordsToMinimapWithContext(ctx, srcMapID, srcX, srcY)
         return nil, nil, false
     end
 
-    local dNorth = tWorld.x - ctx.pWorldX
-    local dWest = tWorld.y - ctx.pWorldY
-    local xDist = -dWest  -- yards East (+right)
-    local yDist = dNorth  -- yards North (+up)
-
-    if ctx.rotate and ctx.sinF and ctx.cosF then
-        local rx = xDist * ctx.cosF - yDist * ctx.sinF
-        local ry = xDist * ctx.sinF + yDist * ctx.cosF
-        xDist, yDist = rx, ry
-    end
-
-    local normX = xDist / ctx.mapRadius
-    local normY = yDist / ctx.mapRadius
-    local normDistSq = normX * normX + normY * normY
-    local maxRatio = 0.88
-    local onEdge = false
-
-    if normDistSq > (maxRatio * maxRatio) then
-        local normDist = math.sqrt(normDistSq)
-        if normDist > 0 then
-            normX = (normX / normDist) * maxRatio
-            normY = (normY / normDist) * maxRatio
-        end
-        onEdge = true
-    end
-
-    return normX * ctx.miniW, normY * ctx.miniH, onEdge
+    return ProjectDeltaToMinimap(ctx, tWorld.x - ctx.pWorldX, tWorld.y - ctx.pWorldY, 0.88)
 end
 
 local function AcquireMinimapPin(idx)
@@ -510,33 +537,49 @@ local function AcquireMinimapPin(idx)
     if pin then return pin end
 
     pin = CreateFrame("Button", "SocialCentralSpotterMiniPin" .. idx, Minimap, "SecureActionButtonTemplate")
-    pin:SetSize(14, 14)
+    pin:SetSize(16, 16)
     pin:RegisterForClicks("AnyUp")
     pin:SetAttribute("useOnKeyDown", false)
     pin:SetFrameStrata("MEDIUM")
-    pin:SetFrameLevel((Minimap:GetFrameLevel() or 10) + 15)
+    pin:SetFrameLevel((Minimap:GetFrameLevel() or 10) + 20)
+
+    local glow = pin:CreateTexture(nil, "BACKGROUND", nil, -4)
+    glow:SetSize(22, 22)
+    glow:SetPoint("CENTER")
+    glow:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\toast-glow")
+    glow:SetBlendMode("ADD")
+    glow:SetVertexColor(0.98, 0.80, 0.24, 0.55)
+    pin.glow = glow
 
     local solidBg = pin:CreateTexture(nil, "BACKGROUND", nil, -8)
-    solidBg:SetSize(14, 14)
+    solidBg:SetSize(16, 16)
     solidBg:SetPoint("CENTER")
     solidBg:SetTexture(DOT_CIRCLE_TEX)
     solidBg:SetVertexColor(0.06, 0.08, 0.12, 1.0)
     pin._solidOpaqueBg = solidBg
 
     local outerRing = pin:CreateTexture(nil, "ARTWORK", nil, 0)
-    outerRing:SetSize(14, 14)
+    outerRing:SetSize(16, 16)
     outerRing:SetPoint("CENTER")
     outerRing:SetTexture(DOT_CIRCLE_TEX)
     outerRing:SetVertexColor(0.98, 0.80, 0.24, 1.0)
     pin.outerRing = outerRing
 
     local icon = pin:CreateTexture(nil, "OVERLAY", nil, 1)
-    icon:SetSize(10, 10)
+    icon:SetSize(12, 12)
     icon:SetPoint("CENTER")
     icon:SetTexture(RADAR_FALLBACK_ICON)
     icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    ApplyCircleMask(pin, icon, 10)
+    ApplyCircleMask(pin, icon, 12)
     pin.icon = icon
+
+    local distFs = pin:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    distFs:SetPoint("TOP", pin, "BOTTOM", 0, 1)
+    distFs:SetTextColor(1, 0.92, 0.60, 1)
+    distFs:SetShadowColor(0, 0, 0, 1)
+    distFs:SetShadowOffset(1, -1)
+    distFs:Hide()
+    pin.distFs = distFs
 
     pin:SetScript("OnEnter", function(selfPin)
         if selfPin.entry then
@@ -630,23 +673,30 @@ local function GetPlottableTargets()
         local now = GetTime()
         for senderName, p in pairs(ns.Spotter.peerPositions) do
             if p and p.mapID and p.x and p.y and (now - (p.at or 0)) < 150 then
-                if not reusablePinSeen[senderName] then
-                    reusablePinSeen[senderName] = true
+                local canonKey = p.key or senderName
+                if not reusablePinSeen[canonKey] and not (p.firstLower and reusablePinSeen[p.firstLower]) then
+                    reusablePinSeen[canonKey] = true
+                    if p.firstLower then
+                        reusablePinSeen[p.firstLower] = true
+                    end
                     local stance = "SAME"
-                    if ns.Watchlist and ns.Watchlist.IsOnWatchlist and ns.Watchlist:IsOnWatchlist(senderName) then
+                    if ns.Watchlist and ns.Watchlist.IsOnWatchlist and ns.Watchlist:IsOnWatchlist(canonKey) then
                         stance = "WATCHLIST"
-                    elseif ns.Compat and ns.Compat.IsFriend and ns.Compat.IsFriend(senderName) then
+                    elseif ns.Compat and ns.Compat.IsFriend and ns.Compat.IsFriend(canonKey) then
                         stance = "FRIEND"
                     end
-                    local entry = reusablePeerPool[senderName]
+                    local entry = reusablePeerPool[canonKey]
                     if not entry then
                         entry = {
-                            key = senderName,
-                            displayName = senderName,
-                            unitName = senderName,
+                            key = canonKey,
+                            displayName = p.name or senderName,
+                            unitName = p.name or senderName,
                             isPeer = true,
                         }
-                        reusablePeerPool[senderName] = entry
+                        reusablePeerPool[canonKey] = entry
+                    elseif p.name then
+                        entry.displayName = p.name
+                        entry.unitName = p.name
                     end
                     entry.stance = stance
                     entry.classFile = p.classFile
@@ -910,7 +960,11 @@ function SpotterHUD:BuildFrame()
     whisperBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if not e then return end
-        if ns.Chat and ns.Chat.OpenDirectConversation then
+        local hasAddon = ns.Chat and e.key and (
+            (ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(e.key))
+            or (ns.Chat.GetSavedPeerRecord and ns.Chat:GetSavedPeerRecord(e.key) ~= nil)
+        )
+        if hasAddon and ns.Chat.OpenDirectConversation then
             ns.Chat:OpenDirectConversation({
                 targetName = e.targetName or e.displayName,
                 classFile = e.classFile,
@@ -1011,7 +1065,9 @@ function SpotterHUD:BuildFrame()
 end
 
 function SpotterHUD:SyncTickerState(kin)
-    local interval = 0.5
+    local e = self._compassEntry
+    local hasCoords = e and (e._anchorMapX ~= nil or e._exactWorldAt ~= nil)
+    local interval = hasCoords and 0.20 or 0.50
     self._tickerInterval = interval
 
     if not self._mainOnUpdateFn then
@@ -1416,7 +1472,17 @@ end
 function SpotterHUD:UpdateMinimapPinsInternal(targets)
     local miniIdx = 0
     local inCombat = InCombatLockdown and InCombatLockdown()
-    local ctx = PrepareMinimapContext()
+    local nowClock = GetTime and GetTime() or 0
+    local fallbackIdx = 0
+    local anyCoords = false
+    for i = 1, #targets do
+        local t = targets[i]
+        if t._anchorMapX or t._exactWorldAt then
+            anyCoords = true
+            break
+        end
+    end
+    local ctx = PrepareMinimapContext(anyCoords)
 
     if ctx.valid then
         for i = 1, #targets do
@@ -1426,23 +1492,25 @@ function SpotterHUD:UpdateMinimapPinsInternal(targets)
             local my = entry._anchorMapY
 
             local offX, offY, onEdge
-            if mapID and mx and my then
+            local distBadgeVal
+            if entry._exactWorldAt and (nowClock - entry._exactWorldAt) <= 3.0 and entry._exactWorldNorth and entry._exactWorldWest then
+                offX, offY, onEdge = ProjectDeltaToMinimap(ctx, entry._exactWorldNorth, entry._exactWorldWest, 0.86)
+            elseif ctx.hasWorldCoords and mapID and mx and my then
                 offX, offY, onEdge = ProjectCoordsToMinimapWithContext(ctx, mapID, mx, my)
-            elseif entry._kinematics and entry._kinematics.distYards and entry._kinematics.angle then
-                local distY = entry._kinematics.distYards
-                local a = entry._kinematics.angle
-                local xYards = -math.sin(a) * distY
-                local yYards = math.cos(a) * distY
-                local nX = xYards / ctx.mapRadius
-                local nY = yYards / ctx.mapRadius
-                local dSq = nX * nX + nY * nY
-                local maxR = 0.88
-                if dSq > (maxR * maxR) then
-                    local d = math.sqrt(dSq)
-                    if d > 0 then nX = (nX / d) * maxR; nY = (nY / d) * maxR end
-                    onEdge = true
+            else
+                local distY = (entry._kinematics and entry._kinematics.distYards) or entry.lastDistYards
+                if (not distY or distY <= 0) and (entry.isTarget or entry.isSoftTarget or entry.onScreen or entry.unit) then
+                    distY = 25
                 end
-                offX, offY = nX * ctx.miniW, nY * ctx.miniH
+                if distY and distY > 0 then
+                    local slotAngle = (fallbackIdx == 0) and 0 or ((math.ceil(fallbackIdx / 2) * 0.34) * ((fallbackIdx % 2 == 1) and 1 or -1))
+                    fallbackIdx = fallbackIdx + 1
+                    local ratio = math.max(0.24, math.min(0.78, distY / ctx.mapRadius))
+                    offX = math.sin(slotAngle) * ratio * ctx.miniW
+                    offY = math.cos(slotAngle) * ratio * ctx.miniH
+                    onEdge = ratio >= 0.78
+                    distBadgeVal = distY
+                end
             end
 
             if offX and offY then
@@ -1458,6 +1526,20 @@ function SpotterHUD:UpdateMinimapPinsInternal(targets)
                 end
                 pin.entry = entry
 
+                if pin.distFs then
+                    if distBadgeVal then
+                        local roundedDist = math.floor(distBadgeVal + 0.5)
+                        if pin._lastDistBadge ~= roundedDist then
+                            pin._lastDistBadge = roundedDist
+                            pin.distFs:SetText(string.format("%dm", roundedDist))
+                        end
+                        pin.distFs:Show()
+                    elseif pin._lastDistBadge ~= nil then
+                        pin._lastDistBadge = nil
+                        pin.distFs:Hide()
+                    end
+                end
+
                 local stanceVal = entry.stance or "SAME"
                 if pin._lastStance ~= stanceVal or pin._lastOnEdge ~= onEdge then
                     pin._lastStance = stanceVal
@@ -1465,6 +1547,9 @@ function SpotterHUD:UpdateMinimapPinsInternal(targets)
                     local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
                     if pin.outerRing then
                         pin.outerRing:SetVertexColor(rgb[1], rgb[2], rgb[3], onEdge and 0.75 or 1.0)
+                    end
+                    if pin.glow then
+                        pin.glow:SetVertexColor(rgb[1], rgb[2], rgb[3], onEdge and 0.35 or 0.55)
                     end
                 end
 
@@ -1590,16 +1675,82 @@ function SpotterHUD:UpdateWorldMapPinsInternal(targets)
     end
 end
 
+function SpotterHUD:ClearNativeWaypoint()
+    if not self._nativeWaypointKey then return end
+    self._nativeWaypointKey = nil
+    self._nativeWaypointMapId = nil
+    self._nativeWaypointX = nil
+    self._nativeWaypointY = nil
+    self._nativeWaypointAt = 0
+    if C_Map and C_Map.ClearUserWaypoint then
+        pcall(C_Map.ClearUserWaypoint)
+    end
+end
+
+function SpotterHUD:SyncNativeWaypoint(entry, forceNow)
+    if not self._nativeWaypointKey then return end
+    if not entry or entry.key ~= self._nativeWaypointKey then
+        self:ClearNativeWaypoint()
+        return
+    end
+    local mapID = entry._anchorMapID
+    local x, y = entry._anchorMapX, entry._anchorMapY
+    if not (mapID and x and y) then
+        return
+    end
+    if entry.distanceMeters and entry.distanceMeters <= 8 then
+        self:ClearNativeWaypoint()
+        return
+    end
+    local now = GetTime and GetTime() or 0
+    if not forceNow and self._nativeWaypointAt and (now - self._nativeWaypointAt) < 1.5 then
+        return
+    end
+    if self._nativeWaypointMapId == mapID
+        and self._nativeWaypointX and math.abs(self._nativeWaypointX - x) < 0.002
+        and self._nativeWaypointY and math.abs(self._nativeWaypointY - y) < 0.002
+    then
+        self._nativeWaypointAt = now
+        return
+    end
+    if not (C_Map and C_Map.SetUserWaypoint and UiMapPoint and UiMapPoint.CreateFromCoordinates) then
+        return
+    end
+    if C_Map.CanSetUserWaypointOnMap then
+        local okCan, canSet = pcall(C_Map.CanSetUserWaypointOnMap, mapID)
+        if okCan and canSet == false then return end
+    end
+    local okPt, pt = pcall(UiMapPoint.CreateFromCoordinates, mapID, x, y)
+    if not okPt or not pt then return end
+    local okSet = pcall(C_Map.SetUserWaypoint, pt)
+    if okSet then
+        self._nativeWaypointMapId = mapID
+        self._nativeWaypointX = x
+        self._nativeWaypointY = y
+        self._nativeWaypointAt = now
+        if C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint then
+            pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+        end
+    end
+end
+
 function SpotterHUD:UpdateCompassVisuals(snap, dt)
     local f = self.frame
     local cf = self.combatArrowFrame
     local mainCompassActive = f and f:IsShown() and f.compassBar and f.compassBar:IsShown()
     local combatCompassActive = cf and cf:IsShown()
 
+    local entry = self._compassEntry
+    local kin = (entry and ns.Spotter and ns.Spotter.GetTargetKinematics) and ns.Spotter:GetTargetKinematics(entry) or nil
+
+    local pinInterval = (entry and (entry._anchorMapX ~= nil or entry._exactWorldAt ~= nil)) and 0.20 or 0.50
     local now = GetTime and GetTime() or 0
-    if snap or not self._lastMapPinsAt or (now - self._lastMapPinsAt) >= 1.5 then
+    if snap or not self._lastMapPinsAt or (now - self._lastMapPinsAt) >= pinInterval then
         self._lastMapPinsAt = now
         self:UpdateMapPins()
+    end
+    if self._nativeWaypointKey then
+        self:SyncNativeWaypoint(entry, false)
     end
 
     if not (mainCompassActive or combatCompassActive) then
@@ -1607,13 +1758,6 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
         return
     end
 
-    local entry = self._compassEntry
-    if not (entry and ns.Spotter and ns.Spotter.GetTargetKinematics) then
-        self:SyncTickerState(nil)
-        return
-    end
-
-    local kin = ns.Spotter:GetTargetKinematics(entry)
     if not kin then
         self:SyncTickerState(nil)
         return
@@ -1741,6 +1885,7 @@ function SpotterHUD:Refresh()
     end
 
     if totalCount == 0 and not self.manualPinnedEmpty then
+        self:ClearNativeWaypoint()
         self.focusedKey = nil
         self.interactionOpen = false
         self.interactionKey = nil
@@ -1924,18 +2069,18 @@ function SpotterHUD:Refresh()
                 if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
                 if f.actionPanel.tellBtn then f.actionPanel.tellBtn:Hide() end
                 if f.actionPanel.scoutBtn then
-                    f.actionPanel.scoutBtn:SetWidth(76)
+                    f.actionPanel.scoutBtn:SetWidth(84)
                     f.actionPanel.scoutBtn:ClearAllPoints()
                     f.actionPanel.scoutBtn:SetPoint("BOTTOMLEFT", 5, 4)
                     f.actionPanel.scoutBtn:Show()
                     Theme:SetButtonText(f.actionPanel.scoutBtn, L["Scout Alert"])
                 end
                 Theme:SetButtonText(f.actionPanel.inviteBtn, L["Diplomacy"])
-                f.actionPanel.inviteBtn:SetWidth(72)
+                f.actionPanel.inviteBtn:SetWidth(78)
                 f.actionPanel.inviteBtn:ClearAllPoints()
                 f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.scoutBtn, "RIGHT", 3, 0)
                 if f.actionPanel.watchBtn then
-                    f.actionPanel.watchBtn:SetWidth(72)
+                    f.actionPanel.watchBtn:SetWidth(78)
                     f.actionPanel.watchBtn:ClearAllPoints()
                     f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
                 end
@@ -1944,18 +2089,18 @@ function SpotterHUD:Refresh()
                 if f.actionPanel.tellBtn then f.actionPanel.tellBtn:Hide() end
                 if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
                 Theme:SetButtonText(f.actionPanel.inviteBtn, L["Dismiss Target"])
-                f.actionPanel.inviteBtn:SetWidth(108)
+                f.actionPanel.inviteBtn:SetWidth(118)
                 f.actionPanel.inviteBtn:ClearAllPoints()
                 f.actionPanel.inviteBtn:SetPoint("BOTTOMLEFT", 5, 4)
                 if f.actionPanel.watchBtn then
-                    f.actionPanel.watchBtn:SetWidth(108)
+                    f.actionPanel.watchBtn:SetWidth(118)
                     f.actionPanel.watchBtn:ClearAllPoints()
                     f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 4, 0)
                 end
             else
                 if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
                 if f.actionPanel.whisperBtn then
-                    f.actionPanel.whisperBtn:SetWidth(60)
+                    f.actionPanel.whisperBtn:SetWidth(68)
                     f.actionPanel.whisperBtn:Show()
                     f.actionPanel.whisperBtn:ClearAllPoints()
                     f.actionPanel.whisperBtn:SetPoint("BOTTOMLEFT", 5, 4)
@@ -1967,11 +2112,11 @@ function SpotterHUD:Refresh()
                     f.actionPanel.tellBtn:SetPoint("LEFT", f.actionPanel.whisperBtn, "RIGHT", 3, 0)
                 end
                 Theme:SetButtonText(f.actionPanel.inviteBtn, L["Invite"])
-                f.actionPanel.inviteBtn:SetWidth(54)
+                f.actionPanel.inviteBtn:SetWidth(64)
                 f.actionPanel.inviteBtn:ClearAllPoints()
                 f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.tellBtn, "RIGHT", 3, 0)
                 if f.actionPanel.watchBtn then
-                    f.actionPanel.watchBtn:SetWidth(75)
+                    f.actionPanel.watchBtn:SetWidth(78)
                     f.actionPanel.watchBtn:ClearAllPoints()
                     f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 3, 0)
                 end

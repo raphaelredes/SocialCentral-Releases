@@ -483,6 +483,32 @@ end
 local function ProcessPeerVersion(senderDisplay, senderLookupKey, remoteVer, chatType)
     if not IsSaneRemoteSemVer(remoteVer) then return end
 
+    if chatType == "GUILD" and type(senderLookupKey) == "string" and not senderLookupKey:find("-", 1, true) then
+        local cached = Compat.LookupForeverFullName and Compat.LookupForeverFullName(nil, senderLookupKey, false)
+        local cParsed = cached and cached.fullName and Compat.ParseCharacterName and Compat.ParseCharacterName(cached.fullName)
+        if cParsed and cParsed.displayName and cParsed.lookupKey then
+            senderDisplay = cParsed.displayName
+            senderLookupKey = cParsed.lookupKey
+        end
+        if not senderLookupKey:find("-", 1, true) and Store and type(Store.guildRosterRanks) == "table" then
+            local matchCount, matchRec = 0, nil
+            for _, rk in pairs(Store.guildRosterRanks) do
+                if type(rk) == "table" and rk.displayName and not rk.isSelf then
+                    local _, fn = Compat.ParseCharacterFields(rk.displayName)
+                    if fn and fn:lower() == senderLookupKey then
+                        matchCount = matchCount + 1
+                        matchRec = rk
+                        if matchCount > 1 then break end
+                    end
+                end
+            end
+            if matchCount == 1 and matchRec and matchRec.lookupKey then
+                senderDisplay = matchRec.displayName
+                senderLookupKey = matchRec.lookupKey
+            end
+        end
+    end
+
     Clan.peerVersions = Clan.peerVersions or {}
     Clan.peerVersions[senderLookupKey] = remoteVer
 
@@ -3970,6 +3996,95 @@ function Clan:GetSignupSummary(evt)
     return counts
 end
 
+local function BuildPeerDigestSuffix(baseLen)
+    local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+    local peers = bucket and bucket.peers
+    if type(peers) ~= "table" then return "" end
+
+    local now = time()
+    local cutoff = now - (14 * 86400)
+    local items = {}
+    for k, rec in pairs(peers) do
+        if type(k) == "string" and k ~= "" and not k:find("[%s:~|,]") and type(rec) == "table" then
+            local ver = Safe.String(rec.version)
+            local ts = tonumber(rec.updatedAt) or 0
+            if ver and ver ~= "" and IsSaneRemoteSemVer(ver) and ts >= cutoff and Store and Store.guildRosterRanks and Store.guildRosterRanks[k] ~= nil then
+                items[#items + 1] = { key = k, ver = ver, ts = ts }
+            end
+        end
+    end
+    if #items == 0 then return "" end
+    if #items > 1 then
+        table.sort(items, function(a, b) return a.ts > b.ts end)
+    end
+
+    local parts = {}
+    local curLen = (baseLen or 12) + 1
+    local count = 0
+    for i = 1, math.min(8, #items) do
+        local entry = items[i].key .. ":" .. items[i].ver
+        local addLen = #entry + (count > 0 and 1 or 0)
+        if (curLen + addLen) > 235 then
+            break
+        end
+        parts[#parts + 1] = entry
+        curLen = curLen + addLen
+        count = count + 1
+    end
+    if count == 0 then return "" end
+    return "~" .. table.concat(parts, ",")
+end
+
+local function ProcessGuildPeerDigest(digestStr, senderLookupKey)
+    if type(digestStr) ~= "string" or digestStr == "" or not senderLookupKey then return end
+    if not (Compat.IsInGuild and Compat.IsInGuild()) then return end
+    if not IsSenderConfirmedInGuild(senderLookupKey) then return end
+
+    local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+    if not bucket then return end
+    bucket.peers = bucket.peers or {}
+
+    local now = time()
+    local gossipStamp = now - 600
+    local processed = 0
+    local myFull = (Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()) or Compat.GetPlayerName()
+    local myKey = (Compat.ParseCharacterFields and myFull) and select(1, Compat.ParseCharacterFields(myFull)) or nil
+
+    for token in digestStr:gmatch("([^,]+)") do
+        processed = processed + 1
+        if processed > 10 then break end
+        local lk, ver = token:match("^([^:%s~|,]+):([%d]+%.[%d]+%.[%d]+)$")
+        if lk and lk ~= "" and lk ~= myKey and not Compat.IsMe(lk) and ver and IsSaneRemoteSemVer(ver) then
+            local rosterRec = Store and Store.guildRosterRanks and Store.guildRosterRanks[lk]
+            local inGuild = (rosterRec ~= nil) or (Compat.IsGuildMember and Compat.IsGuildMember(lk, nil, lk))
+            if inGuild then
+                local existing = bucket.peers[lk]
+                local sr = Store and Store.socialByLookup and Store.socialByLookup[lk]
+                local dispName = (rosterRec and type(rosterRec.displayName) == "string" and rosterRec.displayName ~= "" and rosterRec.displayName)
+                    or (existing and type(existing.name) == "string" and existing.name ~= "" and existing.name)
+                    or (sr and sr.name)
+                    or lk
+                if not Compat.IsMe(dispName) then
+                    if type(existing) ~= "table" then
+                        bucket.peers[lk] = {
+                            name = dispName,
+                            version = ver,
+                            updatedAt = gossipStamp,
+                        }
+                    elseif (tonumber(existing.updatedAt) or 0) < gossipStamp then
+                        existing.version = ver
+                        existing.updatedAt = gossipStamp
+                        if dispName ~= lk then existing.name = dispName end
+                    end
+                    if ns.Chat and ns.Chat.RecordPassiveSavedPeer then
+                        ns.Chat:RecordPassiveSavedPeer(lk, dispName, ver, gossipStamp)
+                    end
+                end
+            end
+        end
+    end
+end
+
 local function OnAddonMessage(_, _, prefix, text, chatType, sender)
     if prefix ~= Clan.PREFIX then return end
     if chatType ~= "GUILD" and chatType ~= "PARTY" and chatType ~= "RAID" and chatType ~= "INSTANCE_CHAT" and chatType ~= "WHISPER" then
@@ -3995,6 +4110,9 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         if not (ns.db and ns.db.settings and ns.db.settings.versionCheck ~= false) then return end
         local remoteVer = parts[2]
         ProcessPeerVersion(parsed.displayName, parsed.lookupKey, remoteVer, chatType)
+        if cmd == "VR" and chatType == "GUILD" and parts[3] and parts[3] ~= "" then
+            ProcessGuildPeerDigest(parts[3], parsed.lookupKey)
+        end
 
         if cmd == "VH" and IsSaneRemoteSemVer(ns.version) and IsSaneRemoteSemVer(remoteVer) and Compat.CompareSemVer(ns.version, remoteVer) >= 0 then
             local delay = 1.5 + math.random() * 2.5
@@ -4008,7 +4126,9 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 end
             end
             C_Timer.After(delay, function()
-                TransmitAddonMessage(Clan, "VR~" .. ns.version, targetChannel, true)
+                local baseMsg = "VR~" .. ns.version
+                local msg = baseMsg .. ((targetChannel == "GUILD") and BuildPeerDigestSuffix(#baseMsg) or "")
+                TransmitAddonMessage(Clan, msg, targetChannel, true)
             end)
         end
         if chatType == "GUILD" then QueueClanEmit(0.8) end
