@@ -176,7 +176,7 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 2670)
+    content:SetSize(590, 3280)
     scrollFrame:SetScrollChild(content)
     scrollFrame:SetScript("OnSizeChanged", function(self)
         local w = math.max(460, (self:GetWidth() or 590) - 10)
@@ -473,10 +473,72 @@ local function BuildPanel()
         L["Check to hear an audio chime when a watched friend comes online."]
     )
 
+    local friendAlertHeader = AddSectionHeader(
+        content,
+        L["Friend Online Alerts"],
+        soundCb,
+        -12,
+        L["Help: Friend Online Alerts"],
+        L["Notifies you cleanly when Character Friends or Battle.net friends enter World of Warcraft: Forever, after an 8-second post-login grace window and 120-second anti-spam cooldown."],
+        L["Choose Favorites Only (recommended), All Friends, or Off; customize popup Toast, chat line, and sound below."]
+    )
+
+    local friendAlertModeRow = CreateChoiceRow(content, friendAlertHeader, -6, {
+        { value = "favorites", label = L["Favorites Only"], width = 166 },
+        { value = "all", label = L["All Friends"], width = 152 },
+        { value = "off", label = L["Off"], width = 112 },
+    }, function()
+        return ns.db and ns.db.settings.friendOnlineAlertMode or "favorites"
+    end, function(val)
+        ns.db.settings.friendOnlineAlertMode = val
+    end)
+
+    local friendToastCb = CreateCheckbox(
+        content,
+        L["Show floating Toast when Friends come online"],
+        friendAlertModeRow,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.friendOnlineAlertToast ~= false end,
+        function(checked)
+            ns.db.settings.friendOnlineAlertToast = checked
+        end,
+        L["Help: Friend Online Toast"],
+        L["Displays a compact floating Notification Toast when a tracked Favorite or Friend logs into WoW: Forever."],
+        L["Left-click the toast to jump straight to that friend in the Social tab."]
+    )
+
+    local friendChatCb = CreateCheckbox(
+        content,
+        L["Print clickable [Social] summary line on Friend login"],
+        friendToastCb,
+        -6,
+        function() return ns.db and ns.db.settings.friendOnlineAlertChat == true end,
+        function(checked)
+            ns.db.settings.friendOnlineAlertChat = checked
+        end,
+        L["Help: Friend Online Chat"],
+        L["Prints an extra local SocialCentral chat line with a clickable [Social] link whenever a friend alert fires."],
+        L["Disabled by default to avoid duplicating Blizzard's standard friend-online chat line."]
+    )
+
+    local friendSoundCb = CreateCheckbox(
+        content,
+        L["Play audio chime when Friends come online"],
+        friendChatCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.friendOnlineAlertSound ~= false end,
+        function(checked)
+            ns.db.settings.friendOnlineAlertSound = checked
+        end,
+        L["Help: Friend Online Sound"],
+        L["Plays a subtle Battle.net UI chime when a Friend Online alert triggers."],
+        L["Uncheck for silent visual friend login alerts only."]
+    )
+
     local verCb = CreateCheckbox(
         content,
         L["Check for addon updates (DBM-style peer alerts)"],
-        soundCb,
+        friendSoundCb,
         -6,
         function() return ns.db and ns.db.settings.versionCheck ~= false end,
         function(checked)
@@ -648,10 +710,40 @@ local function BuildPanel()
         end
     end
 
+    local clanEventAlertCb = CreateCheckbox(
+        content,
+        L["Notify when guildmates post a new Guild Event"],
+        clanFilterRow,
+        -6,
+        function() return ns.db and ns.db.settings.clanEventAlertEnabled == true end,
+        function(checked)
+            ns.db.settings.clanEventAlertEnabled = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: Guild Event Alerts"],
+        L["Alerts you with a clickable notification and toast whenever a guildmate schedules a new Raid, Quest, PvP, or Custom Guild Event."],
+        L["Enable to never miss scheduled guild activities even when outside Dungeon LFG."]
+    )
+
+    local clanSignupAlertCb = CreateCheckbox(
+        content,
+        L["Notify me when guildmates sign up to my Events"],
+        clanEventAlertCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.clanSignupAlertEnabled ~= false end,
+        function(checked)
+            ns.db.settings.clanSignupAlertEnabled = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: Guild Signup Alerts"],
+        L["Notifies you as the event organizer whenever a guildmate signs up (or declines) on one of your active Guild Events."],
+        L["Triggers only on events you created so your chat stays clutter-free."]
+    )
+
     local chatSettingsHeader = AddSectionHeader(
         content,
         L["Conversations & Sound Alerts"],
-        clanFilterRow,
+        clanSignupAlertCb,
         -14,
         L["Help: Conversations & Sounds"],
         L["Separately control sound chimes by channel type and decide whether WoW native Guild/Group channels are mirrored inside Conversations."],
@@ -701,10 +793,24 @@ local function BuildPanel()
         L["Turn off if your Private Room is noisy while still keeping Whisper alerts enabled."]
     )
 
+    local chatSoundAllianceCb = CreateCheckbox(
+        content,
+        L["Play chime on Alliance Chat messages"],
+        chatSoundRoomsCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.chatSoundAlliance ~= false end,
+        function(checked)
+            ns.db.settings.chatSoundAlliance = checked
+        end,
+        L["Help: Alliance Chat Sound"],
+        L["Plays a distinct audio chime when an authorized Alliance member posts in cross-guild Alliance Chat."],
+        L["Requires Master Chat Sound Alerts to be enabled."]
+    )
+
     local chatSoundGuildCb = CreateCheckbox(
         content,
         L["Play chime on Guild & Officer chat (off by default)"],
-        chatSoundRoomsCb,
+        chatSoundAllianceCb,
         -6,
         function() return ns.db and ns.db.settings.chatSoundGuild == true end,
         function(checked)
@@ -774,10 +880,114 @@ local function BuildPanel()
         L["When unchecked or when the other player lacks SocialCentral, Conversations show a single button to open the pre-addressed official WoW chat instead."]
     )
 
+    local addonNotifyHeader = AddSectionHeader(
+        content,
+        L["Addon Message Notifications"],
+        addonDirectCb,
+        -14,
+        L["Help: Addon Message Notifications"],
+        L["Customize how SocialCentral alerts you when incoming addon-only messages (Direct Messages, Private Rooms, Invites, Alliance Chat, and Guild Alerts) arrive."],
+        L["Combine the floating Toast pill, clickable [SC] chat lines, Minimap & Side-Tab unread badges, and taskbar flashing to suit your screen."]
+    )
+
+    local addonToastCb = CreateCheckbox(
+        content,
+        L["Show floating popup Toast for incoming addon messages"],
+        addonNotifyHeader,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgToast ~= false end,
+        function(checked)
+            ns.db.settings.addonMsgToast = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Floating Notification Toast"],
+        L["Displays a compact, draggable 100%-opaque pill near the top of your screen when a peer messages you via the addon or sends a room invite."],
+        L["Left-click the pill to jump directly to the conversation (deferred automatically after combat), hover to pause, or right-click to dismiss."]
+    )
+
+    local addonEchoCb = CreateCheckbox(
+        content,
+        L["Print clickable [SC] summary in Chat window for addon messages"],
+        addonToastCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgChatEcho ~= false end,
+        function(checked)
+            ns.db.settings.addonMsgChatEcho = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Addon Chat Echo"],
+        L["Blizzard hides raw addon packets from standard chat frames. Enabling this echoes a clean one-line summary with a clickable [Open] link in your chat."],
+        L["Skipped automatically while you are actively viewing that exact thread inside SocialCentral."]
+    )
+
+    local addonFlashCb = CreateCheckbox(
+        content,
+        L["Pulse taskbar icon when high-priority addon messages arrive"],
+        addonEchoCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgTaskbarFlash ~= false end,
+        function(checked)
+            ns.db.settings.addonMsgTaskbarFlash = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Taskbar Flash"],
+        L["Calls Blizzard's FlashClientIcon() so the WoW window highlights on your Windows taskbar if you are alt-tabbed when a DM or invite arrives."],
+        L["Only flashes for priority incoming notifications and does nothing while you are already viewing the open thread."]
+    )
+
+    local addonMinimapBadgeCb = CreateCheckbox(
+        content,
+        L["Show numeric unread counter on Minimap icon"],
+        addonFlashCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgMinimapBadge ~= false end,
+        function(checked)
+            ns.db.settings.addonMsgMinimapBadge = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Minimap Unread Counter"],
+        L["Displays a compact red unread counter badge directly on the corner of the SocialCentral Minimap button alongside the golden ring tint."],
+        L["Clears automatically as soon as you open and view the unread threads or invitations."]
+    )
+
+    local addonTabBadgesCb = CreateCheckbox(
+        content,
+        L["Show unread counters on Social (O) & Guild (J) side-tabs"],
+        addonMinimapBadgeCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgTabBadges ~= false end,
+        function(checked)
+            ns.db.settings.addonMsgTabBadges = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Side-Tab Unread Counters"],
+        L["Displays unread Direct/Room message counts on the Social (O) side-tab and new Guild Event/LFG alert counts on the Guild (J) side-tab."],
+        L["Uncheck if you prefer completely plain bookmark tabs without counter pills."]
+    )
+
+    local testToastBtn = ns.Theme:CreateButton(content, 190, 22, L["Test Notification Toast"], "default")
+    ns.Theme:AutoFitButton(testToastBtn, 160, 18, 260)
+    testToastBtn:SetPoint("TOPLEFT", addonTabBadgesCb, "BOTTOMLEFT", 0, -8)
+    testToastBtn:SetScript("OnClick", function()
+        if ns.NotificationToast and ns.NotificationToast.ShowTestNotification then
+            ns.NotificationToast:ShowTestNotification()
+        end
+    end)
+    HelpBtn(
+        content,
+        testToastBtn,
+        L["Help: Test Notification Toast"],
+        L["Spawns a sample floating Notification Toast pill with sound so you can preview its look and drag it to your preferred screen position."],
+        L["Click to show the pill, drag it anywhere on screen, or reset positions anytime with '/sc resetpos'."]
+    )
+    syncFns[#syncFns + 1] = function()
+        ns.Theme:StyleButton(testToastBtn, "default")
+    end
+
     local histHeader = AddSectionHeader(
         content,
         L["Character Whisper history per thread (0 = off)"],
-        addonDirectCb,
+        testToastBtn,
         -12,
         L["Help: Whisper History Limit"],
         L["Saves the last N lines per Character Whisper locally (0 to 60 lines). Battle.net Real IDs and BattleTags are never persisted to disk."],

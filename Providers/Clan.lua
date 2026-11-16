@@ -25,23 +25,56 @@ local Clan = {
     lastSyncSentAt = 0,
     lastAlfgSentAt = 0,
     lastAlfgRelayAt = 0,
+    lastAlmRelayAt = 0,
     lastVersionSentAt = 0,
     lastReqReplyAt = 0,
     lastIntelReplyAt = 0,
     lastCalendarRefreshAt = 0,
+    lastClanSoundAt = 0,
     isStoppedThisSession = false,
     throttledCount = 0,
+    unreadAlertsCount = 0,
     latestRemoteVersion = nil,
     latestReportedBy = nil,
     notifiedVersion = nil,
     peerVersions = {},
     lfgAlertCooldowns = {},
+    signupAlertCooldowns = {},
+    seenAllianceRelay = {},
     externalLFG = {},
     calendarEvents = {},
     preferredRightView = nil,
     intelQueue = {},
     activeScopeToken = nil,
 }
+
+local function PlayClanAlertSound(self, kit)
+    local nowMono = GetTime and GetTime() or time()
+    if (nowMono - (self.lastClanSoundAt or 0)) < 2.5 then
+        return
+    end
+    local resolvedKit = kit or (SOUNDKIT and (SOUNDKIT.READY_CHECK or SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_QUEST_LOG_OPEN))
+    if PlaySound and resolvedKit then
+        self.lastClanSoundAt = nowMono
+        pcall(PlaySound, resolvedKit, "Master")
+    end
+end
+
+function Clan:GetNotificationCount()
+    return self.unreadAlertsCount or 0
+end
+
+function Clan:IncrementNotificationCount(delta)
+    self.unreadAlertsCount = math.max(0, (self.unreadAlertsCount or 0) + (delta or 1))
+    ns:Emit("CLAN_UPDATED")
+end
+
+function Clan:ClearNotificationCount()
+    if (self.unreadAlertsCount or 0) > 0 then
+        self.unreadAlertsCount = 0
+        ns:Emit("CLAN_UPDATED")
+    end
+end
 
 local function IsClanOrLFGVisible()
     if _G.SocialCentralFrame and _G.SocialCentralFrame.IsShown and _G.SocialCentralFrame:IsShown() then
@@ -814,25 +847,86 @@ function Clan:GetGuildMembersWithAllianceStatus()
     return out
 end
 
+local function CollectExternalAllianceRecipients(self, maxCount)
+    local targets = {}
+    local seen = {}
+    local limit = maxCount or 6
+    local myGuildNorm = NormalizeGuildKey((Store.guildInfo and Store.guildInfo.name) or "")
+
+    local function PushTarget(rawName, guildName)
+        if #targets >= limit then return end
+        if not guildName or guildName == "" or not self:IsAlliedGuild(guildName) then return end
+        if myGuildNorm ~= "" and NormalizeGuildKey(guildName) == myGuildNorm then return end
+        local clean = Compat.CleanPayloadField and Compat.CleanPayloadField(rawName or "", 40) or Safe.String(rawName)
+        if not clean or clean == "" or Compat.IsMe(clean) then return end
+        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(clean)
+        local key = (parsed and parsed.lookupKey) or clean:lower()
+        if seen[key] then return end
+        seen[key] = true
+        table.insert(targets, clean)
+    end
+
+    if type(Store.social) == "table" then
+        for _, row in pairs(Store.social) do
+            if #targets >= limit then break end
+            if type(row) == "table" and row.online and not (row.sources and row.sources.guild) then
+                PushTarget(row.characterName or row.displayName, row.guild)
+            end
+        end
+    end
+
+    if type(Store.nearby) == "table" then
+        local now = time()
+        for _, nRow in pairs(Store.nearby) do
+            if #targets >= limit then break end
+            if type(nRow) == "table" and (now - (nRow.lastSeen or 0)) <= 600 then
+                PushTarget(nRow.displayName, nRow.guild)
+            end
+        end
+    end
+
+    return targets
+end
+
 function Clan:SendAllianceChat(rawText)
     if not (IsInGuild and IsInGuild()) then
         ns:Print(L["No guild"])
+        return false
+    end
+    if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
+        ns:Print(L["Enable Clan guild sync (opt-in) in Settings or above to sync with guildmates."])
         return false
     end
     if not self:IsMemberAllianceAuthorized() then
         ns:Print(L["You do not have permission to use Alliance Chat."])
         return false
     end
-    local cleanText = Compat.CleanPayloadField(rawText or "", 140)
+    local cleanText = Compat.CleanPayloadField(rawText or "", 130)
     if cleanText == "" then return false end
 
     local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
     local myName = ResolveSelfIdentity()
     local _, myClass = Safe.Call(UnitClass, "player")
+    local msgId = ("a%d_%d"):format(time() % 100000, math.random(10, 99))
 
-    local payload = string.format("ALM~%s~%s~%s~%s", Compat.CleanPayloadField(myGuild, 32), Compat.CleanPayloadField(myName, 25), myClass or "", cleanText)
-    self:SendGuildSync(payload)
-    return true
+    local payload = string.format(
+        "ALM~%s~%s~%s~%s~%s",
+        Compat.CleanPayloadField(myGuild, 32),
+        Compat.CleanPayloadField(myName, 25),
+        myClass or "",
+        cleanText,
+        msgId
+    )
+    local sent = self:SendGuildSync(payload)
+    if not sent then
+        ns:Print(L["Please wait a moment before sending another alliance message."])
+        return false
+    end
+
+    for _, recipient in ipairs(CollectExternalAllianceRecipients(self, 6)) do
+        SendExternalLFGPacket(self, payload, "WHISPER", recipient)
+    end
+    return true, msgId
 end
 
 function Clan:IsAlliedGuild(rawGuildName)
@@ -2182,13 +2276,11 @@ function Clan:MaybeNotifyClanLFG(lookupKey, displayName, classFile, summaryText,
     local cLink = "|Haddon:SCentral:clanlfg|h|cfff2c94c[" .. L["Clan LFG"] .. "]|r|h"
     ns:Print(("|cff3fb950[%s]|r %s: %s %s %s"):format(L["Dungeon LFG Alert"], nameCol, cleanMsg, wLink, cLink))
 
-    if s.clanLfgAlertSound ~= false and PlaySound and SOUNDKIT then
-        local kit = SOUNDKIT.READY_CHECK or SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_QUEST_LOG_OPEN
-        if kit then
-            pcall(PlaySound, kit, "Master")
-        end
+    if s.clanLfgAlertSound ~= false then
+        PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.READY_CHECK or SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_QUEST_LOG_OPEN))
     end
 
+    self:IncrementNotificationCount(1)
     ns:Emit("CLAN_LFG_ALERT", {
         lookupKey = lookupKey,
         displayName = displayName,
@@ -2198,6 +2290,16 @@ function Clan:MaybeNotifyClanLFG(lookupKey, displayName, classFile, summaryText,
         isDungeon = isDungeon,
         sourceType = sourceType or "LFG",
         ts = now,
+    })
+    ns:Emit("ADDON_MESSAGE_NOTIFY", {
+        id = "clanlfg:" .. lookupKey .. ":" .. tostring(now),
+        kind = "CLAN_LFG",
+        sourceTag = L["Clan LFG"],
+        sender = displayName,
+        senderClass = classFile,
+        text = cleanMsg,
+        ts = now,
+        priority = 1,
     })
     return true
 end
@@ -3387,6 +3489,63 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         return
     end
 
+    if cmd == "ALM" then
+        if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
+            return
+        end
+        if not Clan:IsMemberAllianceAuthorized() then
+            return
+        end
+        local senderGuild = Compat.CleanPayloadField(parts[2] or "", 32)
+        local authorName = Compat.CleanPayloadField(parts[3] or "", 25)
+        local classFile = parts[4]
+        local msgText = Compat.CleanPayloadField(parts[5] or "", 140)
+        local msgId = Compat.CleanPayloadField(parts[6] or "", 24)
+        if authorName == "" or msgText == "" or Compat.IsMe(authorName) then
+            return
+        end
+        if chatType ~= "GUILD" and (senderGuild == "" or not Clan:IsAlliedGuild(senderGuild)) then
+            return
+        end
+
+        local monoNow = GetTime and GetTime() or time()
+        Clan.seenAllianceRelay = Clan.seenAllianceRelay or {}
+        for k, seenAt in pairs(Clan.seenAllianceRelay) do
+            if (monoNow - (seenAt or 0)) > 120 then
+                Clan.seenAllianceRelay[k] = nil
+            end
+        end
+        local dedupeKey = (msgId ~= "") and msgId or (senderGuild .. "|" .. authorName .. "|" .. msgText:sub(1, 32))
+        if Clan.seenAllianceRelay[dedupeKey] then
+            return
+        end
+        Clan.seenAllianceRelay[dedupeKey] = monoNow
+
+        if ns.Chat and ns.Chat.MarkPeerVerified then
+            ns.Chat:MarkPeerVerified(parsed.displayName, nil, nil, "ALM")
+            if authorName ~= "" then
+                ns.Chat:MarkPeerVerified(authorName, nil, nil, "ALM")
+            end
+        end
+
+        if ns.Chat and ns.Chat.ReceiveAllianceMessage then
+            ns.Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText, dedupeKey)
+        end
+
+        local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+        if chatType == "WHISPER" and senderGuild ~= myGuild and IsInGuild and IsInGuild() and (monoNow - (Clan.lastAlmRelayAt or 0)) >= 10 then
+            Clan.lastAlmRelayAt = monoNow
+            local relayPayload = cleanText
+            local relayDelay = 0.8 + math.random() * 1.4
+            C_Timer.After(relayDelay, function()
+                if not Clan:IsMessagingLocked() then
+                    Clan:SendGuildSync(relayPayload)
+                end
+            end)
+        end
+        return
+    end
+
     -- All Clan Hub interactive features require GUILD + explicit clanSync opt-in.
     if chatType ~= "GUILD" or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
         return
@@ -3499,7 +3658,27 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             }
             if isOpen and not existing then
                 local isDng = IsDungeonLFGText(title, cat)
-                Clan:MaybeNotifyClanLFG(parsed.lookupKey, parsed.displayName, nil, title .. " (" .. (whenText ~= "" and whenText or L["Now"]) .. ")", title, isDng, "EVT")
+                local didLfg = Clan:MaybeNotifyClanLFG(parsed.lookupKey, parsed.displayName, nil, title .. " (" .. (whenText ~= "" and whenText or L["Now"]) .. ")", title, isDng, "EVT")
+                local s = ns.db and ns.db.settings
+                if not didLfg and s and s.clanEventAlertEnabled == true and not Compat.IsMe(parsed.displayName) then
+                    local evtWhen = whenText ~= "" and whenText or L["Now"]
+                    local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
+                    ns:Print("%s", ("|cff58a6ff[%s]|r %s: %s (%s) %s"):format(L["Guild Event"], parsed.displayName, title, evtWhen, openLink))
+                    if s.clanLfgAlertSound ~= false then
+                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.IG_QUEST_LIST_OPEN or SOUNDKIT.TELL_MESSAGE))
+                    end
+                    Clan:IncrementNotificationCount(1)
+                    ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                        id = "clanevt:" .. eventId,
+                        kind = "CLAN_EVENT",
+                        sourceTag = L["Guild Event"],
+                        sender = parsed.displayName,
+                        text = title .. " (" .. evtWhen .. ")",
+                        eventId = eventId,
+                        ts = now,
+                        priority = 1,
+                    })
+                end
             end
             QueueClanEmit(0.6)
         end
@@ -3549,6 +3728,36 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 }
             end
             evt.updatedAt = now
+            local _, myKey = ResolveSelfIdentity()
+            local s = ns.db and ns.db.settings
+            if myKey and evt.creatorKey == myKey and not Compat.IsMe(parsed.displayName) and s and s.clanSignupAlertEnabled ~= false then
+                local cdKey = (parsed.lookupKey or "") .. ":" .. eventId
+                local monoNow = GetTime and GetTime() or time()
+                Clan.signupAlertCooldowns = Clan.signupAlertCooldowns or {}
+                if (monoNow - (Clan.signupAlertCooldowns[cdKey] or 0)) >= 15 then
+                    Clan.signupAlertCooldowns[cdKey] = monoNow
+                    local roleLbl = L[role] or role
+                    local evtName = (evt.title and evt.title ~= "") and evt.title or eventId
+                    local msgBody = string.format(L["%s signed (%s): %s"], parsed.displayName, roleLbl, evtName)
+                    local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
+                    ns:Print("%s", "|cff3fb950[" .. L["Event Signup"] .. "]|r " .. msgBody .. " " .. openLink)
+                    if s.chatSound ~= false then
+                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON))
+                    end
+                    Clan:IncrementNotificationCount(1)
+                    ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                        id = "sig:" .. cdKey .. ":" .. tostring(now),
+                        kind = "CLAN_SIGNUP",
+                        sourceTag = L["Event Signup"],
+                        sender = parsed.displayName,
+                        senderClass = classFile ~= "" and classFile or nil,
+                        text = msgBody,
+                        eventId = eventId,
+                        ts = now,
+                        priority = 2,
+                    })
+                end
+            end
             QueueClanEmit(0.5)
         end
 
@@ -3677,10 +3886,23 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             local guildTag = targetGuild ~= "" and (" <" .. targetGuild .. ">") or ""
             local lvlTag = lvl > 0 and (" (Lv " .. lvl .. ")") or ""
             local locTag = (zone ~= "" and coords ~= "") and (" - " .. zone .. " (" .. coords .. ")") or ""
-            ns:Print("|cffff4444[SocialCentral Scout] %s%s%s%s (%s)|r", targetName, guildTag, lvlTag, locTag, parsed.displayName)
-            if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then
-                pcall(PlaySound, SOUNDKIT.RAID_WARNING)
+            local radarLink = "|Haddon:SCentral:spotter|h|cff58a6ff[" .. L["Target Radar"] .. "]|r|h"
+            ns:Print("%s", string.format("|cffff4444[SocialCentral Scout] %s%s%s%s (%s)|r %s", targetName, guildTag, lvlTag, locTag, parsed.displayName, radarLink))
+            local s = ns.db and ns.db.settings
+            if not s or s.spotterSound ~= false then
+                PlayClanAlertSound(Clan, SOUNDKIT and SOUNDKIT.RAID_WARNING)
             end
+            Clan:IncrementNotificationCount(1)
+            ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                id = "sct:" .. targetName .. ":" .. tostring(now),
+                kind = "SCOUT",
+                sourceTag = L["Scout Alert"],
+                sender = parsed.displayName,
+                senderClass = classFile ~= "" and classFile or nil,
+                text = targetName .. guildTag .. locTag,
+                ts = now,
+                priority = 3,
+            })
         end
 
     elseif cmd == "WB" then
@@ -3688,15 +3910,6 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local ts = tonumber(parts[3])
         if VALID_WB_SYNC_IDS[syncId] and ts and ts > 0 and ns.WorldBuffs and ns.WorldBuffs.ReceiveSyncedDrop then
             ns.WorldBuffs:ReceiveSyncedDrop(syncId, ts, parsed.displayName)
-        end
-
-    elseif cmd == "ALM" then
-        local senderGuild = Compat.CleanPayloadField(parts[2] or "", 32)
-        local authorName = Compat.CleanPayloadField(parts[3] or "", 25)
-        local classFile = parts[4]
-        local msgText = Compat.CleanPayloadField(parts[5] or "", 140)
-        if ns.Chat and ns.Chat.ReceiveAllianceMessage then
-            ns.Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText)
         end
     end
 end

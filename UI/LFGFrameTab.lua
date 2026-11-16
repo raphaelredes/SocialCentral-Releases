@@ -368,6 +368,43 @@ local function AutoFitNativeButton(btn, minW, pad, maxW)
     return w
 end
 
+local function UpdateSideTabBadge(tab, count)
+    if not tab then return end
+    local showBadges = not (ns.db and ns.db.settings and ns.db.settings.addonMsgTabBadges == false)
+    local n = tonumber(count) or 0
+    if not showBadges or n <= 0 then
+        if tab.scUnreadBadge then
+            tab.scUnreadBadge:Hide()
+        end
+        return
+    end
+    if not tab.scUnreadBadge then
+        local b = CreateFrame("Frame", nil, tab, "BackdropTemplate")
+        b:SetSize(16, 14)
+        b:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -2, 3)
+        b:SetFrameLevel((tab:GetFrameLevel() or 60) + 4)
+        if b.SetBackdrop then
+            b:SetBackdrop({
+                bgFile = "Interface\\Buttons\\WHITE8X8",
+                edgeFile = "Interface\\Buttons\\WHITE8X8",
+                edgeSize = 1,
+            })
+            b:SetBackdropColor(0.84, 0.18, 0.22, 1.0)
+            b:SetBackdropBorderColor(0.08, 0.10, 0.14, 1.0)
+        end
+        local txt = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+        txt:SetPoint("CENTER", 0, 0)
+        txt:SetTextColor(1, 1, 1)
+        b.text = txt
+        tab.scUnreadBadge = b
+    end
+    local lbl = n > 9 and "9+" or tostring(n)
+    tab.scUnreadBadge.text:SetText(lbl)
+    tab.scUnreadBadge:SetWidth(n > 9 and 20 or 16)
+    tab.scUnreadBadge:SetFrameLevel((tab:GetFrameLevel() or 60) + 4)
+    tab.scUnreadBadge:Show()
+end
+
 local function UpdateSideTabVisual(tab, isSelected)
     if not tab then return end
     if tab.selectedTex then
@@ -3845,7 +3882,7 @@ local function SyncHostNativeTabs(parentFrame, scTab, isEmbeddedActive, namedKey
     end
 end
 
-local function OpenSocialUIModule(targetTab, fallbackToChatFrame)
+local function OpenSocialUIModule(targetTab, fallbackToChatFrame, forceKeepOpen)
     local sf = _G.SocialUIFrame or _G.FriendsFrame
     if not (sf and sf:IsShown()) and _G.ToggleFriendsFrame then
         pcall(_G.ToggleFriendsFrame, 1)
@@ -3855,9 +3892,9 @@ local function OpenSocialUIModule(targetTab, fallbackToChatFrame)
         LFGFrameTab:EnsureSocialSideTab()
         local host = _G.SocialUIFrame or _G.FriendsFrame
         if host and host:IsShown() and ns.UI and ns.UI.OpenEmbedded then
-            ns.UI:OpenEmbedded(host, { "watchlist", "social", "nearby", "chat" }, targetTab)
+            ns.UI:OpenEmbedded(host, { "watchlist", "social", "nearby", "chat" }, targetTab, forceKeepOpen)
         elseif fallbackToChatFrame and _G.ChatFrame1 and ns.UI and ns.UI.OpenEmbedded then
-            ns.UI:OpenEmbedded(_G.ChatFrame1, { "chat" }, "chat")
+            ns.UI:OpenEmbedded(_G.ChatFrame1, { "chat" }, "chat", forceKeepOpen)
         elseif ns.UI and ns.UI.ShowHub then
             ns.UI:ShowHub(targetTab)
         end
@@ -3870,8 +3907,10 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local socialHost = _G.SocialUIFrame or _G.FriendsFrame
         local shown = socialHost and socialHost.IsShown and socialHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(socialHost)
+        local socialUnread = ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))) or 0
         if shown or active then
             UpdateSideTabVisual(self.socialTab, active)
+            UpdateSideTabBadge(self.socialTab, socialUnread)
             if shown then
                 SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
             end
@@ -3881,8 +3920,10 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local guildHost = _G.CommunitiesFrame or _G.GuildFrame
         local shown = guildHost and guildHost.IsShown and guildHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(guildHost)
+        local guildUnread = (ns.Clan and ns.Clan.GetNotificationCount and ns.Clan:GetNotificationCount()) or 0
         if shown or active then
             UpdateSideTabVisual(self.guildTab, active)
+            UpdateSideTabBadge(self.guildTab, active and 0 or guildUnread)
             if shown then
                 SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
             end
@@ -3904,7 +3945,7 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
     end
 end
 
-function LFGFrameTab:OpenOfficialModule(moduleId)
+function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
     if IsCombatLocked() then
         ns:Print("%s", L["Unavailable during combat."])
         return
@@ -3975,7 +4016,7 @@ function LFGFrameTab:OpenOfficialModule(moduleId)
             LFGFrameTab:EnsureGuildSideTab()
             local host = _G.CommunitiesFrame or _G.GuildFrame
             if host and host:IsShown() and ns.UI and ns.UI.OpenEmbedded then
-                ns.UI:OpenEmbedded(host, { "clan" }, "clan")
+                ns.UI:OpenEmbedded(host, { "clan" }, "clan", forceKeepOpen)
             elseif ns.UI and ns.UI.ShowHub then
                 ns.UI:ShowHub("clan")
             end
@@ -3989,7 +4030,7 @@ function LFGFrameTab:OpenOfficialModule(moduleId)
             LFGFrameTab:AttachCharacterUI()
             LFGFrameTab:EnsureCharacterSideTab()
             if ns.UI and ns.UI.OpenEmbedded then
-                ns.UI:OpenEmbedded(_G.CharacterFrame, { "alts" }, "alts")
+                ns.UI:OpenEmbedded(_G.CharacterFrame, { "alts" }, "alts", forceKeepOpen)
                 return
             end
         end
@@ -4000,7 +4041,7 @@ function LFGFrameTab:OpenOfficialModule(moduleId)
     end
 
     if mod == "chat" or mod == "rooms" then
-        OpenSocialUIModule("chat", true)
+        OpenSocialUIModule("chat", true, forceKeepOpen)
         return
     end
 
@@ -4051,6 +4092,9 @@ function LFGFrameTab:Init()
     end
 
     ns:On("CHAT_UPDATED", SyncEmbeddedIfAnyHostShown)
+    ns:On("CLAN_UPDATED", SyncEmbeddedIfAnyHostShown)
+    ns:On("ADDON_MESSAGE_NOTIFY", SyncEmbeddedIfAnyHostShown)
+    ns:On("SETTINGS_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("BUFFS_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("WORLD_BUFFS_UPDATED", function()
         if _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then

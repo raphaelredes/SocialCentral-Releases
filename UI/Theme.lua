@@ -806,6 +806,12 @@ function Theme:ApplyStatusColor(tex, status)
         c = p.offline
     elseif status == "nearby" then
         c = p.nearby
+    elseif status == "away" then
+        c = { 0.96, 0.76, 0.22 }
+    elseif status == "busy" then
+        c = { 0.92, 0.36, 0.36 }
+    elseif status == "app" then
+        c = { 0.44, 0.70, 0.96 }
     end
     tex:SetColorTexture(c[1], c[2], c[3], 1)
 end

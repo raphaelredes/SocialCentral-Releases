@@ -358,17 +358,26 @@ function Store:GetSocialMetaTable()
     return root[scope]
 end
 
-function Store:GetSocialMeta(rawNameOrKey)
+local function NormalizeMetaKey(rawNameOrKey)
     if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" then return nil end
+    local lookupKey = Compat.ParseCharacterFields and Compat.ParseCharacterFields(rawNameOrKey)
+    if lookupKey and lookupKey ~= "" then
+        return lookupKey
+    end
     local parsed = Compat.ParseCharacterName(rawNameOrKey)
-    local key = (parsed and parsed.lookupKey) or rawNameOrKey:lower()
+    return (parsed and parsed.lookupKey) or rawNameOrKey:lower()
+end
+
+function Store:GetSocialMeta(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return nil end
     return self:GetSocialMetaTable()[key]
 end
 
 function Store:GetResolvedSocialMeta(rawNameOrKey)
     local direct = self:GetSocialMeta(rawNameOrKey)
     if not direct then return nil end
-    if direct.flag or not direct.mainName or direct.mainName == "" then
+    if not direct.mainName or direct.mainName == "" then
         return direct
     end
     local mainMeta = self:GetSocialMeta(direct.mainName)
@@ -376,18 +385,18 @@ function Store:GetResolvedSocialMeta(rawNameOrKey)
         return direct
     end
     return {
-        folder = direct.folder or mainMeta.folder,
+        folder = (direct.folder and direct.folder ~= "") and direct.folder or mainMeta.folder,
         mainName = direct.mainName,
-        note = direct.note or mainMeta.note,
+        note = (direct.note and direct.note ~= "") and direct.note or mainMeta.note,
         flag = direct.flag or mainMeta.flag,
+        favorite = (direct.favorite == true) or (mainMeta.favorite == true) or nil,
         updatedAt = direct.updatedAt or mainMeta.updatedAt,
     }
 end
 
 function Store:SetSocialMeta(rawNameOrKey, patch)
-    if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" or type(patch) ~= "table" then return nil end
-    local parsed = Compat.ParseCharacterName(rawNameOrKey)
-    local key = (parsed and parsed.lookupKey) or rawNameOrKey:lower()
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key or type(patch) ~= "table" then return nil end
     local tbl = self:GetSocialMetaTable()
     local rec = tbl[key] or {}
     if patch.folder ~= nil then
@@ -409,12 +418,17 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
             rec.flag = nil
         end
     end
-    if not rec.folder and not rec.mainName and not rec.note and not rec.flag then
+    if patch.favorite ~= nil then
+        rec.favorite = (patch.favorite == true) and true or nil
+    end
+    if not rec.folder and not rec.mainName and not rec.note and not rec.flag and not rec.favorite then
         tbl[key] = nil
     else
         rec.updatedAt = time()
         tbl[key] = rec
     end
+    self._socialFoldersCache = nil
+    self._linkedAltsDirty = true
     ns:Emit("SOCIAL_UPDATED")
     ns:Emit("GROUP_UPDATED")
     ns:Emit("CLAN_UPDATED")
@@ -429,6 +443,9 @@ function Store:SetSocialFlag(rawNameOrKey, flagVal)
 end
 
 function Store:GetSocialFolders()
+    if self._socialFoldersCache then
+        return self._socialFoldersCache
+    end
     local seen, out = {}, {}
     for _, meta in pairs(self:GetSocialMetaTable()) do
         if type(meta) == "table" and type(meta.folder) == "string" and meta.folder ~= "" and not seen[meta.folder] then
@@ -437,7 +454,165 @@ function Store:GetSocialFolders()
         end
     end
     table.sort(out)
+    self._socialFoldersCache = out
     return out
+end
+
+function Store:GetLinkedAltsForCharacter(rawNameOrKey)
+    local mainKey = NormalizeMetaKey(rawNameOrKey)
+    if not mainKey then return nil end
+    local metaTbl = self:GetSocialMetaTable()
+    if self._linkedAltsDirty or self._linkedAltsRef ~= metaTbl or not self._linkedAltsMap then
+        local map = {}
+        for altKey, rec in pairs(metaTbl) do
+            if type(rec) == "table" and type(rec.mainName) == "string" and rec.mainName ~= "" then
+                local mKey = NormalizeMetaKey(rec.mainName)
+                if mKey and mKey ~= altKey then
+                    local bucket = map[mKey]
+                    if not bucket then
+                        bucket = {}
+                        map[mKey] = bucket
+                    end
+                    local parsedAlt = Compat.ParseCharacterName(altKey)
+                    bucket[#bucket + 1] = (parsedAlt and parsedAlt.displayName) or altKey
+                end
+            end
+        end
+        for _, bucket in pairs(map) do
+            table.sort(bucket)
+        end
+        self._linkedAltsMap = map
+        self._linkedAltsRef = metaTbl
+        self._linkedAltsDirty = false
+    end
+    return self._linkedAltsMap[mainKey]
+end
+
+function Store:MigrateSocialSurnameRecords(firstName, lookupKey)
+    if type(firstName) ~= "string" or firstName == "" or type(lookupKey) ~= "string" or lookupKey == "" then
+        return
+    end
+    local firstLower = firstName:lower()
+    if firstLower == lookupKey then return end
+
+    local metaTbl = self:GetSocialMetaTable()
+    if metaTbl[firstLower] and not metaTbl[lookupKey] then
+        metaTbl[lookupKey] = metaTbl[firstLower]
+        metaTbl[firstLower] = nil
+        self._socialFoldersCache = nil
+        self._linkedAltsDirty = true
+    end
+
+    local presRoot = ns.db and ns.db.friendPresence
+    local scope = presRoot and Compat.ScopeKey()
+    local presTbl = scope and presRoot[scope]
+    if type(presTbl) == "table" and presTbl[firstLower] and not presTbl[lookupKey] then
+        presTbl[lookupKey] = presTbl[firstLower]
+        presTbl[firstLower] = nil
+    end
+end
+
+local MAX_FRIEND_PRESENCE = 250
+local FRIEND_PRESENCE_TTL = 180 * 86400
+
+function Store:GetFriendPresenceTable(forcePrune)
+    local root = ns.db and ns.db.friendPresence
+    if not root then return {} end
+    local scope = Compat.ScopeKey()
+    if type(root[scope]) ~= "table" then root[scope] = {} end
+    local tbl = root[scope]
+    self._presencePruneAt = self._presencePruneAt or {}
+    local nowT = GetTime and GetTime() or 0
+    local lastAt = self._presencePruneAt[scope]
+    if forcePrune or not lastAt or (nowT - lastAt) >= 60 then
+        self._presencePruneAt[scope] = nowT
+        local now = time()
+        local count, oldestKey, oldestSeen = 0, nil, nil
+        for k, rec in pairs(tbl) do
+            if type(rec) ~= "table" then
+                tbl[k] = nil
+            else
+                local seen = tonumber(rec.lastSeen) or 0
+                if (not rec.favorite) and seen > 0 and (now - seen) > FRIEND_PRESENCE_TTL then
+                    tbl[k] = nil
+                else
+                    count = count + 1
+                    if not rec.favorite and (not oldestSeen or seen < oldestSeen) then
+                        oldestKey, oldestSeen = k, seen
+                    end
+                end
+            end
+        end
+        if count > MAX_FRIEND_PRESENCE and oldestKey then
+            tbl[oldestKey] = nil
+        end
+    end
+    return tbl
+end
+
+function Store:GetFriendPresence(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return nil end
+    return self:GetFriendPresenceTable()[key]
+end
+
+-- Stores strictly character lookupKey metadata (never BattleTag, Real ID, or bnetAccountID).
+function Store:TouchFriendPresence(rawNameOrKey, info)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key or type(info) ~= "table" then return nil end
+    local tbl = self:GetFriendPresenceTable()
+    local rec = tbl[key]
+    if not rec then
+        rec = {}
+        tbl[key] = rec
+    end
+    if info.seenNow then
+        rec.lastSeen = time()
+    end
+    if info.area and info.area ~= "" then
+        rec.lastArea = info.area
+    end
+    if info.classFile and info.classFile ~= "" then
+        rec.lastClass = info.classFile
+    end
+    if info.level and info.level > 0 then
+        rec.lastLevel = info.level
+    end
+    if info.favorite ~= nil then
+        rec.favorite = (info.favorite == true) and true or nil
+    end
+    return rec
+end
+
+function Store:IsSocialFavorite(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return false end
+    local meta = self:GetResolvedSocialMeta(key)
+    if meta and meta.favorite == true then
+        return true
+    end
+    local pres = self:GetFriendPresence(key)
+    return type(pres) == "table" and pres.favorite == true
+end
+
+function Store:ToggleSocialFavorite(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return false end
+    local nextFav = not self:IsSocialFavorite(key)
+    self:SetSocialMeta(key, { favorite = nextFav })
+    local tbl = self:GetFriendPresenceTable()
+    local rec = tbl[key]
+    if rec or nextFav then
+        rec = rec or {}
+        rec.favorite = nextFav and true or nil
+        if not rec.lastSeen and not rec.lastArea and not rec.lastClass and not rec.lastLevel and not rec.favorite then
+            tbl[key] = nil
+        else
+            tbl[key] = rec
+        end
+    end
+    ns:Emit("SOCIAL_UPDATED")
+    return nextFav
 end
 
 function Store:GetRecentCompanionsTable(forcePrune)

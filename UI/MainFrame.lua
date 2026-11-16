@@ -61,8 +61,37 @@ function UI:GetFrame()
     return frame
 end
 
+function UI:SetSocialNavigation(opts)
+    if type(opts) ~= "table" then return end
+    if opts.socialFilter and opts.socialFilter ~= "" then
+        socialFilter = opts.socialFilter
+    end
+    if opts.socialSearch ~= nil then
+        local clean = Compat.CleanInput(opts.socialSearch) or ""
+        searchQuery = clean
+        if searchBox and searchBox.SetText then
+            searchBox:SetText(clean)
+        end
+    end
+    self:QueueRefresh(true)
+end
+
 function UI:IsMainVisible()
     return (frame and frame:IsShown()) and true or false
+end
+
+function UI:IsChatTabVisible()
+    return (frame and frame:IsShown() and activeTab == "chat") and true or false
+end
+
+function UI:IsChatThreadVisible(threadKey)
+    if not (frame and frame:IsShown() and activeTab == "chat") then
+        return false
+    end
+    if not threadKey then
+        return true
+    end
+    return (ns.Chat and ns.Chat.activeThreadKey == threadKey) and true or false
 end
 
 function UI:OpenUpdateModal()
@@ -165,9 +194,16 @@ local function EnsureModal()
     if modalFrame then
         modalFrame:SetHeight(162)
         if modalFrame.input then
+            modalFrame.input:Show()
+            modalFrame.input:SetMaxLetters(120)
             modalFrame.input:ClearAllPoints()
             modalFrame.input:SetPoint("TOPLEFT", modalFrame, "TOPLEFT", 16, -56)
             modalFrame.input:SetPoint("TOPRIGHT", modalFrame, "TOPRIGHT", -16, -56)
+        end
+        if modalFrame.btnSave then
+            modalFrame.btnSave:Show()
+            Theme:SetButtonText(modalFrame.btnSave, L["Save"])
+            Theme:AutoFitButton(modalFrame.btnSave, 88, 20)
         end
         Theme:ApplyBackdrop(modalFrame, "window")
         Theme:StyleButton(modalFrame.topCloseBtn, "default")
@@ -314,6 +350,108 @@ end
 
 function UI:OpenCopyModal(text, customTitle, noteText)
     OpenCopyModal(text, customTitle, noteText)
+end
+
+local function OpenAddFriendModal()
+    local m = EnsureModal()
+    m.title:SetText(L["Add WoW Character Friend (Name or Name Surname):"])
+    local prefill = ""
+    if UnitExists and UnitExists("target") and UnitIsPlayer and ns.Safe and ns.Safe.Bool(ns.Safe.Call(UnitIsPlayer, "target")) == true then
+        local guid = ns.Safe.String(ns.Safe.Call(UnitGUID, "target"))
+        local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName("target", guid, nil, true)
+        local cand = (resolved and resolved.fullName) or ns.Safe.String(ns.Safe.Call(UnitName, "target"))
+        if cand and not Compat.IsMe(cand, guid) then
+            prefill = cand
+        end
+    end
+    m.input:SetMaxLetters(48)
+    m.input:SetText(prefill)
+    Theme:SetButtonText(m.btnSave, L["Add"])
+    Theme:AutoFitButton(m.btnSave, 88, 20)
+
+    local function Commit()
+        local raw = Compat.Trim(m.input:GetText() or "")
+        if raw ~= "" and Compat.AddCharacterFriend then
+            local ok = Compat.AddCharacterFriend(raw)
+            if not ok then
+                ns:Print("%s", L["Cannot modify friends while in combat."])
+            end
+        end
+        m.input:ClearFocus()
+        m:Hide()
+    end
+    m.btnSave:SetScript("OnClick", Commit)
+    m.input:SetScript("OnEnterPressed", Commit)
+    m:Show()
+    m.input:SetFocus()
+    if prefill ~= "" then
+        m.input:HighlightText()
+    end
+end
+
+local function OpenNativeFriendNoteModal(item)
+    if not item then return end
+    local isChar = item.sources and item.sources.friend == true
+    local isBNet = item.sources and item.sources.bnet == true and item.bnetAccountID ~= nil
+    if not isChar and not isBNet then return end
+
+    local m = EnsureModal()
+    local shownName = item.displayName or item.bnetName or "?"
+    if isChar then
+        m.title:SetText(L["Edit Blizzard Friend Note for %s:"]:format(shownName))
+        m.input:SetMaxLetters(48)
+        m.input:SetText(item.friendNote or "")
+    else
+        m.title:SetText(L["Edit Battle.net Note for %s:"]:format(item.bnetName or shownName))
+        m.input:SetMaxLetters(120)
+        m.input:SetText(item.bnetNote or "")
+    end
+
+    local function Commit()
+        local nextNote = m.input:GetText() or ""
+        local ok = false
+        if isChar and Compat.SetCharacterFriendNote then
+            ok = Compat.SetCharacterFriendNote(shownName, nextNote)
+        elseif isBNet and Compat.SetBNetFriendNote then
+            ok = Compat.SetBNetFriendNote(item.bnetAccountID, nextNote)
+        end
+        if not ok then
+            ns:Print("%s", L["Cannot update Blizzard friend note while in combat."])
+        end
+        m.input:ClearFocus()
+        m:Hide()
+    end
+    m.btnSave:SetScript("OnClick", Commit)
+    m.input:SetScript("OnEnterPressed", Commit)
+    m:Show()
+    m.input:SetFocus()
+    m.input:HighlightText()
+end
+
+local function OpenRemoveFriendConfirmModal(item)
+    if not (item and item.sources and item.sources.friend) then return end
+    local targetName = item.displayName or item.name
+    if not targetName or targetName == "" then return end
+
+    local m = EnsureModal()
+    m:SetHeight(148)
+    m.title:SetText(L["Remove %s from your WoW Character Friends list?"]:format(targetName))
+    m.input:ClearFocus()
+    m.input:Hide()
+    Theme:SetButtonText(m.btnSave, L["Remove"])
+    Theme:AutoFitButton(m.btnSave, 92, 20)
+    Theme:StyleButton(m.btnSave, "danger")
+
+    m.btnSave:SetScript("OnClick", function()
+        if Compat.RemoveCharacterFriend then
+            local ok = Compat.RemoveCharacterFriend(targetName)
+            if not ok then
+                ns:Print("%s", L["Cannot modify friends while in combat."])
+            end
+        end
+        m:Hide()
+    end)
+    m:Show()
 end
 
 
@@ -1621,7 +1759,10 @@ local function OpenRowMenu(row, item, tabOverride)
         return
     end
     local tab = tabOverride or item._tab or activeTab
-    local targetName = item.displayName or item.name
+    local targetName = item.displayName or item.name or item.bnetName
+    local charKey = item.lookupKey
+    local isFav = item.bnetFavorite == true or (charKey ~= nil and ns.Store and ns.Store.IsSocialFavorite and ns.Store:IsSocialFavorite(charKey))
+
     MenuUtil.CreateContextMenu(row, function(_, root)
         root:CreateTitle(targetName or "")
         if tab == "watchlist" then
@@ -1647,56 +1788,117 @@ local function OpenRowMenu(row, item, tabOverride)
                 end
             end)
         elseif tab == "social" or tab == "nearby" then
-            local isWatched = ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(item.lookupKey or targetName)
-            if isWatched then
-                root:CreateButton(L["Remove from Watchlist"], function()
-                    if ns.Watchlist then
-                        ns.Watchlist:Remove(item.lookupKey or targetName)
+            if tab == "social" and (charKey or (item.sources and item.sources.bnet and item.bnetAccountID)) then
+                root:CreateButton(isFav and ("|cffffd24d*|r " .. L["Unfavorite"]) or L["Favorite"], function()
+                    local nextFav = not isFav
+                    if charKey and ns.Store and ns.Store.ToggleSocialFavorite then
+                        nextFav = ns.Store:ToggleSocialFavorite(charKey)
                     end
+                    if item.sources and item.sources.bnet and item.bnetAccountID and Compat.SetBNetFriendFavorite then
+                        Compat.SetBNetFriendFavorite(item.bnetAccountID, nextFav)
+                    end
+                    UI:QueueRefresh(false)
                 end)
-            else
-                root:CreateButton(L["Add to Watchlist"], function()
-                    if ns.Watchlist then
-                        ns.Watchlist:Add(item.lookupKey or targetName)
+            end
+
+            if charKey or tab == "nearby" then
+                local wlLookup = charKey or targetName
+                local isWatched = ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(wlLookup)
+                if isWatched then
+                    root:CreateButton(L["Remove from Watchlist"], function()
+                        if ns.Watchlist then
+                            ns.Watchlist:Remove(wlLookup)
+                        end
+                    end)
+                else
+                    root:CreateButton(L["Add to Watchlist"], function()
+                        if ns.Watchlist then
+                            ns.Watchlist:Add(wlLookup)
+                        end
+                    end)
+                end
+            end
+
+            if tab == "social" and charKey and not (item.sources and item.sources.friend) and item.samePool ~= false and item.sameFaction ~= false then
+                root:CreateButton("+ " .. L["Add Character Friend"], function()
+                    if Compat.AddCharacterFriend then
+                        if not Compat.AddCharacterFriend(targetName) then
+                            ns:Print("%s", L["Cannot modify friends while in combat."])
+                        end
                     end
                 end)
             end
         end
 
         if targetName and tab ~= "alts" then
-            root:CreateButton(L["Edit Social Card"], function()
-                if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
-                    ns.SocialPanels:OpenSocialMetaModal(targetName, item.lookupKey or targetName)
-                end
-            end)
+            if charKey then
+                local curMeta = ns.Store and (ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(charKey) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(charKey)))
+                local goodLabel = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
+                root:CreateButton(goodLabel, function()
+                    if ns.Store and ns.Store.SetSocialFlag then
+                        ns.Store:SetSocialFlag(charKey, "GOOD")
+                    end
+                end)
+                local avoidLabel = (curMeta and curMeta.flag == "AVOID") and ("|cffff4d4d[x]|r " .. L["Flag: Avoid"]) or L["Flag: Avoid"]
+                root:CreateButton(avoidLabel, function()
+                    if ns.Store and ns.Store.SetSocialFlag then
+                        ns.Store:SetSocialFlag(charKey, "AVOID")
+                    end
+                end)
+            end
+
+            if charKey or (item.sources and item.sources.bnet and item.bnetAccountID) then
+                root:CreateButton(L["Edit Social Card"], function()
+                    if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
+                        ns.SocialPanels:OpenSocialMetaModal(targetName, charKey or targetName, item)
+                    end
+                end)
+            end
+
+            if tab == "social" and ((item.sources and item.sources.friend) or (item.sources and item.sources.bnet and item.bnetAccountID)) then
+                local noteLbl = (item.sources and item.sources.friend) and L["Edit Blizzard Friend Note"] or L["Edit Battle.net Note"]
+                root:CreateButton(noteLbl, function()
+                    OpenNativeFriendNoteModal(item)
+                end)
+            end
+
             root:CreateDivider()
-            root:CreateButton(L["Open in SocialCentral Chat"], function()
-                if ns.Chat and ns.Chat.OpenDirectConversation then
-                    ns.Chat:OpenDirectConversation({
-                        targetName = targetName,
-                        bnetAccountID = item.bnetAccountID,
-                        bnetName = item.bnetName,
-                        classFile = item.classFile,
-                        autoProbe = true,
-                    })
-                    UI:OpenTab("chat")
-                end
-            end)
+            if charKey or (item.sources and item.sources.bnet and item.bnetAccountID) then
+                root:CreateButton(L["Open in SocialCentral Chat"], function()
+                    if ns.Chat and ns.Chat.OpenDirectConversation then
+                        ns.Chat:OpenDirectConversation({
+                            targetName = item.hasCharacterName ~= false and targetName or nil,
+                            bnetAccountID = item.bnetAccountID,
+                            bnetName = item.bnetName,
+                            classFile = item.classFile,
+                            autoProbe = item.online ~= false,
+                        })
+                        UI:OpenTab("chat")
+                    end
+                end)
+            end
             root:CreateButton(L["WoW Whisper (/w)"], function()
-                if tab == "social" and item.samePool == false and item.bnetName then
-                    Compat.BNetWhisper(item.bnetName, targetName)
+                if tab == "social" and ((item.samePool == false or item.hasCharacterName == false or item.bnetState == "bnet_app" or item.bnetState == "wow_other") and item.bnetName) then
+                    Compat.BNetWhisper(item.bnetName, item.hasCharacterName ~= false and targetName or nil)
+                elseif tab == "social" and not item.online and item.bnetName then
+                    Compat.BNetWhisper(item.bnetName, item.hasCharacterName ~= false and targetName or nil)
                 else
                     Compat.Whisper(targetName)
                 end
             end)
-            if item.sameFaction ~= false then
+            local canInvite = (item.online ~= false or tab == "watchlist")
+                and (item.sameFaction ~= false)
+                and (item.samePool ~= false)
+                and (item.hasCharacterName ~= false)
+                and (not item.bnetState or item.bnetState == "wow_forever" or (item.sources and (item.sources.friend or item.sources.guild)))
+            if canInvite then
                 root:CreateButton(L["Invite"], function()
                     Compat.Invite(targetName)
                 end)
             end
         end
 
-        if targetName and not item.isSelf and ns.Spotter and ns.Spotter.TrackPlayer then
+        if targetName and not item.isSelf and item.hasCharacterName ~= false and item.samePool ~= false and ns.Spotter and ns.Spotter.TrackPlayer then
             if tab == "watchlist" or tab == "social" or tab == "nearby" or tab == "clan" then
                 root:CreateButton(L["Track on Radar"], function()
                     local stanceHint = (tab == "watchlist" or item.isWatchlist) and "WATCHLIST"
@@ -1719,6 +1921,11 @@ local function OpenRowMenu(row, item, tabOverride)
                 if ns.Watchlist then
                     ns.Watchlist:Remove(item.id)
                 end
+            end)
+        elseif tab == "social" and item.sources and item.sources.friend then
+            root:CreateDivider()
+            root:CreateButton("|cffff5555" .. L["Remove Friend"] .. "|r", function()
+                OpenRemoveFriendConfirmModal(item)
             end)
         end
     end)
@@ -1767,15 +1974,15 @@ local function CreateListRow(parent, _, rowHeight)
         local tab = item._tab or activeTab
         if ns.Chat and ns.Chat.OpenDirectConversation then
             ns.Chat:OpenDirectConversation({
-                targetName = item.displayName,
+                targetName = item.hasCharacterName ~= false and item.displayName or nil,
                 bnetAccountID = item.bnetAccountID,
                 bnetName = item.bnetName,
                 classFile = item.classFile,
-                autoProbe = true,
+                autoProbe = item.online ~= false,
             })
             UI:OpenTab("chat")
-        elseif tab == "social" and item.samePool == false and item.bnetName then
-            Compat.BNetWhisper(item.bnetName, item.displayName)
+        elseif tab == "social" and ((item.samePool == false or item.hasCharacterName == false or item.bnetState == "bnet_app" or item.bnetState == "wow_other") and item.bnetName) then
+            Compat.BNetWhisper(item.bnetName, item.hasCharacterName ~= false and item.displayName or nil)
         else
             Compat.Whisper(item.displayName)
         end
@@ -1818,14 +2025,61 @@ local function CreateListRow(parent, _, rowHeight)
             GameTooltip:ClearLines()
             local item = self._item
             local tab = item._tab or activeTab
-            GameTooltip:AddLine(item.fullName or item.displayName or item.name or "", 1, 1, 1)
-            if item.area and item.area ~= "" then
+            local titleName = item.fullName or item.displayName or item.name or item.bnetName or ""
+            GameTooltip:AddLine(titleName, 1, 1, 1)
+            if item.bnetName and item.bnetName ~= "" and item.bnetName ~= titleName then
+                GameTooltip:AddDoubleLine(L["Battle.net"], item.bnetName, 0.50, 0.78, 0.98, 0.72, 0.88, 1.0)
+            end
+            if tab == "social" then
+                if not item.online then
+                    local offStr = item.lastSeen and (L["Offline"] .. " (" .. Compat.FormatRelativeTime(item.lastSeen, L) .. ")") or L["Offline"]
+                    GameTooltip:AddLine(offStr, 0.62, 0.66, 0.72)
+                elseif item.bnetState == "bnet_app" or item.bnetState == "wow_other" then
+                    local statusLbl = item.richPresence or item.clientProgram or L["Battle.net"]
+                    GameTooltip:AddLine(statusLbl, 0.44, 0.72, 0.96, true)
+                elseif item.dnd then
+                    GameTooltip:AddLine(L["Busy"] .. " [DND]", 0.94, 0.40, 0.40)
+                elseif item.afk then
+                    GameTooltip:AddLine("[AFK]", 0.96, 0.76, 0.22)
+                end
+                if item.customMessage and item.customMessage ~= "" then
+                    GameTooltip:AddLine("\"" .. item.customMessage .. "\"", 0.72, 0.80, 0.92, true)
+                end
+            end
+            if item.area and item.area ~= "" and item.area ~= item.richPresence then
                 GameTooltip:AddLine(item.area, 0.78, 0.84, 0.92)
             end
             if item.guild and item.guild ~= "" then
                 GameTooltip:AddLine("<" .. item.guild .. ">", 0.35, 0.88, 0.50)
             end
-            if item.note and item.note ~= "" then
+            if tab == "social" and item.lookupKey and ns.Store then
+                local meta = (ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(item.lookupKey))
+                    or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(item.lookupKey))
+                if meta and meta.mainName and meta.mainName ~= "" then
+                    GameTooltip:AddDoubleLine(L["Main"], meta.mainName, 0.68, 0.78, 0.90, 0.85, 0.92, 1.0)
+                end
+                local alts = ns.Store.GetLinkedAltsForCharacter and ns.Store:GetLinkedAltsForCharacter(item.lookupKey)
+                if alts and #alts > 0 then
+                    GameTooltip:AddDoubleLine(L["Linked Alts"], table.concat(alts, ", "), 0.68, 0.78, 0.90, 0.78, 0.86, 0.96)
+                end
+                if meta and meta.note and meta.note ~= "" then
+                    GameTooltip:AddLine(L["Social Note:"] .. " " .. meta.note, 0.95, 0.85, 0.45, true)
+                end
+                if item.friendNote and item.friendNote ~= "" then
+                    GameTooltip:AddLine(L["Friend Note"] .. ": " .. item.friendNote, 0.58, 0.82, 0.98, true)
+                end
+                if item.bnetNote and item.bnetNote ~= "" then
+                    GameTooltip:AddLine(L["Battle.net Note"] .. ": " .. item.bnetNote, 0.50, 0.78, 0.98, true)
+                end
+                if item.guildNote and item.guildNote ~= "" then
+                    GameTooltip:AddLine(L["Guild Note"] .. ": " .. item.guildNote, 0.45, 0.88, 0.58, true)
+                end
+                local comp = ns.Store.GetRecentCompanion and ns.Store:GetRecentCompanion(item.lookupKey)
+                if comp then
+                    local runsTxt = (comp.runs and comp.runs > 1) and (" (" .. tostring(comp.runs) .. "x)") or ""
+                    GameTooltip:AddLine(L["Recent companion: %s (%s)"]:format((comp.zone and comp.zone ~= "") and comp.zone or L["Group"], Compat.FormatRelativeTime(comp.lastSeen, L)) .. runsTxt, 0.62, 0.85, 0.96, true)
+                end
+            elseif item.note and item.note ~= "" then
                 GameTooltip:AddLine(item.note, 0.95, 0.85, 0.45, true)
             end
             if tab == "alts" then
@@ -1895,23 +2149,38 @@ local function FormatSocialSubline(item)
     if #tags > 0 then
         table.insert(parts, "[" .. table.concat(tags, "/") .. "]")
     end
-    local meta = ns.Store and ns.Store:GetSocialMeta(item.lookupKey or item.displayName)
+    local meta = (item.lookupKey and ns.Store)
+        and ((ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(item.lookupKey)) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(item.lookupKey)))
+        or nil
     if meta and meta.folder and meta.folder ~= "" then
         table.insert(parts, "[" .. meta.folder .. "]")
     end
     if meta and meta.mainName and meta.mainName ~= "" then
         table.insert(parts, L["Main"] .. ": " .. meta.mainName)
     end
-    if item.bnetName then
+    local comp = (item.lookupKey and ns.Store and ns.Store.GetRecentCompanion) and ns.Store:GetRecentCompanion(item.lookupKey) or nil
+    if comp then
+        local runsSuffix = (comp.runs and comp.runs > 1) and (" " .. tostring(comp.runs) .. "x") or ""
+        table.insert(parts, "[" .. L["Group"] .. runsSuffix .. "]")
+    end
+    if item.bnetName and item.bnetName ~= item.displayName then
         table.insert(parts, item.bnetName)
     end
-    if item.area and item.area ~= "" then
+    if not item.online then
+        local seenStr = item.lastSeen and (L["Offline"] .. " · " .. Compat.FormatRelativeTime(item.lastSeen, L)) or L["Offline"]
+        table.insert(parts, seenStr)
+    elseif item.bnetState == "bnet_app" or item.bnetState == "wow_other" then
+        local appInfo = item.richPresence or item.clientProgram or item.area
+        if appInfo and appInfo ~= "" then
+            table.insert(parts, appInfo)
+        end
+    elseif item.area and item.area ~= "" then
         table.insert(parts, item.area)
     end
     if item.guild and item.guild ~= "" then
         table.insert(parts, "<" .. item.guild .. ">")
     end
-    local noteText = (meta and meta.note and meta.note ~= "") and meta.note or item.note
+    local noteText = (meta and meta.note and meta.note ~= "") and meta.note or item.friendNote or item.bnetNote or item.guildNote or item.note
     if noteText and noteText ~= "" then
         table.insert(parts, noteText)
     end
@@ -1946,7 +2215,7 @@ local function UpdateListRow(row, item, idx, palette)
     local maxRowBtnW = compactRow and 84 or 150
 
     local leftMostAnchor
-    local scBadge = (item.lookupKey and ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(item.lookupKey)) and " |cff3fb950[SC]|r" or ""
+    local scBadge = (item.lookupKey and ns.Chat and ((ns.Chat.GetLookupKeyAddonBadge and ns.Chat:GetLookupKeyAddonBadge(item.lookupKey)) or (ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(item.lookupKey) and " |cff3fb950[SC]|r"))) or ""
     if tab == "watchlist" then
         Theme:ApplyStatusColor(row.dot, item.status or "unknown")
         local star = item.favorite and "|cffffd24d* |r" or ""
@@ -1974,19 +2243,73 @@ local function UpdateListRow(row, item, idx, palette)
         end
 
     elseif tab == "social" then
-        Theme:ApplyStatusColor(row.dot, "online")
+        local dotState = "online"
+        if not item.online then
+            dotState = "offline"
+        elseif item.dnd then
+            dotState = "busy"
+        elseif item.afk then
+            dotState = "away"
+        elseif item.bnetState == "bnet_app" or item.bnetState == "wow_other" then
+            dotState = "app"
+        end
+        Theme:ApplyStatusColor(row.dot, dotState)
+
+        local meta = (item.lookupKey and ns.Store)
+            and ((ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(item.lookupKey)) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(item.lookupKey)))
+            or nil
+        local isFav = item.bnetFavorite == true or (item.lookupKey ~= nil and ns.Store and ns.Store.IsSocialFavorite and ns.Store:IsSocialFavorite(item.lookupKey))
+        local star = isFav and "|cffffd24d* |r" or ""
+        local flagBadge = ""
+        if meta and meta.flag == "GOOD" then
+            flagBadge = " |cff3fb950[+]|r"
+        elseif meta and meta.flag == "AVOID" then
+            flagBadge = " |cffff4d4d[!]|r"
+        end
+
         local flags = ""
+        if not item.online then
+            flags = flags .. " |cff8b949e[" .. L["Offline"] .. "]|r"
+        elseif item.bnetState == "bnet_app" then
+            flags = flags .. " |cff70b5f9[" .. (item.clientProgram or "App") .. "]|r"
+        elseif item.bnetState == "wow_other" then
+            flags = flags .. " |cff70b5f9[" .. L["Other Realm"] .. "]|r"
+        end
         if item.afk then flags = flags .. " |cffffd24d[AFK]|r" end
         if item.dnd then flags = flags .. " |cffff6b6b[DND]|r" end
-        row.nameText:SetText(hex .. (item.displayName or "") .. "|r" .. levelStr .. flags .. scBadge)
+
+        local nameColor = item.online and hex or "|cff8b949e"
+        local displayTitle = item.displayName or item.bnetName or ""
+        row.nameText:SetText(star .. nameColor .. displayTitle .. "|r" .. levelStr .. flagBadge .. flags .. scBadge)
         row.subText:SetText(FormatSocialSubline(item))
 
-        Theme:AutoFitButton(row.btnWhisper, minWhispW, btnPad, maxRowBtnW)
-        row.btnWhisper:Show()
-        row.btnWhisper:ClearAllPoints()
-        row.btnWhisper:SetPoint("RIGHT", compactRow and -5 or -8, 0)
         row.btnAction:Hide()
-        leftMostAnchor = row.btnWhisper
+        local canInviteNow = item.online == true
+            and item.hasCharacterName ~= false
+            and item.samePool ~= false
+            and item.sameFaction ~= false
+            and (not item.bnetState or item.bnetState == "wow_forever" or (item.sources and (item.sources.friend or item.sources.guild)))
+        local canWhisperNow = item.online == true
+
+        if canInviteNow then
+            Theme:AutoFitButton(row.btnInvite, minInvW, btnPad, maxRowBtnW)
+            Theme:AutoFitButton(row.btnWhisper, minWhispW, btnPad, maxRowBtnW)
+            row.btnInvite:Show()
+            row.btnInvite:ClearAllPoints()
+            row.btnInvite:SetPoint("RIGHT", compactRow and -5 or -8, 0)
+            row.btnWhisper:Show()
+            row.btnWhisper:ClearAllPoints()
+            row.btnWhisper:SetPoint("RIGHT", row.btnInvite, "LEFT", btnGap, 0)
+            leftMostAnchor = row.btnWhisper
+        elseif canWhisperNow then
+            Theme:AutoFitButton(row.btnWhisper, minWhispW, btnPad, maxRowBtnW)
+            row.btnWhisper:Show()
+            row.btnWhisper:ClearAllPoints()
+            row.btnWhisper:SetPoint("RIGHT", compactRow and -5 or -8, 0)
+            leftMostAnchor = row.btnWhisper
+        else
+            leftMostAnchor = nil
+        end
 
     elseif tab == "nearby" then
         Theme:ApplyStatusColor(row.dot, "nearby")
@@ -2071,16 +2394,31 @@ local function BuildFilteredRows()
             end
         end
     elseif activeTab == "social" and ns.Social then
-        for _, item in ipairs(ns.Social:GetList(socialFilter)) do
-            local meta = ns.Store and ns.Store:GetSocialMeta(item.lookupKey or item.displayName)
-            local folderMatch = (socialFolderFilter == "all") or (meta and meta.folder == socialFolderFilter)
-            if folderMatch and SafeTextMatches(
+        local showOffline = not (ns.db and ns.db.settings and ns.db.settings.socialShowOffline == false)
+        local sortMode = (ns.db and ns.db.settings and ns.db.settings.socialSortBy) or "smart"
+        local items = ns.Social.GetDirectoryList and ns.Social:GetDirectoryList({
+            sourceFilter = socialFilter,
+            folderFilter = socialFolderFilter,
+            showOffline = showOffline,
+            sortBy = sortMode,
+        }) or ns.Social:GetList(socialFilter)
+
+        for _, item in ipairs(items) do
+            local meta = (item.lookupKey and ns.Store)
+                and ((ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(item.lookupKey)) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(item.lookupKey)))
+                or nil
+            if SafeTextMatches(
                 searchQuery,
                 item.displayName,
                 item.area,
-                item.guild,
                 item.note,
+                item.friendNote,
+                item.bnetNote,
+                item.guildNote,
+                item.guild,
                 item.bnetName,
+                item.richPresence,
+                item.customMessage,
                 meta and meta.folder,
                 meta and meta.mainName,
                 meta and meta.note
@@ -2691,7 +3029,10 @@ local function UpdatePeerRow(row, item, idx, palette)
     Theme:ApplyStatusColor(row.dot, (view == "gchat" or item.isAlt) and "nearby" or (isOnline and "online" or "offline"))
 
     local hex = item.classFile and Compat.ClassHex(item.classFile) or ((palette.key == "blizzard" and isOnline) and "|cffffd100" or Compat.ClassHex(nil))
-    local scTag = (item.hasAddon or (item.lookupKey and ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(item.lookupKey))) and " |cff3fb950[SC]|r" or ""
+    local scTag = (item.hasAddon and " |cff3fb950[SC]|r")
+        or (item.lookupKey and ns.Chat and ns.Chat.GetLookupKeyAddonBadge and ns.Chat:GetLookupKeyAddonBadge(item.lookupKey))
+        or ((item.lookupKey and ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(item.lookupKey)) and " |cff3fb950[SC]|r")
+        or ""
 
     if view == "lfg" then
         local modeCol = (item.mode == "LFM") and "|cff58a6ff[LFM]|r" or "|cff3fb950[LFG]|r"
@@ -2758,7 +3099,7 @@ local function UpdatePeerRow(row, item, idx, palette)
     end
 
     local lvlStr = (item.level and item.level > 0) and (" [" .. item.level .. "]") or ""
-    local ver = item.version and (" |cff3fb950[SC v" .. item.version .. "]|r") or (item.hasAddon and " |cff3fb950[SC]|r" or "")
+    local ver = item.version and (" |cff3fb950[SC v" .. item.version .. "]|r") or (item.hasAddon and " |cff3fb950[SC]|r" or scTag)
     local rankStr = (item.rankName and item.rankName ~= "") and (" |cff9da7b5<" .. item.rankName .. ">|r") or ""
     row.nameText:SetText(hex .. (item.displayName or "") .. "|r" .. lvlStr .. rankStr .. ver)
 
@@ -4344,6 +4685,12 @@ local function ApplyTheme()
     if frame.altsGoldText then
         frame.altsGoldText:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
     end
+    if frame.socialInviteBanner then
+        Theme:ApplyBackdrop(frame.socialInviteBanner, "surface", p)
+        if frame.socialInviteBanner.text then
+            frame.socialInviteBanner.text:SetTextColor(p.text[1], p.text[2], p.text[3])
+        end
+    end
     if modalFrame and modalFrame:IsShown() then
         Theme:ApplyBackdrop(modalFrame, "window", p)
         if modalFrame.btnSave then Theme:StyleButton(modalFrame.btnSave, "primary") end
@@ -4740,6 +5087,13 @@ local function BuildMainFrame()
                 ns.Social:RequestRosters(false)
             elseif def.id == "clan" and ns.Clan then
                 ns.Clan:RefreshGameCalendar(false)
+                if ns.Clan.ClearNotificationCount then
+                    ns.Clan:ClearNotificationCount()
+                end
+            elseif def.id == "chat" and ns.Chat then
+                if ns.Chat.activeThreadKey and ns.Chat.MarkThreadRead then
+                    ns.Chat:MarkThreadRead(ns.Chat.activeThreadKey)
+                end
             elseif def.id == "group" and ns.Group then
                 ns.Group:Scan()
             elseif def.id == "buffs" and ns.WorldBuffs then
@@ -4800,8 +5154,8 @@ local function BuildMainFrame()
         socialBar,
         socialBar,
         L["Help: Social Filters"],
-        L["Combines live online friends from Guild, Character Friends, and Battle.net without spending /who cooldown."],
-        L["Click a source button (All, Guild, Friends, Battle.net) or type in search. Right-click a row to Whisper, Invite, or add to Watchlist."],
+        L["Unifies Character Friends (online & offline), Battle.net friends (WoW, Launcher/Games, & offline), and online Guildmates without spending /who cooldown."],
+        L["Filter by source, Favorites (*), [SC] addon users, Good Partners, Recent Companions, or Social Folders; change Sort order or click '+ Friend' to add a WoW friend safely."],
         "RIGHT",
         "RIGHT",
         -2,
@@ -4963,26 +5317,33 @@ local function BuildMainFrame()
         0
     )
 
-    local socialFilterBtn = Theme:CreateButton(socialBar, 146, 22, L["All"] .. "  v", "default")
+    local socialFilterBtn = Theme:CreateButton(socialBar, 134, 22, L["All"] .. "  v", "default")
     socialFilterBtn:SetPoint("LEFT", socialBar, "LEFT", 0, 0)
     themeTargets[#themeTargets + 1] = { btn = socialFilterBtn, variant = "default" }
     frame.socialFilterBtn = socialFilterBtn
 
     local filterDefs = {
         { id = "all", label = L["All"] },
-        { id = "guild", label = L["Guild"] },
+        { id = "online", label = L["Online Only"] },
         { id = "friend", label = L["Friends"] },
         { id = "bnet", label = L["Battle.net"] },
+        { id = "guild", label = L["Guild"] },
+        { id = "fav", label = L["Favorites"] },
+        { id = "sc", label = "[SC]" },
+        { id = "good", label = L["Good Partner (+)"] },
+        { id = "recent", label = L["Recent Companions"] },
+        { id = "offline", label = L["Offline Only"] },
     }
     socialFilterBtn:SetScript("OnClick", function(self)
         local folders = ns.Store and ns.Store:GetSocialFolders() or {}
         if MenuUtil and MenuUtil.CreateContextMenu then
             MenuUtil.CreateContextMenu(self, function(_, root)
-                local addChoice = root.CreateRadio or root.CreateCheckbox
+                local addRadio = root.CreateRadio or root.CreateCheckbox
+                local addCheck = root.CreateCheckbox or addRadio
                 root:CreateTitle(L["Filters"])
                 for _, def in ipairs(filterDefs) do
                     local id = def.id
-                    addChoice(root, def.label, function()
+                    addRadio(root, def.label, function()
                         return socialFilter == id
                     end, function()
                         socialFilter = id
@@ -4990,16 +5351,31 @@ local function BuildMainFrame()
                     end)
                 end
                 root:CreateDivider()
+                addCheck(root, L["Show Offline Friends"], function()
+                    return not (ns.db and ns.db.settings and ns.db.settings.socialShowOffline == false)
+                end, function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.socialShowOffline = (ns.db.settings.socialShowOffline == false)
+                    end
+                    UI:Refresh(true)
+                end)
+                root:CreateDivider()
                 root:CreateTitle(L["Social Folders"])
-                addChoice(root, L["All Folders"], function()
+                addRadio(root, L["All Folders"], function()
                     return socialFolderFilter == "all"
                 end, function()
                     socialFolderFilter = "all"
                     UI:Refresh(true)
                 end)
+                addRadio(root, L["Unassigned (No Folder)"], function()
+                    return socialFolderFilter == "__none"
+                end, function()
+                    socialFolderFilter = "__none"
+                    UI:Refresh(true)
+                end)
                 for _, fName in ipairs(folders) do
                     local fn = fName
-                    addChoice(root, fn, function()
+                    addRadio(root, fn, function()
                         return socialFolderFilter == fn
                     end, function()
                         socialFolderFilter = fn
@@ -5015,6 +5391,55 @@ local function BuildMainFrame()
             socialFilter = filterDefs[nextIdx].id
             UI:Refresh(true)
         end
+    end)
+
+    local socialSortDefs = {
+        { id = "smart", label = L["Sort: Smart"] },
+        { id = "name", label = L["Sort: Name"] },
+        { id = "level", label = L["Sort: Level"] },
+        { id = "lastSeen", label = L["Sort: Last Seen"] },
+    }
+    local socialSortBtn = Theme:CreateButton(socialBar, 108, 22, L["Sort: Smart"], "default")
+    themeTargets[#themeTargets + 1] = { btn = socialSortBtn, variant = "default" }
+    frame.socialSortBtn = socialSortBtn
+    socialSortBtn:SetScript("OnClick", function(self)
+        local curMode = (ns.db and ns.db.settings and ns.db.settings.socialSortBy) or "smart"
+        if MenuUtil and MenuUtil.CreateContextMenu then
+            MenuUtil.CreateContextMenu(self, function(_, root)
+                local addRadio = root.CreateRadio or root.CreateCheckbox
+                root:CreateTitle(L["Sort Order"])
+                for _, def in ipairs(socialSortDefs) do
+                    local modeId = def.id
+                    addRadio(root, def.label, function()
+                        return ((ns.db and ns.db.settings and ns.db.settings.socialSortBy) or "smart") == modeId
+                    end, function()
+                        if ns.db and ns.db.settings then
+                            ns.db.settings.socialSortBy = modeId
+                        end
+                        UI:Refresh(true)
+                    end)
+                end
+            end)
+        else
+            local nextMode = socialSortDefs[1].id
+            for idx, def in ipairs(socialSortDefs) do
+                if def.id == curMode then
+                    nextMode = socialSortDefs[(idx % #socialSortDefs) + 1].id
+                    break
+                end
+            end
+            if ns.db and ns.db.settings then
+                ns.db.settings.socialSortBy = nextMode
+            end
+            UI:Refresh(true)
+        end
+    end)
+
+    local socialAddBtn = Theme:CreateButton(socialBar, 88, 22, "+ " .. L["Friend"], "default")
+    themeTargets[#themeTargets + 1] = { btn = socialAddBtn, variant = "default" }
+    frame.socialAddBtn = socialAddBtn
+    socialAddBtn:SetScript("OnClick", function()
+        OpenAddFriendModal()
     end)
 
     if socialHelp then
@@ -5046,8 +5471,10 @@ local function BuildMainFrame()
             end
 
             if activeTab == "social" then
-                Theme:AutoFitButton(socialFilterBtn, 110, 12, 195)
-                local sBtns = { socialFilterBtn }
+                Theme:AutoFitButton(socialFilterBtn, 94, 12, 170)
+                Theme:AutoFitButton(socialSortBtn, 84, 12, 145)
+                Theme:AutoFitButton(socialAddBtn, 68, 12, 118)
+                local sBtns = { socialFilterBtn, socialSortBtn, socialAddBtn }
                 if socialHelp then table.insert(sBtns, socialHelp) end
                 local flowH = FlowButtonGroup(socialBar, sBtns, 6, 4, 0)
                 socialBar:SetHeight(flowH)
@@ -5094,9 +5521,15 @@ local function BuildMainFrame()
                 sb:SetHeight(26)
             end
 
-            Theme:AutoFitButton(socialFilterBtn, 128, 16, 220)
+            Theme:AutoFitButton(socialFilterBtn, 104, 14, 185)
+            Theme:AutoFitButton(socialSortBtn, 92, 14, 150)
+            Theme:AutoFitButton(socialAddBtn, 74, 14, 118)
             socialFilterBtn:ClearAllPoints()
             socialFilterBtn:SetPoint("LEFT", socialBar, "LEFT", 0, 0)
+            socialSortBtn:ClearAllPoints()
+            socialSortBtn:SetPoint("LEFT", socialFilterBtn, "RIGHT", 6, 0)
+            socialAddBtn:ClearAllPoints()
+            socialAddBtn:SetPoint("LEFT", socialSortBtn, "RIGHT", 6, 0)
             if socialHelp then
                 socialHelp:ClearAllPoints()
                 socialHelp:SetPoint("RIGHT", socialBar, "RIGHT", -2, 0)
@@ -5135,9 +5568,11 @@ local function BuildMainFrame()
 
             local desiredSearch = math.max(150, math.min(250, math.floor(avail * 0.28)))
             if activeTab == "social" then
-                local fltW = socialFilterBtn:GetWidth() or 140
-                local maxSearchForSocial = avail - (fltW + 44)
-                desiredSearch = math.max(150, math.min(280, maxSearchForSocial))
+                local fltW = socialFilterBtn:GetWidth() or 120
+                local srtW = socialSortBtn:GetWidth() or 100
+                local addW = socialAddBtn:GetWidth() or 82
+                local maxSearchForSocial = avail - (fltW + srtW + addW + 52)
+                desiredSearch = math.max(135, math.min(250, maxSearchForSocial))
             end
             searchBox:SetWidth(desiredSearch)
             filterBar:SetHeight(26)
@@ -5259,6 +5694,52 @@ local function BuildMainFrame()
     content:SetPoint("TOPLEFT", watchBar, "BOTTOMLEFT", 0, -8)
     content:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, 16)
     frame.content = content
+
+    local socialInviteBanner = CreateFrame("Frame", nil, content, "BackdropTemplate")
+    socialInviteBanner:SetHeight(28)
+    socialInviteBanner:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+    socialInviteBanner:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, 0)
+    Theme:ApplyBackdrop(socialInviteBanner, "surface")
+    socialInviteBanner:Hide()
+
+    local invDecline = Theme:CreateButton(socialInviteBanner, 74, 20, L["Decline"], "default")
+    Theme:AutoFitButton(invDecline, 62, 12, 95)
+    invDecline:SetPoint("RIGHT", socialInviteBanner, "RIGHT", -6, 0)
+    themeTargets[#themeTargets + 1] = { btn = invDecline, variant = "default" }
+    socialInviteBanner.btnDecline = invDecline
+
+    local invAccept = Theme:CreateButton(socialInviteBanner, 74, 20, L["Accept"], "primary")
+    Theme:AutoFitButton(invAccept, 62, 12, 95)
+    invAccept:SetPoint("RIGHT", invDecline, "LEFT", -6, 0)
+    themeTargets[#themeTargets + 1] = { btn = invAccept, variant = "primary" }
+    socialInviteBanner.btnAccept = invAccept
+
+    local invText = socialInviteBanner:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    invText:SetPoint("LEFT", socialInviteBanner, "LEFT", 8, 0)
+    invText:SetPoint("RIGHT", invAccept, "LEFT", -8, 0)
+    invText:SetJustifyH("LEFT")
+    invText:SetWordWrap(false)
+    socialInviteBanner.text = invText
+
+    invAccept:SetScript("OnClick", function()
+        if socialInviteBanner._inviteID and Compat.RespondBNetInvite then
+            if not Compat.RespondBNetInvite(socialInviteBanner._inviteID, true) then
+                ns:Print("%s", L["Cannot modify friends while in combat."])
+            elseif ns.Social and ns.Social.QueueScan then
+                ns.Social:QueueScan(0.5)
+            end
+        end
+    end)
+    invDecline:SetScript("OnClick", function()
+        if socialInviteBanner._inviteID and Compat.RespondBNetInvite then
+            if not Compat.RespondBNetInvite(socialInviteBanner._inviteID, false) then
+                ns:Print("%s", L["Cannot modify friends while in combat."])
+            elseif ns.Social and ns.Social.QueueScan then
+                ns.Social:QueueScan(0.5)
+            end
+        end
+    end)
+    frame.socialInviteBanner = socialInviteBanner
 
     scrollList = Theme:CreateScrollList(content, 40, CreateListRow, UpdateListRow)
     scrollList.container:SetAllPoints()
@@ -5442,7 +5923,19 @@ function UI:Refresh(resetScroll)
     end
     ReflowTabStrip()
 
-    if ns.Watchlist then
+    if activeTab == "social" and ns.Social and ns.Social.GetDirectoryStats then
+        local st = ns.Social:GetDirectoryStats()
+        frame.summaryText:SetText(string.format(
+            "%s: %d  |  %s: %d/%d  |  BNet: %d/%d",
+            L["Online"], st.onlineTotal or 0,
+            L["Friends"], st.friendOnline or 0, st.friendTotal or 0,
+            (st.bnetOnlineWoW or 0) + (st.bnetOnlineApp or 0), st.bnetTotal or 0
+        ))
+    elseif activeTab == "nearby" and ns.Nearby then
+        frame.summaryText:SetText(string.format("%s: %d", L["Nearby"], nearbyCount))
+    elseif activeTab == "alts" and ns.Store then
+        frame.summaryText:SetText(L["Total Gold"] .. ": " .. Compat.FormatMoney(ns.Store:GetTotalAltsGold(true)))
+    elseif ns.Watchlist then
         frame.summaryText:SetText(string.format("%s: %d  |  %s: %d  |  %s: %d", L["Online"], on, L["Offline"], off, L["Unchecked"], unk))
     end
 
@@ -5520,16 +6013,34 @@ function UI:Refresh(resetScroll)
     if frame.socialFilterBtn then
         local srcLabels = {
             all = L["All"],
-            guild = L["Guild"],
+            online = L["Online Only"],
             friend = L["Friends"],
             bnet = L["Battle.net"],
+            guild = L["Guild"],
+            fav = L["Favorites"],
+            sc = "[SC]",
+            good = L["Good Partner (+)"],
+            recent = L["Recent Companions"],
+            offline = L["Offline Only"],
         }
         local sLbl = srcLabels[socialFilter] or L["All"]
-        if socialFolderFilter ~= "all" then
+        if socialFolderFilter == "__none" then
+            sLbl = sLbl .. " · " .. L["No Folder"]
+        elseif socialFolderFilter ~= "all" then
             sLbl = sLbl .. " · " .. socialFolderFilter
         end
         Theme:SetButtonText(frame.socialFilterBtn, sLbl .. "  v")
         Theme:SetButtonActive(frame.socialFilterBtn, socialFilter ~= "all" or socialFolderFilter ~= "all", "default")
+    end
+    if frame.socialSortBtn then
+        local sSortLabels = {
+            smart = L["Sort: Smart"],
+            name = L["Sort: Name"],
+            level = L["Sort: Level"],
+            lastSeen = L["Sort: Last Seen"],
+        }
+        local curSMode = (ns.db and ns.db.settings and ns.db.settings.socialSortBy) or "smart"
+        Theme:SetButtonText(frame.socialSortBtn, sSortLabels[curSMode] or L["Sort: Smart"])
     end
     if frame.sortBtn then
         local mode = (ns.db and ns.db.settings and ns.db.settings.sortBy) or "status"
@@ -5596,6 +6107,28 @@ function UI:Refresh(resetScroll)
     if chatPanel then chatPanel:SetShown(activeTab == "chat") end
     if buffsPanel then buffsPanel:SetShown(activeTab == "buffs") end
     if altsPanel then altsPanel:SetShown(activeTab == "alts") end
+
+    local showPendingInvite = false
+    if activeTab == "social" and frame.socialInviteBanner and ns.Social and ns.Social.GetPendingBNetInvites then
+        local invList = ns.Social:GetPendingBNetInvites()
+        if type(invList) == "table" and #invList > 0 then
+            local firstInv = invList[1]
+            showPendingInvite = true
+            frame.socialInviteBanner._inviteID = firstInv.inviteID
+            local extraTxt = #invList > 1 and (" (+" .. tostring(#invList - 1) .. ")") or ""
+            frame.socialInviteBanner.text:SetText("|cff70b5f9" .. L["Pending Battle.net Friend Invite"] .. ":|r " .. tostring(firstInv.accountName or "Battle.net") .. extraTxt)
+        end
+    end
+    if frame.socialInviteBanner then
+        frame.socialInviteBanner:SetShown(showPendingInvite)
+    end
+    scrollList.container:ClearAllPoints()
+    if showPendingInvite and frame.socialInviteBanner then
+        scrollList.container:SetPoint("TOPLEFT", frame.socialInviteBanner, "BOTTOMLEFT", 0, -6)
+        scrollList.container:SetPoint("BOTTOMRIGHT", frame.content, "BOTTOMRIGHT", 0, 0)
+    else
+        scrollList.container:SetAllPoints(frame.content)
+    end
     scrollList.container:SetShown(not isFullPanel)
 
     if activeTab == "clan" then
@@ -5630,6 +6163,13 @@ local function TriggerTabRefresh(tabId)
         ns.Social:RequestRosters(false)
     elseif tabId == "clan" and ns.Clan then
         ns.Clan:RefreshGameCalendar(false)
+        if ns.Clan.ClearNotificationCount then
+            ns.Clan:ClearNotificationCount()
+        end
+    elseif tabId == "chat" and ns.Chat then
+        if ns.Chat.activeThreadKey and ns.Chat.MarkThreadRead then
+            ns.Chat:MarkThreadRead(ns.Chat.activeThreadKey)
+        end
     elseif tabId == "group" and ns.Group then
         ns.Group:Scan()
     elseif tabId == "buffs" and ns.WorldBuffs then
@@ -5972,7 +6512,7 @@ function UI:CloseEmbeddedIfHost(hostFrame)
     end
 end
 
-function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab)
+function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     if inCombat then
         ns:Print("%s", L["Unavailable during combat."])
@@ -5983,7 +6523,7 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab)
     end
 
     local targetTab = defaultTab or (allowedTabs and allowedTabs[1]) or "watchlist"
-    if frame:IsShown() and embeddedState.active and embeddedState.host == hostFrame and activeTab == targetTab then
+    if not forceKeepOpen and frame:IsShown() and embeddedState.active and embeddedState.host == hostFrame and activeTab == targetTab then
         frame:Hide()
         return false
     end

@@ -310,13 +310,19 @@ local function UpdateBadge()
         end
     end
 
-    if button and button.badge then
-        button.badge:Hide()
-        button.badge:SetText("")
-    end
-
-    if button and button.msgBadgeFrame then
-        button.msgBadgeFrame:Hide()
+    local showNumBadge = not (ns.db and ns.db.settings and ns.db.settings.addonMsgMinimapBadge == false)
+    if button and button.msgBadgeFrame and button.badge then
+        if showNumBadge and unreadDirect > 0 then
+            local label = unreadDirect > 9 and "9+" or tostring(unreadDirect)
+            button.badge:SetText(label)
+            button.msgBadgeFrame:SetWidth(unreadDirect > 9 and 20 or 15)
+            button.msgBadgeFrame:Show()
+            button.badge:Show()
+        else
+            button.badge:Hide()
+            button.badge:SetText("")
+            button.msgBadgeFrame:Hide()
+        end
     end
 
     if button and button.overlayRing then
@@ -331,7 +337,7 @@ local function UpdateBadge()
     end
 
     if ldbObject then
-        ldbObject.text = "SocialCentral"
+        ldbObject.text = unreadDirect > 0 and ("SocialCentral (" .. tostring(unreadDirect) .. ")") or "SocialCentral"
     end
 end
 
@@ -411,6 +417,27 @@ local function EnsureButton()
     overlay:SetTexture(RING_TEX)
     button.overlayRing = overlay
 
+    local badgeFrame = CreateFrame("Frame", nil, button, "BackdropTemplate")
+    badgeFrame:SetSize(15, 14)
+    badgeFrame:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", 3, -2)
+    badgeFrame:SetFrameLevel((button:GetFrameLevel() or 8) + 6)
+    if badgeFrame.SetBackdrop then
+        badgeFrame:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Buttons\\WHITE8X8",
+            edgeSize = 1,
+        })
+        badgeFrame:SetBackdropColor(0.84, 0.18, 0.22, 1.0)
+        badgeFrame:SetBackdropBorderColor(0.08, 0.10, 0.14, 1.0)
+    end
+    badgeFrame:Hide()
+
+    local badgeText = badgeFrame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+    badgeText:SetPoint("CENTER", 0, 0)
+    badgeText:SetTextColor(1, 1, 1)
+    button.msgBadgeFrame = badgeFrame
+    button.badge = badgeText
+
     button:SetScript("OnMouseDown", function() SetIconPressed(true) end)
     button:SetScript("OnMouseUp", function() SetIconPressed(false) end)
 
@@ -470,6 +497,6 @@ function MinimapBtn:Update()
     end
 end
 
-for _, ev in ipairs({ "CHAT_UPDATED", "SPOTTER_UPDATED", "SETTINGS_CHANGED" }) do
+for _, ev in ipairs({ "CHAT_UPDATED", "SPOTTER_UPDATED", "SETTINGS_CHANGED", "SETTINGS_UPDATED", "ADDON_MESSAGE_NOTIFY" }) do
     ns:On(ev, UpdateBadge)
 end

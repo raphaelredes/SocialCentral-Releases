@@ -42,13 +42,34 @@ end
 
 local metaModal, profModal, createRoomModal, roomInviteModal, tempChannelModal
 
-function SocialPanels:OpenSocialMetaModal(displayName, rawKey)
-    local key = rawKey or displayName
-    if not key or key == "" then return end
+local DEFAULT_FOLDER_PRESETS = { "M+", "Raid", "PvP", "Craft" }
+
+function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
+    local dirEntry = contextItem
+        or (ns.Social and ns.Social.GetDirectoryEntry and ns.Social:GetDirectoryEntry(rawKey or displayName))
+        or nil
+
+    local charKey = nil
+    if dirEntry then
+        if dirEntry.lookupKey and dirEntry.lookupKey ~= "" then
+            charKey = dirEntry.lookupKey
+        end
+    else
+        charKey = rawKey or displayName
+        if charKey == "" then charKey = nil end
+    end
+
+    local bnetAccountID = dirEntry and dirEntry.bnetAccountID or nil
+    local isCharFriend = dirEntry and dirEntry.sources and dirEntry.sources.friend == true
+    local isBNetFriend = dirEntry and dirEntry.sources and dirEntry.sources.bnet == true and bnetAccountID ~= nil
+    local allowSocialCard = charKey ~= nil
+    if not allowSocialCard and not isBNetFriend then
+        return
+    end
 
     if not metaModal then
         local m = CreateFrame("Frame", "SocialCentralMetaModal", UIParent, "BackdropTemplate")
-        m:SetSize(428, 294)
+        m:SetSize(454, 412)
         m:SetPoint("CENTER")
         m:SetFrameStrata("DIALOG")
         m:SetFrameLevel(110)
@@ -59,7 +80,7 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey)
 
         local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         title:SetPoint("TOPLEFT", 16, -14)
-        title:SetPoint("TOPRIGHT", -36, -14)
+        title:SetPoint("TOPRIGHT", -64, -14)
         title:SetJustifyH("LEFT")
         title:SetWordWrap(false)
         m.title = title
@@ -70,66 +91,106 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey)
             m.folderIn:ClearFocus()
             m.mainIn:ClearFocus()
             m.noteIn:ClearFocus()
+            m.nativeNoteIn:ClearFocus()
             m:Hide()
         end)
         m.topCloseBtn = topCloseBtn
 
+        m.helpBtn = AddHelp(
+            m,
+            topCloseBtn,
+            L["Help: Social Card & Friend Notes"],
+            L["Organizes players with Favorite, Social Folders, Good/Avoid relationship tags, linked Main/Alts, personal Social Card notes, and native WoW/Battle.net Friend Notes."],
+            L["Social Card fields are stored safely by character name (never saving Real ID or BattleTag), while Blizzard Friend Note updates your official Friend/Battle.net note outside combat."],
+            "RIGHT",
+            "LEFT",
+            -6,
+            0
+        )
+
         local fLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        fLbl:SetPoint("TOPLEFT", 16, -44)
-        fLbl:SetPoint("TOPRIGHT", -16, -44)
         fLbl:SetJustifyH("LEFT")
         fLbl:SetWordWrap(false)
         fLbl:SetText(L["Social Folder (e.g. M+ Team, Guild Core):"])
+        m.fLbl = fLbl
+
         local fIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 24 })
-        fIn:SetPoint("TOPLEFT", fLbl, "BOTTOMLEFT", 0, -4)
-        fIn:SetPoint("RIGHT", m, "RIGHT", -16, 0)
         m.folderIn = fIn
 
+        local chipBtns = {}
+        for i = 1, 5 do
+            local cb = Theme:CreateButton(m, 64, 18, "", "default")
+            cb:SetScript("OnClick", function(self)
+                if self._folderVal then
+                    fIn:SetText(self._folderVal)
+                end
+            end)
+            chipBtns[i] = cb
+        end
+        m.chipBtns = chipBtns
+
         local mainLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        mainLbl:SetPoint("TOPLEFT", 16, -94)
-        mainLbl:SetPoint("TOPRIGHT", -16, -94)
         mainLbl:SetJustifyH("LEFT")
         mainLbl:SetWordWrap(false)
         mainLbl:SetText(L["Linked Main Character (optional):"])
+        m.mainLbl = mainLbl
+
         local mainIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 32 })
-        mainIn:SetPoint("TOPLEFT", mainLbl, "BOTTOMLEFT", 0, -4)
-        mainIn:SetPoint("RIGHT", m, "RIGHT", -16, 0)
         m.mainIn = mainIn
 
+        local altsLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        altsLbl:SetJustifyH("LEFT")
+        altsLbl:SetWordWrap(true)
+        altsLbl:SetTextColor(0.66, 0.74, 0.84)
+        m.altsLbl = altsLbl
+
         local noteLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        noteLbl:SetPoint("TOPLEFT", 16, -144)
-        noteLbl:SetPoint("TOPRIGHT", -16, -144)
         noteLbl:SetJustifyH("LEFT")
         noteLbl:SetWordWrap(false)
         noteLbl:SetText(L["Social Note:"])
+        m.noteLbl = noteLbl
+
         local noteIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 60 })
-        noteIn:SetPoint("TOPLEFT", noteLbl, "BOTTOMLEFT", 0, -4)
-        noteIn:SetPoint("RIGHT", m, "RIGHT", -16, 0)
         m.noteIn = noteIn
 
-        local btnFlagGood = Theme:CreateButton(m, 148, 22, L["Good Partner (+)"], "default")
-        Theme:AutoFitButton(btnFlagGood, 130, 16, 185)
-        btnFlagGood:SetPoint("TOPLEFT", noteIn, "BOTTOMLEFT", 0, -12)
+        local nativeNoteLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        nativeNoteLbl:SetJustifyH("LEFT")
+        nativeNoteLbl:SetWordWrap(false)
+        m.nativeNoteLbl = nativeNoteLbl
+
+        local nativeNoteIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 48 })
+        m.nativeNoteIn = nativeNoteIn
+
+        local btnFav = Theme:CreateButton(m, 110, 22, "* " .. L["Favorite"], "default")
+        Theme:AutoFitButton(btnFav, 94, 14, 140)
+        m.btnFav = btnFav
+
+        local btnFlagGood = Theme:CreateButton(m, 144, 22, L["Good Partner (+)"], "default")
+        Theme:AutoFitButton(btnFlagGood, 120, 14, 175)
         m.btnFlagGood = btnFlagGood
 
-        local btnFlagAvoid = Theme:CreateButton(m, 148, 22, L["Flag: Avoid"], "default")
-        Theme:AutoFitButton(btnFlagAvoid, 130, 16, 185)
-        btnFlagAvoid:SetPoint("LEFT", btnFlagGood, "RIGHT", 8, 0)
+        local btnFlagAvoid = Theme:CreateButton(m, 130, 22, L["Flag: Avoid"], "default")
+        Theme:AutoFitButton(btnFlagAvoid, 110, 14, 165)
         m.btnFlagAvoid = btnFlagAvoid
 
-        local function SyncFlagButtons()
+        local function SyncActionButtons()
+            Theme:SetButtonActive(btnFav, m._pendingFav == true, "primary")
             Theme:SetButtonActive(btnFlagGood, m._pendingFlag == "GOOD", "default")
             Theme:SetButtonActive(btnFlagAvoid, m._pendingFlag == "AVOID", "danger")
         end
-        m.SyncFlagButtons = SyncFlagButtons
+        m.SyncFlagButtons = SyncActionButtons
 
+        btnFav:SetScript("OnClick", function()
+            m._pendingFav = not (m._pendingFav == true)
+            SyncActionButtons()
+        end)
         btnFlagGood:SetScript("OnClick", function()
             m._pendingFlag = (m._pendingFlag == "GOOD") and "" or "GOOD"
-            SyncFlagButtons()
+            SyncActionButtons()
         end)
         btnFlagAvoid:SetScript("OnClick", function()
             m._pendingFlag = (m._pendingFlag == "AVOID") and "" or "AVOID"
-            SyncFlagButtons()
+            SyncActionButtons()
         end)
 
         local btnSave = Theme:CreateButton(m, 92, 24, L["Save"], "primary")
@@ -146,48 +207,239 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey)
             fIn:ClearFocus()
             mainIn:ClearFocus()
             noteIn:ClearFocus()
+            nativeNoteIn:ClearFocus()
             m:Hide()
         end)
-        for _, box in ipairs({ fIn, mainIn, noteIn }) do
+        for _, box in ipairs({ fIn, mainIn, noteIn, nativeNoteIn }) do
             box:SetScript("OnEscapePressed", function() m:Hide() end)
         end
 
         metaModal = m
     end
 
-    local meta = Store and Store:GetSocialMeta(key) or {}
+    local meta = (allowSocialCard and Store and Store:GetSocialMeta(charKey)) or {}
+    local curFav = false
+    if allowSocialCard and Store and Store.IsSocialFavorite then
+        curFav = Store:IsSocialFavorite(charKey)
+    end
+    if not curFav and dirEntry and dirEntry.bnetFavorite == true then
+        curFav = true
+    end
+
     Theme:ApplyBackdrop(metaModal, "window")
     Theme:StyleButton(metaModal.topCloseBtn, "default")
     Theme:StyleButton(metaModal.btnSave, "primary")
     Theme:StyleButton(metaModal.btnCancel, "default")
+    Theme:StyleButton(metaModal.btnFav, "default")
     Theme:StyleButton(metaModal.btnFlagGood, "default")
     Theme:StyleButton(metaModal.btnFlagAvoid, "danger")
-    metaModal.title:SetText(L["Social Card: %s"]:format(displayName or key))
-    metaModal.folderIn:SetText(meta and meta.folder or "")
-    metaModal.mainIn:SetText(meta and meta.mainName or "")
-    metaModal.noteIn:SetText(meta and meta.note or "")
-    metaModal._pendingFlag = (meta and meta.flag) or ""
+    if metaModal.helpBtn and metaModal.helpBtn.RefreshTheme then
+        metaModal.helpBtn:RefreshTheme()
+    end
+
+    metaModal.title:SetText(L["Social Card: %s"]:format(displayName or charKey or ""))
+
+    -- Dynamically stack visible sections cleanly with zero overlap.
+    local y = -44
+    if allowSocialCard then
+        metaModal.fLbl:Show()
+        metaModal.fLbl:ClearAllPoints()
+        metaModal.fLbl:SetPoint("TOPLEFT", 16, y)
+        metaModal.fLbl:SetPoint("TOPRIGHT", -16, y)
+        y = y - 16
+
+        metaModal.folderIn:Show()
+        metaModal.folderIn:ClearAllPoints()
+        metaModal.folderIn:SetPoint("TOPLEFT", 16, y)
+        metaModal.folderIn:SetPoint("RIGHT", metaModal, "RIGHT", -16, 0)
+        metaModal.folderIn:SetText(meta and meta.folder or "")
+        y = y - 28
+
+        -- Populate folder chips: existing user folders first, then curated defaults.
+        local chipList, seenChip = {}, {}
+        if Store and Store.GetSocialFolders then
+            for _, fn in ipairs(Store:GetSocialFolders()) do
+                if #chipList < 5 and not seenChip[fn] then
+                    seenChip[fn] = true
+                    chipList[#chipList + 1] = fn
+                end
+            end
+        end
+        for _, def in ipairs(DEFAULT_FOLDER_PRESETS) do
+            if #chipList < 5 and not seenChip[def] then
+                seenChip[def] = true
+                chipList[#chipList + 1] = def
+            end
+        end
+        local cx = 16
+        for i, cb in ipairs(metaModal.chipBtns) do
+            local fn = chipList[i]
+            if fn then
+                cb._folderVal = fn
+                Theme:StyleButton(cb, "default")
+                Theme:SetButtonText(cb, fn)
+                Theme:AutoFitButton(cb, 42, 12, 108)
+                local cw = cb:GetWidth() or 60
+                if (cx + cw) <= 438 then
+                    cb:ClearAllPoints()
+                    cb:SetPoint("TOPLEFT", metaModal, "TOPLEFT", cx, y)
+                    cb:Show()
+                    cx = cx + cw + 6
+                else
+                    cb:Hide()
+                end
+            else
+                cb:Hide()
+            end
+        end
+        y = y - 26
+
+        metaModal.mainLbl:Show()
+        metaModal.mainLbl:ClearAllPoints()
+        metaModal.mainLbl:SetPoint("TOPLEFT", 16, y)
+        metaModal.mainLbl:SetPoint("TOPRIGHT", -16, y)
+        y = y - 16
+
+        metaModal.mainIn:Show()
+        metaModal.mainIn:ClearAllPoints()
+        metaModal.mainIn:SetPoint("TOPLEFT", 16, y)
+        metaModal.mainIn:SetPoint("RIGHT", metaModal, "RIGHT", -16, 0)
+        metaModal.mainIn:SetText(meta and meta.mainName or "")
+        y = y - 28
+
+        local linkedAlts = Store and Store.GetLinkedAltsForCharacter and Store:GetLinkedAltsForCharacter(charKey)
+        if linkedAlts and #linkedAlts > 0 then
+            metaModal.altsLbl:ClearAllPoints()
+            metaModal.altsLbl:SetPoint("TOPLEFT", 16, y)
+            metaModal.altsLbl:SetPoint("TOPRIGHT", -16, y)
+            metaModal.altsLbl:SetText(L["Linked Alts"] .. ": " .. table.concat(linkedAlts, ", "))
+            metaModal.altsLbl:Show()
+            y = y - 18
+        else
+            metaModal.altsLbl:Hide()
+        end
+
+        metaModal.noteLbl:Show()
+        metaModal.noteLbl:ClearAllPoints()
+        metaModal.noteLbl:SetPoint("TOPLEFT", 16, y)
+        metaModal.noteLbl:SetPoint("TOPRIGHT", -16, y)
+        y = y - 16
+
+        metaModal.noteIn:Show()
+        metaModal.noteIn:ClearAllPoints()
+        metaModal.noteIn:SetPoint("TOPLEFT", 16, y)
+        metaModal.noteIn:SetPoint("RIGHT", metaModal, "RIGHT", -16, 0)
+        metaModal.noteIn:SetText(meta and meta.note or "")
+        y = y - 30
+    else
+        metaModal.fLbl:Hide()
+        metaModal.folderIn:Hide()
+        for _, cb in ipairs(metaModal.chipBtns) do cb:Hide() end
+        metaModal.mainLbl:Hide()
+        metaModal.mainIn:Hide()
+        metaModal.altsLbl:Hide()
+        metaModal.noteLbl:Hide()
+        metaModal.noteIn:Hide()
+    end
+
+    local showNativeNote = isCharFriend or isBNetFriend
+    local initialNativeNote = ""
+    if showNativeNote then
+        if isCharFriend then
+            metaModal.nativeNoteLbl:SetText(L["Blizzard Friend Note (synced with WoW Friends):"])
+            initialNativeNote = (dirEntry and dirEntry.friendNote) or ""
+            metaModal.nativeNoteIn:SetMaxLetters(48)
+        else
+            metaModal.nativeNoteLbl:SetText(L["Battle.net Friend Note:"])
+            initialNativeNote = (dirEntry and dirEntry.bnetNote) or ""
+            metaModal.nativeNoteIn:SetMaxLetters(120)
+        end
+        metaModal.nativeNoteLbl:ClearAllPoints()
+        metaModal.nativeNoteLbl:SetPoint("TOPLEFT", 16, y)
+        metaModal.nativeNoteLbl:SetPoint("TOPRIGHT", -16, y)
+        metaModal.nativeNoteLbl:Show()
+        y = y - 16
+
+        metaModal.nativeNoteIn:ClearAllPoints()
+        metaModal.nativeNoteIn:SetPoint("TOPLEFT", 16, y)
+        metaModal.nativeNoteIn:SetPoint("RIGHT", metaModal, "RIGHT", -16, 0)
+        metaModal.nativeNoteIn:SetText(initialNativeNote)
+        metaModal.nativeNoteIn:Show()
+        y = y - 32
+    else
+        metaModal.nativeNoteLbl:Hide()
+        metaModal.nativeNoteIn:Hide()
+    end
+
+    metaModal.btnFav:ClearAllPoints()
+    metaModal.btnFav:SetPoint("TOPLEFT", 16, y)
+    if allowSocialCard then
+        metaModal.btnFlagGood:Show()
+        metaModal.btnFlagGood:ClearAllPoints()
+        metaModal.btnFlagGood:SetPoint("LEFT", metaModal.btnFav, "RIGHT", 6, 0)
+        metaModal.btnFlagAvoid:Show()
+        metaModal.btnFlagAvoid:ClearAllPoints()
+        metaModal.btnFlagAvoid:SetPoint("LEFT", metaModal.btnFlagGood, "RIGHT", 6, 0)
+    else
+        metaModal.btnFlagGood:Hide()
+        metaModal.btnFlagAvoid:Hide()
+    end
+
+    metaModal:SetHeight(math.max(190, math.abs(y) + 74))
+
+    metaModal._pendingFav = curFav
+    metaModal._pendingFlag = (allowSocialCard and meta and meta.flag) or ""
     metaModal.SyncFlagButtons()
 
     local function Commit()
-        if Store and Store.SetSocialMeta then
-            Store:SetSocialMeta(key, {
+        if allowSocialCard and Store and Store.SetSocialMeta then
+            Store:SetSocialMeta(charKey, {
                 folder = metaModal.folderIn:GetText() or "",
                 mainName = metaModal.mainIn:GetText() or "",
                 note = metaModal.noteIn:GetText() or "",
                 flag = metaModal._pendingFlag or "",
+                favorite = metaModal._pendingFav == true,
             })
+            if Store.TouchFriendPresence then
+                Store:TouchFriendPresence(charKey, { favorite = metaModal._pendingFav == true })
+            end
         end
+
+        if isBNetFriend and Compat and Compat.SetBNetFriendFavorite and (dirEntry.bnetFavorite == true) ~= (metaModal._pendingFav == true) then
+            Compat.SetBNetFriendFavorite(bnetAccountID, metaModal._pendingFav == true)
+        end
+
+        if showNativeNote and Compat then
+            local nextNative = metaModal.nativeNoteIn:GetText() or ""
+            if nextNative ~= initialNativeNote then
+                local savedOk = false
+                if isCharFriend and Compat.SetCharacterFriendNote then
+                    savedOk = Compat.SetCharacterFriendNote(displayName or charKey, nextNative)
+                elseif isBNetFriend and Compat.SetBNetFriendNote then
+                    savedOk = Compat.SetBNetFriendNote(bnetAccountID, nextNative)
+                end
+                if not savedOk and InCombatLockdown and InCombatLockdown() then
+                    ns:Print("%s", L["Cannot update Blizzard friend note while in combat."])
+                end
+            end
+        end
+
         metaModal.folderIn:ClearFocus()
         metaModal.mainIn:ClearFocus()
         metaModal.noteIn:ClearFocus()
+        metaModal.nativeNoteIn:ClearFocus()
         metaModal:Hide()
     end
 
     metaModal.btnSave:SetScript("OnClick", Commit)
     metaModal.noteIn:SetScript("OnEnterPressed", Commit)
+    metaModal.nativeNoteIn:SetScript("OnEnterPressed", Commit)
     metaModal:Show()
-    metaModal.folderIn:SetFocus()
+    if allowSocialCard then
+        metaModal.folderIn:SetFocus()
+    else
+        metaModal.nativeNoteIn:SetFocus()
+    end
 end
 
 function SocialPanels:OpenProfessionModal()
@@ -2040,6 +2292,8 @@ function SocialPanels:CreateChatPanel(parent)
                         if not entry.incoming and entry.viaAddon and not isRoom then
                             if entry.deliveryState == "delivered" then
                                 tick = " |cff3fb950[" .. L["ok"] .. "]|r"
+                            elseif entry.deliveryState == "off" or entry.deliveryState == "declined" then
+                                tick = " |cfff54747[" .. L["off"] .. "]|r"
                             else
                                 tick = " |cff9da7b5[" .. L["sent"] .. "]|r"
                             end

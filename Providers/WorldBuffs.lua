@@ -501,7 +501,17 @@ function WorldBuffs:ReceiveSyncedDrop(syncId, ts, sender)
     if (now - ts) <= 20 and ns.db and ns.db.settings and ns.db.settings.worldBuffsAlerts ~= false then
         for _, def in ipairs(BUFF_DEFINITIONS) do
             if def.id == defId then
-                ns:Print(L["[World Buff Sync] %s reported %s!"]:format(sender or L["Guild"], def.name))
+                local openLink = "|Haddon:SCentral:buffs|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
+                ns:Print("%s %s", L["[World Buff Sync] %s reported %s!"]:format(sender or L["Guild"], def.name), openLink)
+                ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                    id = "wb:" .. syncId .. ":" .. tostring(ts),
+                    kind = "WORLDBUFF",
+                    sourceTag = L["World Buffs"],
+                    sender = sender or L["Guild"],
+                    text = def.name,
+                    ts = time(),
+                    priority = 1,
+                })
                 break
             end
         end

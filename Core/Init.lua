@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.8"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.8" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.9"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.9" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -76,6 +76,12 @@ local DEFAULTS = {
         whoCooldown = 6,            -- seconds between /who hardware-event requests
         nearbyRetentionMin = 15,    -- minutes to keep passive nearby sightings
         sortBy = "status",          -- "status" | "name" | "recent"
+        socialSortBy = "smart",     -- "smart" | "name" | "level" | "lastSeen"
+        socialShowOffline = true,   -- show offline Character/BNet friends in Social directory
+        friendOnlineAlertMode = "favorites", -- "off" | "favorites" | "all"
+        friendOnlineAlertToast = true,       -- show compact floating toast when friends come online
+        friendOnlineAlertChat = false,       -- optional extra chat summary line on friend login
+        friendOnlineAlertSound = true,       -- subtle audio chime when friend online toast fires
         alerts = {
             chat = true,
             sound = false,
@@ -92,10 +98,13 @@ local DEFAULTS = {
         clanLfgAlertDungeonsOnly = true, -- notify specifically for Dungeon / M+ group searches
         clanLfgAlertFilter = "",     -- optional comma-separated dungeon keywords
         clanLfgAlertSound = true,    -- sound chime when a Clan Dungeon LFG alert triggers
+        clanEventAlertEnabled = false, -- opt-in alert when a guildmate posts a new Guild Event
+        clanSignupAlertEnabled = true, -- alert event creator when guildmates sign up or decline
         autoStatusInstance = false, -- opt-in contextual activity tag out-of-combat
         chatSound = true,           -- master chime toggle for direct/room conversations
         chatSoundWhispers = true,   -- chime on Character & Battle.net whispers
         chatSoundRooms = true,      -- chime on Addon Private Chat Room messages & invites
+        chatSoundAlliance = true,   -- chime on Alliance chat addon messages
         chatSoundGuild = false,     -- Guild / Officer chat sound muted by default
         chatSoundGroup = false,     -- Party / Raid / Instance chat sound muted by default
         chatMirrorChannels = true,  -- mirror native WoW Guild/Party/Raid channels inside Conversations
@@ -103,6 +112,11 @@ local DEFAULTS = {
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
         chatHistoryLimit = 30,      -- local lines kept per character conversation thread
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
+        addonMsgToast = true,       -- show compact floating toast pill when addon messages arrive
+        addonMsgChatEcho = true,    -- echo clickable [SC] summary line to chat frame for addon messages
+        addonMsgTaskbarFlash = true, -- pulse game taskbar icon on incoming addon messages
+        addonMsgMinimapBadge = true, -- display compact unread counter badge on Minimap button
+        addonMsgTabBadges = true,   -- display compact unread badges on Social (O) & Guild (J) side-tabs
         spotterEnabled = true,      -- lightweight event-driven radar (0ms idle CPU)
         spotterNotifyEnemy = true,  -- chat + banner notification when Enemy Clan player appears
         spotterNotifyAlly = true,   -- chat + banner notification when Ally Clan player appears
@@ -133,7 +147,8 @@ local DEFAULTS = {
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
     clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
-    socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note, flag } }
+    socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note, flag, favorite } }
+    friendPresence = {},           -- [scopeKey] = { [lookupKey] = { lastSeen, lastArea, lastClass, lastLevel, favorite } } (strictly zero BattleTag/Real ID)
     recentCompanions = {},         -- [scopeKey] = { [lookupKey] = { name, classFile, level, zone, role, lastSeen } }
     chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
     chatRooms = {},                -- [scopeKey] = { [roomId] = { id, name, owner, scope, members } }
@@ -337,6 +352,56 @@ function SocialCentral_OnAddonCompartmentLeave()
     GameTooltip:Hide()
 end
 
+local navRegenHost = {}
+local pendingNavigation = nil
+
+--- Navigate to a SocialCentral module safely, deferring official Blizzard frame opens if currently in combat.
+function ns:NavigateToModule(modName, opts)
+    opts = opts or {}
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+    if inCombat then
+        pendingNavigation = { mod = modName, opts = opts }
+        ns:Print("%s", L["Will open right after combat ends."])
+        return false
+    end
+
+    pendingNavigation = nil
+    if (opts.socialFilter or opts.socialSearch) and ns.UI and ns.UI.SetSocialNavigation then
+        ns.UI:SetSocialNavigation(opts)
+    end
+    if opts.clanRightView and ns.Clan and ns.Clan.SetPreferredRightView then
+        ns.Clan:SetPreferredRightView(opts.clanRightView)
+    end
+    if opts.threadKey and ns.Chat and ns.Chat.SetActiveThread then
+        ns.Chat:SetActiveThread(opts.threadKey)
+    elseif (opts.targetName or opts.bnetAccountID) and ns.Chat and ns.Chat.OpenDirectConversation then
+        ns.Chat:OpenDirectConversation({
+            targetName = opts.targetName,
+            bnetAccountID = opts.bnetAccountID,
+            bnetName = opts.bnetName,
+        })
+    end
+
+    if (modName == "clan" or modName == "lfg") and ns.Clan and ns.Clan.ClearNotificationCount then
+        ns.Clan:ClearNotificationCount()
+    end
+
+    if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+        ns.LFGFrameTab:OpenOfficialModule(modName, true)
+    elseif ns.UI and ns.UI.OpenTab then
+        ns.UI:OpenTab(modName)
+    end
+    return true
+end
+
+ns.RegisterEvent(navRegenHost, "PLAYER_REGEN_ENABLED", function()
+    if pendingNavigation then
+        local job = pendingNavigation
+        pendingNavigation = nil
+        ns:NavigateToModule(job.mod, job.opts)
+    end
+end)
+
 if EventRegistry and EventRegistry.RegisterCallback then
     EventRegistry:RegisterCallback("SetItemRef", function(_, link)
         if ns.Safe and ns.Safe.IsSecret and ns.Safe.IsSecret(link) then return end
@@ -346,23 +411,14 @@ if EventRegistry and EventRegistry.RegisterCallback then
                 ns.UI:OpenUpdateModal()
             end
         elseif link:find("addon:SCentral:clanlfg", 1, true) then
-            if ns.Clan and ns.Clan.SetPreferredRightView then
-                ns.Clan:SetPreferredRightView("lfg")
-            end
-            if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
-                ns.LFGFrameTab:OpenOfficialModule("lfg")
-            elseif ns.UI and ns.UI.OpenTab then
-                ns.UI:OpenTab("clan")
-            end
+            ns:NavigateToModule("lfg", { clanRightView = "lfg" })
+        elseif link:find("addon:SCentral:clanevt:", 1, true) then
+            local eventId = link:match("addon:SCentral:clanevt:([^|]+)")
+            ns:NavigateToModule("clan", { clanRightView = "events", eventId = eventId })
         elseif link:find("addon:SCentral:diplomacy", 1, true) then
-            if ns.Clan and ns.Clan.SetPreferredRightView then
-                ns.Clan:SetPreferredRightView("diplomacy")
-            end
-            if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
-                ns.LFGFrameTab:OpenOfficialModule("diplomacy")
-            elseif ns.UI and ns.UI.OpenTab then
-                ns.UI:OpenTab("clan")
-            end
+            ns:NavigateToModule("diplomacy", { clanRightView = "diplomacy" })
+        elseif link:find("addon:SCentral:buffs", 1, true) then
+            ns:NavigateToModule("buffs")
         elseif link:find("addon:SCentral:spotter", 1, true) then
             if ns.SpotterHUD and ns.SpotterHUD.Show then
                 ns.SpotterHUD:Show(true)
@@ -372,16 +428,29 @@ if EventRegistry and EventRegistry.RegisterCallback then
             if targetKey and targetKey ~= "" and ns.Spotter and ns.Spotter.FocusTarget then
                 ns.Spotter:FocusTarget(targetKey)
             end
+        elseif link:find("addon:SCentral:thread:", 1, true) then
+            local threadKey = link:match("addon:SCentral:thread:([^|]+)")
+            if threadKey and threadKey ~= "" then
+                ns:NavigateToModule("chat", { threadKey = threadKey })
+            end
+        elseif link:find("addon:SCentral:social:", 1, true) then
+            local who = link:match("addon:SCentral:social:([^|]+)")
+            ns:NavigateToModule("social", { socialSearch = who or "" })
+        elseif link:find("addon:SCentral:room:", 1, true) then
+            local roomId = link:match("addon:SCentral:room:([^|]+)")
+            if roomId and roomId ~= "" then
+                local room = ns.Chat and ns.Chat.GetRoom and ns.Chat:GetRoom(roomId)
+                if room and room.joined then
+                    ns:NavigateToModule("chat", { threadKey = "room:" .. roomId })
+                else
+                    ns:NavigateToModule("chat", { pendingRoomId = roomId })
+                end
+            end
         else
             local who = link:match("addon:SCentral:w:([^|]+)")
             if who and who ~= "" then
                 if ns.Chat and ns.Chat.OpenDirectConversation then
-                    ns.Chat:OpenDirectConversation({ targetName = who })
-                    if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
-                        ns.LFGFrameTab:OpenOfficialModule("chat")
-                    elseif ns.UI and ns.UI.OpenTab then
-                        ns.UI:OpenTab("chat")
-                    end
+                    ns:NavigateToModule("chat", { targetName = who })
                 elseif ns.Compat and ns.Compat.Whisper then
                     ns.Compat.Whisper(who)
                 end

@@ -22,10 +22,13 @@ local Chat = {
     pendingOfficialOpen = {},
     probeSentAt = {},
     pongSentAt = {},
+    nackSentAt = {},
+    seenAllianceMsgs = {},
     deliveryIndex = {},
     msgSeq = 0,
     lastRoomSendAt = 0,
     lastDirectSendAt = 0,
+    lastChimeAt = 0,
     activeTempChannel = nil,
 }
 
@@ -41,6 +44,8 @@ local ROOM_SEND_COOLDOWN = 1.2
 local DIRECT_SEND_COOLDOWN = 0.8
 local PING_COOLDOWN = 10
 local PONG_COOLDOWN = 6
+local NACK_COOLDOWN = 8
+local SOUND_COOLDOWN = 2.0
 local PING_TIMEOUT = 3.5
 local HISTORY_TTL_SECONDS = 30 * 86400
 local MAX_SAVED_THREADS = 80
@@ -267,6 +272,8 @@ local function ShouldPlaySoundForThread(kind, threadKey)
         return s.chatSoundWhispers ~= false
     elseif kind == "ROOM" then
         return s.chatSoundRooms ~= false
+    elseif kind == "ALLIANCE" then
+        return s.chatSoundAlliance ~= false
     elseif kind == "GUILD" or kind == "OFFICER" then
         return s.chatSoundGuild == true
     elseif kind == "PARTY" or kind == "RAID" or kind == "INSTANCE_CHAT" then
@@ -279,9 +286,21 @@ local function PlayIncomingChime(kind, threadKey)
     if not ShouldPlaySoundForThread(kind, threadKey) then
         return
     end
+    local monoNow = GetTime and GetTime() or time()
+    if (monoNow - (Chat.lastChimeAt or 0)) < SOUND_COOLDOWN then
+        return
+    end
     if PlaySound and SOUNDKIT then
-        local kit = SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON
+        local kit
+        if kind == "ROOM" then
+            kit = SOUNDKIT.UI_BNET_TOAST or SOUNDKIT.IG_QUEST_LIST_OPEN or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or SOUNDKIT.TELL_MESSAGE
+        elseif kind == "ALLIANCE" then
+            kit = SOUNDKIT.IG_QUEST_LIST_COMPLETE or SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON
+        else
+            kit = SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON
+        end
         if kit then
+            Chat.lastChimeAt = monoNow
             pcall(PlaySound, kit, "Master")
         end
     end
@@ -402,7 +421,12 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     thread.lastAt = ts
 
     local mainVisible = ns.UI and ns.UI.IsMainVisible and ns.UI:IsMainVisible()
-    local isViewing = Chat.activeThreadKey == thread.key and mainVisible
+    local isViewing = false
+    if ns.UI and ns.UI.IsChatThreadVisible then
+        isViewing = ns.UI:IsChatThreadVisible(thread.key)
+    elseif mainVisible then
+        isViewing = (Chat.activeThreadKey == thread.key)
+    end
     local isMuted = Chat:IsThreadMuted(thread.key)
     local isPublic = IsPublicChannelKind(thread.kind)
     local allowChannelUnread = ns.db and ns.db.settings and ns.db.settings.chatChannelUnread == true
@@ -413,6 +437,54 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
         end
         if not silent then
             PlayIncomingChime(thread.kind, thread.key)
+        end
+        if extraFields and extraFields.viaAddon and not silent then
+            local notifyKind = extraFields.notifyKind
+            if not notifyKind then
+                if thread.kind == "ROOM" then
+                    notifyKind = "ROOM"
+                elseif thread.kind == "ALLIANCE" then
+                    notifyKind = "ALLIANCE"
+                else
+                    notifyKind = "DIRECT"
+                end
+            end
+            local cleanPreview = Compat.CleanPayloadField(text, 100)
+            local sourceTag
+            if notifyKind == "ALLIANCE" then
+                sourceTag = L["Alliance"]
+            elseif notifyKind == "ROOM" then
+                sourceTag = (thread.title and thread.title ~= "") and thread.title or L["Private Room"]
+            else
+                sourceTag = L["Direct Addon"]
+            end
+            local s = ns.db and ns.db.settings
+            if s and s.addonMsgChatEcho ~= false then
+                local hex = classFile and Compat.ClassHex(classFile) or "|cffd2a8ff"
+                local echoLine = ("|cff3fb950[SC %s]|r %s%s|r: %s |Haddon:SCentral:thread:%s|h|cff58a6ff[%s]|r|h"):format(
+                    sourceTag,
+                    hex,
+                    tostring(senderName or "?"),
+                    cleanPreview,
+                    tostring(thread.key),
+                    L["Open"]
+                )
+                ns:Print("%s", echoLine)
+            end
+            ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                id = extraFields.deliveryMsgId or (tostring(thread.key) .. ":" .. tostring(ts)),
+                kind = notifyKind,
+                sourceTag = sourceTag,
+                sender = tostring(senderName or "?"),
+                senderClass = classFile,
+                text = cleanPreview,
+                threadKey = thread.key,
+                roomId = thread.roomId,
+                targetName = thread.targetName,
+                bnetAccountID = thread.bnetAccountID,
+                ts = ts,
+                priority = (notifyKind == "DIRECT") and 2 or 1,
+            })
         end
     end
 
@@ -1121,10 +1193,24 @@ function Chat:SendRoomMessage(roomId, rawText)
     return true
 end
 
-function Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText)
+function Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText, msgId)
     if not msgText or msgText == "" then return end
     if not ns.Clan or not ns.Clan:IsMemberAllianceAuthorized() then
         return
+    end
+
+    local nowTs = GetTime and GetTime() or time()
+    self.seenAllianceMsgs = self.seenAllianceMsgs or {}
+    if msgId and msgId ~= "" then
+        for k, seenAt in pairs(self.seenAllianceMsgs) do
+            if (nowTs - (seenAt or 0)) > 120 then
+                self.seenAllianceMsgs[k] = nil
+            end
+        end
+        if self.seenAllianceMsgs[msgId] then
+            return
+        end
+        self.seenAllianceMsgs[msgId] = nowTs
     end
 
     local t = EnsureThread("ch:alliance", "ALLIANCE", L["Alliance"], { slash = "/al " })
@@ -1134,9 +1220,12 @@ function Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText
     local displayName = gTag .. (authorName or "?")
 
     local _, meKey, myFirst = GetMyInfo()
-    local isMe = (authorName == myFirst or authorName == meKey)
-    AppendMessage(t, displayName, msgText, not isMe, classFile, true, false, { viaAddon = true })
-    ns:Emit("CHAT_UPDATED")
+    local isMe = Compat.IsMe(authorName) or (authorName == myFirst or authorName == meKey)
+    AppendMessage(t, displayName, msgText, not isMe, classFile, true, false, {
+        viaAddon = true,
+        notifyKind = "ALLIANCE",
+        deliveryMsgId = msgId,
+    })
 end
 
 function Chat:SendAllianceMessage(rawText)
@@ -1156,12 +1245,12 @@ function Chat:SendAllianceMessage(rawText)
     end
     self.lastAllianceSendAt = now
 
-    local ok = ns.Clan:SendAllianceChat(clean)
+    local ok, sentMsgId = ns.Clan:SendAllianceChat(clean)
     if ok then
         local myName = GetMyInfo()
         local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
         local _, myClass = Safe.Call(UnitClass, "player")
-        self:ReceiveAllianceMessage(myGuild, myName, myClass, clean)
+        self:ReceiveAllianceMessage(myGuild, myName, myClass, clean, sentMsgId)
         return true
     end
     return false
@@ -1455,6 +1544,19 @@ function Chat:IsLookupKeyVerified(lookupKey)
         return true
     end
     return false
+end
+
+function Chat:GetLookupKeyAddonBadge(lookupKey)
+    if not lookupKey or lookupKey == "" then return "" end
+    if self:IsLookupKeyVerified(lookupKey) then
+        return " |cff3fb950[SC]|r"
+    end
+    local savedPeers = GetAddonPeersScopeTable()
+    local rec = savedPeers and savedPeers[lookupKey]
+    if type(rec) == "table" and (time() - (rec.lastSeenAt or 0)) <= (14 * 86400) then
+        return " |cff8ab4f8[SC*]|r"
+    end
+    return ""
 end
 
 function Chat:GetOfficialDestinationInfo(threadKey)
@@ -1993,13 +2095,19 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
     end
 
     if op == "DMA" then
-        local _, msgId = strsplit("|", payload, 2)
+        local _, msgId, ackFlag, reason = strsplit("|", payload, 4)
         msgId = CleanRoomToken(msgId)
         Chat:MarkPeerVerified(parsedSender and parsedSender.displayName or senderRaw, bnGameAccId, nil, "DMA")
         if msgId and Chat.deliveryIndex and Chat.deliveryIndex[msgId] then
             local rec = Chat.deliveryIndex[msgId]
             if rec and rec.entry then
-                rec.entry.deliveryState = "delivered"
+                if ackFlag == "0" then
+                    rec.entry.deliveryState = (reason == "off") and "off" or "declined"
+                    local who = (parsedSender and parsedSender.displayName) or senderRaw or "?"
+                    ns:Print("%s", string.format(L["%s has In-Addon Direct Chat disabled. Send via Blizzard chat instead."], who))
+                else
+                    rec.entry.deliveryState = "delivered"
+                end
             end
             Chat.deliveryIndex[msgId] = nil
             ns:Emit("CHAT_UPDATED")
@@ -2009,6 +2117,20 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
 
     if op == "DM" or op == "DPIN" then
         if not Chat:IsDirectChatEnabled() then
+            local _, rawMsgId = strsplit("|", payload, 3)
+            local mId = CleanRoomToken(rawMsgId)
+            local nackKey = bnGameAccId and ("bn:" .. tostring(bnGameAccId)) or (parsedSender and ("w:" .. parsedSender.lookupKey))
+            local monoNow = GetTime and GetTime() or time()
+            Chat.nackSentAt = Chat.nackSentAt or {}
+            if mId and nackKey and (monoNow - (Chat.nackSentAt[nackKey] or 0)) >= NACK_COOLDOWN and not (ns.Clan and ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked()) then
+                Chat.nackSentAt[nackKey] = monoNow
+                local nackPayload = "DMA|" .. mId .. "|0|off"
+                if bnGameAccId then
+                    SendRoomPacket(nil, bnGameAccId, nackPayload)
+                elseif parsedSender then
+                    SendRoomPacket(parsedSender.displayName, nil, nackPayload)
+                end
+            end
             return
         end
         Chat:MarkPeerVerified(parsedSender and parsedSender.displayName or senderRaw, bnGameAccId, nil, op)
@@ -2087,7 +2209,21 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
             Chat.roomBNetTargets[roomId][bnGameAccId] = (hostParsed and hostParsed.firstName) or "Host"
         end
         PlayIncomingChime("ROOM", "room:" .. roomId)
-        ns:Print(string.format(L["Private room invite from %s: %s (open Chat tab to accept)."], (hostParsed and hostParsed.firstName) or "Friend", title))
+        local hostDisp = (hostParsed and hostParsed.displayName) or (hostParsed and hostParsed.firstName) or "Friend"
+        local openLink = "|Haddon:SCentral:room:" .. roomId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
+        ns:Print("%s", string.format(L["Private room invite from %s: %s %s"], hostDisp, title, openLink))
+        ns:Emit("ADDON_MESSAGE_NOTIFY", {
+            id = "rmi:" .. roomId,
+            kind = "RMI",
+            sourceTag = L["Room Invite"],
+            sender = hostDisp,
+            text = title,
+            roomId = roomId,
+            roomTitle = title,
+            threadKey = "room:" .. roomId,
+            ts = time(),
+            priority = 3,
+        })
         ns:Emit("CHAT_UPDATED")
     elseif op == "RMJ" then
         local _, roomId, memberRaw, accepted = strsplit("|", payload, 4)
@@ -2149,7 +2285,10 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
         end
         local classFile = parsedSender and LookupClassFromCache(parsedSender.lookupKey)
         local t = EnsureThread("room:" .. roomId, "ROOM", room.title or roomId, { roomId = roomId })
-        AppendMessage(t, displaySender, msgText, true, classFile, true, false)
+        AppendMessage(t, displaySender, msgText, true, classFile, true, false, {
+            viaAddon = true,
+            notifyKind = "ROOM",
+        })
     end
 end
 

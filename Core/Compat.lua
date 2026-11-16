@@ -1163,6 +1163,138 @@ function Compat.Invite(target)
     end
 end
 
+local function IsInCombatNow()
+    return (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+end
+
+function Compat.AddCharacterFriend(targetName, noteText)
+    if IsInCombatNow() then return false end
+    local clean = Compat.FormatForeverTarget(targetName)
+    if not clean or clean == "" then return false end
+    local cleanNote = Compat.CleanPayloadField(noteText or "", 48)
+    if C_FriendList and C_FriendList.AddFriend then
+        local ok = pcall(C_FriendList.AddFriend, clean, cleanNote)
+        if ok then return true end
+    end
+    if AddFriend then
+        local ok = pcall(AddFriend, clean)
+        if ok then return true end
+    end
+    return false
+end
+
+function Compat.RemoveCharacterFriend(targetName)
+    if IsInCombatNow() then return false end
+    local clean = Compat.FormatForeverTarget(targetName)
+    if not clean or clean == "" then return false end
+    if C_FriendList and C_FriendList.RemoveFriend then
+        local ok, removed = pcall(C_FriendList.RemoveFriend, clean)
+        if ok and removed ~= false then return true end
+    end
+    if RemoveFriend then
+        local ok = pcall(RemoveFriend, clean)
+        if ok then return true end
+    end
+    return false
+end
+
+function Compat.SetCharacterFriendNote(targetName, noteText)
+    if IsInCombatNow() then return false end
+    local clean = Compat.FormatForeverTarget(targetName)
+    if not clean or clean == "" then return false end
+    local cleanNote = Compat.CleanPayloadField(noteText or "", 48)
+    if C_FriendList and C_FriendList.SetFriendNotes then
+        local ok, updated = pcall(C_FriendList.SetFriendNotes, clean, cleanNote)
+        if ok and updated ~= false then return true end
+    end
+    if SetFriendNotes then
+        local ok = pcall(SetFriendNotes, clean, cleanNote)
+        if ok then return true end
+    end
+    return false
+end
+
+function Compat.SetBNetFriendNote(bnetAccountID, noteText)
+    if IsInCombatNow() then return false end
+    local accId = Safe.Number(bnetAccountID)
+    if not accId then return false end
+    local cleanNote = Compat.CleanPayloadField(noteText or "", 127)
+    if C_BattleNet and C_BattleNet.SetFriendNote then
+        local ok = pcall(C_BattleNet.SetFriendNote, accId, cleanNote)
+        if ok then return true end
+    end
+    if BNSetFriendNote then
+        local ok = pcall(BNSetFriendNote, accId, cleanNote)
+        if ok then return true end
+    end
+    return false
+end
+
+function Compat.SetBNetFriendFavorite(bnetAccountID, isFav)
+    if IsInCombatNow() then return false end
+    local accId = Safe.Number(bnetAccountID)
+    if not accId then return false end
+    local fav = isFav == true
+    if C_BattleNet and C_BattleNet.SetFriendFavorite then
+        local ok = pcall(C_BattleNet.SetFriendFavorite, accId, fav)
+        if ok then return true end
+    end
+    if BNSetFriendFavorite then
+        local ok = pcall(BNSetFriendFavorite, accId, fav)
+        if ok then return true end
+    end
+    return false
+end
+
+function Compat.GetPendingBNetInvites()
+    local out = {}
+    if not BNGetNumFriendInvites then
+        return out
+    end
+    local count = Safe.Number(Safe.Call(BNGetNumFriendInvites)) or 0
+    for i = 1, count do
+        local inviteID, accountName
+        if C_BattleNet and C_BattleNet.GetFriendInviteInfoByIndex then
+            local info = Safe.Call(C_BattleNet.GetFriendInviteInfoByIndex, i)
+            if type(info) == "table" then
+                inviteID = Safe.Number(info.inviteID)
+                accountName = Safe.String(info.accountName) or Safe.String(info.battleTag)
+            end
+        elseif BNGetFriendInviteInfo then
+            local ok, id, acc = pcall(BNGetFriendInviteInfo, i)
+            if ok then
+                inviteID = Safe.Number(id)
+                accountName = Safe.String(acc)
+            end
+        end
+        if inviteID then
+            out[#out + 1] = {
+                inviteID = inviteID,
+                accountName = accountName or ("Battle.net #" .. tostring(inviteID)),
+            }
+        end
+    end
+    return out
+end
+
+function Compat.RespondBNetInvite(inviteID, accept)
+    if IsInCombatNow() then return false end
+    local id = Safe.Number(inviteID)
+    if not id then return false end
+    if accept then
+        if BNAcceptFriendInvite then
+            local ok = pcall(BNAcceptFriendInvite, id)
+            return ok == true
+        end
+    else
+        if BNDeclineFriendInvite then
+            local ok = pcall(BNDeclineFriendInvite, id)
+            return ok == true
+        end
+    end
+    return false
+end
+
 function Compat.FormatMoney(copper)
     copper = tonumber(copper) or 0
     local g = math.floor(copper / 10000)
