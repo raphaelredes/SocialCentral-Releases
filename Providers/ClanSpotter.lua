@@ -135,6 +135,23 @@ local function RecordBystanderCooldown(guid, expiresAt)
     bystanderCooldown[guid] = expiresAt
 end
 
+local BYSTANDER_COOLDOWN_SECONDS = 25.0
+local BYSTANDER_CROWD_COOLDOWN_SECONDS = 60.0
+
+local function IsCrowdMode()
+    if activePlateCount >= 18 then
+        return true
+    end
+    if IsInRaid and Safe.Value(Safe.Call(IsInRaid)) == true then
+        return true
+    end
+    return false
+end
+
+local function GetBystanderCooldownSeconds()
+    return IsCrowdMode() and BYSTANDER_CROWD_COOLDOWN_SECONDS or BYSTANDER_COOLDOWN_SECONDS
+end
+
 local function RecordGateMissCooldown(guid, confirmedNoMatch, nowClock)
     if not guid then return end
     local cdSec
@@ -183,8 +200,6 @@ local RETENTION_SECONDS = 12
 local MANUAL_RETENTION_SECONDS = 60
 local DISMISS_COOLDOWN_SECONDS = 180
 local PRUNE_INTERVAL = 3.0
-local BYSTANDER_COOLDOWN_SECONDS = 25.0
-local BYSTANDER_CROWD_COOLDOWN_SECONDS = 60.0
 local CHAT_SIGHTING_COOLDOWN = 12.0
 local INSPECT_BATCH_LIMIT = 6
 local INSPECT_SLICE_INTERVAL = 0.15
@@ -222,20 +237,6 @@ local STANCE_COLORS = {
     ALLY      = { r = 0.25, g = 0.85, b = 0.45, hex = "|cff40d973" },
     SAME      = { r = 0.98, g = 0.80, b = 0.24, hex = "|cfffacc3d" },
 }
-
-local function IsCrowdMode()
-    if activePlateCount >= 18 then
-        return true
-    end
-    if IsInRaid and Safe.Value(Safe.Call(IsInRaid)) == true then
-        return true
-    end
-    return false
-end
-
-local function GetBystanderCooldownSeconds()
-    return IsCrowdMode() and BYSTANDER_CROWD_COOLDOWN_SECONDS or BYSTANDER_COOLDOWN_SECONDS
-end
 
 local function NormalizeKeyPart(value)
     local s = Safe.String(value)
@@ -385,7 +386,7 @@ local function RebuildPositiveIndex()
         if type(wl) == "table" then
             for k, wRow in pairs(wl) do
                 if type(wRow) == "table" then
-                    AddPositiveCandidate(wRow.name or k, wRow.guid, nil, nil, true, k)
+                    AddPositiveCandidate(wRow.displayName or wRow.name or k, wRow.guid, nil, nil, true, k)
                 else
                     AddPositiveCandidate(k, nil, nil, nil, true, k)
                 end
@@ -2992,6 +2993,54 @@ function Spotter:GetCounts()
     return enemy, ally, same, total, onScreen, watchlist, friend, blocked
 end
 
+local function ResolveManualTrackKey(rawName, guid)
+    local cleanName = Safe.String(rawName)
+    local cleanGuid = Safe.String(guid)
+    if (not cleanName or cleanName == "") and not cleanGuid then
+        return nil, cleanName, cleanGuid
+    end
+    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanName)
+    local bestFullName = (resolved and resolved.fullName) or cleanName
+    local parsed = bestFullName and Compat.ParseCharacterName and Compat.ParseCharacterName(bestFullName)
+    local key = (parsed and parsed.lookupKey) or (bestFullName and NormalizeKeyPart(bestFullName))
+    return (key and key ~= "") and key or nil, cleanName, cleanGuid
+end
+
+function Spotter:IsPlayerTracked(rawName, guid)
+    local key = ResolveManualTrackKey(rawName, guid)
+    return key ~= nil and self.manualTracked and self.manualTracked[key] == true
+end
+
+function Spotter:UntrackPlayer(rawName, guid)
+    local key = ResolveManualTrackKey(rawName, guid)
+    if not key then
+        return false
+    end
+    self.manualTracked[key] = nil
+    self.manualTrackedStance[key] = nil
+    self.dismissedUntil[key] = nil
+    if self.entries and self.entries[key] then
+        local removed = self.entries[key]
+        if removed and removed.guid then
+            self.entryByGuid[removed.guid] = nil
+        end
+        self.entries[key] = nil
+        for unit, uKey in pairs(self.visibleUnits) do
+            if uKey == key then
+                self.visibleUnits[unit] = nil
+                HidePlateBadge(unit, nil)
+            end
+        end
+        self:UpdateFocusedPlateMarker()
+    end
+    if ns.SpotterHUD and ns.SpotterHUD.focusedKey == key then
+        ns.SpotterHUD.focusedKey = nil
+    end
+    self:InvalidatePositiveIndex()
+    ns:Emit("SPOTTER_UPDATED")
+    return true
+end
+
 function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedStance)
     if not self:IsEnabled() then return nil end
     local cleanName = Safe.String(rawName)
@@ -3021,6 +3070,17 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
         self.manualTrackedStance[key] = forcedStance
     end
     AddPositiveCandidate(displayName, cleanGuid, nil, nil, true)
+
+    local s = ns.db and ns.db.settings
+    if s and not s.spotterRadarTutorialShown then
+        s.spotterRadarTutorialShown = true
+        if ns.SpotterHUD and ns.SpotterHUD.ShowRadarTutorial then
+            ns.SpotterHUD:ShowRadarTutorial(true)
+        end
+        if ns.Print then
+            ns:Print("|cff70b5f9[%s]|r %s", L["Target Radar"], L["Radar active! Monitors players within 100m. A directional arrow and range will appear when nearby (does not show on World Map)."])
+        end
+    end
 
     local tempEntry = {
         key = key,

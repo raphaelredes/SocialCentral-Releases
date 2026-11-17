@@ -163,6 +163,7 @@ local PLAYSTYLE_OPTIONS = {
 
 local BROADCAST_OPTIONS = {
     { id = "ALL", labelKey = "Clan & Allied Clans" },
+    { id = "OFFICIAL", labelKey = "Clan, Allies + Official LFG" },
     { id = "GCHAT", labelKey = "Clan, Allies + Guild Chat (/g)" },
     { id = "CLAN", labelKey = "My Clan Only" },
 }
@@ -1352,7 +1353,11 @@ local function OpenPlayerWhisper(item)
     local targetName = item.displayName or item.lookupKey
     if not targetName or targetName == "" then return end
     local draft = BuildLfgApplyDraft(item)
-    local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or targetName, item.bnetAccountID)
+    local rKey = item.lookupKey or targetName
+    local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and ns.Social:GetBNetLinkInfo(rKey)
+    local isCrossFac = (item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
+    local bnetName = item.bnetName or (bInfo and bInfo.bnetName)
+    local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, item.bnetAccountID or (bInfo and bInfo.bnetAccountID))
     if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
         ns.Chat:OpenDirectConversation({
             targetName = targetName,
@@ -1362,6 +1367,8 @@ local function OpenPlayerWhisper(item)
             draftText = draft,
         })
         LFGFrameTab:OpenOfficialModule("chat")
+    elseif isCrossFac and bnetName and Compat.BNetWhisper then
+        Compat.BNetWhisper(bnetName, targetName, draft)
     elseif Compat.Whisper then
         Compat.Whisper(targetName, draft)
     end
@@ -1445,6 +1452,14 @@ local function OpenLfgRowContextMenu(anchor, item)
     local targetName = item.displayName or item.lookupKey
     MenuUtil.CreateContextMenu(anchor, function(_, root)
         root:CreateTitle(targetName or L["Clan & Allied LFG"])
+        if item.isSelf then
+            root:CreateButton(L["Unlist"], function()
+                if ns.Clan and ns.Clan.ClearMyLFG then
+                    ns.Clan:ClearMyLFG()
+                end
+                LFGFrameTab:RefreshData()
+            end)
+        end
         if targetName and not item.isSelf then
             root:CreateButton(L["Whisper"], function()
                 OpenPlayerWhisper(item)
@@ -1455,16 +1470,23 @@ local function OpenLfgRowContextMenu(anchor, item)
             root:CreateButton(L["Invite to Group"], function()
                 if Compat.Invite then Compat.Invite(targetName, item.bnetAccountID) end
             end)
-            root:CreateButton(L["Track on Radar"], function()
-                if ns.Spotter and ns.Spotter.TrackPlayer then
-                    local hintStance = item.isWatchlist and "WATCHLIST"
-                        or (item.isFriend and "FRIEND")
-                        or (item.isAllied and "ALLY")
-                        or (item.isClan and "SAME")
-                        or "WATCHLIST"
-                    ns.Spotter:TrackPlayer(targetName, item.guild, item.classFile, item.level, item.guid, hintStance)
-                end
-            end)
+            local isTracked = ns.Spotter and ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(targetName, item.guid)
+            if isTracked and ns.Spotter and ns.Spotter.UntrackPlayer then
+                root:CreateButton(L["Untrack from Radar"], function()
+                    ns.Spotter:UntrackPlayer(targetName, item.guid)
+                end)
+            else
+                root:CreateButton(L["Track on Radar"], function()
+                    if ns.Spotter and ns.Spotter.TrackPlayer then
+                        local hintStance = item.isWatchlist and "WATCHLIST"
+                            or (item.isFriend and "FRIEND")
+                            or (item.isAllied and "ALLY")
+                            or (item.isClan and "SAME")
+                            or "WATCHLIST"
+                        ns.Spotter:TrackPlayer(targetName, item.guild, item.classFile, item.level, item.guid, hintStance)
+                    end
+                end)
+            end
             if not item.isWatchlist and ns.Watchlist and ns.Watchlist.Add then
                 root:CreateButton(L["Add to Watchlist"], function()
                     ns.Watchlist:Add(targetName, item.activity or L["Clans & Allies LFG"])
@@ -1636,6 +1658,7 @@ local function CreateLfgRow(parent)
         LFGFrameTab.selectedKey = GetItemIdentityKey(it)
         LFGFrameTab.selectedItem = it
         SyncRowSelectionVisuals()
+        LFGFrameTab:UpdateBottomButtons()
         if btn == "RightButton" then
             OpenLfgRowContextMenu(selfRow, it)
         end
@@ -1713,7 +1736,7 @@ local function UpdateLfgRow(row, item, _, palette)
     local classHex = Compat.ClassHex and Compat.ClassHex(item.classFile) or "|cffffd200"
     local keyTag = (item.keyLvl and item.keyLvl > 0) and (" |cffd2a8ff+" .. item.keyLvl .. "|r") or ""
     row.nameFs:SetText(string.format("%s%s%s|r%s", flagPrefix, classHex, item.displayName or "?", keyTag))
-    row.nameFs:SetWidth(math.min(185, math.max(50, row.nameFs:GetStringWidth() or 120)))
+    row.nameFs:SetWidth(math.min(152, math.max(46, row.nameFs:GetStringWidth() or 110)))
 
     local lvlPart = (item.level and item.level > 0) and ("Nv " .. item.level) or item.mode
     row.levelFs:SetText(lvlPart or "")
@@ -1757,6 +1780,9 @@ local function UpdateLfgRow(row, item, _, palette)
                 end
             end
         end
+    end
+    if item.isOfficial then
+        badges = badges .. "|cff58a6ff[" .. L["Official LFG"] .. "]|r "
     end
     if item.isAllied then
         local gShort = (item.guild and item.guild ~= "") and (" " .. item.guild) or ""
@@ -2158,6 +2184,12 @@ function LFGFrameTab:SubmitListing()
     end
     if self.broadcastMode == "GCHAT" and ns.Clan and ns.Clan.OpenGuildChatLFG then
         ns.Clan:OpenGuildChatLFG(mode, role, activity, 0, note)
+    elseif self.broadcastMode == "OFFICIAL" and ns.Clan and ns.Clan.OpenOfficialLfgForGuild then
+        self.categoryFilter = "ALL"
+        self.viewMode = "browse"
+        self:RefreshData()
+        ns.Clan:OpenOfficialLfgForGuild(activity, note, mode)
+        return
     end
 
     self.categoryFilter = "ALL"
@@ -3034,11 +3066,6 @@ function LFGFrameTab:AttachSocialUI()
                 end
             end)
         end
-        if type(_G.FriendsFrame_ShowSubFrame) == "function" then
-            hooksecurefunc("FriendsFrame_ShowSubFrame", function()
-                if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-            end)
-        end
     end
 
     if parent.IsShown and parent:IsShown() then
@@ -3177,14 +3204,12 @@ function LFGFrameTab:EnsureCharacterSideTab()
     if lastNative then
         local gapY = MeasureTabGap(nativeTabs, -2)
         self.charTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
-        if not self.charTab._nativeTabsHooked then
-            self.charTab._nativeTabsHooked = true
-            for _, nt in ipairs(nativeTabs) do
-                if nt.HasScript and nt:HasScript("OnClick") then
-                    nt:HookScript("OnClick", function()
-                        if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                    end)
-                end
+        for _, nt in ipairs(nativeTabs) do
+            if not nt._scCharCloseHooked and nt.HasScript and nt:HasScript("OnClick") then
+                nt._scCharCloseHooked = true
+                nt:HookScript("OnClick", function()
+                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                end)
             end
         end
     else
@@ -4026,17 +4051,23 @@ end
 
 local function OpenSocialUIModule(targetTab, fallbackToChatFrame, forceKeepOpen)
     local sf = _G.SocialUIFrame or _G.FriendsFrame
-    if not (sf and sf:IsShown()) and _G.ToggleFriendsFrame then
-        pcall(_G.ToggleFriendsFrame, 1)
+    if not (sf and sf:IsShown()) then
+        if _G.ToggleFriendsFrame then
+            pcall(_G.ToggleFriendsFrame, 1)
+        end
+        if not (sf and sf:IsShown()) and _G.ShowUIPanel and sf then
+            pcall(_G.ShowUIPanel, sf)
+        end
+        if not (sf and sf:IsShown()) and sf and sf.Show then
+            pcall(sf.Show, sf)
+        end
     end
     local function ShowSoc()
         LFGFrameTab:AttachSocialUI()
         LFGFrameTab:EnsureSocialSideTab()
         local host = _G.SocialUIFrame or _G.FriendsFrame
         if host and host:IsShown() and ns.UI and ns.UI.OpenEmbedded then
-            ns.UI:OpenEmbedded(host, { "watchlist", "social", "nearby", "chat" }, targetTab, forceKeepOpen)
-        elseif fallbackToChatFrame and _G.ChatFrame1 and ns.UI and ns.UI.OpenEmbedded then
-            ns.UI:OpenEmbedded(_G.ChatFrame1, { "chat" }, "chat", forceKeepOpen)
+            ns.UI:OpenEmbedded(host, { "watchlist", "social", "nearby", "chat" }, targetTab, forceKeepOpen ~= false)
         elseif ns.UI and ns.UI.ShowHub then
             ns.UI:ShowHub(targetTab)
         end

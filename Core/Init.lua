@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.13"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.13" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.14"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.14" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -82,6 +82,8 @@ local DEFAULTS = {
         friendOnlineAlertToast = true,       -- show compact floating toast when friends come online
         friendOnlineAlertChat = false,       -- optional extra chat summary line on friend login
         friendOnlineAlertSound = true,       -- subtle audio chime when friend online toast fires
+        friendOfflineAlertToast = true,      -- show compact floating toast when friends log off / disconnect
+        friendOfflineAlertChat = false,      -- optional extra chat summary line on friend logoff
         friendAlertAllMigrated = false,      -- one-time default upgrade from v0.2.9 favorites-only mode
         alerts = {
             chat = true,
@@ -97,8 +99,9 @@ local DEFAULTS = {
         versionCheck = true,        -- passive DBM-style peer version check (rate-limited)
         clanSync = false,           -- opt-in for clan guild addon messages (status/events/signups/lfg)
         guildChatFinder = false,    -- opt-in passive /g LFM line detector (read-only, zero auto-reply)
-        clanLfgAlertEnabled = false, -- opt-in alert when a clan member looks for a dungeon/group
+        clanLfgAlertEnabled = true,  -- alert when a guild/allied/official peer looks for a dungeon/group
         clanLfgAlertDungeonsOnly = true, -- notify specifically for Dungeon / M+ group searches
+        clanLfgAlertNearLevel = true, -- filter group alerts to ±5 levels around the player
         clanLfgAlertFilter = "",     -- optional comma-separated dungeon keywords
         clanLfgAlertSound = true,    -- sound chime when a Clan Dungeon LFG alert triggers
         clanEventAlertEnabled = false, -- opt-in alert when a guildmate posts a new Guild Event
@@ -139,6 +142,7 @@ local DEFAULTS = {
         spotterNameplateArrow = true, -- show animated red arrow above focused/selected target nameplate when visible
         spotterNameplateBadges = true, -- show lightweight stance tags above visible tracked player nameplates
         spotterPlateTutorialShown = false, -- show one-time nameplate tutorial (Shift+V / V) on first radar sighting
+        spotterRadarTutorialShown = false, -- show one-time target radar proximity tutorial on first radar tracking
         spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
         worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
         worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
@@ -147,7 +151,9 @@ local DEFAULTS = {
         tooltipPlayerNotes = true,  -- show Social Card notes, red flags & companion context inside player tooltips
         globalChatLfgScan = true,   -- passively index dungeon/raid LFG posts from public chat channels
         lfgAutoApplyDraft = true,   -- pre-fill your Level, Class & Role when whispering LFG posts
+        lfgAntiSpam = true,         -- filter WTS/GDKP/boost spam from public LFG channels
         lfgHideAvoidEnemy = false,  -- hide LFG posts from Avoid-flagged or Enemy Guild leaders
+        groupAvoidAlert = true,     -- warn in chat and toast if an Avoided player enters your party or raid
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
         worldBuffsExpiryAlert = true, -- warn out of combat when an active World Buff has < 5 minutes left
     },
@@ -239,6 +245,18 @@ local function HandleSlash(raw)
                 ns.UI:OpenTab("buffs")
             end
         end
+    elseif cmd == "al" or cmd == "alliance" then
+        if rest and rest ~= "" then
+            if ns.Chat and ns.Chat.SendAllianceMessage then
+                ns.Chat:SendAllianceMessage(rest)
+            end
+        else
+            if ns.ConversationsFrameTab and ns.ConversationsFrameTab.OpenOfficialModule then
+                ns.ConversationsFrameTab:OpenOfficialModule("alliance")
+            elseif ns.UI and ns.UI.OpenTab then
+                ns.UI:OpenTab("chat")
+            end
+        end
     elseif cmd == "clan" or cmd == "lfg" or cmd == "diplomacy" then
         if ns.Clan and ns.Clan.SetPreferredRightView and cmd == "diplomacy" then
             ns.Clan:SetPreferredRightView("diplomacy")
@@ -281,6 +299,7 @@ local function HandleSlash(raw)
         ns:Print("  |cffffd200/sc|r — %s", L["Settings"])
         ns:Print("  |cffffd200/sc lfg|r — %s", L["Looking for Group (I)"])
         ns:Print("  |cffffd200/sc chat|r — %s", L["Open Conversations"])
+        ns:Print("  |cffffd200/al <msg>|r — %s", L["Alliance / Clan Chat"])
         ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"])
         ns:Print("  |cffffd200/sc buffs|r — %s", L["World Buffs"])
         ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"])
@@ -342,6 +361,12 @@ ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
     SLASH_SOCIALCENTRAL1 = "/sc"
     SLASH_SOCIALCENTRAL2 = "/socialcentral"
     SlashCmdList.SOCIALCENTRAL = HandleSlash
+
+    SLASH_SOCIALCENTRAL_AL1 = "/al"
+    SlashCmdList.SOCIALCENTRAL_AL = function(msg)
+        local text = msg and msg:match("^%s*(.-)%s*$") or ""
+        HandleSlash("al " .. text)
+    end
 
     if ns.Settings and ns.Settings.Register then
         pcall(ns.Settings.Register, ns.Settings)
@@ -633,6 +658,11 @@ if EventRegistry and EventRegistry.RegisterCallback then
                     ns:NavigateToModule("watchlist")
                     ns.UI:OpenWatchlistDisambiguation(entryId)
                 end)
+            end
+        elseif link:find("addon:SCentral:delnote:", 1, true) then
+            local noteId = link:match("addon:SCentral:delnote:([^|]+)")
+            if noteId and noteId ~= "" and ns.Chat and ns.Chat.DeletePersonalNote then
+                ns.Chat:DeletePersonalNote(noteId)
             end
         elseif link:find("addon:SCentral:room:", 1, true) then
             local roomId = link:match("addon:SCentral:room:([^|]+)")

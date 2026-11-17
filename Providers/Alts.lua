@@ -11,9 +11,32 @@ table.insert(ns.modules, Alts)
 
 local cachedMyGuid
 local mySurnameConfirmed = false
+local surnameChatRegistered = false
+
+local SURNAME_CHAT_EVENTS = {
+    "CHAT_MSG_GUILD",
+    "CHAT_MSG_OFFICER",
+    "CHAT_MSG_PARTY",
+    "CHAT_MSG_PARTY_LEADER",
+    "CHAT_MSG_RAID",
+    "CHAT_MSG_SAY",
+    "CHAT_MSG_YELL",
+    "CHAT_MSG_WHISPER",
+}
+
+local function UnregisterSurnameChatEvents()
+    if not surnameChatRegistered then return end
+    surnameChatRegistered = false
+    for _, chatEv in ipairs(SURNAME_CHAT_EVENTS) do
+        ns.UnregisterEvent(Alts, chatEv)
+    end
+end
 
 local function ApplyAuthorSurname(author, guid)
-    if mySurnameConfirmed then return end
+    if mySurnameConfirmed then
+        UnregisterSurnameChatEvents()
+        return
+    end
     if not (ns.db and ns.db.alts) then return end
     if not cachedMyGuid then
         cachedMyGuid = Safe.String(Safe.Call(UnitGUID, "player"))
@@ -32,6 +55,7 @@ local function ApplyAuthorSurname(author, guid)
     if not rec then return end
     if rec.userSetSurname then
         mySurnameConfirmed = true
+        UnregisterSurnameChatEvents()
         return
     end
 
@@ -47,6 +71,7 @@ local function ApplyAuthorSurname(author, guid)
             ns:Emit("ALTS_UPDATED")
         end
         mySurnameConfirmed = true
+        UnregisterSurnameChatEvents()
     end
 end
 
@@ -998,6 +1023,7 @@ function Alts:Init()
         if type(rec) ~= "table" or rec.userSetSurname then
             if type(rec) == "table" and rec.userSetSurname then
                 mySurnameConfirmed = true
+                UnregisterSurnameChatEvents()
             end
             return
         end
@@ -1007,6 +1033,7 @@ function Alts:Init()
             rec.surname = resolved.surname
             rec.fullName = resolved.fullName
             mySurnameConfirmed = true
+            UnregisterSurnameChatEvents()
             self.itemIndex = nil
             ns:Emit("ALTS_UPDATED")
         end
@@ -1036,19 +1063,19 @@ function Alts:Init()
         end
     end)
 
-    for _, chatEvent in ipairs({
-        "CHAT_MSG_GUILD",
-        "CHAT_MSG_OFFICER",
-        "CHAT_MSG_PARTY",
-        "CHAT_MSG_PARTY_LEADER",
-        "CHAT_MSG_RAID",
-        "CHAT_MSG_SAY",
-        "CHAT_MSG_YELL",
-        "CHAT_MSG_WHISPER",
-    }) do
-        ns.RegisterEvent(self, chatEvent, function(_, _, text, author, ...)
-            local guid = select(10, ...)
-            ApplyAuthorSurname(author, guid)
-        end)
+    local key = Compat.CharacterKey and Compat.CharacterKey()
+    local rec = key and ns.db and ns.db.alts and ns.db.alts[key]
+    if rec and (rec.userSetSurname or (rec.surname and rec.surname ~= "")) then
+        mySurnameConfirmed = true
+    end
+
+    if not mySurnameConfirmed then
+        surnameChatRegistered = true
+        for _, chatEvent in ipairs(SURNAME_CHAT_EVENTS) do
+            ns.RegisterEvent(self, chatEvent, function(_, _, text, author, ...)
+                local guid = select(10, ...)
+                ApplyAuthorSurname(author, guid)
+            end)
+        end
     end
 end

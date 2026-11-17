@@ -588,10 +588,44 @@ local function BuildPanel()
         L["Uncheck for silent visual friend login alerts only."]
     )
 
+    local friendOfflineToastCb = CreateCheckbox(
+        content,
+        L["Show floating Toast when Friends disconnect"],
+        friendSoundCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.friendOfflineAlertToast ~= false end,
+        function(checked)
+            ns.db.settings.friendOfflineAlertToast = checked
+            if ns.UI and ns.UI.QueueRefresh then
+                ns.UI:QueueRefresh(false)
+            end
+        end,
+        L["Help: Friend Disconnect Toast"],
+        L["Displays a compact floating Notification Toast when a friend or tracked player logs off or disconnects from WoW."],
+        L["Left-click the toast to view the player in the Social directory."]
+    )
+
+    local friendOfflineChatCb = CreateCheckbox(
+        content,
+        L["Print clickable [Social] summary line on Friend logoff"],
+        friendOfflineToastCb,
+        -6,
+        function() return ns.db and ns.db.settings.friendOfflineAlertChat == true end,
+        function(checked)
+            ns.db.settings.friendOfflineAlertChat = checked
+            if ns.UI and ns.UI.QueueRefresh then
+                ns.UI:QueueRefresh(false)
+            end
+        end,
+        L["Help: Friend Disconnect Chat"],
+        L["Prints a local chat notification with a clickable [Social] shortcut when a friend logs off."],
+        L["Disabled by default to prevent chat clutter."]
+    )
+
     local verCb = CreateCheckbox(
         content,
         L["Check for addon updates (DBM-style peer alerts)"],
-        friendSoundCb,
+        friendOfflineChatCb,
         -6,
         function() return ns.db and ns.db.settings.versionCheck ~= false end,
         function(checked)
@@ -679,10 +713,25 @@ local function BuildPanel()
         L["Click Send Message or Quick Apply on any group listing to open your message ready to confirm or send in 1 click."]
     )
 
+    local lfgAntiSpamCb = CreateCheckbox(
+        content,
+        L["Filter WTS and boost spam from public LFG channels"],
+        lfgDraftCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.lfgAntiSpam ~= false end,
+        function(checked)
+            ns.db.settings.lfgAntiSpam = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: LFG Anti-Spam Filter"],
+        L["Hides booster advertisements, real-money sales (WTS/GDKP/carry services), and repetitive commercial spam from Group Finder and chat scans."],
+        L["Keep checked for a clean, legitimate dungeon and raid group recruitment feed."]
+    )
+
     local autoStatusCb = CreateCheckbox(
         content,
         L["Auto-tag Busy inside dungeons/raids (opt-in)"],
-        lfgDraftCb,
+        lfgAntiSpamCb,
         -6,
         function() return ns.db and ns.db.settings.autoStatusInstance end,
         function(checked)
@@ -726,10 +775,25 @@ local function BuildPanel()
         L["Uncheck if you want to be notified for all Clan LFG activity types (Dungeons, Raids, World Bosses, PvP)."]
     )
 
+    local clanLfgNearLevelCb = CreateCheckbox(
+        content,
+        L["Notify only for nearby-level LFG/LFM (±5 levels)"],
+        clanLfgDngOnlyCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.clanLfgAlertNearLevel ~= false end,
+        function(checked)
+            ns.db.settings.clanLfgAlertNearLevel = checked
+            ns:Emit("CLAN_UPDATED")
+        end,
+        L["Help: Nearby-Level LFG Alerts"],
+        L["Filters group-finder alerts to players within ±5 levels of your character (or max-level peers) so leveling alerts stay relevant."],
+        L["Keep checked to avoid alerts for dungeons far above or below your current level."]
+    )
+
     local clanLfgAlertSoundCb = CreateCheckbox(
         content,
         L["Play chime sound on Clan Dungeon LFG alert"],
-        clanLfgDngOnlyCb,
+        clanLfgNearLevelCb,
         -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.clanLfgAlertSound ~= false end,
         function(checked)
@@ -1427,10 +1491,24 @@ local function BuildPanel()
         L["Recommended to keep checked to avoid screen clutter during dungeons and raids."]
     )
 
+    local groupAvoidAlertCb = CreateCheckbox(
+        content,
+        L["Warn in chat and toast if an Avoided player joins your party/raid"],
+        spotterIgnoreGroupCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.groupAvoidAlert ~= false end,
+        function(checked)
+            ns.db.settings.groupAvoidAlert = checked
+        end,
+        L["Help: Group Avoid Warning"],
+        L["Immediately alerts you with a warning toast and chat notice if someone on your Avoid list or linked alts enters your party or raid."],
+        L["Allows you to address toxic encounters or leave before dungeons and raids start."]
+    )
+
     local spotterSoundCb = CreateCheckbox(
         content,
         L["Play alert chime on Enemy / Ally Clan sighting"],
-        spotterIgnoreGroupCb,
+        groupAvoidAlertCb,
         -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.spotterSound ~= false end,
         function(checked)
@@ -1591,6 +1669,25 @@ local function BuildPanel()
         L["Click anytime to review how nameplate shortcuts work alongside Target Radar."]
     )
 
+    local viewRadarTutorialBtn = ns.Theme:CreateButton(content, 210, 24, L["View Radar Tutorial"], "default")
+    ns.Theme:AutoFitButton(viewRadarTutorialBtn, 170, 20, 260)
+    viewRadarTutorialBtn:SetPoint("LEFT", viewTutorialBtn, "RIGHT", 28, 0)
+    viewRadarTutorialBtn:SetScript("OnClick", function()
+        if ns.db and ns.db.settings then
+            ns.db.settings.spotterRadarTutorialShown = false
+        end
+        if ns.SpotterHUD and ns.SpotterHUD.ShowRadarTutorial then
+            ns.SpotterHUD:ShowRadarTutorial(true)
+        end
+    end)
+    HelpBtn(
+        content,
+        viewRadarTutorialBtn,
+        L["Help: Radar Tutorial"],
+        L["Opens the quick visual guide explaining how Target Radar proximity tracking, directional arrows, and click-to-target work."],
+        L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."]
+    )
+
     syncFns[#syncFns + 1] = function()
         ns.Theme:StyleButton(updateLinkBtn, "default")
         ns.Theme:SetButtonActive(updateLinkBtn, false, "default")
@@ -1598,6 +1695,7 @@ local function BuildPanel()
         ns.Theme:StyleButton(openRadarBtn, "primary")
         ns.Theme:StyleButton(resetPosBtn, "default")
         ns.Theme:StyleButton(viewTutorialBtn, "default")
+        ns.Theme:StyleButton(viewRadarTutorialBtn, "default")
     end
 
     if ns.Theme and ns.Theme.RegisterListener then

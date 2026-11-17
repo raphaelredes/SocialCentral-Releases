@@ -45,21 +45,21 @@ local metaModal, profModal, createRoomModal, roomInviteModal, tempChannelModal
 local DEFAULT_FOLDER_PRESETS = { "M+", "Raid", "PvP", "Craft" }
 
 function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
-    local dirEntry = contextItem
-        or (ns.Social and ns.Social.GetDirectoryEntry and ns.Social:GetDirectoryEntry(rawKey or displayName))
-        or nil
+    local socialEntry = (ns.Social and ns.Social.GetDirectoryEntry and ns.Social:GetDirectoryEntry(rawKey or displayName)) or nil
+    local dirEntry = socialEntry or contextItem or nil
 
     local charKey = nil
-    if dirEntry then
-        if dirEntry.lookupKey and dirEntry.lookupKey ~= "" then
-            charKey = dirEntry.lookupKey
-        end
-    else
-        charKey = rawKey or displayName
-        if charKey == "" then charKey = nil end
+    if dirEntry and dirEntry.lookupKey and dirEntry.lookupKey ~= "" then
+        charKey = dirEntry.lookupKey
+    elseif contextItem and contextItem.lookupKey and contextItem.lookupKey ~= "" then
+        charKey = contextItem.lookupKey
+    elseif type(rawKey) == "string" and rawKey ~= "" then
+        charKey = rawKey
+    elseif type(displayName) == "string" and displayName ~= "" then
+        charKey = displayName
     end
 
-    local bnetAccountID = dirEntry and dirEntry.bnetAccountID or nil
+    local bnetAccountID = (dirEntry and dirEntry.bnetAccountID) or (contextItem and contextItem.bnetAccountID) or nil
     local isCharFriend = dirEntry and dirEntry.sources and dirEntry.sources.friend == true
     local isBNetFriend = dirEntry and dirEntry.sources and dirEntry.sources.bnet == true and bnetAccountID ~= nil
     local allowSocialCard = charKey ~= nil
@@ -178,7 +178,7 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
 
         local function SyncActionButtons()
             Theme:SetButtonActive(btnFav, m._pendingFav == true, "primary")
-            Theme:SetButtonActive(btnFlagGood, m._pendingFlag == "GOOD", "default")
+            Theme:SetButtonActive(btnFlagGood, m._pendingFlag == "GOOD", "primary")
             Theme:SetButtonActive(btnFlagAvoid, m._pendingFlag == "AVOID", "danger")
         end
         m.SyncFlagButtons = SyncActionButtons
@@ -1206,16 +1206,22 @@ function SocialPanels:CreateGroupPanel(parent)
                 return
             end
             if row._item.displayName then
-                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(row._item.lookupKey or row._item.displayName, row._item.bnetAccountID)
+                local rKey = row._item.lookupKey or row._item.displayName
+                local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and ns.Social:GetBNetLinkInfo(rKey)
+                local isCrossFac = (row._item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
+                local bnetName = row._item.bnetName or (bInfo and bInfo.bnetName)
+                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, row._item.bnetAccountID or (bInfo and bInfo.bnetAccountID))
                 if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
                     ns.Chat:OpenDirectConversation({
-                        targetName = row._item.lookupKey or row._item.displayName,
+                        targetName = rKey,
                         classFile = row._item.classFile,
                         autoProbe = true,
                     })
                     if ns.UI and ns.UI.OpenTab then
                         ns.UI:OpenTab("chat")
                     end
+                elseif isCrossFac and bnetName and Compat.BNetWhisper then
+                    Compat.BNetWhisper(bnetName, row._item.displayName)
                 else
                     Compat.Whisper(row._item.displayName)
                 end
@@ -1225,33 +1231,53 @@ function SocialPanels:CreateGroupPanel(parent)
         row:SetScript("OnClick", function(self, btn)
             if (btn == "RightButton" or btn == "LeftButton") and self._item and MenuUtil and MenuUtil.CreateContextMenu then
                 local item = self._item
+                local rKey = item.lookupKey or item.displayName
+                local bInfo = (rKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(rKey) or nil
+                local isCrossFac = (item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
+                local bnetName = item.bnetName or (bInfo and bInfo.bnetName)
+                local bnetId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
                 MenuUtil.CreateContextMenu(self, function(_, root)
                     root:CreateTitle(item.displayName or "")
                     if not item.isMe and item.displayName and ns.Spotter and ns.Spotter.TrackPlayer then
-                        root:CreateButton(L["Track on Radar"], function()
-                            ns.Spotter:TrackPlayer(item.displayName, item.guild, item.classFile, item.level, item.guid, nil)
-                        end)
+                        local isTracked = ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(item.displayName, item.guid)
+                        if isTracked and ns.Spotter.UntrackPlayer then
+                            root:CreateButton(L["Untrack from Radar"], function()
+                                ns.Spotter:UntrackPlayer(item.displayName, item.guid)
+                            end)
+                        else
+                            root:CreateButton(L["Track on Radar"], function()
+                                ns.Spotter:TrackPlayer(item.displayName, item.guild, item.classFile, item.level, item.guid, nil)
+                            end)
+                        end
                     end
-                    local scConfirmed = (not item.isMe) and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or item.displayName, item.bnetAccountID)
+                    local scConfirmed = (not item.isMe) and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetId)
                     if scConfirmed then
                         root:CreateButton(L["Whisper in SocialCentral"], function()
                             if ns.Chat and ns.Chat.OpenDirectConversation then
                                 ns.Chat:OpenDirectConversation({
-                                    targetName = item.lookupKey or item.displayName,
+                                    targetName = rKey,
                                     classFile = item.classFile,
                                     autoProbe = true,
                                 })
                                 if ns.UI and ns.UI.OpenTab then
                                     ns.UI:OpenTab("chat")
                                 end
+                            elseif isCrossFac and bnetName and Compat.BNetWhisper then
+                                Compat.BNetWhisper(bnetName, item.displayName)
                             elseif Compat.Whisper then
                                 Compat.Whisper(item.displayName)
                             end
                         end)
                     end
-                    root:CreateButton(L["WoW Whisper (/w)"], function()
-                        Compat.Whisper(item.displayName)
-                    end)
+                    if isCrossFac and bnetName and Compat.BNetWhisper then
+                        root:CreateButton(L["Battle.net Whisper"], function()
+                            Compat.BNetWhisper(bnetName, item.displayName)
+                        end)
+                    elseif not isCrossFac then
+                        root:CreateButton(L["WoW Whisper (/w)"], function()
+                            Compat.Whisper(item.displayName)
+                        end)
+                    end
                     if item.isMe then
                         root:CreateButton(L["Leave Group"], function()
                             if ns.Group and ns.Group.LeaveGroup then
@@ -1272,9 +1298,11 @@ function SocialPanels:CreateGroupPanel(parent)
                                 end
                             end
                         end
-                        root:CreateButton(L["Invite"], function()
-                            Compat.Invite(item.displayName, item.bnetAccountID)
-                        end)
+                        if not isCrossFac then
+                            root:CreateButton(L["Invite"], function()
+                                Compat.Invite(item.displayName, bnetId)
+                            end)
+                        end
                         root:CreateButton(L["Add to Watchlist"], function()
                             if ns.Watchlist then ns.Watchlist:Add(item.lookupKey or item.displayName) end
                         end)
@@ -1747,13 +1775,50 @@ function SocialPanels:CreateChatPanel(parent)
         if MenuUtil and MenuUtil.CreateContextMenu then
             MenuUtil.CreateContextMenu(self, function(_, root)
                 root:CreateButton("+ " .. L["New 1-on-1 Chat"], OpenNewDirectChatModal)
+                local bnetSub = root:CreateButton("+ " .. L["Battle.net Friend"])
+                local bnetRows = ns.Social and ns.Social.GetList and ns.Social:GetList("bnet") or {}
+                local addedBnet = 0
+                for _, br in ipairs(bnetRows) do
+                    if br and br.online and br.bnetAccountID then
+                        addedBnet = addedBnet + 1
+                        local lbl = br.bnetName or br.displayName or ("BNet #" .. tostring(br.bnetAccountID))
+                        if br.hasCharacterName ~= false and br.displayName and br.displayName ~= lbl then
+                            lbl = lbl .. " (" .. br.displayName .. ")"
+                        end
+                        bnetSub:CreateButton(lbl, function()
+                            if ns.Chat and ns.Chat.OpenDirectConversation then
+                                ns.Chat:OpenDirectConversation({
+                                    bnetAccountID = br.bnetAccountID,
+                                    bnetName = br.bnetName,
+                                    targetName = (br.hasCharacterName ~= false) and br.displayName or nil,
+                                    classFile = br.classFile,
+                                    autoProbe = true,
+                                })
+                            end
+                        end)
+                        if addedBnet >= 20 then break end
+                    end
+                end
+                if addedBnet == 0 then
+                    bnetSub:CreateTitle(L["No online Battle.net friends"])
+                end
+                root:CreateButton("+ " .. L["Personal Notes (You)"], function()
+                    if ns.Chat and ns.Chat.EnsurePersonalNotesThread then
+                        local nt = ns.Chat:EnsurePersonalNotesThread()
+                        if nt then
+                            ns.Chat:SetActiveThread(nt.key, false)
+                            ns:Emit("CHAT_UPDATED")
+                        end
+                    end
+                end)
                 root:CreateButton("+ " .. L["Create Private Room"], OpenCreateRoomModal)
                 root:CreateButton(L["Temp Channel"], OpenTempChannelModal)
                 root:CreateDivider()
                 root:CreateButton(L["Mark Read"], function()
                     if ns.Chat then ns.Chat:MarkAllRead() end
                 end)
-                root:CreateButton(L["Clear"], function()
+                local clearTopSub = root:CreateButton(L["Clear"])
+                clearTopSub:CreateButton(L["Confirm Clear?"], function()
                     if ns.Chat then ns.Chat:ClearHistory(ns.Chat.activeThreadKey) end
                 end)
             end)
@@ -1824,6 +1889,100 @@ function SocialPanels:CreateChatPanel(parent)
         end
     end)
 
+    local deleteThreadModal
+    local function OpenDeleteThreadModal(threadKey, threadTitle)
+        if not threadKey then return end
+        local confirmWord = L["DELETE"]
+        if not deleteThreadModal then
+            local m = CreateFrame("Frame", "SocialCentralDeleteThreadModal", UIParent, "BackdropTemplate")
+            m:SetSize(380, 176)
+            m:SetPoint("CENTER")
+            m:SetFrameStrata("DIALOG")
+            m:SetFrameLevel(120)
+            m:EnableMouse(true)
+            Theme:MakeMovable(m, { key = "modal_delete_thread" })
+            table.insert(UISpecialFrames, "SocialCentralDeleteThreadModal")
+
+            local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            title:SetPoint("TOPLEFT", 16, -14)
+            title:SetPoint("TOPRIGHT", -36, -14)
+            title:SetJustifyH("LEFT")
+            title:SetWordWrap(false)
+            title:SetText("|cfff54747" .. L["Delete Conversation"] .. "|r")
+
+            local topCloseBtn = Theme:CreateButton(m, 22, 20, "X", "default")
+            topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
+            topCloseBtn:SetScript("OnClick", function()
+                if m.input then m.input:ClearFocus() end
+                m:Hide()
+            end)
+
+            local desc = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            desc:SetPoint("TOPLEFT", 16, -42)
+            desc:SetPoint("TOPRIGHT", -16, -42)
+            desc:SetJustifyH("LEFT")
+            desc:SetWordWrap(true)
+            m.desc = desc
+
+            local input = Theme:CreateEditBox(m, { height = 24, maxLetters = 24 })
+            input:SetPoint("TOPLEFT", desc, "BOTTOMLEFT", 0, -10)
+            input:SetPoint("RIGHT", m, "RIGHT", -16, 0)
+            m.input = input
+
+            local btnConfirm = Theme:CreateButton(m, 110, 24, L["Delete"], "danger")
+            btnConfirm:SetPoint("BOTTOMRIGHT", -16, 14)
+            btnConfirm:SetEnabled(false)
+            m.btnConfirm = btnConfirm
+
+            local btnCancel = Theme:CreateButton(m, 90, 24, L["Cancel"], "default")
+            btnCancel:SetPoint("RIGHT", btnConfirm, "LEFT", -8, 0)
+            btnCancel:SetScript("OnClick", function()
+                input:ClearFocus()
+                m:Hide()
+            end)
+
+            local function IsWordMatched()
+                local raw = (input:GetText() or ""):gsub("^%s*(.-)%s*$", "%1"):upper()
+                local targetWord = (L["DELETE"] or "DELETE"):upper()
+                return raw == targetWord
+            end
+
+            input:SetScript("OnTextChanged", function()
+                btnConfirm:SetEnabled(IsWordMatched())
+            end)
+            input:SetScript("OnEscapePressed", function()
+                input:ClearFocus()
+                m:Hide()
+            end)
+
+            local function ConfirmDelete()
+                if not IsWordMatched() then return end
+                local targetKey = m._threadKey
+                input:ClearFocus()
+                m:Hide()
+                if targetKey and ns.Chat and ns.Chat.DeleteThread then
+                    ns.Chat:DeleteThread(targetKey)
+                end
+            end
+
+            input:SetScript("OnEnterPressed", ConfirmDelete)
+            btnConfirm:SetScript("OnClick", ConfirmDelete)
+            deleteThreadModal = m
+        end
+
+        deleteThreadModal._threadKey = threadKey
+        Theme:ApplyBackdrop(deleteThreadModal, "modal")
+        deleteThreadModal.desc:SetText(string.format(
+            L["Are you sure you want to permanently delete the conversation with \"%s\"?\n\nType %s to confirm:"],
+            threadTitle or threadKey,
+            "|cffffd24d" .. confirmWord .. "|r"
+        ))
+        deleteThreadModal.input:SetText("")
+        deleteThreadModal.btnConfirm:SetEnabled(false)
+        deleteThreadModal:Show()
+        deleteThreadModal.input:SetFocus()
+    end
+
     local threadsScroll = Theme:CreateScrollList(leftCard, 38, function(rowParent, _, rowHeight)
         local r = CreateFrame("Button", nil, rowParent, "BackdropTemplate")
         r:SetHeight(rowHeight)
@@ -1841,6 +2000,16 @@ function SocialPanels:CreateChatPanel(parent)
         r.unreadDot:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
         r.unreadDot:SetVertexColor(1.0, 0.30, 0.32, 1.0)
         r.unreadDot:Hide()
+
+        r.kindIcon = r:CreateTexture(nil, "ARTWORK", nil, 2)
+        r.kindIcon:SetSize(12, 12)
+        r.kindIcon:SetPoint("TOPLEFT", r, "TOPLEFT", 9, -5)
+
+        r.scDot = r:CreateTexture(nil, "ARTWORK", nil, 3)
+        r.scDot:SetSize(6, 6)
+        r.scDot:SetPoint("BOTTOMRIGHT", r.kindIcon, "BOTTOMRIGHT", 2, -1)
+        r.scDot:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
+        r.scDot:Hide()
 
         r.unreadBadge = CreateFrame("Frame", nil, r, "BackdropTemplate")
         r.unreadBadge:SetSize(20, 15)
@@ -1879,16 +2048,35 @@ function SocialPanels:CreateChatPanel(parent)
                     local key = r._item.key
                     MenuUtil.CreateContextMenu(selfBtn, function(_, root)
                         root:CreateTitle(r._item.title or key)
+                        if key ~= "notes:self" and ns.Chat.ToggleThreadPinned then
+                            local isPinned = ns.Chat:IsThreadPinned(key)
+                            root:CreateButton(isPinned and L["Unpin Conversation"] or L["Pin Conversation"], function()
+                                ns.Chat:ToggleThreadPinned(key)
+                            end)
+                        end
                         local isMuted = ns.Chat:IsThreadMuted(key)
                         root:CreateButton(isMuted and L["Unmute Conversation"] or L["Mute Conversation"], function()
                             ns.Chat:ToggleThreadMuted(key)
                         end)
-                        root:CreateButton(L["Mark Read"], function()
-                            ns.Chat:MarkThreadRead(key)
-                        end)
-                        root:CreateButton(L["Clear"], function()
+                        if (r._item.unread or 0) > 0 then
+                            root:CreateButton(L["Mark Read"], function()
+                                ns.Chat:MarkThreadRead(key)
+                            end)
+                        elseif key ~= "notes:self" and ns.Chat.MarkThreadUnread then
+                            root:CreateButton(L["Mark Unread"], function()
+                                ns.Chat:MarkThreadUnread(key)
+                            end)
+                        end
+                        local clearSub = root:CreateButton(L["Clear"])
+                        clearSub:CreateButton(L["Confirm Clear?"], function()
                             ns.Chat:ClearHistory(key)
                         end)
+                        if ns.Chat.CanDeleteThread and ns.Chat:CanDeleteThread(key) then
+                            root:CreateDivider()
+                            root:CreateButton("|cfff54747" .. L["Delete Conversation"] .. "|r", function()
+                                OpenDeleteThreadModal(key, r._item.title or key)
+                            end)
+                        end
                     end)
                 else
                     ns.Chat:ToggleThreadMuted(r._item.key)
@@ -1913,6 +2101,22 @@ function SocialPanels:CreateChatPanel(parent)
             if not (it and GameTooltip) then return end
             GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
             GameTooltip:SetText(it.title or it.key or "?", 1, 1, 1)
+            local kindNames = {
+                WHISPER = L["WoW Whisper (/w)"],
+                BN_WHISPER = "Battle.net",
+                ROOM = L["Addon Private Room"],
+                NOTES = L["Personal Notes"],
+            }
+            local kindLbl = kindNames[it.kind] or L["Official WoW Channel"]
+            local stPeer = (ns.Chat and ns.Chat.GetPeerAddonState) and ns.Chat:GetPeerAddonState(it.key) or nil
+            if it.kind ~= "ROOM" and it.kind ~= "NOTES" and stPeer then
+                if stPeer.state == "verified" then
+                    kindLbl = kindLbl .. " · |cff3fb950SocialCentral|r"
+                elseif stPeer.state == "registered" or stPeer.knownAddon then
+                    kindLbl = kindLbl .. " · |cff58a6ffSocialCentral|r"
+                end
+            end
+            GameTooltip:AddLine(kindLbl, 0.72, 0.80, 0.90, true)
             local st, stMsg = ns.Chat and ns.Chat.GetThreadAvailabilityStatus and ns.Chat:GetThreadAvailabilityStatus(it.key)
             if st then
                 local stTag = (st == "DND") and L["DND"] or L["AFK"]
@@ -1932,9 +2136,15 @@ function SocialPanels:CreateChatPanel(parent)
         r._item = item
         local isSel = ns.Chat and ns.Chat.activeThreadKey == item.key
         local hasUnread = (not item.muted and item.unread and item.unread > 0)
+        if r._hadUnreadBorder and not hasUnread then
+            r._scBackdropSig = nil
+        end
         Theme:ApplyBackdrop(r, (isSel or hasUnread) and "surface" or ((idx % 2 == 1) and "row" or "rowAlt"), pal)
         if hasUnread and r.SetBackdropBorderColor then
             r:SetBackdropBorderColor(0.86, 0.24, 0.28, 0.90)
+            r._hadUnreadBorder = true
+        else
+            r._hadUnreadBorder = false
         end
         if r.selBar then
             if hasUnread then
@@ -1962,31 +2172,53 @@ function SocialPanels:CreateChatPanel(parent)
             end
         end
 
+        if r.kindIcon then
+            r.kindIcon:ClearAllPoints()
+            r.kindIcon:SetPoint("TOPLEFT", r, "TOPLEFT", hasUnread and 18 or 9, -5)
+            r.kindIcon:SetTexCoord(0, 1, 0, 1)
+            r.kindIcon:SetVertexColor(1, 1, 1)
+            if item.kind == "BN_WHISPER" then
+                r.kindIcon:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-BattleNet")
+            elseif item.kind == "ROOM" then
+                r.kindIcon:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\icon")
+            elseif item.kind == "NOTES" then
+                r.kindIcon:SetTexture("Interface\\Buttons\\UI-GuildButton-PublicNote-Up")
+                r.kindIcon:SetVertexColor(1.0, 0.85, 0.35)
+            elseif item.kind == "WHISPER" then
+                r.kindIcon:SetTexture("Interface\\Icons\\INV_Letter_15")
+                r.kindIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            else
+                r.kindIcon:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-Chat-Up")
+                r.kindIcon:SetVertexColor(0.65, 0.78, 0.96)
+            end
+        end
+
         r.title:ClearAllPoints()
-        r.title:SetPoint("TOPLEFT", hasUnread and 18 or 10, -5)
+        r.title:SetPoint("TOPLEFT", r.kindIcon or r, r.kindIcon and "TOPRIGHT" or "TOPLEFT", r.kindIcon and 6 or (hasUnread and 18 or 10), r.kindIcon and 0 or -5)
         if hasUnread and r.unreadBadge then
             r.title:SetPoint("RIGHT", r.unreadBadge, "LEFT", -6, 0)
         else
             r.title:SetPoint("RIGHT", r, "RIGHT", -8, 0)
         end
 
-        local tagMap = {
-            WHISPER = "|cffd2a8ff[W]|r ",
-            BN_WHISPER = "|cff58a6ff[BN]|r ",
-            ROOM = "|cff3fb950[R]|r ",
-        }
-        local prefix = tagMap[item.kind] or "|cff9da7b5[C]|r "
         local st = (ns.Chat and ns.Chat.GetPeerAddonState) and ns.Chat:GetPeerAddonState(item.key) or nil
-        local scTag = ""
-        if item.kind ~= "ROOM" and st then
-            if st.state == "verified" then
-                scTag = "|cff3fb950[SC]|r "
-            elseif st.state == "registered" then
-                scTag = "|cff58a6ff[SC]|r "
-            elseif st.knownAddon then
-                scTag = "|cff8ab4f8[SC*]|r "
+        if r.scDot then
+            if item.kind ~= "ROOM" and item.kind ~= "NOTES" and st then
+                if st.state == "verified" then
+                    r.scDot:SetVertexColor(0.25, 0.73, 0.31, 1.0)
+                    r.scDot:Show()
+                elseif st.state == "registered" or st.knownAddon then
+                    r.scDot:SetVertexColor(0.35, 0.65, 1.0, 1.0)
+                    r.scDot:Show()
+                else
+                    r.scDot:Hide()
+                end
+            else
+                r.scDot:Hide()
             end
         end
+        local pinTag = item.pinned and "|cffffd24d*|r " or ""
+        local mentionTag = item.hasMention and "|cffffd24d[@]|r " or ""
         local mutedTag = item.muted and (" |cffff9b3d[" .. L["Muted"] .. "]|r") or ""
         local availTag = ""
         if item.statusTag == "DND" then
@@ -1995,9 +2227,18 @@ function SocialPanels:CreateChatPanel(parent)
             availTag = " |cffff9b3d[" .. L["AFK"] .. "]|r"
         end
         local hex = item.classFile and Compat.ClassHex(item.classFile) or "|cffffffff"
-        r.title:SetText(prefix .. scTag .. hex .. (item.title or "") .. "|r" .. availTag .. mutedTag)
+        r.title:SetText(pinTag .. mentionTag .. hex .. (item.title or "") .. "|r" .. availTag .. mutedTag)
 
-        r.sub:SetText((item.preview ~= "" and item.preview) or (Compat.FormatRelativeTime(item.lastAt, L)))
+        local draftTxt = panel._drafts and panel._drafts[item.key]
+        local subStr
+        if item._searchPreview and item._searchPreview ~= "" then
+            subStr = "|cff8ab4f8" .. L["Match:"] .. "|r " .. item._searchPreview
+        elseif draftTxt and draftTxt ~= "" and not isSel then
+            subStr = "|cffff9b3d[" .. L["Draft"] .. "]|r " .. draftTxt
+        else
+            subStr = (item.preview ~= "" and item.preview) or (Compat.FormatRelativeTime(item.lastAt, L))
+        end
+        r.sub:SetText(subStr)
         if hasUnread then
             local tc = pal.text or { 0.95, 0.96, 0.98 }
             r.sub:SetTextColor(tc[1], tc[2], tc[3])
@@ -2029,38 +2270,117 @@ function SocialPanels:CreateChatPanel(parent)
     hdrTitle:SetJustifyH("LEFT")
     hdrTitle:SetWordWrap(false)
 
-    local btnLeaveRoom = Theme:CreateButton(rightHdr, 64, 20, L["Leave"], "danger")
-    Theme:AutoFitButton(btnLeaveRoom, 60, 16, 110)
+    local function SetupIconBtn(btn, w, h, tex, opts)
+        opts = opts or {}
+        Theme:SetButtonText(btn, "")
+        btn:SetSize(w, h)
+        local layer = btn._textLayer or btn
+        local ico = layer:CreateTexture(nil, "OVERLAY", nil, 2)
+        ico:SetSize(opts.size or 14, opts.size or 14)
+        ico:SetPoint("CENTER")
+        if opts.atlas and Theme.HasAtlas and Theme:HasAtlas(opts.atlas) and ico.SetAtlas then
+            ico:SetAtlas(opts.atlas, false)
+        else
+            ico:SetTexture(tex)
+            if opts.texCoord then
+                ico:SetTexCoord(opts.texCoord[1], opts.texCoord[2], opts.texCoord[3], opts.texCoord[4])
+            end
+        end
+        if opts.color then
+            ico:SetVertexColor(opts.color[1], opts.color[2], opts.color[3], opts.color[4] or 1)
+        end
+        btn.ico = ico
+        btn:HookScript("OnEnter", function(selfBtn)
+            if not GameTooltip then return end
+            local title, desc
+            if type(opts.tooltipFn) == "function" then
+                title, desc = opts.tooltipFn(selfBtn)
+            else
+                title, desc = opts.title, opts.desc
+            end
+            if title and title ~= "" then
+                GameTooltip:SetOwner(selfBtn, opts.anchor or "ANCHOR_TOP")
+                GameTooltip:ClearLines()
+                GameTooltip:AddLine(title, 1, 0.9, 0.55, true)
+                if desc and desc ~= "" then
+                    GameTooltip:AddLine(desc, 0.85, 0.88, 0.94, true)
+                end
+                GameTooltip:Show()
+            end
+        end)
+        btn:HookScript("OnLeave", function(selfBtn)
+            if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
+        end)
+    end
+
+    local btnLeaveRoom = Theme:CreateButton(rightHdr, 24, 20, "", "danger")
+    SetupIconBtn(btnLeaveRoom, 24, 20, "Interface\\Buttons\\UI-GroupLoot-Pass-Up", {
+        size = 13,
+        color = { 1.0, 0.45, 0.45 },
+        title = L["Leave"],
+        desc = L["Leave this Private Addon Room."],
+    })
     btnLeaveRoom:SetPoint("RIGHT", 0, 0)
     btnLeaveRoom:Hide()
 
-    local btnRoomInvite = Theme:CreateButton(rightHdr, 76, 20, "+ " .. L["Invite"], "default")
-    Theme:AutoFitButton(btnRoomInvite, 72, 16, 120)
-    btnRoomInvite:SetPoint("RIGHT", btnLeaveRoom, "LEFT", -6, 0)
+    local btnRoomInvite = Theme:CreateButton(rightHdr, 24, 20, "", "default")
+    SetupIconBtn(btnRoomInvite, 24, 20, "Interface\\PaperDollInfoFrame\\Character-Plus", {
+        size = 13,
+        color = { 0.45, 0.95, 0.55 },
+        title = L["Invite"],
+        desc = L["Invite another player to this Private Addon Room."],
+    })
+    btnRoomInvite:SetPoint("RIGHT", btnLeaveRoom, "LEFT", -4, 0)
     btnRoomInvite:Hide()
 
-    local btnTargetCard = Theme:CreateButton(rightHdr, 78, 20, L["Note"], "default")
-    Theme:AutoFitButton(btnTargetCard, 66, 16, 115)
+    local btnTargetCard = Theme:CreateButton(rightHdr, 24, 20, "", "default")
+    SetupIconBtn(btnTargetCard, 24, 20, "Interface\\Buttons\\UI-GuildButton-OfficerNote-Up", {
+        size = 14,
+        title = L["Social Card & Notes"],
+        desc = L["Open Social Card, folders, alts, and friend notes."],
+    })
     btnTargetCard:SetPoint("RIGHT", 0, 0)
     btnTargetCard:Hide()
 
-    local btnPinLoc = Theme:CreateButton(rightHdr, 84, 20, "+ " .. L["Location"], "default")
-    Theme:AutoFitButton(btnPinLoc, 72, 14, 124)
+    local btnPinLoc = Theme:CreateButton(rightHdr, 24, 20, "", "default")
+    SetupIconBtn(btnPinLoc, 24, 20, "Interface\\Icons\\INV_Misc_Map_01", {
+        size = 14,
+        texCoord = { 0.08, 0.92, 0.08, 0.92 },
+        title = L["Location"],
+        desc = L["Send your current zone and coordinates to this player."],
+    })
     btnPinLoc:SetPoint("RIGHT", 0, 0)
     btnPinLoc:Hide()
 
-    local btnMuteThread = Theme:CreateButton(rightHdr, 74, 20, L["Mute"], "default")
-    Theme:AutoFitButton(btnMuteThread, 64, 16, 120)
+    local btnMuteThread = Theme:CreateButton(rightHdr, 24, 20, "", "default")
+    SetupIconBtn(btnMuteThread, 24, 20, "Interface\\AddOns\\SocialCentral\\Media\\bell-on", {
+        size = 14,
+        tooltipFn = function(selfBtn)
+            if selfBtn._scMuted then
+                return L["Unmute Conversation"], L["Sound alerts are muted for this conversation. Click to re-enable."]
+            end
+            return L["Mute Conversation"], L["Mute sound and unread badges for this conversation."]
+        end,
+    })
     btnMuteThread:SetPoint("RIGHT", 0, 0)
     btnMuteThread:Hide()
 
-    local btnCopyThread = Theme:CreateButton(rightHdr, 62, 20, L["Copy"], "default")
-    Theme:AutoFitButton(btnCopyThread, 56, 14, 100)
+    local btnCopyThread = Theme:CreateButton(rightHdr, 24, 20, "", "default")
+    SetupIconBtn(btnCopyThread, 24, 20, "Interface\\Buttons\\UI-GuildButton-PublicNote-Up", {
+        size = 14,
+        title = L["Copy"],
+        desc = L["Copy the conversation log to clipboard."],
+    })
     btnCopyThread:SetPoint("RIGHT", 0, 0)
     btnCopyThread:Hide()
 
-    local btnMarkRead = Theme:CreateButton(rightHdr, 78, 20, L["Mark Read"], "primary")
-    Theme:AutoFitButton(btnMarkRead, 64, 12, 118)
+    local btnMarkRead = Theme:CreateButton(rightHdr, 24, 20, "", "primary")
+    SetupIconBtn(btnMarkRead, 24, 20, "Interface\\Buttons\\UI-CheckBox-Check", {
+        size = 15,
+        color = { 0.45, 0.95, 0.55 },
+        title = L["Mark Read"],
+        desc = L["Clear unread message counter for this conversation."],
+    })
     btnMarkRead:SetPoint("RIGHT", 0, 0)
     btnMarkRead:SetScript("OnClick", function()
         local k = ns.Chat and ns.Chat.activeThreadKey
@@ -2069,6 +2389,48 @@ function SocialPanels:CreateChatPanel(parent)
         end
     end)
     btnMarkRead:Hide()
+
+    local btnClearNotes = Theme:CreateButton(rightHdr, 24, 20, "", "danger")
+    SetupIconBtn(btnClearNotes, 24, 20, "Interface\\Buttons\\UI-GroupLoot-Pass-Up", {
+        size = 13,
+        color = { 1.0, 0.45, 0.45 },
+        tooltipFn = function(selfBtn)
+            if selfBtn._confirmUntil and (GetTime and GetTime() or time()) <= selfBtn._confirmUntil then
+                return L["Confirm Clear?"], L["Click again to permanently delete all personal notes."]
+            end
+            return L["Clear Notes"], L["Delete all saved personal notes."]
+        end,
+    })
+    btnClearNotes:SetPoint("RIGHT", 0, 0)
+    btnClearNotes:SetScript("OnClick", function(selfBtn)
+        local nowMono = GetTime and GetTime() or time()
+        if not selfBtn._confirmUntil or nowMono > selfBtn._confirmUntil then
+            selfBtn._confirmUntil = nowMono + 4.0
+            Theme:SetButtonActive(selfBtn, true, "danger")
+            if GameTooltip and GameTooltip:IsOwned(selfBtn) then
+                GameTooltip:ClearLines()
+                GameTooltip:AddLine(L["Confirm Clear?"], 1, 0.45, 0.45, true)
+                GameTooltip:AddLine(L["Click again to permanently delete all personal notes."], 0.85, 0.88, 0.94, true)
+                GameTooltip:Show()
+            end
+            if C_Timer and C_Timer.After then
+                local tok = selfBtn._confirmUntil
+                C_Timer.After(4.1, function()
+                    if selfBtn._confirmUntil == tok then
+                        selfBtn._confirmUntil = nil
+                        Theme:SetButtonActive(selfBtn, false, "danger")
+                    end
+                end)
+            end
+            return
+        end
+        selfBtn._confirmUntil = nil
+        Theme:SetButtonActive(selfBtn, false, "danger")
+        if ns.Chat and ns.Chat.ClearHistory then
+            ns.Chat:ClearHistory("notes:self")
+        end
+    end)
+    btnClearNotes:Hide()
 
     hdrTitle:SetPoint("RIGHT", btnMuteThread, "LEFT", -8, 0)
 
@@ -2117,8 +2479,19 @@ function SocialPanels:CreateChatPanel(parent)
     btnTargetCard:SetScript("OnClick", function()
         local k = ns.Chat and ns.Chat.activeThreadKey
         local t = k and ns.Chat and ns.Chat.threads[k]
-        if t and t.targetName then
-            SocialPanels:OpenSocialMetaModal(t.targetName, t.targetName)
+        if not t then return end
+        local rawTarget = t.targetName or t.bnetName or t.title
+        local parsed = rawTarget and Compat.ParseCharacterName and Compat.ParseCharacterName(rawTarget)
+        local lk = parsed and parsed.lookupKey or rawTarget
+        local disp = (parsed and parsed.displayName) or rawTarget
+        local ctx = (t.bnetAccountID and {
+            lookupKey = parsed and parsed.lookupKey or nil,
+            bnetAccountID = t.bnetAccountID,
+            bnetName = t.bnetName,
+            sources = { bnet = true },
+        }) or nil
+        if disp or ctx then
+            SocialPanels:OpenSocialMetaModal(disp, lk, ctx)
         end
     end)
 
@@ -2127,8 +2500,13 @@ function SocialPanels:CreateChatPanel(parent)
     peerBar:SetPoint("TOPRIGHT", rightHdr, "BOTTOMRIGHT", 0, -4)
     peerBar:SetHeight(20)
 
-    local btnVerify = Theme:CreateButton(peerBar, 106, 18, L["Verify Addon"], "default")
-    Theme:AutoFitButton(btnVerify, 88, 14, 150)
+    local btnVerify = Theme:CreateButton(peerBar, 22, 18, "", "default")
+    SetupIconBtn(btnVerify, 22, 18, "Interface\\Buttons\\UI-RefreshButton", {
+        size = 13,
+        tooltipFn = function()
+            return L["Verify Addon"], L["Ping this player to check if SocialCentral direct chat is active."]
+        end,
+    })
     btnVerify:SetPoint("RIGHT", 0, 0)
     btnVerify:SetScript("OnClick", function()
         local k = ns.Chat and ns.Chat.activeThreadKey
@@ -2138,11 +2516,57 @@ function SocialPanels:CreateChatPanel(parent)
     end)
     btnVerify:Hide()
 
+    local peerStatusIcon = peerBar:CreateTexture(nil, "OVERLAY")
+    peerStatusIcon:SetSize(13, 13)
+    peerStatusIcon:SetPoint("LEFT", 2, 0)
+    peerStatusIcon:Hide()
+
     local peerStatusText = peerBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    peerStatusText:SetPoint("LEFT", 2, 0)
+    peerStatusText:SetPoint("LEFT", peerStatusIcon, "RIGHT", 5, 0)
     peerStatusText:SetPoint("RIGHT", btnVerify, "LEFT", -6, 0)
     peerStatusText:SetJustifyH("LEFT")
     peerStatusText:SetWordWrap(false)
+
+    local peerStatusHover = CreateFrame("Frame", nil, peerBar)
+    peerStatusHover:SetPoint("TOPLEFT", peerBar, "TOPLEFT", 0, 0)
+    peerStatusHover:SetPoint("BOTTOMRIGHT", btnVerify, "BOTTOMLEFT", -4, 0)
+    peerStatusHover:EnableMouse(true)
+    peerStatusHover:SetScript("OnEnter", function(selfFrm)
+        if not GameTooltip or not selfFrm._tipTitle then return end
+        GameTooltip:SetOwner(selfFrm, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(selfFrm._tipTitle, 1, 0.9, 0.55, true)
+        if selfFrm._tipDesc and selfFrm._tipDesc ~= "" then
+            GameTooltip:AddLine(selfFrm._tipDesc, 0.85, 0.88, 0.94, true)
+        end
+        GameTooltip:Show()
+    end)
+    peerStatusHover:SetScript("OnLeave", function(selfFrm)
+        if GameTooltip and GameTooltip:IsOwned(selfFrm) then GameTooltip:Hide() end
+    end)
+
+    local pinnedBanner = CreateFrame("Frame", nil, rightCard, "BackdropTemplate")
+    pinnedBanner:SetPoint("TOPLEFT", peerBar, "BOTTOMLEFT", 0, -2)
+    pinnedBanner:SetPoint("TOPRIGHT", peerBar, "BOTTOMRIGHT", 0, -2)
+    pinnedBanner:SetHeight(20)
+    Theme:ApplyBackdrop(pinnedBanner, "inset")
+    pinnedBanner:Hide()
+
+    local btnUnpinBanner = Theme:CreateButton(pinnedBanner, 20, 18, "x", "default")
+    btnUnpinBanner:SetPoint("RIGHT", -2, 0)
+    btnUnpinBanner:SetScript("OnClick", function()
+        local k = ns.Chat and ns.Chat.activeThreadKey
+        if k and panel._pinnedMsgs then
+            panel._pinnedMsgs[k] = nil
+            panel:Refresh(false)
+        end
+    end)
+
+    local pinnedBannerText = pinnedBanner:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    pinnedBannerText:SetPoint("LEFT", 6, 0)
+    pinnedBannerText:SetPoint("RIGHT", btnUnpinBanner, "LEFT", -4, 0)
+    pinnedBannerText:SetJustifyH("LEFT")
+    pinnedBannerText:SetWordWrap(false)
 
     local msgFrame = CreateFrame("ScrollingMessageFrame", nil, rightCard)
     msgFrame:SetPoint("TOPLEFT", 10, -56)
@@ -2157,14 +2581,135 @@ function SocialPanels:CreateChatPanel(parent)
     if msgFrame.SetInsertMode then
         msgFrame:SetInsertMode("BOTTOM")
     end
+    msgFrame:EnableMouse(true)
     msgFrame:EnableMouseWheel(true)
+    if msgFrame.SetHyperlinksEnabled then
+        msgFrame:SetHyperlinksEnabled(true)
+    end
+    msgFrame:SetScript("OnHyperlinkClick", function(selfFrame, link, text, button)
+        if type(link) ~= "string" then return end
+        if link:find("addon:SCentral:delnote:", 1, true) then
+            local noteId = link:match("addon:SCentral:delnote:([^|]+)")
+            if noteId and noteId ~= "" and ns.Chat and ns.Chat.DeletePersonalNote then
+                ns.Chat:DeletePersonalNote(noteId)
+            end
+        elseif link:find("addon:SCentral:msgact:", 1, true) then
+            local idx = tonumber(link:match("addon:SCentral:msgact:(%d+)"))
+            local k = ns.Chat and ns.Chat.activeThreadKey
+            local t = k and ns.Chat and ns.Chat.threads and ns.Chat.threads[k]
+            local entry = idx and t and t.messages and t.messages[idx]
+            if entry and MenuUtil and MenuUtil.CreateContextMenu then
+                local rawPlain = tostring(entry.text or ""):gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T.-|t", "")
+                local senderLbl = entry.sender or t.title or "?"
+                MenuUtil.CreateContextMenu(msgFrame, function(_, root)
+                    root:CreateTitle(senderLbl)
+                    root:CreateButton(L["Quote Reply"], function()
+                        local snippet = (#rawPlain > 45) and (rawPlain:sub(1, 42) .. "...") or rawPlain
+                        local quote = string.format("> %s: \"%s\" ", senderLbl, snippet)
+                        replyInput:SetText(quote)
+                        if replyInput.SetCursorPosition then replyInput:SetCursorPosition(#quote) end
+                        if replyInput.SetFocus then replyInput:SetFocus() end
+                    end)
+                    root:CreateButton(L["Pin Message"], function()
+                        panel._pinnedMsgs = panel._pinnedMsgs or {}
+                        panel._pinnedMsgs[k] = senderLbl .. ": " .. rawPlain
+                        panel:Refresh(false)
+                    end)
+                    if k ~= "notes:self" and ns.Chat and ns.Chat.SavePersonalNote then
+                        root:CreateButton(L["Save to Personal Notes"], function()
+                            ns.Chat:SavePersonalNote("[" .. senderLbl .. "] " .. rawPlain)
+                            ns:Print("%s", L["Saved to Personal Notes."])
+                        end)
+                    end
+                    root:CreateButton(L["Copy Message"], function()
+                        if ns.UI and ns.UI.OpenCopyModal then
+                            ns.UI:OpenCopyModal(senderLbl .. ": " .. rawPlain, L["Copy Message"], L["Press Ctrl+C to copy this message."])
+                        end
+                    end)
+                end)
+            end
+        elseif not link:find("^addon:") then
+            if _G.ChatFrame_OnHyperlinkShow then
+                pcall(_G.ChatFrame_OnHyperlinkShow, selfFrame, link, text, button)
+            elseif _G.SetItemRef and not (InCombatLockdown and InCombatLockdown()) then
+                pcall(_G.SetItemRef, link, text, button, selfFrame)
+            end
+        end
+    end)
+    local btnScrollBottom = Theme:CreateButton(rightCard, 24, 22, "v", "default")
+    btnScrollBottom:SetPoint("BOTTOMRIGHT", msgFrame, "BOTTOMRIGHT", -4, 4)
+    btnScrollBottom:SetFrameLevel((msgFrame:GetFrameLevel() or 2) + 4)
+    btnScrollBottom:Hide()
+    btnScrollBottom:SetScript("OnClick", function()
+        if msgFrame.ScrollToBottom then
+            msgFrame:ScrollToBottom()
+        end
+        btnScrollBottom:Hide()
+    end)
+    btnScrollBottom:SetScript("OnEnter", function(selfBtn)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText(L["Jump to latest messages"], 1, 0.9, 0.55)
+        GameTooltip:Show()
+    end)
+    btnScrollBottom:SetScript("OnLeave", function()
+        if GameTooltip and GameTooltip:IsOwned(btnScrollBottom) then GameTooltip:Hide() end
+    end)
+
     msgFrame:SetScript("OnMouseWheel", function(self, delta)
         if delta > 0 and self.ScrollUp then
             self:ScrollUp()
         elseif delta < 0 and self.ScrollDown then
             self:ScrollDown()
         end
+        local atBot = self.AtBottom and self:AtBottom()
+        btnScrollBottom:SetShown(atBot == false)
     end)
+
+    local dragScrollActive = false
+    local dragLastY = 0
+    local DRAG_STEP_PX = 14
+    local function StopMsgDrag()
+        dragScrollActive = false
+        msgFrame:SetScript("OnUpdate", nil)
+    end
+    local function OnMsgDragUpdate()
+        if not dragScrollActive or not IsMouseButtonDown("LeftButton") then
+            StopMsgDrag()
+            return
+        end
+        local _, cursorY = GetCursorPosition()
+        local scale = msgFrame:GetEffectiveScale() or 1
+        local curY = cursorY / scale
+        local dy = curY - dragLastY
+        local moved = false
+        while dy >= DRAG_STEP_PX do
+            if msgFrame.ScrollDown then msgFrame:ScrollDown() end
+            dragLastY = dragLastY + DRAG_STEP_PX
+            dy = curY - dragLastY
+            moved = true
+        end
+        while dy <= -DRAG_STEP_PX do
+            if msgFrame.ScrollUp then msgFrame:ScrollUp() end
+            dragLastY = dragLastY - DRAG_STEP_PX
+            dy = curY - dragLastY
+            moved = true
+        end
+        if moved then
+            local atBot = msgFrame.AtBottom and msgFrame:AtBottom()
+            btnScrollBottom:SetShown(atBot == false)
+        end
+    end
+    msgFrame:SetScript("OnMouseDown", function(_, button)
+        if button ~= "LeftButton" then return end
+        local _, cursorY = GetCursorPosition()
+        local scale = msgFrame:GetEffectiveScale() or 1
+        dragLastY = cursorY / scale
+        dragScrollActive = true
+        msgFrame:SetScript("OnUpdate", OnMsgDragUpdate)
+    end)
+    msgFrame:SetScript("OnMouseUp", StopMsgDrag)
+    msgFrame:SetScript("OnHide", StopMsgDrag)
 
     local composer = CreateFrame("Frame", nil, rightCard)
     composer:SetPoint("BOTTOMLEFT", 8, 6)
@@ -2183,9 +2728,26 @@ function SocialPanels:CreateChatPanel(parent)
         0
     )
 
-    local btnSend = Theme:CreateButton(composer, 92, 24, L["Send"], "primary")
-    Theme:AutoFitButton(btnSend, 74, 18, 125)
+    local btnSend = Theme:CreateButton(composer, 28, 24, "", "primary")
+    SetupIconBtn(btnSend, 28, 24, "Interface\\AddOns\\SocialCentral\\Media\\arrow", {
+        size = 15,
+        color = { 1.0, 0.92, 0.65 },
+        tooltipFn = function(selfBtn)
+            return selfBtn._tipTitle or L["Send"], selfBtn._tipDesc or L["Send your message."]
+        end,
+    })
+    if btnSend.ico and btnSend.ico.SetRotation then
+        btnSend.ico:SetRotation(-math.pi / 2)
+    end
     btnSend:SetPoint("RIGHT", helpComposer, "LEFT", -6, 0)
+
+    local btnQuickReply = Theme:CreateButton(composer, 26, 24, "", "default")
+    SetupIconBtn(btnQuickReply, 26, 24, "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", {
+        size = 15,
+        title = L["Quick Replies"],
+        desc = L["Send a saved message in 1 click or save the current text as a new template."],
+    })
+    btnQuickReply:SetPoint("RIGHT", btnSend, "LEFT", -4, 0)
 
     local replyInput = Theme:CreateEditBox(composer, {
         height = 24,
@@ -2194,16 +2756,74 @@ function SocialPanels:CreateChatPanel(parent)
         placeholder = L["Select a conversation to reply..."],
     })
     replyInput:SetPoint("LEFT", 0, 0)
-    replyInput:SetPoint("RIGHT", btnSend, "LEFT", -8, 0)
+    replyInput:SetPoint("RIGHT", btnQuickReply, "LEFT", -6, 0)
+
+    local charCounter = composer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    charCounter:SetPoint("RIGHT", replyInput, "RIGHT", -6, 0)
+    charCounter:SetJustifyH("RIGHT")
+    charCounter:Hide()
+    replyInput:HookScript("OnTextChanged", function(selfBox)
+        local len = #(selfBox:GetText() or "")
+        if len >= 100 then
+            charCounter:SetText(string.format("%d/180", len))
+            if len > 180 then
+                charCounter:SetTextColor(1.0, 0.35, 0.35)
+            elseif len >= 160 then
+                charCounter:SetTextColor(1.0, 0.72, 0.25)
+            else
+                charCounter:SetTextColor(0.65, 0.72, 0.80)
+            end
+            charCounter:Show()
+        else
+            charCounter:Hide()
+        end
+    end)
 
     local function SubmitReply()
         if not (ns.Chat and ns.Chat.activeThreadKey) then return end
+        local key = ns.Chat.activeThreadKey
         local txt = replyInput:GetText() or ""
-        if ns.Chat:SendOrOpenReply(ns.Chat.activeThreadKey, txt, true) then
+        if ns.Chat:SendOrOpenReply(key, txt, true) then
             replyInput:SetText("")
+            if panel._drafts then
+                panel._drafts[key] = nil
+            end
         end
     end
     btnSend:SetScript("OnClick", SubmitReply)
+    btnQuickReply:SetScript("OnClick", function(selfBtn)
+        if not (MenuUtil and MenuUtil.CreateContextMenu and ns.Chat) then return end
+        local key = ns.Chat.activeThreadKey
+        local list = ns.Chat.GetQuickReplies and ns.Chat:GetQuickReplies() or {}
+        local curTxt = Compat.CleanInput(replyInput:GetText() or "")
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["Quick Replies"])
+            for idx, tpl in ipairs(list) do
+                root:CreateButton(tpl, function()
+                    if key and ns.Chat:SendOrOpenReply(key, tpl, true) then
+                        if panel._drafts then
+                            panel._drafts[key] = nil
+                        end
+                    end
+                end)
+            end
+            root:CreateDivider()
+            if curTxt and curTxt ~= "" then
+                root:CreateButton("+ " .. L["Save current text as Quick Reply"], function()
+                    ns.Chat:AddQuickReply(curTxt)
+                end)
+            end
+            local sub = root:CreateButton(L["Remove Quick Reply"])
+            for idx, tpl in ipairs(list) do
+                sub:CreateButton(tpl, function()
+                    ns.Chat:RemoveQuickReply(idx)
+                end)
+            end
+            root:CreateButton(L["Reset Defaults"], function()
+                ns.Chat:ResetQuickReplies()
+            end)
+        end)
+    end)
     replyInput:SetScript("OnEnterPressed", SubmitReply)
     replyInput:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
     replyInput:HookScript("OnEditFocusGained", function()
@@ -2276,9 +2896,13 @@ function SocialPanels:CreateChatPanel(parent)
         Theme:StyleButton(btnPinLoc, "default")
         Theme:StyleButton(btnCopyThread, "default")
         Theme:StyleButton(btnMarkRead, "primary")
+        Theme:StyleButton(btnClearNotes, "danger")
         Theme:StyleButton(btnMuteThread, "default")
         Theme:StyleButton(btnVerify, "default")
         Theme:StyleButton(btnSend, "primary")
+        Theme:StyleButton(btnQuickReply, "default")
+        Theme:StyleButton(btnScrollBottom, "default")
+        Theme:StyleButton(btnUnpinBanner, "default")
         Theme:StyleButton(btnOfficialDest, "primary")
         if helpTop and helpTop.RefreshTheme then helpTop:RefreshTheme() end
         if helpComposer and helpComposer.RefreshTheme then helpComposer:RefreshTheme() end
@@ -2363,15 +2987,43 @@ function SocialPanels:CreateChatPanel(parent)
             local qLow = tQuery:lower()
             local filtered = {}
             for _, th in ipairs(threads) do
+                th._searchPreview = nil
                 local hay = ((th.title or "") .. " " .. (th.preview or "")):lower()
                 if hay:find(qLow, 1, true) then
                     filtered[#filtered + 1] = th
+                else
+                    local rawThread = ns.Chat and ns.Chat.threads and ns.Chat.threads[th.key]
+                    local msgs = rawThread and rawThread.messages
+                    if type(msgs) == "table" then
+                        for i = #msgs, 1, -1 do
+                            local m = msgs[i]
+                            local mText = m and m.text or ""
+                            local mSender = m and m.sender or ""
+                            if mText:lower():find(qLow, 1, true) or mSender:lower():find(qLow, 1, true) then
+                                th._searchPreview = mText
+                                filtered[#filtered + 1] = th
+                                break
+                            end
+                        end
+                    end
                 end
             end
             threads = filtered
         end
         if ns.Chat and (not ns.Chat.activeThreadKey or not ns.Chat.threads[ns.Chat.activeThreadKey]) and #threads > 0 then
             ns.Chat:SetActiveThread(threads[1].key, (threads[1].unread or 0) > 0)
+        end
+        local activeKeyNow = ns.Chat and ns.Chat.activeThreadKey
+        panel._drafts = panel._drafts or {}
+        if panel._lastDraftThreadKey ~= activeKeyNow then
+            if panel._lastDraftThreadKey then
+                local prevText = replyInput:GetText() or ""
+                panel._drafts[panel._lastDraftThreadKey] = (prevText ~= "") and prevText or nil
+            end
+            panel._lastDraftThreadKey = activeKeyNow
+            if not (ns.Chat and ns.Chat.pendingDraftText) then
+                replyInput:SetText((activeKeyNow and panel._drafts[activeKeyNow]) or "")
+            end
         end
         local emptyMsg = (tQuery ~= "" and L["No matching conversations found."])
             or (self._filter == "unread" and L["No unread conversations right now."])
@@ -2410,6 +3062,7 @@ function SocialPanels:CreateChatPanel(parent)
 
         if active then
             local isRoom = active.kind == "ROOM"
+            local isNotes = active.kind == "NOTES"
             local isDirect = (active.kind == "WHISPER" or active.kind == "BN_WHISPER")
             local pState = (ns.Chat and ns.Chat.GetPeerAddonState) and ns.Chat:GetPeerAddonState(activeKey) or { state = "none", verified = isRoom }
             local isMuted = ns.Chat and ns.Chat:IsThreadMuted(activeKey)
@@ -2428,42 +3081,30 @@ function SocialPanels:CreateChatPanel(parent)
 
             btnRoomInvite:SetShown(isRoom)
             btnLeaveRoom:SetShown(isRoom)
-            btnTargetCard:SetShown(active.kind == "WHISPER" and active.targetName ~= nil)
-            btnPinLoc:SetShown(not isRoom and isDirect and pState.verified == true)
-            btnMarkRead:SetShown(activeUnread > 0)
-            btnMuteThread:Show()
+            btnTargetCard:SetShown((not isNotes) and isDirect and (active.targetName ~= nil or active.bnetAccountID ~= nil))
+            btnPinLoc:SetShown((not isNotes) and (not isRoom) and isDirect and pState.verified == true)
+            btnMarkRead:SetShown((not isNotes) and activeUnread > 0)
+            btnClearNotes:SetShown(isNotes and type(active.messages) == "table" and #active.messages > 0)
+            btnMuteThread:SetShown(not isNotes)
             btnCopyThread:SetShown(type(active.messages) == "table" and #active.messages > 0)
-            Theme:SetButtonText(btnMuteThread, isMuted and L["Muted"] or L["Mute"])
-            Theme:SetButtonActive(btnMuteThread, isMuted, "default")
-
-            local compactRight = (rightCard:GetWidth() or panel:GetWidth() or 500) < 430
-            if compactRight then
-                Theme:AutoFitButton(btnLeaveRoom, 46, 10, 92)
-                Theme:AutoFitButton(btnRoomInvite, 46, 10, 96)
-                Theme:AutoFitButton(btnTargetCard, 46, 10, 90)
-                Theme:AutoFitButton(btnPinLoc, 46, 10, 98)
-                Theme:AutoFitButton(btnMarkRead, 56, 10, 108)
-                Theme:AutoFitButton(btnMuteThread, 46, 12, 108)
-                Theme:AutoFitButton(btnCopyThread, 44, 10, 84)
-            else
-                Theme:AutoFitButton(btnLeaveRoom, 60, 16, 110)
-                Theme:AutoFitButton(btnRoomInvite, 72, 16, 120)
-                Theme:AutoFitButton(btnTargetCard, 66, 16, 115)
-                Theme:AutoFitButton(btnPinLoc, 72, 14, 124)
-                Theme:AutoFitButton(btnMarkRead, 68, 14, 124)
-                Theme:AutoFitButton(btnMuteThread, 64, 16, 120)
-                Theme:AutoFitButton(btnCopyThread, 56, 14, 100)
+            btnMuteThread._scMuted = isMuted
+            if btnMuteThread.ico then
+                btnMuteThread.ico:SetTexture(isMuted
+                    and "Interface\\AddOns\\SocialCentral\\Media\\bell-off"
+                    or "Interface\\AddOns\\SocialCentral\\Media\\bell-on")
             end
+            Theme:SetButtonActive(btnMuteThread, isMuted, "default")
 
             local orderedRight = {}
             if btnLeaveRoom:IsShown() then table.insert(orderedRight, btnLeaveRoom) end
             if btnRoomInvite:IsShown() then table.insert(orderedRight, btnRoomInvite) end
+            if btnClearNotes:IsShown() then table.insert(orderedRight, btnClearNotes) end
             if btnMarkRead:IsShown() then table.insert(orderedRight, btnMarkRead) end
             if btnTargetCard:IsShown() then table.insert(orderedRight, btnTargetCard) end
             if btnPinLoc:IsShown() then table.insert(orderedRight, btnPinLoc) end
             if btnCopyThread:IsShown() then table.insert(orderedRight, btnCopyThread) end
             if btnMuteThread:IsShown() then table.insert(orderedRight, btnMuteThread) end
-            local rightGap = compactRight and -4 or -6
+            local rightGap = -4
             local prevR
             for _, rb in ipairs(orderedRight) do
                 rb:ClearAllPoints()
@@ -2482,85 +3123,240 @@ function SocialPanels:CreateChatPanel(parent)
                 hdrTitle:SetPoint("RIGHT", rightHdr, "RIGHT", -4, 0)
             end
 
-            -- Peer verification bar
-            local showVerifyBtn = isDirect and (pState.state == "unprobed" or pState.state == "unverified" or pState.state == "checking")
+            -- Peer verification bar (compact icon + short tag; full explanation on hover)
+            local showVerifyBtn = (not isNotes) and isDirect and (pState.state == "unprobed" or pState.state == "unverified" or pState.state == "checking")
             btnVerify:SetShown(showVerifyBtn)
             if showVerifyBtn then
-                if pState.state == "checking" then
-                    Theme:SetButtonText(btnVerify, L["Checking..."])
-                    btnVerify:SetEnabled(false)
-                else
-                    Theme:SetButtonText(btnVerify, L["Verify Addon"])
-                    btnVerify:SetEnabled(true)
+                btnVerify:SetEnabled(pState.state ~= "checking")
+                if btnVerify.ico then
+                    btnVerify.ico:SetVertexColor(pState.state == "checking" and 0.6 or 1, pState.state == "checking" and 0.6 or 1, pState.state == "checking" and 0.6 or 1)
                 end
             end
+            peerStatusIcon:Show()
+            peerStatusIcon:SetTexCoord(0, 1, 0, 1)
+            peerStatusIcon:SetVertexColor(1, 1, 1)
             peerStatusText:ClearAllPoints()
-            peerStatusText:SetPoint("LEFT", 2, 0)
+            peerStatusText:SetPoint("LEFT", peerStatusIcon, "RIGHT", 5, 0)
             peerStatusText:SetPoint("RIGHT", showVerifyBtn and btnVerify or peerBar, showVerifyBtn and "LEFT" or "RIGHT", showVerifyBtn and -6 or -2, 0)
             peerStatusText:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
 
-            if isRoom then
-                peerStatusText:SetText("|cff3fb950[" .. L["Addon Private Room"] .. "]|r  " .. string.format(L["%d members"], memberCount))
+            local function SetPeerStatus(iconTex, r, g, b, shortTxt, tipTitle, tipDesc, texCoord)
+                peerStatusIcon:SetTexture(iconTex)
+                if texCoord then
+                    peerStatusIcon:SetTexCoord(texCoord[1], texCoord[2], texCoord[3], texCoord[4])
+                end
+                peerStatusIcon:SetVertexColor(r, g, b)
+                peerStatusText:SetText(shortTxt)
+                peerStatusHover._tipTitle = tipTitle
+                peerStatusHover._tipDesc = tipDesc
+            end
+
+            local parsedAct = active.targetName and Compat.ParseCharacterName and Compat.ParseCharacterName(active.targetName) or nil
+            local bInfo = parsedAct and parsedAct.lookupKey and ns.Social and ns.Social.GetBNetLinkInfo
+                and ns.Social:GetBNetLinkInfo(parsedAct.lookupKey) or nil
+            local isBNetRedirectActive = (not isNotes) and (not isRoom) and active.kind == "WHISPER"
+                and bInfo and bInfo.online == true
+                and ((bInfo.sameFaction == false) or (pState.state == "offline") or (bInfo.activeLookupKey ~= (parsedAct and parsedAct.lookupKey)))
+
+            local destInfo = (not isNotes and not isRoom and ns.Chat and ns.Chat.GetOfficialDestinationInfo)
+                and ns.Chat:GetOfficialDestinationInfo(activeKey) or nil
+            local isAltRedirectActive = (destInfo and destInfo.isAltRedirect == true) or false
+
+            if isNotes then
+                SetPeerStatus(
+                    "Interface\\Buttons\\UI-GuildButton-PublicNote-Up", 1.0, 0.85, 0.35,
+                    "|cffffd24d" .. L["Personal Notes"] .. "|r",
+                    L["Personal Notes"],
+                    L["Saved permanently until you delete them."]
+                )
+            elseif isRoom then
+                SetPeerStatus(
+                    "Interface\\AddOns\\SocialCentral\\Media\\icon", 1, 1, 1,
+                    "|cff3fb950" .. string.format(L["%d members"], memberCount) .. "|r",
+                    L["Addon Private Room"],
+                    string.format(L["%d members"], memberCount)
+                )
             elseif activeKey == "ch:alliance" or pState.state == "alliance" then
                 local allCfg = ns.Clan and ns.Clan.GetAllianceConfig and ns.Clan:GetAllianceConfig() or {}
                 local allName = (allCfg.name and allCfg.name ~= "") and allCfg.name or L["Cross-Guild Alliance"]
-                peerStatusText:SetText("|cff3fb950[" .. L["Alliance Chat"] .. "]|r  " .. allName)
+                SetPeerStatus(
+                    "Interface\\AddOns\\SocialCentral\\Media\\icon", 1, 1, 1,
+                    "|cff3fb950" .. allName .. "|r",
+                    L["Alliance Chat"],
+                    allName
+                )
+            elseif isBNetRedirectActive then
+                local activeLbl = bInfo.activeDisplayName or bInfo.bnetName or "Battle.net"
+                local facLbl = bInfo.faction and ((bInfo.faction == "Alliance") and L["Alliance"] or L["Horde"]) or nil
+                local shortLbl = (bInfo.sameFaction == false and facLbl)
+                    and ("|cff58a6ffB.net · " .. facLbl .. "|r")
+                    or ("|cff58a6ffB.net -> " .. activeLbl .. "|r")
+                local desc = string.format(
+                    L["Character offline or opposite faction. Messages sent here are automatically redirected to Battle.net (%s) tagged [To %s]."],
+                    activeLbl,
+                    (parsedAct and parsedAct.displayName) or active.title or "?"
+                )
+                SetPeerStatus("Interface\\ChatFrame\\UI-ChatIcon-BattleNet", 1, 1, 1, shortLbl, L["Battle.net Redirect"], desc)
+            elseif isAltRedirectActive then
+                local altLbl = destInfo.activeChar or destInfo.label or "?"
+                local desc = string.format(
+                    L["Character offline. Messages sent here are automatically redirected to %s tagged [To %s]."],
+                    altLbl,
+                    destInfo.targetDisplay or active.title or "?"
+                )
+                SetPeerStatus("Interface\\Icons\\INV_Letter_15", 0.55, 0.82, 1.0, "|cff58a6ff-> " .. altLbl .. "|r", L["Alt Redirect"], desc, { 0.08, 0.92, 0.08, 0.92 })
             elseif pState.state == "registered" then
                 local verTag = pState.version and ("v" .. pState.version) or "OK"
-                peerStatusText:SetText("|cff58a6ff[SocialCentral " .. verTag .. " · " .. L["Registered"] .. "]|r  " .. L["In-addon direct chat ready"])
+                SetPeerStatus(
+                    "Interface\\AddOns\\SocialCentral\\Media\\icon", 1, 1, 1,
+                    "|cff58a6ffSC " .. verTag .. "|r",
+                    "SocialCentral " .. verTag .. " · " .. L["Registered"],
+                    L["In-addon direct chat ready"]
+                )
             elseif pState.verified then
                 local verTag = pState.version and ("v" .. pState.version) or "OK"
-                peerStatusText:SetText("|cff3fb950[SocialCentral " .. verTag .. "]|r  " .. L["Both players verified — in-addon direct chat active"])
+                SetPeerStatus(
+                    "Interface\\AddOns\\SocialCentral\\Media\\icon", 1, 1, 1,
+                    "|cff3fb950SC " .. verTag .. "|r",
+                    "SocialCentral " .. verTag,
+                    L["Both players verified — in-addon direct chat active"]
+                )
             elseif pState.state == "checking" then
-                peerStatusText:SetText("|cffffd24d[" .. L["Checking SocialCentral..."] .. "]|r")
+                SetPeerStatus(
+                    "Interface\\AddOns\\SocialCentral\\Media\\dot", 1.0, 0.82, 0.30,
+                    "|cffffd24d...|r",
+                    L["Checking SocialCentral..."],
+                    L["Waiting for addon handshake response."]
+                )
             elseif pState.state == "disabled" then
-                peerStatusText:SetText("|cffff9b3d[" .. L["In-addon direct chat disabled in Settings"] .. "]|r")
+                SetPeerStatus(
+                    "Interface\\AddOns\\SocialCentral\\Media\\dot", 1.0, 0.60, 0.24,
+                    "|cffff9b3d/w|r",
+                    L["In-addon direct chat disabled in Settings"],
+                    L["Messages will be sent via standard WoW whisper."]
+                )
             elseif pState.state == "offline" then
                 if pState.knownAddon then
                     local verStr = pState.version and ("v" .. pState.version .. " · ") or ""
-                    peerStatusText:SetText("|cff8ab4f8[SocialCentral " .. verStr .. L["Offline"] .. "]|r  " .. L["Registered user — in-addon chat resumes automatically when online"])
+                    SetPeerStatus(
+                        "Interface\\AddOns\\SocialCentral\\Media\\dot", 0.54, 0.71, 0.97,
+                        "|cff8ab4f8" .. L["Offline"] .. "|r",
+                        "SocialCentral " .. verStr .. L["Offline"],
+                        L["Registered user — in-addon chat resumes automatically when online"]
+                    )
                 else
-                    peerStatusText:SetText("|cff9da7b5[" .. L["Offline or out of addon range"] .. "]|r")
+                    SetPeerStatus(
+                        "Interface\\AddOns\\SocialCentral\\Media\\dot", 0.62, 0.65, 0.71,
+                        "|cff9da7b5" .. L["Offline"] .. "|r",
+                        L["Offline or out of addon range"],
+                        L["Player is currently offline or unreachable."]
+                    )
                 end
             elseif pState.state == "channel" then
-                peerStatusText:SetText("|cff58a6ff[" .. L["Official WoW Channel"] .. "]|r  " .. (pState.slash or ""))
+                SetPeerStatus(
+                    "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", 0.35, 0.65, 1.0,
+                    "|cff58a6ff" .. (pState.slash or "") .. "|r",
+                    L["Official WoW Channel"],
+                    (pState.slash or "")
+                )
             else
-                peerStatusText:SetText("|cff9da7b5[" .. L["WoW Whisper (/w)"] .. "]|r  " .. L["SocialCentral not detected on peer"])
+                if active.kind == "BN_WHISPER" then
+                    SetPeerStatus(
+                        "Interface\\ChatFrame\\UI-ChatIcon-BattleNet", 1, 1, 1,
+                        "|cff58a6ffB.net|r",
+                        "Battle.net",
+                        L["SocialCentral not detected on peer"]
+                    )
+                else
+                    SetPeerStatus(
+                        "Interface\\Icons\\INV_Letter_15", 0.85, 0.85, 0.85,
+                        "|cff9da7b5/w|r",
+                        L["WoW Whisper (/w)"],
+                        L["SocialCentral not detected on peer"],
+                        { 0.08, 0.92, 0.08, 0.92 }
+                    )
+                end
+            end
+
+            if lineCount == 0 and panel._pinnedMsgs and panel._pinnedMsgs[activeKey] then
+                panel._pinnedMsgs[activeKey] = nil
+            end
+            local pinnedMsg = panel._pinnedMsgs and panel._pinnedMsgs[activeKey]
+            if pinnedMsg and pinnedMsg ~= "" then
+                pinnedBannerText:SetText("|cffffd24d[" .. L["Pinned"] .. "]|r " .. pinnedMsg)
+                Theme:ApplyBackdrop(pinnedBanner, "inset", p)
+                pinnedBanner:Show()
+                msgFrame:ClearAllPoints()
+                msgFrame:SetPoint("TOPLEFT", 10, -78)
+                msgFrame:SetPoint("BOTTOMRIGHT", -10, 40)
+            else
+                pinnedBanner:Hide()
+                msgFrame:ClearAllPoints()
+                msgFrame:SetPoint("TOPLEFT", 10, -56)
+                msgFrame:SetPoint("BOTTOMRIGHT", -10, 40)
             end
 
             -- Unified composer bar (direct in-addon packets when verified, instant WoW /w or channel reply otherwise)
             local isAlliance = (activeKey == "ch:alliance")
             officialBar:Hide()
             composer:Show()
-            if isRoom or pState.verified or isAlliance then
+            btnQuickReply:SetEnabled(true)
+            if (isNotes or isRoom or pState.verified or isAlliance) and not isBNetRedirectActive and not isAltRedirectActive then
                 if ns.Chat and ns.Chat.focusInputPending then
                     ns.Chat.focusInputPending = nil
                     if replyInput and replyInput.SetFocus then
                         replyInput:SetFocus()
                     end
                 end
-                Theme:SetButtonText(btnSend, L["Send"])
-                Theme:AutoFitButton(btnSend, 74, 18, 125)
                 btnSend:SetEnabled(true)
+                if btnSend.ico then
+                    btnSend.ico:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\arrow")
+                    btnSend.ico:SetSize(15, 15)
+                    btnSend.ico:SetVertexColor(1.0, 0.92, 0.65)
+                    if btnSend.ico.SetRotation then btnSend.ico:SetRotation(-math.pi / 2) end
+                end
+                btnSend._tipTitle = L["Send"]
+                btnSend._tipDesc = isNotes and L["Save personal note."]
+                    or (isAlliance and L["Send to Alliance chat inside SocialCentral."]
+                    or (isRoom and L["Send to Private Addon Room."]
+                    or L["Send direct in-addon message."]))
                 if replyInput.SetPlaceholder then
-                    replyInput:SetPlaceholder(isAlliance
-                        and L["Type in-addon alliance message and press Enter..."]
+                    replyInput:SetPlaceholder(isNotes
+                        and L["Type a personal note to save permanently..."]
+                        or (isAlliance and L["Type in-addon alliance message and press Enter..."]
                         or (isRoom and L["Type message to Private Room and press Enter..."]
-                        or L["Type in-addon direct message and press Enter..."]))
+                        or L["Type in-addon direct message and press Enter..."])))
                 end
             else
-                local destInfo = (ns.Chat and ns.Chat.GetOfficialDestinationInfo) and ns.Chat:GetOfficialDestinationInfo(activeKey)
-                local btnLabel = (destInfo and destInfo.compactButtonText) or L["WoW Whisper (/w)"]
-                Theme:SetButtonText(btnSend, btnLabel)
-                Theme:AutoFitButton(btnSend, 84, 14, 196)
                 btnSend:SetEnabled(destInfo ~= nil)
+                if btnSend.ico then
+                    if destInfo and destInfo.kind == "BN_WHISPER" then
+                        btnSend.ico:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-BattleNet")
+                        btnSend.ico:SetSize(15, 15)
+                        btnSend.ico:SetVertexColor(1, 1, 1)
+                        if btnSend.ico.SetRotation then btnSend.ico:SetRotation(0) end
+                    else
+                        btnSend.ico:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\arrow")
+                        btnSend.ico:SetSize(15, 15)
+                        btnSend.ico:SetVertexColor(1.0, 0.92, 0.65)
+                        if btnSend.ico.SetRotation then btnSend.ico:SetRotation(-math.pi / 2) end
+                    end
+                end
+                btnSend._tipTitle = (destInfo and destInfo.buttonText) or L["Send"]
+                if destInfo and destInfo.isBNetRedirect then
+                    btnSend._tipDesc = string.format(L["Redirects to Battle.net tagged [To %s]."], destInfo.targetDisplay or active.title or "?")
+                elseif destInfo and destInfo.isAltRedirect then
+                    btnSend._tipDesc = string.format(L["Redirects to %s tagged [To %s]."], destInfo.activeChar or "?", destInfo.targetDisplay or active.title or "?")
+                else
+                    btnSend._tipDesc = L["Press Enter or click to send."]
+                end
                 if replyInput.SetPlaceholder then
                     replyInput:SetPlaceholder((destInfo and destInfo.buttonText) or L["Select a conversation to reply..."])
                 end
             end
             replyInput:ClearAllPoints()
             replyInput:SetPoint("LEFT", 0, 0)
-            replyInput:SetPoint("RIGHT", btnSend, "LEFT", -8, 0)
+            replyInput:SetPoint("RIGHT", btnQuickReply, "LEFT", -6, 0)
             if ns.Chat and ns.Chat.pendingDraftText then
                 local draft = ns.Chat.pendingDraftText
                 ns.Chat.pendingDraftText = nil
@@ -2577,13 +3373,31 @@ function SocialPanels:CreateChatPanel(parent)
                 if #lines == 0 then
                     msgFrame:AddMessage(L["No messages yet."], p.textMuted[1], p.textMuted[2], p.textMuted[3])
                 else
-                    for _, entry in ipairs(lines) do
-                        local ts = entry.ts and entry.ts > 0 and date("|cff9da7b5[%H:%M]|r ", entry.ts) or ""
+                    local todayKey = date("%Y-%m-%d")
+                    local yesterdayKey = date("%Y-%m-%d", time() - 86400)
+                    local lastDayKey = nil
+                    for msgIdx, entry in ipairs(lines) do
+                        if entry.ts and entry.ts > 0 then
+                            local dKey = date("%Y-%m-%d", entry.ts)
+                            if dKey ~= lastDayKey then
+                                lastDayKey = dKey
+                                local dLabel = (dKey == todayKey and L["Today"])
+                                    or (dKey == yesterdayKey and L["Yesterday"])
+                                    or date("%d/%m/%Y", entry.ts)
+                                msgFrame:AddMessage("|cff7f8a9c—— " .. dLabel .. " ——|r")
+                            end
+                        end
+                        local tsRaw = entry.ts and entry.ts > 0 and date("[%H:%M]", entry.ts) or nil
+                        local ts = tsRaw and (entry.isStatusNotice and ("|cff9da7b5" .. tsRaw .. "|r ") or ("|Haddon:SCentral:msgact:" .. tostring(msgIdx) .. "|h|cff9da7b5" .. tsRaw .. "|r|h ")) or ""
                         if entry.isStatusNotice then
                             local sCol = (entry.statusKind == "DND") and "|cfff54747" or "|cffff9b3d"
                             msgFrame:AddMessage(ts .. sCol .. "[" .. (entry.sender or L["Status"]) .. "]|r |cffb8c2d0" .. (entry.text or "") .. "|r")
+                        elseif isNotes then
+                            local delLink = entry.noteId and ("|Haddon:SCentral:delnote:" .. tostring(entry.noteId) .. "|h|cffff6b6b[x]|r|h ") or ""
+                            msgFrame:AddMessage(ts .. delLink .. "|cffffd24d" .. (entry.sender or "") .. "|r: " .. (entry.text or ""))
                         else
                             local addonTag = (entry.viaAddon and not isRoom) and "|cff3fb950[SC]|r " or ""
+                            local mentionPrefix = entry.isMention and "|cffffd24d[@]|r " or ""
                             local tick = ""
                             if not entry.incoming and entry.viaAddon and not isRoom then
                                 if entry.deliveryState == "delivered" then
@@ -2595,17 +3409,22 @@ function SocialPanels:CreateChatPanel(parent)
                                 end
                             end
                             local hex = entry.classFile and Compat.ClassHex(entry.classFile) or (entry.incoming and "|cffd2a8ff" or "|cff58a6ff")
-                            msgFrame:AddMessage(ts .. addonTag .. hex .. (entry.sender or "") .. "|r: " .. (entry.text or "") .. tick)
+                            msgFrame:AddMessage(ts .. mentionPrefix .. addonTag .. hex .. (entry.sender or "") .. "|r: " .. (entry.text or "") .. tick)
                         end
                     end
                 end
                 if msgFrame.ScrollToBottom then
                     msgFrame:ScrollToBottom()
                 end
+                btnScrollBottom:Hide()
             end
         else
             hdrTitle:SetText(L["Select a conversation or create a Private Room"])
             peerStatusText:SetText("")
+            peerStatusIcon:Hide()
+            peerStatusHover._tipTitle = nil
+            peerStatusHover._tipDesc = nil
+            pinnedBanner:Hide()
             btnVerify:Hide()
             btnRoomInvite:Hide()
             btnLeaveRoom:Hide()
@@ -2613,6 +3432,7 @@ function SocialPanels:CreateChatPanel(parent)
             btnPinLoc:Hide()
             btnCopyThread:Hide()
             btnMarkRead:Hide()
+            btnClearNotes:Hide()
             btnMuteThread:Hide()
             hdrTitle:ClearAllPoints()
             hdrTitle:SetPoint("LEFT", 2, 0)
@@ -2620,6 +3440,7 @@ function SocialPanels:CreateChatPanel(parent)
             officialBar:Hide()
             composer:Show()
             btnSend:SetEnabled(false)
+            btnQuickReply:SetEnabled(false)
             if replyInput.SetPlaceholder then
                 replyInput:SetPlaceholder(L["Select a conversation to reply..."])
             end
@@ -3175,6 +3996,17 @@ function SocialPanels:CreateAltsPanel(parent)
 
     local charBtn = Theme:CreateButton(topBar, 168, 22, "...", "default")
     charBtn:SetPoint("LEFT", 0, 0)
+    charBtn:SetScript("OnEnter", function(selfBtn)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["Help: Select Character & Armory"], 1, 0.9, 0.55, true)
+        GameTooltip:AddLine(L["Click to pick any saved character on this server or copy their Web Armory profile URL."], 0.85, 0.88, 0.94, true)
+        GameTooltip:Show()
+    end)
+    charBtn:SetScript("OnLeave", function(selfBtn)
+        if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
+    end)
 
     local charHelpBtn = AddHelp(
         topBar,
@@ -3204,6 +4036,17 @@ function SocialPanels:CreateAltsPanel(parent)
 
     local filterBtn = Theme:CreateButton(searchBar, 96, 22, L["All"] .. "  v", "default")
     filterBtn:SetPoint("LEFT", bagSearch, "RIGHT", 6, 0)
+    filterBtn:SetScript("OnEnter", function(selfBtn)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["Filter Items"], 1, 0.9, 0.55, true)
+        GameTooltip:AddLine(L["Filter by source: All, Equipped, Bags, or Bank."], 0.85, 0.88, 0.94, true)
+        GameTooltip:Show()
+    end)
+    filterBtn:SetScript("OnLeave", function(selfBtn)
+        if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
+    end)
 
     local helpBtn = AddHelp(
         searchBar,
@@ -3351,6 +4194,7 @@ function SocialPanels:CreateAltsPanel(parent)
         if not dossierRows[idx] then
             local row = CreateFrame("Frame", nil, dossierContent)
             row:SetHeight(16)
+            row:EnableMouse(true)
             local lLbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             lLbl:SetPoint("TOPLEFT", row, "TOPLEFT", 2, 0)
             lLbl:SetJustifyH("LEFT")
@@ -3359,9 +4203,25 @@ function SocialPanels:CreateAltsPanel(parent)
             rLbl:SetPoint("TOPRIGHT", row, "TOPRIGHT", -2, 0)
             rLbl:SetJustifyH("RIGHT")
             rLbl:SetWordWrap(false)
-            lLbl:SetPoint("RIGHT", rLbl, "LEFT", -6, 0)
             row.left = lLbl
             row.right = rLbl
+            row:SetScript("OnEnter", function(selfRow)
+                if not GameTooltip then return end
+                local lt = selfRow._leftFull or ""
+                local rt = selfRow._rightFull or ""
+                if lt == "" and rt == "" then return end
+                GameTooltip:SetOwner(selfRow, "ANCHOR_RIGHT")
+                GameTooltip:ClearLines()
+                if rt ~= "" then
+                    GameTooltip:AddDoubleLine(lt, rt, 0.82, 0.86, 0.92, 1.0, 1.0, 1.0)
+                else
+                    GameTooltip:AddLine(lt, 1.0, 0.85, 0.25, true)
+                end
+                GameTooltip:Show()
+            end)
+            row:SetScript("OnLeave", function(selfRow)
+                if GameTooltip and GameTooltip:IsOwned(selfRow) then GameTooltip:Hide() end
+            end)
             dossierRows[idx] = row
         end
         return dossierRows[idx]
@@ -3673,6 +4533,20 @@ function SocialPanels:CreateAltsPanel(parent)
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", dossierContent, "TOPLEFT", 0, -yOff)
             row:SetPoint("TOPRIGHT", dossierContent, "TOPRIGHT", 0, -yOff)
+            row._leftFull = leftTxt or ""
+            row._rightFull = rightTxt or ""
+            row.left:ClearAllPoints()
+            row.left:SetPoint("TOPLEFT", row, "TOPLEFT", 2, 0)
+            row.right:ClearAllPoints()
+            if rightTxt and rightTxt ~= "" then
+                row.left:SetWidth(92)
+                row.right:SetPoint("LEFT", row.left, "RIGHT", 6, 0)
+                row.right:SetPoint("TOPRIGHT", row, "TOPRIGHT", -2, 0)
+            else
+                row.left:SetWidth(0)
+                row.left:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+                row.right:SetPoint("TOPRIGHT", row, "TOPRIGHT", -2, 0)
+            end
             row.left:SetText(leftTxt or "")
             row.left:SetTextColor(lr or 0.78, lg or 0.80, lb or 0.86)
             row.right:SetText(rightTxt or "")

@@ -276,6 +276,16 @@ function Watchlist:Add(rawName, note)
     ns:Print(L["Added %s to your Watchlist."]:format(parsed.displayName))
     Watchlist._wlIndexDirty = true
     if Store and Store.InvalidateWatchlistIndex then Store:InvalidateWatchlistIndex() end
+    if ns.Spotter and ns.Spotter.TrackPlayer then
+        ns.Spotter:TrackPlayer(
+            parsed.displayName,
+            dirEntry and dirEntry.guild or nil,
+            dirEntry and dirEntry.classFile or nil,
+            dirEntry and dirEntry.level or nil,
+            dirEntry and dirEntry.guid or nil,
+            "WATCHLIST"
+        )
+    end
     ns:Emit("WATCHLIST_UPDATED")
     return true, list[parsed.lookupKey]
 end
@@ -800,7 +810,12 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                 ns:Print(L["50+ matches found for '%s'; add surname for accuracy."]:format(targetEntry.displayName))
             end
         else
-            targetEntry.status = "offline"
+            local socRow = Store.socialByLookup and Store.socialByLookup[pending.id]
+            if socRow and socRow.online == true then
+                targetEntry.status = "online"
+            else
+                targetEntry.status = "offline"
+            end
             targetEntry.truncatedWarning = nil
         end
     end
@@ -829,6 +844,22 @@ function Watchlist:CheckEntry(id, silent)
     local list = Store:GetWatchlistTable()
     local entry = list[id]
     if not entry then return false, "missing" end
+
+    local socRow = Store.socialByLookup and Store.socialByLookup[entry.id]
+    if socRow and socRow.online == true then
+        local src = (socRow.sources and socRow.sources.bnet and "bnet")
+            or (socRow.sources and socRow.sources.friend and "friend")
+            or "guild"
+        Store:SyncWatchlistObservation(entry.displayName, {
+            online = true,
+            level = socRow.level,
+            classFile = socRow.classFile,
+            area = socRow.area,
+            guildName = socRow.guild,
+            source = src,
+        }, { suppressAlert = true })
+        return true, "social_online"
+    end
 
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     if inCombat then
@@ -1000,13 +1031,16 @@ function Watchlist:AutoCheckNextFromHardwareClick(preferredId)
     local best = nil
     local bestScore = -1
     for _, entry in ipairs(entries) do
-        local age = entry.lastChecked and (now - entry.lastChecked) or 999999
-        local isFriendOrGuild = (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
-        if entry.status == "unknown" or (not isFriendOrGuild and age >= 45) or (isFriendOrGuild and age >= 120) then
-            local score = age + ((entry.status == "unknown") and 1000000 or 0)
-            if score > bestScore then
-                bestScore = score
-                best = entry
+        local socRow = Store.socialByLookup and Store.socialByLookup[entry.id]
+        if not (socRow and socRow.online == true) then
+            local age = entry.lastChecked and (now - entry.lastChecked) or 999999
+            local isFriendOrGuild = (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
+            if entry.status == "unknown" or (not isFriendOrGuild and age >= 45) or (isFriendOrGuild and age >= 120) then
+                local score = age + ((entry.status == "unknown") and 1000000 or 0)
+                if score > bestScore then
+                    bestScore = score
+                    best = entry
+                end
             end
         end
     end
@@ -1336,12 +1370,19 @@ local function RegisterUnitContextMenus()
         end)
 
         if ns.SpotterHUD and ns.SpotterHUD.TrackEntry then
-            rootDescription:CreateButton(L["Track on Radar"], function()
-                ns.SpotterHUD:TrackEntry({
-                    displayName = parsed.displayName,
-                    lookupKey = parsed.lookupKey,
-                }, "SOCIAL")
-            end)
+            local isTracked = ns.Spotter and ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(parsed.displayName)
+            if isTracked and ns.Spotter and ns.Spotter.UntrackPlayer then
+                rootDescription:CreateButton(L["Untrack from Radar"], function()
+                    ns.Spotter:UntrackPlayer(parsed.displayName)
+                end)
+            else
+                rootDescription:CreateButton(L["Track on Radar"], function()
+                    ns.SpotterHUD:TrackEntry({
+                        displayName = parsed.displayName,
+                        lookupKey = parsed.lookupKey,
+                    }, "SOCIAL")
+                end)
+            end
         end
     end
 

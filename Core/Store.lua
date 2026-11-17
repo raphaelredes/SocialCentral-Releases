@@ -510,6 +510,7 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
     self._socialFoldersCache = nil
     self._linkedAltsDirty = true
     ns:Emit("SOCIAL_UPDATED")
+    ns:Emit("WATCHLIST_UPDATED")
     ns:Emit("GROUP_UPDATED")
     ns:Emit("CLAN_UPDATED")
     return tbl[key]
@@ -566,6 +567,88 @@ function Store:GetLinkedAltsForCharacter(rawNameOrKey)
         self._linkedAltsDirty = false
     end
     return self._linkedAltsMap[mainKey]
+end
+
+local MAX_OBSERVED_ALT_KEYS = 200
+
+function Store:RecordObservedAltPair(nameOrKeyA, nameOrKeyB)
+    local kA = NormalizeMetaKey(nameOrKeyA)
+    local kB = NormalizeMetaKey(nameOrKeyB)
+    if not kA or not kB or kA == kB then return end
+    if not ns.db then return end
+    ns.db.observedAlts = ns.db.observedAlts or {}
+    local scope = Compat.ScopeKey()
+    ns.db.observedAlts[scope] = ns.db.observedAlts[scope] or {}
+    local tbl = ns.db.observedAlts[scope]
+
+    local function link(src, dst)
+        local pDst = Compat.ParseCharacterName(dst)
+        local dispDst = (pDst and pDst.displayName) or dst
+        local bucket = tbl[src]
+        if type(bucket) ~= "table" then
+            local count = 0
+            for _ in pairs(tbl) do count = count + 1 end
+            if count >= MAX_OBSERVED_ALT_KEYS then
+                local oldestKey = next(tbl)
+                if oldestKey then tbl[oldestKey] = nil end
+            end
+            bucket = {}
+            tbl[src] = bucket
+        end
+        bucket[dst] = dispDst
+    end
+
+    link(kA, kB)
+    link(kB, kA)
+end
+
+function Store:GetAllLinkedCharacters(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return {} end
+    local out, seen = {}, { [key] = true }
+    local function addCand(raw)
+        if type(raw) ~= "string" or raw == "" then return end
+        local k = NormalizeMetaKey(raw)
+        if not k or seen[k] then return end
+        seen[k] = true
+        local parsed = Compat.ParseCharacterName(raw)
+        out[#out + 1] = {
+            lookupKey = k,
+            displayName = (parsed and parsed.displayName) or raw,
+        }
+    end
+
+    local metaTbl = self:GetSocialMetaTable()
+    local ownMeta = metaTbl and metaTbl[key]
+    local rootKey = key
+    if type(ownMeta) == "table" and type(ownMeta.mainName) == "string" and ownMeta.mainName ~= "" then
+        addCand(ownMeta.mainName)
+        rootKey = NormalizeMetaKey(ownMeta.mainName) or key
+    end
+    local rootAlts = self:GetLinkedAltsForCharacter(rootKey)
+    if type(rootAlts) == "table" then
+        for _, altName in ipairs(rootAlts) do
+            addCand(altName)
+        end
+    end
+    if rootKey ~= key then
+        local ownAlts = self:GetLinkedAltsForCharacter(key)
+        if type(ownAlts) == "table" then
+            for _, altName in ipairs(ownAlts) do
+                addCand(altName)
+            end
+        end
+    end
+
+    local scope = Compat.ScopeKey()
+    local obs = ns.db and ns.db.observedAlts and ns.db.observedAlts[scope]
+    local obsBucket = obs and obs[key]
+    if type(obsBucket) == "table" then
+        for k, disp in pairs(obsBucket) do
+            addCand(disp or k)
+        end
+    end
+    return out
 end
 
 function Store:MigrateSocialSurnameRecords(firstName, lookupKey)

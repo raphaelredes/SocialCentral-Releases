@@ -632,18 +632,20 @@ function Nearby:Init()
     end
 
     if C_Timer and C_Timer.NewTicker then
-        local hiddenIdleStep = 0
         C_Timer.NewTicker(8.0, function()
             if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
                 return
             end
-            if not IsMainWindowOpen() and not Compat.IsInGroup() then
-                hiddenIdleStep = (hiddenIdleStep + 1) % 3
-                if hiddenIdleStep ~= 0 then
+            local uiOpen = IsMainWindowOpen()
+            if not uiOpen then
+                if not Compat.IsInGroup() then
+                    -- Zero CPU idle: reactive events (NAME_PLATE_UNIT_ADDED, PLAYER_TARGET_CHANGED, UPDATE_MOUSEOVER_UNIT, CHAT)
+                    -- capture nearby players with zero timer overhead when the window is closed and player is solo.
                     return
                 end
-            else
-                hiddenIdleStep = 0
+                -- In a group with closed UI, only refresh group member zones/distances.
+                ScanGroup(true)
+                return
             end
             ScanActiveEnvironment(true)
         end)

@@ -1210,7 +1210,13 @@ function Compat.Whisper(target, draftText)
 end
 
 function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
-    local cleanBNet = Compat.CleanInput(bnetName)
+    local cleanBNet
+    if type(bnetName) == "string" and bnetName:find("|K", 1, true) then
+        cleanBNet = bnetName:gsub("[%c]", ""):gsub("^%s*(.-)%s*$", "%1")
+        if cleanBNet == "" then cleanBNet = nil end
+    else
+        cleanBNet = Compat.CleanInput(bnetName)
+    end
     if cleanBNet then
         if ChatFrameUtil and ChatFrameUtil.SendBNetTell then
             local ok = pcall(ChatFrameUtil.SendBNetTell, cleanBNet)

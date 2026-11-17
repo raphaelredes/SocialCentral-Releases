@@ -64,15 +64,18 @@ local KIND_RGB = {
     SCOUT            = { 0.96, 0.28, 0.28 },
     WORLDBUFF        = { 0.98, 0.62, 0.22 },
     FRIEND_ONLINE    = { 0.28, 0.92, 0.52 },
+    FRIEND_OFFLINE   = { 0.62, 0.66, 0.72 },
     WATCHLIST_ONLINE = { 0.40, 0.94, 0.48 },
+    AVOID_ALERT      = { 1.00, 0.30, 0.30 },
+    VERSION_UPDATE   = { 1.00, 0.78, 0.20 },
 }
 
 local function ResolveIconForKind(kind)
-    if kind == "FRIEND_ONLINE" or kind == "WATCHLIST_ONLINE" then
+    if kind == "FRIEND_ONLINE" or kind == "FRIEND_OFFLINE" or kind == "WATCHLIST_ONLINE" then
         return ICON_ONLINE
     elseif kind == "RMI" or kind == "CLAN_LFG" then
         return ICON_PARTY
-    elseif kind == "WORLDBUFF" or kind == "SCOUT" then
+    elseif kind == "WORLDBUFF" or kind == "SCOUT" or kind == "AVOID_ALERT" or kind == "VERSION_UPDATE" then
         return ICON_DEFAULT
     end
     return ICON_MAIL
@@ -93,10 +96,12 @@ local function GetToastTooltipHint(item)
     end
     local k = item.kind
     local action
-    if k == "FRIEND_ONLINE" then
+    if k == "FRIEND_ONLINE" or k == "FRIEND_OFFLINE" then
         action = L["Click: view in Social"]
     elseif k == "WATCHLIST_ONLINE" then
         action = L["Click: view in Watchlist"]
+    elseif k == "AVOID_ALERT" then
+        action = L["Click: open Group"]
     elseif k == "WORLDBUFF" then
         action = L["Click: view World Buffs"]
     elseif k == "CLAN_EVENT" or k == "CLAN_SIGNUP" then
@@ -105,6 +110,8 @@ local function GetToastTooltipHint(item)
         action = L["Click: open Group Finder"]
     elseif k == "SCOUT" then
         action = L["Click: open Radar"]
+    elseif k == "VERSION_UPDATE" then
+        action = L["Click: open update link"]
     else
         action = L["Click: open conversation"]
     end
@@ -156,7 +163,11 @@ end
 local function NavigateForItem(item)
     if not item then return end
     local k = item.kind
-    if k == "SCOUT" then
+    if k == "VERSION_UPDATE" then
+        if ns.UI and ns.UI.OpenUpdateModal then
+            ns.UI:OpenUpdateModal()
+        end
+    elseif k == "SCOUT" then
         if ns.SpotterHUD and ns.SpotterHUD.Show then
             ns.SpotterHUD:Show(true)
         elseif ns.NavigateToModule then
@@ -166,13 +177,17 @@ local function NavigateForItem(item)
         if ns.NavigateToModule then
             ns:NavigateToModule("buffs")
         end
-    elseif k == "FRIEND_ONLINE" then
+    elseif k == "FRIEND_ONLINE" or k == "FRIEND_OFFLINE" then
         if ns.NavigateToModule then
-            ns:NavigateToModule("social", { socialSearch = item.searchHint or "" })
+            ns:NavigateToModule("social", { socialSearch = "" })
+        end
+    elseif k == "AVOID_ALERT" then
+        if ns.NavigateToModule then
+            ns:NavigateToModule("group")
         end
     elseif k == "WATCHLIST_ONLINE" then
         if ns.NavigateToModule then
-            ns:NavigateToModule("watchlist", { watchlistSearch = item.searchHint or "" })
+            ns:NavigateToModule("watchlist", { watchlistSearch = "" })
         end
     elseif k == "CLAN_EVENT" or k == "CLAN_SIGNUP" then
         if ns.NavigateToModule then
@@ -795,6 +810,14 @@ function Toast:PushNotification(item)
         if s and s.friendOnlineAlertToast == false then
             return
         end
+    elseif item.kind == "FRIEND_OFFLINE" then
+        if s and s.friendOfflineAlertToast == false then
+            return
+        end
+    elseif item.kind == "AVOID_ALERT" then
+        if s and s.groupAvoidAlert == false then
+            return
+        end
     elseif item.kind == "WATCHLIST_ONLINE" then
         if s and s.alerts and s.alerts.toast == false then
             return
@@ -848,7 +871,7 @@ function Toast:PushNotification(item)
             entry.totalDuration = AUTO_DISMISS_INVITE_SEC
         elseif entry.kind == "WORLDBUFF" then
             entry.totalDuration = AUTO_DISMISS_BUFF_SEC
-        elseif entry.kind == "FRIEND_ONLINE" or entry.kind == "WATCHLIST_ONLINE" then
+        elseif entry.kind == "FRIEND_ONLINE" or entry.kind == "FRIEND_OFFLINE" or entry.kind == "WATCHLIST_ONLINE" then
             entry.totalDuration = AUTO_DISMISS_FRIEND_SEC
         else
             entry.totalDuration = AUTO_DISMISS_DEFAULT_SEC
@@ -904,6 +927,28 @@ function Toast:ShowTestNotification(variant)
             text = L["Online"],
             priority = 1,
             totalDuration = AUTO_DISMISS_FRIEND_SEC,
+        })
+    elseif v == "offline" then
+        self:PushNotification({
+            id = "test:off:" .. tostring(now),
+            kind = "FRIEND_OFFLINE",
+            sourceTag = L["Friend Offline"],
+            sender = myName,
+            senderClass = myClass or "WARRIOR",
+            text = L["Disconnected"],
+            priority = 1,
+            totalDuration = AUTO_DISMISS_FRIEND_SEC,
+        })
+    elseif v == "avoid" then
+        self:PushNotification({
+            id = "test:avoid:" .. tostring(now),
+            kind = "AVOID_ALERT",
+            sourceTag = L["Avoid Warning"],
+            sender = myName,
+            senderClass = myClass or "ROGUE",
+            text = L["In your group! Flagged as Avoid."],
+            priority = 2,
+            totalDuration = 12.0,
         })
     elseif v == "watchlist" then
         self:PushNotification({

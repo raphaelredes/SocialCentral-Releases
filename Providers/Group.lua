@@ -57,6 +57,7 @@ function Group:Scan()
         self.members = {}
         self.readyCheckActive = false
         self.readyStates = {}
+        self._avoidNotified = {}
         ns:Emit("GROUP_UPDATED")
         return
     end
@@ -126,6 +127,35 @@ function Group:Scan()
                     zone = currentZone,
                 }
                 table.insert(nextList, item)
+
+                if not isMe then
+                    local s = ns.db and ns.db.settings
+                    if (not s) or (s.groupAvoidAlert ~= false) then
+                        self._avoidNotified = self._avoidNotified or {}
+                        local alertKey = guid or parsed.lookupKey
+                        if not self._avoidNotified[alertKey] then
+                            local meta = Store and Store.GetEffectiveSocialMeta and Store:GetEffectiveSocialMeta(parsed.lookupKey)
+                            if meta and meta.flag == "AVOID" then
+                                self._avoidNotified[alertKey] = true
+                                local noteText = (meta.note and meta.note ~= "") and (L["Note: %s"]:format(meta.note)) or L["In your group! Flagged as Avoid."]
+                                ns:Print("|cffff4d4d[!] %s:|r %s (%s) — %s", L["Avoid Warning"], parsed.displayName, item.role or "", noteText)
+                                if PlaySound and SOUNDKIT and (SOUNDKIT.RAID_WARNING or 8959) then
+                                    pcall(PlaySound, SOUNDKIT.RAID_WARNING or 8959, "Master")
+                                end
+                                ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                                    id = "avoid:" .. alertKey,
+                                    kind = "AVOID_ALERT",
+                                    sourceTag = L["Avoid Warning"],
+                                    sender = parsed.displayName,
+                                    text = noteText,
+                                    ts = time(),
+                                    priority = 2,
+                                    totalDuration = 12.0,
+                                })
+                            end
+                        end
+                    end
+                end
 
                 if not isMe and Store and Store.RecordCompanion then
                     local compKey = guid or parsed.lookupKey

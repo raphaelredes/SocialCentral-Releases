@@ -908,6 +908,14 @@ function SpotterHUD:UpdateAppearance()
         end
     end
 
+    if self.radarTutorialDialog then
+        if self.radarTutorialDialog:IsShown() then
+            ApplyTutorialDialogTheme(self.radarTutorialDialog, p)
+        else
+            self.radarTutorialDialog._dirtyTheme = true
+        end
+    end
+
     local f = self.frame
     if not f then return end
 
@@ -1550,6 +1558,122 @@ end
 
 function SpotterHUD:ShowNameplateTutorialIfNeeded()
     self:ShowNameplateTutorial(false)
+end
+
+function SpotterHUD:CreateRadarTutorialDialog()
+    if self.radarTutorialDialog then return self.radarTutorialDialog end
+
+    local p = Theme:GetPalette()
+    local dlg = CreateFrame("Frame", "SocialCentralSpotterRadarTutorialDialog", UIParent, "BackdropTemplate")
+    dlg:SetSize(410, 240)
+    dlg:SetPoint("CENTER", UIParent, "CENTER", 0, 85)
+    dlg:SetFrameStrata("DIALOG")
+    dlg:SetFrameLevel(116)
+    if dlg.SetClipsChildren then
+        dlg:SetClipsChildren(false)
+    end
+    Theme:ApplyBackdrop(dlg, "window", p)
+    Theme:MakeMovable(dlg, { key = "spotterRadarTutorial" })
+    table.insert(UISpecialFrames, "SocialCentralSpotterRadarTutorialDialog")
+
+    local titleFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    titleFs:SetPoint("TOPLEFT", 14, -12)
+    titleFs:SetPoint("TOPRIGHT", -38, -12)
+    titleFs:SetJustifyH("LEFT")
+    titleFs:SetTextColor(p.accent[1], p.accent[2], p.accent[3])
+    titleFs:SetText(L["Target Radar & Proximity Tracking"])
+    dlg.titleFs = titleFs
+
+    local closeBtn = Theme:CreateButton(dlg, 20, 20, "X", "default")
+    closeBtn:SetPoint("TOPRIGHT", -10, -10)
+    closeBtn:SetScript("OnClick", function()
+        if ns.db and ns.db.settings then
+            ns.db.settings.spotterRadarTutorialShown = true
+        end
+        dlg:Hide()
+    end)
+    dlg.closeBtn = closeBtn
+
+    local bodyFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    bodyFs:SetPoint("TOPLEFT", 14, -36)
+    bodyFs:SetPoint("TOPRIGHT", -14, -36)
+    bodyFs:SetJustifyH("LEFT")
+    bodyFs:SetWordWrap(true)
+    bodyFs:SetTextColor(p.text[1], p.text[2], p.text[3])
+    bodyFs:SetText(L["The Target Radar scans players within ~100 yards around your character. When a tracked player enters your area, a floating directional arrow and distance indicator appear on screen with a safe click-to-target button."])
+    dlg.bodyFs = bodyFs
+
+    local keysBox = CreateFrame("Frame", nil, dlg, "BackdropTemplate")
+    keysBox:SetPoint("TOPLEFT", bodyFs, "BOTTOMLEFT", 0, -10)
+    keysBox:SetPoint("TOPRIGHT", bodyFs, "BOTTOMRIGHT", 0, -10)
+    keysBox:SetHeight(68)
+    Theme:ApplyBackdrop(keysBox, "inset", p)
+    dlg.keysBox = keysBox
+
+    local keysFs = keysBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    keysFs:SetPoint("TOPLEFT", 10, -8)
+    keysFs:SetPoint("BOTTOMRIGHT", -10, 8)
+    keysFs:SetJustifyH("LEFT")
+    keysFs:SetJustifyV("MIDDLE")
+    keysFs:SetWordWrap(true)
+    keysFs:SetTextColor(p.text[1], p.text[2], p.text[3])
+    keysFs:SetText(
+        "• " .. L["Proximity Tracking: Tactical detection via sightlines & nameplates (does not display on the World Map)."] .. "\n" ..
+        "• " .. L["Quick Target: Click the floating Radar HUD anytime outside combat to immediately select the tracked player."]
+    )
+    dlg.keysFs = keysFs
+
+    local tipFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    tipFs:SetPoint("TOPLEFT", keysBox, "BOTTOMLEFT", 0, -10)
+    tipFs:SetPoint("TOPRIGHT", keysBox, "BOTTOMRIGHT", 0, -10)
+    tipFs:SetJustifyH("LEFT")
+    tipFs:SetWordWrap(true)
+    tipFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+    tipFs:SetText(L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."])
+    dlg.tipFs = tipFs
+
+    local okBtn = Theme:CreateButton(dlg, 220, 24, L["Got it, don't show again"], "primary")
+    okBtn:SetPoint("BOTTOM", 0, 12)
+    Theme:AutoFitButton(okBtn, 190, 24, 340)
+    okBtn:SetScript("OnClick", function()
+        if ns.db and ns.db.settings then
+            ns.db.settings.spotterRadarTutorialShown = true
+        end
+        dlg:Hide()
+    end)
+    dlg.okBtn = okBtn
+
+    dlg:SetScript("OnHide", function()
+        if ns.db and ns.db.settings then
+            ns.db.settings.spotterRadarTutorialShown = true
+        end
+    end)
+
+    self.radarTutorialDialog = dlg
+    dlg:Hide()
+    return dlg
+end
+
+function SpotterHUD:ShowRadarTutorial(forceShow)
+    if InCombatLockdown and InCombatLockdown() then
+        return
+    end
+    local s = ns.db and ns.db.settings
+    if not forceShow then
+        if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
+            return
+        end
+        if s and s.spotterRadarTutorialShown == true then
+            return
+        end
+    end
+    local dlg = self.radarTutorialDialog or self:CreateRadarTutorialDialog()
+    if dlg then
+        if dlg._dirtyTheme then
+            ApplyTutorialDialogTheme(dlg, Theme:GetPalette())
+        end
+        dlg:Show()
+    end
 end
 
 function SpotterHUD:Show(forceUser)
