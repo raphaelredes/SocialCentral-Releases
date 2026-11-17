@@ -3,6 +3,7 @@ local _, ns = ...
 local L = ns.L or setmetatable({}, { __index = function(_, k) return k end })
 local Safe = ns.Safe
 local Compat = ns.Compat
+local Store = ns.Store
 local Theme = ns.Theme
 
 local WHITE8X8 = "Interface\\Buttons\\WHITE8X8"
@@ -17,7 +18,8 @@ local LFGFrameTab = {
     activeCategory = "DUNGEONS", -- "DUNGEONS" | "RAIDS" | "QUESTS" | "PVP" | "CUSTOM"
     roles = { TANK = false, HEALER = false, DPS = false, GUIDE = false },
     rolesInitialized = false,
-    playstyle = "NONE",          -- "NONE" | "LFG" | "LFM" | "NORMAL" | "FAST" | "FULL"
+    listingMode = "LFG",         -- "LFG" | "LFM"
+    playstyle = "NONE",          -- "NONE" | "NORMAL" | "FAST" | "FULL"
     showAllLevels = false,
     broadcastMode = "ALL",       -- "ALL" | "GCHAT" | "CLAN"
     selectedActivities = {},     -- activityId -> true
@@ -152,10 +154,13 @@ local CURATED_ACTIVITIES = {
     },
 }
 
+local LISTING_MODES = {
+    { id = "LFG", labelKey = "Mode: LFG (Join)" },
+    { id = "LFM", labelKey = "Mode: LFM (Recruit)" },
+}
+
 local PLAYSTYLE_OPTIONS = {
     { id = "NONE", labelKey = "Select Playstyle (...)" },
-    { id = "LFG", labelKey = "Mode: Looking for Group (LFG)" },
-    { id = "LFM", labelKey = "Mode: Looking for More (LFM)" },
     { id = "NORMAL", labelKey = "Playstyle: Normal" },
     { id = "FAST", labelKey = "Playstyle: Fast / Speedrun" },
     { id = "FULL", labelKey = "Playstyle: Full Clear / Quests" },
@@ -188,6 +193,15 @@ local function GetCategoryLabel(catId)
         end
     end
     return L["Category"]
+end
+
+local function GetListingModeLabel(modeId)
+    for _, opt in ipairs(LISTING_MODES) do
+        if opt.id == modeId then
+            return L[opt.labelKey]
+        end
+    end
+    return L["Mode: LFG (Join)"]
 end
 
 local function GetPlaystyleLabel(styleId)
@@ -1186,6 +1200,29 @@ function LFGFrameTab:UpdateComposerLayout()
     self:UpdateViewLayout()
 end
 
+local function ResolveLfgInviteTarget(item)
+    if not item or item.isSelf then
+        return false, nil, nil, false, nil
+    end
+    local targetName = item.displayName or item.lookupKey
+    if not targetName or targetName == "" then
+        return false, nil, nil, false, nil
+    end
+    local rKey = item.lookupKey or targetName
+    local bInfo = (ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(rKey) or nil
+    local bnetAccId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
+    local bnetName = item.bnetName or (bInfo and bInfo.bnetName)
+    local isCrossFac = (item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
+    local isMe = (Compat.IsMe and Compat.IsMe(targetName, item.guid)) == true
+    local inGroup = (Compat.IsInMyGroup and Compat.IsInMyGroup(targetName, item.guid)) == true
+    local canInvite = (not isMe)
+        and (not inGroup)
+        and (not isCrossFac)
+        and (item.online ~= false)
+        and (item.hasCharacterName ~= false)
+    return canInvite, targetName, bnetAccId, isCrossFac, bnetName
+end
+
 function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     local c = self.controls
     if not c then return end
@@ -1195,8 +1232,9 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     if c.sendMsgBtn and c.sendMsgBtn.SetEnabled then
         c.sendMsgBtn:SetEnabled(canAct)
     end
+    local canInviteSel = canAct and ResolveLfgInviteTarget(sel)
     if c.inviteBtn and c.inviteBtn.SetEnabled then
-        c.inviteBtn:SetEnabled(canAct)
+        c.inviteBtn:SetEnabled(canInviteSel)
     end
 
     local hasRole = self:HasAnySelectedRole()
@@ -1212,6 +1250,9 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
 end
 
 function LFGFrameTab:ShowSubPanel()
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("I") then
+        return
+    end
     if IsCombatLocked() then
         ns:Print(L["Target Radar"] .. ": " .. L["Unavailable during combat."])
         return
@@ -1461,15 +1502,23 @@ local function OpenLfgRowContextMenu(anchor, item)
             end)
         end
         if targetName and not item.isSelf then
+            local canInviteLfg, invTarget, invBnetId, isCrossFac, bnetName = ResolveLfgInviteTarget(item)
             root:CreateButton(L["Whisper"], function()
                 OpenPlayerWhisper(item)
             end)
             root:CreateButton(L["Quick Apply (/w)"], function()
-                if Compat.Whisper then Compat.Whisper(targetName, BuildLfgApplyDraft(item)) end
+                local draft = BuildLfgApplyDraft(item)
+                if isCrossFac and bnetName and Compat.BNetWhisper then
+                    Compat.BNetWhisper(bnetName, targetName, draft)
+                elseif Compat.Whisper then
+                    Compat.Whisper(targetName, draft)
+                end
             end)
-            root:CreateButton(L["Invite to Group"], function()
-                if Compat.Invite then Compat.Invite(targetName, item.bnetAccountID) end
-            end)
+            if canInviteLfg then
+                root:CreateButton(L["Invite to Group"], function()
+                    if Compat.Invite then Compat.Invite(invTarget, invBnetId) end
+                end)
+            end
             local isTracked = ns.Spotter and ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(targetName, item.guid)
             if isTracked and ns.Spotter and ns.Spotter.UntrackPlayer then
                 root:CreateButton(L["Untrack from Radar"], function()
@@ -2153,7 +2202,7 @@ function LFGFrameTab:SubmitListing()
         return
     end
 
-    local mode = (self.playstyle == "LFM") and "LFM" or "LFG"
+    local mode = (self.listingMode == "LFM") and "LFM" or "LFG"
     local role = self:GetPrimaryListingRole()
     local activity = self:GetSelectedActivitiesSummary()
     local noteParts = {}
@@ -2180,7 +2229,7 @@ function LFGFrameTab:SubmitListing()
     end
 
     if ns.Clan and ns.Clan.PostLFG then
-        ns.Clan:PostLFG(mode, role, activity, 0, note)
+        ns.Clan:PostLFG(mode, role, activity, 0, note, self.broadcastMode == "CLAN")
     end
     if self.broadcastMode == "GCHAT" and ns.Clan and ns.Clan.OpenGuildChatLFG then
         ns.Clan:OpenGuildChatLFG(mode, role, activity, 0, note)
@@ -2208,6 +2257,9 @@ function LFGFrameTab:RefreshData()
         self:UpdateViewLayout()
         return
     elseif mode == "activities" then
+        if c.modeDropdown and c.modeDropdown.RefreshDropdownLabel then
+            c.modeDropdown:RefreshDropdownLabel()
+        end
         if c.playstyleDropdown and c.playstyleDropdown.RefreshDropdownLabel then
             c.playstyleDropdown:RefreshDropdownLabel()
         end
@@ -2618,8 +2670,33 @@ function LFGFrameTab:BuildSubPanel()
     end)
     self.controls.masterCatCheck = masterCatCheck
 
+    local modeDropdown = CreateNativeDropdown(
+        activityView,
+        "SocialCentralLFGModeDropdown",
+        136,
+        22,
+        function()
+            return GetListingModeLabel(LFGFrameTab.listingMode)
+        end,
+        function(root)
+            for _, opt in ipairs(LISTING_MODES) do
+                AddDropdownMenuChoice(root, L[opt.labelKey], function()
+                    return LFGFrameTab.listingMode == opt.id
+                end, function()
+                    LFGFrameTab.listingMode = opt.id
+                    LFGFrameTab:RefreshData()
+                end)
+            end
+        end
+    )
+    modeDropdown:SetPoint("TOPRIGHT", activityView, "TOPRIGHT", -4, -39)
+    self.controls.modeDropdown = modeDropdown
+
     local masterCatLabel = activityView:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     masterCatLabel:SetPoint("LEFT", masterCatCheck, "RIGHT", 4, 0)
+    masterCatLabel:SetPoint("RIGHT", modeDropdown, "LEFT", -6, 0)
+    masterCatLabel:SetJustifyH("LEFT")
+    masterCatLabel:SetWordWrap(false)
     masterCatLabel:SetText(L["Dungeons"])
     masterCatLabel:SetTextColor(1.0, 0.82, 0.0)
     self.controls.masterCatLabel = masterCatLabel
@@ -2776,8 +2853,9 @@ function LFGFrameTab:BuildSubPanel()
     inviteBtn:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", -14, 11)
     inviteBtn:SetScript("OnClick", function()
         local sel = LFGFrameTab.selectedItem
-        if sel and not sel.isSelf and Compat.Invite then
-            Compat.Invite(sel.displayName or sel.lookupKey, sel.bnetAccountID)
+        local canInviteLfg, invTarget, invBnetId = ResolveLfgInviteTarget(sel)
+        if canInviteLfg and Compat.Invite then
+            Compat.Invite(invTarget, invBnetId)
         end
     end)
     self.controls.inviteBtn = inviteBtn
@@ -2845,6 +2923,18 @@ end
 function LFGFrameTab:EnsureSideTab()
     local parent = _G.LFGParentFrame
     if not parent then return end
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("I") then
+        if self.active then
+            self:HideSubPanel(false)
+        end
+        if ns.UI and ns.UI.CloseEmbeddedIfHost then
+            ns.UI:CloseEmbeddedIfHost(parent)
+        end
+        if self.sideTab then
+            self.sideTab:Hide()
+        end
+        return
+    end
 
     local nativeTabs = DiscoverNativeSideTabs(parent)
     if #nativeTabs == 0 then return end
@@ -2878,12 +2968,20 @@ function LFGFrameTab:EnsureSideTab()
                 if LFGFrameTab.active then
                     LFGFrameTab:HideSubPanel(false)
                 end
+                if ns.UI and ns.UI.CloseEmbeddedIfHost and _G.LFGParentFrame then
+                    ns.UI:CloseEmbeddedIfHost(_G.LFGParentFrame)
+                end
             end)
         end
         if ctrl.HasScript and ctrl:HasScript("OnMouseUp") then
             ctrl:HookScript("OnMouseUp", function(_, btn)
-                if btn == "LeftButton" and LFGFrameTab.active and IsAnyNativeSubFrameShown() then
-                    LFGFrameTab:HideSubPanel(false)
+                if btn == "LeftButton" then
+                    if LFGFrameTab.active and IsAnyNativeSubFrameShown() then
+                        LFGFrameTab:HideSubPanel(false)
+                    end
+                    if ns.UI and ns.UI.CloseEmbeddedIfHost and _G.LFGParentFrame then
+                        ns.UI:CloseEmbeddedIfHost(_G.LFGParentFrame)
+                    end
                 end
             end)
         end
@@ -2962,6 +3060,11 @@ end
 function LFGFrameTab:EnsureSocialSideTab()
     local parent = _G.SocialUIFrame or _G.FriendsFrame
     if not parent then return end
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("O") then
+        if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+        if self.socialTab then self.socialTab:Hide() end
+        return
+    end
 
     local nativeTabs = DiscoverRightSideTabs(parent, self.socialTab)
     local lastNative = nativeTabs[#nativeTabs]
@@ -3092,6 +3195,11 @@ local COMMUNITIES_NATIVE_TABS = {
 function LFGFrameTab:EnsureGuildSideTab()
     local parent = _G.CommunitiesFrame or _G.GuildFrame
     if not parent then return end
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("J") then
+        if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+        if self.guildTab then self.guildTab:Hide() end
+        return
+    end
 
     local nativeTabs = DiscoverRightSideTabs(
         parent,
@@ -3181,6 +3289,11 @@ end
 function LFGFrameTab:EnsureCharacterSideTab()
     local parent = _G.CharacterFrame
     if not parent then return end
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("C") then
+        if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+        if self.charTab then self.charTab:Hide() end
+        return
+    end
 
     local nativeTabs = DiscoverRightSideTabs(parent, self.charTab)
     local lastNative = nativeTabs[#nativeTabs]
@@ -3542,7 +3655,7 @@ local function ShowWorldBuffPinTooltip(pinBtn)
                 elseif cd and cd.status == "SCHEDULED" then
                     rightText = cd.text or L["Scheduled"]
                     rr, rg, rb = 0.72, 0.82, 0.96
-                elseif def.cooldown and def.cooldown > 0 then
+                elseif def.yellDelay and def.yellDelay > 0 then
                     rightText = L["Awaiting drop yell"]
                     rr, rg, rb = 0.65, 0.68, 0.74
                 else
@@ -3625,9 +3738,12 @@ local function ShowWorldBuffsPillTooltip(anchor)
                     elseif cd and cd.status == "SCHEDULED" then
                         st = cd.text or L["Scheduled"]
                         r, g, b = 0.72, 0.82, 0.96
-                    else
+                    elseif def.yellDelay and def.yellDelay > 0 then
                         st = L["Awaiting drop yell"]
                         r, g, b = 0.65, 0.68, 0.74
+                    else
+                        st = L["Open-world pickup"]
+                        r, g, b = 0.62, 0.76, 0.90
                     end
                     GameTooltip:AddDoubleLine(def.name or def.id, st, 0.92, 0.94, 0.98, r, g, b)
                     if cd and cd.peakText and cd.peakText ~= "" then
@@ -3752,6 +3868,16 @@ end
 
 function LFGFrameTab:RefreshWorldMapBuffs()
     local mapFrame = _G.WorldMapFrame
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("M") then
+        if self.mapPill then self.mapPill:Hide() end
+        if self.mapPins then
+            for _, p in ipairs(self.mapPins) do
+                p:Hide()
+            end
+        end
+        return
+    end
+    if self.mapPill then self.mapPill:Show() end
     if not (mapFrame and mapFrame.IsShown and mapFrame:IsShown()) then return end
 
     local defById, activeById, activeList = GetWorldBuffLookup()
@@ -3817,8 +3943,17 @@ function LFGFrameTab:RefreshWorldMapBuffs()
     local pinLevel = math.max(2050, (canvas:GetFrameLevel() or 2000) + 45)
     local idx = 0
 
+    local dmfStatus = ns.WorldBuffs and ns.WorldBuffs.GetDarkmoonFaireStatus and ns.WorldBuffs:GetDarkmoonFaireStatus() or nil
+    local activeDmfKey = nil
+    if dmfStatus and dmfStatus.isActive then
+        local t = date("*t", (GetServerTime and GetServerTime()) or time())
+        activeDmfKey = (t and ((t.month or 1) % 2 == 1)) and "dmf_mulgore" or "dmf_elwynn"
+    end
+
     for _, pinDef in ipairs(WORLD_BUFF_MAP_PINS) do
-        if pinDef.faction == "Both" or pinDef.faction == playerFaction or playerFaction == "Both" then
+        local isDmfPin = (pinDef.key == "dmf_elwynn" or pinDef.key == "dmf_mulgore")
+        local dmfVisible = (not isDmfPin) or (activeDmfKey == pinDef.key)
+        if dmfVisible and (pinDef.faction == "Both" or pinDef.faction == playerFaction or playerFaction == "Both") then
             local px, py = ProjectWorldMapCoord(pinDef, currentMapID)
             if px and py then
                 idx = idx + 1
@@ -3855,6 +3990,9 @@ end
 function LFGFrameTab:AttachWorldMapButton()
     local mapFrame = _G.WorldMapFrame
     if self.mapHooked or not mapFrame then return end
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("M") then
+        return
+    end
     self.mapHooked = true
 
     local container = (mapFrame.ScrollContainer) or mapFrame
@@ -4125,6 +4263,21 @@ function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
     end
     local mod = (moduleId or ""):lower()
 
+    if (mod == "clan" or mod == "diplomacy") and ns.Compat and ns.Compat.ShouldShowGuildFeatures and not ns.Compat.ShouldShowGuildFeatures() then
+        ns:Print("%s", L["Your character is not currently in a guild."])
+        return
+    end
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled(mod) then
+        if mod == "lfg" then
+            ns:Print("%s", L["Group Finder (I) integration is disabled in Settings."])
+            return
+        end
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub(mod == "diplomacy" and "clan" or mod)
+            return
+        end
+    end
+
     if mod == "lfg" then
         if not (_G.LFGParentFrame and _G.LFGParentFrame:IsShown()) then
             if _G.ToggleLFGParentFrame then
@@ -4267,8 +4420,6 @@ function LFGFrameTab:Init()
     ns:On("CHAT_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("CLAN_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("ADDON_MESSAGE_NOTIFY", SyncEmbeddedIfAnyHostShown)
-    ns:On("SETTINGS_UPDATED", SyncEmbeddedIfAnyHostShown)
-    ns:On("BUFFS_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("WORLD_BUFFS_UPDATED", function()
         if _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
             LFGFrameTab:RefreshWorldMapBuffs()
@@ -4283,6 +4434,21 @@ function LFGFrameTab:Init()
         LFGFrameTab:AttachCommunitiesUI()
         LFGFrameTab:AttachCharacterUI()
         LFGFrameTab:AttachWorldMapButton()
+        if _G.LFGParentFrame and _G.LFGParentFrame.IsShown and _G.LFGParentFrame:IsShown() then
+            LFGFrameTab:EnsureSideTab()
+        end
+        if (_G.SocialUIFrame or _G.FriendsFrame) and (_G.SocialUIFrame or _G.FriendsFrame):IsShown() then
+            LFGFrameTab:EnsureSocialSideTab()
+        end
+        if (_G.CommunitiesFrame or _G.GuildFrame) and (_G.CommunitiesFrame or _G.GuildFrame):IsShown() then
+            LFGFrameTab:EnsureGuildSideTab()
+        end
+        if _G.CharacterFrame and _G.CharacterFrame:IsShown() then
+            LFGFrameTab:EnsureCharacterSideTab()
+        end
+        if _G.WorldMapFrame and _G.WorldMapFrame:IsShown() then
+            LFGFrameTab:RefreshWorldMapBuffs()
+        end
     end
     local function QueueTryAttachAll()
         if tryAttachPending then return end
@@ -4293,6 +4459,18 @@ function LFGFrameTab:Init()
             TryAttachAll()
         end
     end
+
+    ns:On("SETTINGS_UPDATED", function()
+        QueueTryAttachAll()
+        SyncEmbeddedIfAnyHostShown()
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_GUILD_UPDATE", function(_, _, unit)
+        if not unit or unit == "player" then
+            QueueTryAttachAll()
+            SyncEmbeddedIfAnyHostShown()
+        end
+    end)
 
     ns.RegisterEvent(self, "ADDON_LOADED", function(_, _, loadedName)
         if loadedName == "Blizzard_GroupFinder_VanillaStyle"

@@ -220,7 +220,8 @@ local function ScanGuild(onlineCtx, dirCtx, wlObsMap)
     if liveGuildName and liveGuildName ~= "" then
         info.name = liveGuildName
     elseif not info.name or info.name == "" then
-        local altRec = ns.db and ns.db.alts and Compat.CharacterKey and ns.db.alts[Compat.CharacterKey()]
+        local altRec = Store.GetCurrentAltRecord and Store:GetCurrentAltRecord()
+            or (ns.db and ns.db.alts and Compat.CharacterKey and ns.db.alts[Compat.CharacterKey()])
         if altRec and altRec.guild and altRec.guild ~= "" then
             info.name = altRec.guild
         end
@@ -561,6 +562,10 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                     end
                 end
 
+                local sameFacVal = nil
+                if parsed then
+                    sameFacVal = sameFaction
+                end
                 local pres = (parsed and Store.GetFriendPresence) and Store:GetFriendPresence(parsed.lookupKey) or nil
                 local patch = {
                     displayName = (parsed and parsed.displayName) or accountName,
@@ -580,7 +585,7 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                     area = cleanArea,
                     faction = cleanFaction,
                     samePool = parsed and samePool or false,
-                    sameFaction = parsed and sameFaction or nil,
+                    sameFaction = sameFacVal,
                     afk = accAfk or gameAfk,
                     dnd = accDnd or gameDnd,
                     online = gOnline == true,
@@ -744,6 +749,8 @@ local function CheckFriendOnlineTransitions(dirMap)
                             sourceTag = srcTag,
                             sender = shownName,
                             senderClass = nextInfo.classFile,
+                            lookupKey = nextInfo.lookupKey,
+                            bnetAccountID = nextInfo.bnetAccountID,
                             text = (nextInfo.area and nextInfo.area ~= "") and (L["Online"] .. " · " .. nextInfo.area) or L["Is now online in WoW: Forever"],
                             searchHint = shownName,
                             ts = now,
@@ -760,7 +767,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                         ns:Print("%s", lineText)
                         didChat = true
                     end
-                    if settings.friendOnlineAlertSound ~= false and PlaySound and SOUNDKIT then
+                    if (didToast or didChat) and settings.friendOnlineAlertSound ~= false and PlaySound and SOUNDKIT then
                         local sid = SOUNDKIT.MAP_PING or 3175
                         if sid then
                             pcall(PlaySound, sid, "Master")
@@ -812,6 +819,8 @@ local function CheckFriendOnlineTransitions(dirMap)
                             sourceTag = srcTag,
                             sender = shownName,
                             senderClass = classFile,
+                            lookupKey = lookupKey,
+                            bnetAccountID = bnetAccId,
                             text = L["Disconnected"],
                             searchHint = shownName,
                             ts = now,

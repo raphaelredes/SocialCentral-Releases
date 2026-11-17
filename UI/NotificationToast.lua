@@ -34,6 +34,7 @@ local ICON_MAIL    = "Interface\\AddOns\\SocialCentral\\Media\\toast-mail"
 local ICON_PARTY   = "Interface\\AddOns\\SocialCentral\\Media\\toast-party"
 local ICON_ONLINE  = "Interface\\AddOns\\SocialCentral\\Media\\toast-online"
 local ICON_GLOW    = "Interface\\AddOns\\SocialCentral\\Media\\toast-glow"
+local ICON_BELL_OFF = "Interface\\AddOns\\SocialCentral\\Media\\bell-off"
 local PORTRAIT_MASK = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
 local WHITE8X8     = "Interface\\Buttons\\WHITE8X8"
 
@@ -145,6 +146,9 @@ local function ApplyToastThemeToFrame(f)
         if f.closeBtn and Theme.StyleButton then
             Theme:StyleButton(f.closeBtn, "default")
         end
+        if f.muteNotifBtn and Theme.StyleButton then
+            Theme:StyleButton(f.muteNotifBtn, "default")
+        end
         if f.acceptBtn and Theme.StyleButton then
             Theme:StyleButton(f.acceptBtn, "primary")
         end
@@ -195,7 +199,7 @@ local function NavigateForItem(item)
         end
     elseif k == "CLAN_LFG" then
         if ns.NavigateToModule then
-            ns:NavigateToModule("lfg", { clanRightView = "lfg" })
+            ns:NavigateToModule("lfg", { clanRightView = "browse" })
         end
     elseif k == "RMI" then
         if ns.NavigateToModule then
@@ -329,8 +333,37 @@ function Toast:EnsureFrame(index)
     end)
     f.closeBtn = closeBtn
 
+    local muteNotifBtn = Theme:CreateButton(f, 18, 18, "", "default")
+    muteNotifBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
+    muteNotifBtn:SetFrameLevel(f:GetFrameLevel() + 10)
+    muteNotifBtn:SetHitRectInsets(-3, -3, -4, -4)
+    local muteIco = muteNotifBtn:CreateTexture(nil, "OVERLAY")
+    muteIco:SetSize(12, 12)
+    muteIco:SetPoint("CENTER")
+    muteIco:SetTexture(ICON_BELL_OFF)
+    muteIco:SetVertexColor(0.95, 0.72, 0.35)
+    muteNotifBtn.ico = muteIco
+    muteNotifBtn:SetScript("OnClick", function()
+        if f.itemData then
+            Toast:ShowConfirmDisablePopup(f, f.itemData)
+        end
+    end)
+    muteNotifBtn:SetScript("OnEnter", function(selfBtn)
+        if GameTooltip then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(L["Silence this notification"], 1, 0.85, 0.35)
+            GameTooltip:AddLine(L["Click to disable this notification (asks confirmation nearby to prevent misclicks)."], 0.85, 0.88, 0.92, true)
+            GameTooltip:Show()
+        end
+    end)
+    muteNotifBtn:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    f.muteNotifBtn = muteNotifBtn
+
     local markReadBtn = Theme:CreateButton(f, 24, 18, L["ok"], "default")
-    markReadBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
+    markReadBtn:SetPoint("RIGHT", muteNotifBtn, "LEFT", -3, 0)
     markReadBtn:SetFrameLevel(f:GetFrameLevel() + 10)
     markReadBtn:SetScript("OnClick", function()
         local cur = f.itemData
@@ -493,6 +526,9 @@ function Toast:EnsureFrame(index)
                             Theme:ResetWindowPosition("notification_toast")
                         end
                     end)
+                    root:CreateButton(L["Silence this notification"], function()
+                        Toast:ShowConfirmDisablePopup(self, curItem)
+                    end)
                     root:CreateButton(L["Dismiss"], function()
                         Toast:DismissItem(curItem)
                     end)
@@ -502,7 +538,9 @@ function Toast:EnsureFrame(index)
             Toast:DismissItem(curItem)
             return
         end
-        Toast:DismissItem(curItem)
+        if curItem.kind ~= "RMI" then
+            Toast:DismissItem(curItem)
+        end
         NavigateForItem(curItem)
     end)
 
@@ -619,10 +657,11 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
         f.markReadBtn:SetShown(showQuickRead == true)
     end
     f.queueLbl:ClearAllPoints()
-    f.queueLbl:SetPoint("RIGHT", (showQuickRead and f.markReadBtn) or f.closeBtn, "LEFT", -4, 0)
+    local leftMostHdr = (showQuickRead and f.markReadBtn) or f.muteNotifBtn or f.closeBtn
+    f.queueLbl:SetPoint("RIGHT", leftMostHdr, "LEFT", -4, 0)
 
-    local rightPad = -30
-    if showQuickRead then rightPad = rightPad - 28 end
+    local rightPad = -51
+    if showQuickRead then rightPad = rightPad - 27 end
     if remainingQueueCount and remainingQueueCount > 0 then
         f.queueLbl:SetText("+" .. tostring(remainingQueueCount))
         f.queueLbl:Show()
@@ -741,7 +780,8 @@ function Toast:LayoutStack()
         for i = #Toast.activeItems, 1, -1 do
             local it = Toast.activeItems[i]
             local f = Toast.framePool[i]
-            local isHovered = f and f:IsShown() and f:IsMouseOver()
+            local confirmOpenForThis = Toast.confirmPopup and Toast.confirmPopup:IsShown() and (Toast.confirmPopup._targetItem == it)
+            local isHovered = confirmOpenForThis or (f and f:IsShown() and f:IsMouseOver())
 
             if it.countdownUntil and f and f:IsShown() and f.bodyLbl then
                 local remSec = math.max(0, math.ceil(it.countdownUntil - (GetTime and GetTime() or 0)))
@@ -778,8 +818,369 @@ function Toast:LayoutStack()
     end)
 end
 
+local function DescribeDisableTarget(item)
+    if not item then return nil end
+    local k = item.kind
+    local itemId = type(item.id) == "string" and item.id or ""
+
+    local function EmitDisabledFeedback(label, kindMatchesFn)
+        ns:Emit("SETTINGS_UPDATED")
+        if ns.Settings and ns.Settings.Refresh then
+            ns.Settings:Refresh()
+        end
+        if ns.UI and ns.UI.QueueRefresh then
+            ns.UI:QueueRefresh(false)
+        end
+        for i = #Toast.queue, 1, -1 do
+            if kindMatchesFn(Toast.queue[i]) then
+                table.remove(Toast.queue, i)
+            end
+        end
+        for i = #Toast.activeItems, 1, -1 do
+            if kindMatchesFn(Toast.activeItems[i]) then
+                table.remove(Toast.activeItems, i)
+            end
+        end
+        Toast:SortActiveItems()
+        Toast:LayoutStack()
+        ns:Print("|cff9da7b5%s|r %s", label, L["disabled. Re-enable anytime in Settings -> Notifications."])
+    end
+
+    local playerMuteLabel, playerMuteFn
+    if (k == "FRIEND_ONLINE" or k == "FRIEND_OFFLINE" or k == "WATCHLIST_ONLINE") and (item.lookupKey or item.bnetAccountID) and ns.Store and ns.Store.SetPlayerNotifyMuted then
+        local senderName = tostring(item.sender or "?")
+        playerMuteLabel = L["Only %s"]:format(senderName)
+        playerMuteFn = function()
+            ns.Store:SetPlayerNotifyMuted(item.lookupKey, true, nil, item.bnetAccountID, senderName)
+            ns:Emit("SOCIAL_UPDATED")
+            ns:Emit("WATCHLIST_UPDATED")
+            Toast:DismissItem(item)
+            if ns.UI and ns.UI.QueueRefresh then ns.UI:QueueRefresh(false) end
+            ns:Print(L["Notifications muted for %s."]:format(senderName))
+        end
+    elseif item.threadKey and item.threadKey ~= "" and ns.Chat and ns.Chat.ToggleThreadMuted then
+        local isMuted = ns.Chat.IsThreadMuted and ns.Chat:IsThreadMuted(item.threadKey)
+        if not isMuted then
+            local senderName = tostring(item.sender or "?")
+            playerMuteLabel = L["Only %s"]:format(senderName)
+            playerMuteFn = function()
+                ns.Chat:ToggleThreadMuted(item.threadKey)
+                Toast:DismissItem(item)
+                ns:Print(L["Notifications muted for %s."]:format(senderName))
+            end
+        end
+    end
+
+    if k == "FRIEND_ONLINE" then
+        return {
+            label = L["Friend Online Alerts"],
+            desc = L["Stop notifying when friends connect to WoW."],
+            playerMuteLabel = playerMuteLabel,
+            playerMuteFn = playerMuteFn,
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.friendOnlineAlertToast = false
+                    ns.db.settings.friendOnlineAlertChat = false
+                end
+                EmitDisabledFeedback(L["Friend Online Alerts"], function(it) return it and it.kind == "FRIEND_ONLINE" end)
+            end,
+        }
+    elseif k == "FRIEND_OFFLINE" then
+        return {
+            label = L["Friend Offline Alerts"],
+            desc = L["Stop notifying when friends disconnect from WoW."],
+            playerMuteLabel = playerMuteLabel,
+            playerMuteFn = playerMuteFn,
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.friendOfflineAlertToast = false
+                    ns.db.settings.friendOfflineAlertChat = false
+                end
+                EmitDisabledFeedback(L["Friend Offline Alerts"], function(it) return it and it.kind == "FRIEND_OFFLINE" end)
+            end,
+        }
+    elseif k == "WATCHLIST_ONLINE" then
+        return {
+            label = L["Watchlist Online Alerts"],
+            desc = L["Stop notifying when Watchlist players come online."],
+            playerMuteLabel = playerMuteLabel,
+            playerMuteFn = playerMuteFn,
+            disableFn = function()
+                if ns.db and ns.db.settings and ns.db.settings.alerts then
+                    ns.db.settings.alerts.toast = false
+                    ns.db.settings.alerts.chat = false
+                end
+                EmitDisabledFeedback(L["Watchlist Online Alerts"], function(it) return it and it.kind == "WATCHLIST_ONLINE" end)
+            end,
+        }
+    elseif k == "WORLDBUFF" then
+        if itemId:sub(1, 6) == "wbexp:" then
+            return {
+                label = L["World Buff Expiry Warning"],
+                desc = L["Stop warning when an active World Buff has under 5m left."],
+                disableFn = function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.worldBuffsExpiryAlert = false
+                    end
+                    EmitDisabledFeedback(L["World Buff Expiry Warning"], function(it) return it and it.kind == "WORLDBUFF" and type(it.id) == "string" and it.id:sub(1, 6) == "wbexp:" end)
+                end,
+            }
+        end
+        return {
+            label = L["World Buff Drop Alerts"],
+            desc = L["Stop notifying when Classic World Buffs are announced or synced."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.worldBuffsAlerts = false
+                end
+                EmitDisabledFeedback(L["World Buff Drop Alerts"], function(it) return it and it.kind == "WORLDBUFF" and not (type(it.id) == "string" and it.id:sub(1, 6) == "wbexp:") end)
+            end,
+        }
+    elseif k == "CLAN_LFG" then
+        return {
+            label = L["Clan Dungeon Alerts"],
+            desc = L["Stop notifying when guildmates look for a Dungeon / Group."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.clanLfgAlertEnabled = false
+                end
+                EmitDisabledFeedback(L["Clan Dungeon Alerts"], function(it) return it and it.kind == "CLAN_LFG" end)
+            end,
+        }
+    elseif k == "CLAN_EVENT" then
+        if itemId:sub(1, 6) == "evrem:" then
+            return {
+                label = L["Guild Event Reminders"],
+                desc = L["Stop showing 15m and 5m reminders before Guild & Calendar events."],
+                disableFn = function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.clanEventReminders = false
+                    end
+                    EmitDisabledFeedback(L["Guild Event Reminders"], function(it) return it and it.kind == "CLAN_EVENT" and type(it.id) == "string" and it.id:sub(1, 6) == "evrem:" end)
+                end,
+            }
+        end
+        return {
+            label = L["Guild Event Alerts"],
+            desc = L["Stop notifying when guildmates post new Guild Events."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.clanEventAlertEnabled = false
+                end
+                EmitDisabledFeedback(L["Guild Event Alerts"], function(it) return it and it.kind == "CLAN_EVENT" and not (type(it.id) == "string" and it.id:sub(1, 6) == "evrem:") end)
+            end,
+        }
+    elseif k == "CLAN_SIGNUP" then
+        return {
+            label = L["Guild Signup Alerts"],
+            desc = L["Stop notifying when guildmates sign up to your Events."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.clanSignupAlertEnabled = false
+                end
+                EmitDisabledFeedback(L["Guild Signup Alerts"], function(it) return it and it.kind == "CLAN_SIGNUP" end)
+            end,
+        }
+    elseif k == "SCOUT" then
+        return {
+            label = L["Guild Scout Alerts"],
+            desc = L["Stop notifying on Scout sightings shared by guildmates."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.spotterScoutAlert = false
+                end
+                EmitDisabledFeedback(L["Guild Scout Alerts"], function(it) return it and it.kind == "SCOUT" end)
+            end,
+        }
+    elseif k == "AVOID_ALERT" then
+        return {
+            label = L["Group Avoid Warnings"],
+            desc = L["Stop warning when an Avoid-flagged player enters your group."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.groupAvoidAlert = false
+                end
+                EmitDisabledFeedback(L["Group Avoid Warnings"], function(it) return it and it.kind == "AVOID_ALERT" end)
+            end,
+        }
+    elseif k == "VERSION_UPDATE" then
+        return {
+            label = L["Addon Update Alerts"],
+            desc = L["Stop checking or alerting when peers run a newer addon version."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.versionCheck = false
+                end
+                EmitDisabledFeedback(L["Addon Update Alerts"], function(it) return it and it.kind == "VERSION_UPDATE" end)
+            end,
+        }
+    else
+        return {
+            label = L["Floating Message Popups"],
+            desc = L["Stop showing floating popups for addon messages (conversations still appear in Chat)."],
+            playerMuteLabel = playerMuteLabel,
+            playerMuteFn = playerMuteFn,
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.addonMsgToast = false
+                end
+                EmitDisabledFeedback(L["Floating Message Popups"], function(it)
+                    if not it then return false end
+                    return it.kind == "DIRECT" or it.kind == "ROOM" or it.kind == "RMI" or it.kind == "ALLIANCE"
+                end)
+            end,
+        }
+    end
+end
+
+function Toast:ShowConfirmDisablePopup(anchorToast, item)
+    if not item then return end
+    local spec = DescribeDisableTarget(item)
+    if not spec then return end
+
+    if not self.confirmPopup then
+        local pop = CreateFrame("Frame", "SocialCentralToastConfirmPopup", UIParent, "BackdropTemplate")
+        pop:SetSize(288, 134)
+        pop:SetFrameStrata("DIALOG")
+        pop:SetFrameLevel(240)
+        pop:SetClampedToScreen(true)
+        pop:EnableMouse(true)
+        if pop.SetPropagateKeyboardInput then
+            pop:SetPropagateKeyboardInput(true)
+        end
+
+        local solidBg = pop:CreateTexture(nil, "BACKGROUND", nil, -8)
+        solidBg:SetAllPoints()
+        solidBg:SetTexture(WHITE8X8)
+        solidBg:SetVertexColor(0.06, 0.06, 0.08, 1.0)
+        pop._solidOpaqueBg = solidBg
+
+        local ico = pop:CreateTexture(nil, "OVERLAY")
+        ico:SetSize(16, 16)
+        ico:SetPoint("TOPLEFT", 12, -11)
+        ico:SetTexture(ICON_BELL_OFF)
+        ico:SetVertexColor(1.0, 0.72, 0.30)
+
+        local title = pop:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        title:SetPoint("LEFT", ico, "RIGHT", 6, 0)
+        title:SetPoint("RIGHT", pop, "RIGHT", -28, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+        title:SetText(L["Disable this notification?"])
+        pop.titleLbl = title
+
+        local xBtn = Theme:CreateButton(pop, 18, 18, "X", "default")
+        xBtn:SetPoint("TOPRIGHT", -6, -7)
+        xBtn:SetScript("OnClick", function() pop:Hide() end)
+        pop.xBtn = xBtn
+
+        local subLbl = pop:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        subLbl:SetPoint("TOPLEFT", 12, -31)
+        subLbl:SetPoint("TOPRIGHT", -12, -31)
+        subLbl:SetJustifyH("LEFT")
+        subLbl:SetWordWrap(true)
+        pop.subLbl = subLbl
+
+        local confirmBtn = Theme:CreateButton(pop, 108, 22, L["Disable"], "primary")
+        confirmBtn:SetPoint("BOTTOMLEFT", 12, 10)
+        pop.confirmBtn = confirmBtn
+
+        local playerBtn = Theme:CreateButton(pop, 108, 22, "", "default")
+        playerBtn:SetPoint("LEFT", confirmBtn, "RIGHT", 6, 0)
+        pop.playerBtn = playerBtn
+
+        local cancelBtn = Theme:CreateButton(pop, 84, 22, L["Cancel"], "default")
+        cancelBtn:SetPoint("BOTTOMRIGHT", -12, 10)
+        cancelBtn:SetScript("OnClick", function() pop:Hide() end)
+        pop.cancelBtn = cancelBtn
+
+        pop:SetScript("OnHide", function(selfPop)
+            selfPop._targetItem = nil
+        end)
+        if _G.UISpecialFrames then
+            table.insert(_G.UISpecialFrames, "SocialCentralToastConfirmPopup")
+        end
+
+        self.confirmPopup = pop
+    end
+
+    local pop = self.confirmPopup
+    pop._targetItem = item
+    if Theme and Theme.ApplyBackdrop then
+        Theme:ApplyBackdrop(pop, "window")
+    end
+    local p = Theme and Theme.GetPalette and Theme:GetPalette()
+    if p then
+        if pop._solidOpaqueBg then
+            local wb = p.windowBg or { 0.06, 0.06, 0.08, 1.0 }
+            pop._solidOpaqueBg:SetVertexColor(wb[1], wb[2], wb[3], 1.0)
+        end
+        Theme:StyleButton(pop.xBtn, "default")
+        Theme:StyleButton(pop.confirmBtn, "primary")
+        Theme:StyleButton(pop.playerBtn, "default")
+        Theme:StyleButton(pop.cancelBtn, "default")
+    end
+
+    pop.subLbl:SetText(("|cffffd24d%s|r\n|cffd2d9e4%s|r"):format(spec.label or "", spec.desc or ""))
+    local textH = (pop.subLbl.GetStringHeight and pop.subLbl:GetStringHeight()) or 32
+    pop:SetHeight(math.max(108, math.ceil(36 + textH + 44)))
+
+    pop.confirmBtn:SetScript("OnClick", function()
+        pop:Hide()
+        if spec.disableFn then
+            spec.disableFn()
+        end
+    end)
+
+    if spec.playerMuteFn and spec.playerMuteLabel then
+        Theme:SetButtonText(pop.playerBtn, spec.playerMuteLabel)
+        Theme:AutoFitButton(pop.playerBtn, 74, 12, 118)
+        pop.playerBtn:ClearAllPoints()
+        pop.playerBtn:SetPoint("LEFT", pop.confirmBtn, "RIGHT", 6, 0)
+        pop.playerBtn:SetScript("OnClick", function()
+            pop:Hide()
+            spec.playerMuteFn()
+        end)
+        pop.playerBtn:Show()
+        Theme:SetButtonText(pop.confirmBtn, L["Disable All"])
+        Theme:AutoFitButton(pop.confirmBtn, 84, 12, 108)
+        Theme:AutoFitButton(pop.cancelBtn, 68, 12, 86)
+        local neededW = (pop.confirmBtn:GetWidth() or 92) + (pop.playerBtn:GetWidth() or 88) + (pop.cancelBtn:GetWidth() or 74) + 38
+        pop:SetWidth(math.max(288, math.min(340, neededW)))
+    else
+        pop.playerBtn:Hide()
+        Theme:SetButtonText(pop.confirmBtn, L["Disable"])
+        Theme:AutoFitButton(pop.confirmBtn, 96, 14, 140)
+        Theme:AutoFitButton(pop.cancelBtn, 80, 14, 110)
+        pop:SetWidth(288)
+    end
+
+    pop:ClearAllPoints()
+    local ref = (anchorToast and anchorToast.IsShown and anchorToast:IsShown() and anchorToast) or self.anchorFrame
+    if ref and ref.GetCenter and UIParent and UIParent.GetWidth then
+        local uiW = UIParent:GetWidth() or 1280
+        local popW = pop:GetWidth() or 288
+        local right = (ref.GetRight and ref:GetRight()) or (uiW * 0.6)
+        local left = (ref.GetLeft and ref:GetLeft()) or (uiW * 0.4)
+        if (uiW - right) >= (popW + 12) then
+            pop:SetPoint("TOPLEFT", ref, "TOPRIGHT", 8, 0)
+        elseif left >= (popW + 12) then
+            pop:SetPoint("TOPRIGHT", ref, "TOPLEFT", -8, 0)
+        else
+            pop:SetPoint("TOP", ref, "BOTTOM", 0, -6)
+        end
+    else
+        pop:SetPoint("TOP", UIParent, "TOP", 0, -170)
+    end
+    pop:Show()
+    pop:Raise()
+end
+
 function Toast:DismissItem(item)
     if not item then return end
+    if self.confirmPopup and self.confirmPopup:IsShown() and self.confirmPopup._targetItem == item then
+        self.confirmPopup:Hide()
+    end
     for i, it in ipairs(self.activeItems) do
         if it == item or (it.id and it.id == item.id) then
             table.remove(self.activeItems, i)
@@ -797,6 +1198,9 @@ function Toast:DismissItem(item)
 end
 
 function Toast:DismissAll()
+    if self.confirmPopup and self.confirmPopup:IsShown() then
+        self.confirmPopup:Hide()
+    end
     wipe(self.queue)
     wipe(self.activeItems)
     self:LayoutStack()
@@ -806,6 +1210,7 @@ end
 function Toast:PushNotification(item)
     if type(item) ~= "table" then return end
     local s = ns.db and ns.db.settings
+    local itemId = type(item.id) == "string" and item.id or ""
     if item.kind == "FRIEND_ONLINE" then
         if s and s.friendOnlineAlertToast == false then
             return
@@ -820,6 +1225,34 @@ function Toast:PushNotification(item)
         end
     elseif item.kind == "WATCHLIST_ONLINE" then
         if s and s.alerts and s.alerts.toast == false then
+            return
+        end
+    elseif item.kind == "WORLDBUFF" then
+        if itemId:sub(1, 6) == "wbexp:" then
+            if s and s.worldBuffsExpiryAlert == false then return end
+        else
+            if s and s.worldBuffsAlerts == false then return end
+        end
+    elseif item.kind == "CLAN_LFG" then
+        if s and s.clanLfgAlertEnabled == false then
+            return
+        end
+    elseif item.kind == "CLAN_EVENT" then
+        if itemId:sub(1, 6) == "evrem:" then
+            if s and s.clanEventReminders == false then return end
+        else
+            if s and s.clanEventAlertEnabled == false then return end
+        end
+    elseif item.kind == "CLAN_SIGNUP" then
+        if s and s.clanSignupAlertEnabled == false then
+            return
+        end
+    elseif item.kind == "SCOUT" then
+        if s and s.spotterScoutAlert == false then
+            return
+        end
+    elseif item.kind == "VERSION_UPDATE" then
+        if s and s.versionCheck == false then
             return
         end
     else

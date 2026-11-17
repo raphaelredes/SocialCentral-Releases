@@ -45,8 +45,9 @@ function Store:GetClanScopeData(forcePrune)
         if GetGuildInfo then
             guildName = ns.Safe.String(ns.Safe.Call(GetGuildInfo, "player"))
         end
-        if (not guildName or guildName == "") and ns.db and ns.db.alts and Compat.CharacterKey then
-            local altRec = ns.db.alts[Compat.CharacterKey()]
+        if (not guildName or guildName == "") and ns.db and ns.db.alts then
+            local altRec = self.GetCurrentAltRecord and self:GetCurrentAltRecord()
+                or (Compat.CharacterKey and ns.db.alts[Compat.CharacterKey()])
             if altRec and altRec.guild and altRec.guild ~= "" then
                 guildName = altRec.guild
             end
@@ -173,10 +174,67 @@ function Store:GetClanScopeData(forcePrune)
     return bucket
 end
 
+function Store:GetCurrentAltKey()
+    local safeStr = ns.Safe and ns.Safe.String
+    local safeCall = ns.Safe and ns.Safe.Call
+    local myGuid = (safeStr and safeCall and UnitGUID) and safeStr(safeCall(UnitGUID, "player")) or nil
+    local legacyKey = Compat.CharacterKey and Compat.CharacterKey() or nil
+    if myGuid and myGuid ~= "" then
+        local guidKey = "guid:" .. myGuid
+        local alts = ns.db and ns.db.alts
+        if type(alts) == "table" and legacyKey and legacyKey ~= guidKey then
+            local legacyRec = alts[legacyKey]
+            if type(legacyRec) == "table" and (not legacyRec.guid or legacyRec.guid == "" or legacyRec.guid == myGuid) then
+                if type(alts[guidKey]) ~= "table" then
+                    legacyRec.guid = myGuid
+                    legacyRec.key = guidKey
+                    legacyRec.legacyKey = legacyKey
+                    alts[guidKey] = legacyRec
+                    alts[legacyKey] = nil
+                else
+                    local targetRec = alts[guidKey]
+                    targetRec.guid = myGuid
+                    targetRec.key = guidKey
+                    targetRec.legacyKey = legacyKey
+                    if not targetRec.bank and type(legacyRec.bank) == "table" then
+                        targetRec.bank = legacyRec.bank
+                        targetRec.bankTotal = legacyRec.bankTotal
+                        targetRec.bankFree = legacyRec.bankFree
+                        targetRec.bankUpdatedAt = legacyRec.bankUpdatedAt
+                    end
+                    if not targetRec.mailSince and legacyRec.mailSince then
+                        targetRec.mailSince = legacyRec.mailSince
+                    end
+                    if not targetRec.firstSeen and legacyRec.firstSeen then
+                        targetRec.firstSeen = legacyRec.firstSeen
+                    end
+                    alts[legacyKey] = nil
+                end
+                if ns.Alts then
+                    ns.Alts._itemIndexBuilt = false
+                end
+            end
+        end
+        return guidKey
+    end
+    return legacyKey
+end
+
+function Store:GetCurrentAltRecord()
+    local alts = ns.db and ns.db.alts
+    if type(alts) ~= "table" then return nil end
+    local curKey = self:GetCurrentAltKey()
+    if curKey and type(alts[curKey]) == "table" then
+        return alts[curKey]
+    end
+    local legacyKey = Compat.CharacterKey and Compat.CharacterKey() or nil
+    return legacyKey and alts[legacyKey] or nil
+end
+
 function Store:GetAltsList()
     local out = {}
     local alts = ns.db and ns.db.alts or {}
-    local currentKey = Compat.CharacterKey()
+    local currentKey = self:GetCurrentAltKey()
     local curPool = Compat.RealmPool(Compat.Realm())
     for key, info in pairs(alts) do
         if type(info) == "table" then
@@ -202,7 +260,7 @@ function Store:GetAltsCount()
     local alts = ns.db and ns.db.alts
     if not alts then return 0 end
     local count = 0
-    local currentKey = Compat.CharacterKey()
+    local currentKey = self:GetCurrentAltKey()
     local curPool = Compat.RealmPool(Compat.Realm())
     for key, info in pairs(alts) do
         if type(info) == "table" then
@@ -215,18 +273,55 @@ function Store:GetAltsCount()
     return count
 end
 
-function Store:GetTotalAltsGold(poolOnly)
+function Store:GetTotalAltsGold(poolOnly, factionFilter)
+    self:GetCurrentAltKey()
     local total = 0
     local curPool = poolOnly and Compat.RealmPool(Compat.Realm())
+    local wantFaction = nil
+    if factionFilter == true then
+        wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    elseif type(factionFilter) == "string" and factionFilter ~= "" then
+        wantFaction = factionFilter
+    end
     for _, info in pairs(ns.db and ns.db.alts or {}) do
         if type(info) == "table" and tonumber(info.money) then
-            local match = not curPool or (not info.realmPool) or info.realmPool == curPool
-            if match then
+            local matchPool = not curPool or (not info.realmPool) or info.realmPool == curPool
+            local matchFaction = not wantFaction or (info.faction == wantFaction)
+            if matchPool and matchFaction then
                 total = total + tonumber(info.money)
             end
         end
     end
     return total
+end
+
+function Store:GetTotalAltsGoldByFaction(poolOnly)
+    self:GetCurrentAltKey()
+    local res = {
+        Alliance = 0,
+        Horde = 0,
+        Neutral = 0,
+        total = 0,
+        myFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil,
+    }
+    local curPool = poolOnly and Compat.RealmPool(Compat.Realm())
+    for _, info in pairs(ns.db and ns.db.alts or {}) do
+        if type(info) == "table" and tonumber(info.money) then
+            local matchPool = not curPool or (not info.realmPool) or info.realmPool == curPool
+            if matchPool then
+                local m = tonumber(info.money) or 0
+                res.total = res.total + m
+                if info.faction == "Alliance" then
+                    res.Alliance = res.Alliance + m
+                elseif info.faction == "Horde" then
+                    res.Horde = res.Horde + m
+                else
+                    res.Neutral = res.Neutral + m
+                end
+            end
+        end
+    end
+    return res
 end
 
 function Store:NotifyWatchlistOnline(entry, opts)
@@ -254,6 +349,7 @@ function Store:NotifyWatchlistOnline(entry, opts)
             sourceTag = L["Watchlist"] or "Watchlist",
             sender = entry.displayName or "?",
             senderClass = entry.classFile,
+            lookupKey = entry.id or (entry.displayName and entry.displayName:lower()) or nil,
             text = (entry.area and entry.area ~= "")
                 and ((L["Online"] or "Online") .. " · " .. entry.area)
                 or (L["Is now online in WoW: Forever"] or "Is now online in WoW: Forever"),
@@ -893,13 +989,15 @@ function Store:RecordCompanion(info)
         lastRunAt = lastRunAt,
     }
 
-    local count, oldestKey, oldestSeen = 0, nil, nil
+    local count, oldestKey, oldestScore = 0, nil, nil
     for k, rec in pairs(tbl) do
         if type(rec) == "table" then
             count = count + 1
-            local seen = rec.lastSeen or 0
-            if not oldestSeen or seen < oldestSeen then
-                oldestKey, oldestSeen = k, seen
+            local seen = tonumber(rec.lastSeen) or 0
+            local runs = math.min(5, math.max(1, tonumber(rec.runs) or 1))
+            local evictScore = seen + (runs * 86400)
+            if not oldestScore or evictScore < oldestScore then
+                oldestKey, oldestScore = k, evictScore
             end
         end
     end
@@ -920,6 +1018,43 @@ function Store:GetRecentCompanion(rawNameOrKey)
     local parsed = Compat.ParseCharacterName(rawNameOrKey)
     if not parsed then return nil end
     return self:GetRecentCompanionsTable()[parsed.lookupKey]
+end
+
+--- Time-decayed frecency + explicit feedback social affinity score (returns -1000 for AVOID).
+function Store:GetPlayerAffinityScore(rawNameOrKey, nowTs)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return 0 end
+    local now = nowTs or time()
+    local score = 0
+    local meta = self:GetResolvedSocialMeta(key)
+    if meta then
+        if meta.flag == "AVOID" then
+            return -1000
+        end
+        if meta.favorite == true then
+            score = score + 180
+        end
+        if meta.flag == "GOOD" then
+            score = score + 140
+        end
+    end
+    local compTbl = self:GetRecentCompanionsTable()
+    local comp = compTbl and compTbl[key]
+    if type(comp) == "table" then
+        local runs = math.max(1, tonumber(comp.runs) or 1)
+        local ageDays = math.max(0, (now - (tonumber(comp.lastSeen) or now)) / 86400)
+        local decay = 1 / (1 + ageDays * 0.35)
+        score = score + math.floor((35 * math.log(1 + runs) * decay) + 0.5)
+    end
+    if ns.Chat and type(ns.Chat.threads) == "table" then
+        local th = ns.Chat.threads["w:" .. key]
+        if type(th) == "table" and th.updatedAt and th.updatedAt > 0 then
+            local chatAgeHours = math.max(0, (now - th.updatedAt) / 3600)
+            local chatDecay = 1 / (1 + chatAgeHours * 0.08)
+            score = score + math.floor((60 * chatDecay) + 0.5)
+        end
+    end
+    return score
 end
 
 function Store:GetRecentCompanionsList()

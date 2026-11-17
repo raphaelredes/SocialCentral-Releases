@@ -1,7 +1,9 @@
 local _, ns = ...
 
 local L = ns.L
+local Safe = ns.Safe
 local Compat = ns.Compat
+local Store = ns.Store
 local Theme = ns.Theme
 
 local WHITE8X8 = "Interface\\Buttons\\WHITE8X8"
@@ -12,7 +14,6 @@ ns.UI = UI
 local frame
 local searchBox
 local addBox
-local checkNextBtn
 local scrollList
 local clanPanel
 local groupPanel
@@ -23,8 +24,6 @@ local modalFrame
 local disambigModalFrame
 local watchSuggestFrame
 local eventModalFrame
-local clanLfgModalFrame
-local clanAlertModalFrame
 local clanInfoModalFrame
 local diplomacyModalFrame
 local clanRightViewFilterDip = "all"
@@ -172,6 +171,9 @@ local function SafeTextMatches(query, ...)
 end
 
 local function IsTabAllowed(tabId)
+    if tabId == "clan" and Compat and Compat.ShouldShowGuildFeatures and not Compat.ShouldShowGuildFeatures() then
+        return false
+    end
     if not (embeddedState.active and embeddedState.allowedSet) then
         return true
     end
@@ -231,23 +233,6 @@ end
 local function UpdateWhoButtons()
     if not frame or not frame:IsShown() then
         return
-    end
-    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-    local cd = ns.Watchlist and ns.Watchlist:GetCooldownRemaining() or 0
-    local busy = ns.Watchlist and ns.Watchlist:IsBusy()
-
-    if checkNextBtn then
-        if inCombat then
-            Theme:SetButtonText(checkNextBtn, L["In Combat"])
-            checkNextBtn:SetEnabled(false)
-        elseif busy or cd > 0 then
-            local secs = math.max(1, math.ceil(cd))
-            Theme:SetButtonText(checkNextBtn, L["Wait %ds"]:format(secs))
-            checkNextBtn:SetEnabled(false)
-        else
-            Theme:SetButtonText(checkNextBtn, L["Check Next"])
-            checkNextBtn:SetEnabled(true)
-        end
     end
     if ReflowWatchBar then
         ReflowWatchBar()
@@ -626,7 +611,7 @@ end
 local TAG_LABELS = {
     NONE = L["No Status"],
     LFG = L["LFG (Looking for Group)"],
-    MPLUS = L["Mythic+ / Dungeons"],
+    MPLUS = L["Dungeons"],
     RAID = L["Raid Ready"],
     PVP = L["PvP / Arena"],
     LEVELING = L["Leveling / Questing"],
@@ -635,7 +620,7 @@ local TAG_LABELS = {
 }
 
 local CAT_LABELS = {
-    DUNGEON = L["Dungeon / M+"],
+    DUNGEON = L["Dungeons"],
     RAID = L["Raid"],
     BOSS = L["World Boss"],
     PVP = L["PvP"],
@@ -868,7 +853,7 @@ local function OpenEventModal()
         titleLbl:SetPoint("TOPRIGHT", m, "TOPRIGHT", -16, 0)
         titleLbl:SetJustifyH("LEFT")
         titleLbl:SetWordWrap(false)
-        titleLbl:SetText(L["Event Title (e.g. Mythic +10, Karazhan):"])
+        titleLbl:SetText(L["Event Title (e.g. Blackrock Depths, Molten Core):"])
 
         local titleInput = Theme:CreateEditBox(m, { height = 24, maxLetters = 40 })
         titleInput:SetPoint("TOPLEFT", titleLbl, "BOTTOMLEFT", 0, -4)
@@ -1015,7 +1000,7 @@ local function OpenEventModal()
         eventModalFrame = m
     end
 
-    -- Refresh dynamic Quick Presets from live Game Summary (Owned Keystone / Premade / Dungeons)
+    -- Refresh dynamic Quick Presets from live Game Summary
     for _, b in ipairs(eventModalFrame._presetBtns) do
         b:Hide()
     end
@@ -1080,312 +1065,6 @@ local function OpenEventModal()
     eventModalFrame.titleInput:SetFocus()
 end
 
-local function OpenClanLFGModal()
-    if not clanLfgModalFrame then
-        local m = CreateFrame("Frame", "SocialCentralClanLFGModal", frame, "BackdropTemplate")
-        m:SetSize(496, 368)
-        m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(110)
-        if m.SetClipsChildren then m:SetClipsChildren(false) end
-        m:EnableMouse(true)
-        Theme:MakeMovable(m, { key = "modal_clan_lfg" })
-        table.insert(UISpecialFrames, "SocialCentralClanLFGModal")
-
-        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        title:SetPoint("TOPLEFT", 16, -14)
-        title:SetPoint("TOPRIGHT", -36, -14)
-        title:SetJustifyH("LEFT")
-        title:SetWordWrap(false)
-        title:SetText(L["Clan Group Finder (LFG / LFM)"])
-
-        local topCloseBtn = Theme:CreateButton(m, 22, 20, "X", "default")
-        topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
-        topCloseBtn:SetScript("OnClick", function()
-            if m.actIn then m.actIn:ClearFocus() end
-            if m.noteIn then m.noteIn:ClearFocus() end
-            if m.keyIn then m.keyIn:ClearFocus() end
-            m:Hide()
-        end)
-        m.topCloseBtn = topCloseBtn
-
-        local modeLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        modeLbl:SetPoint("TOPLEFT", 16, -42)
-        modeLbl:SetText(L["Mode:"])
-        m._mode = "LFG"
-        m._modeBtns = {}
-        local prevM = modeLbl
-        for _, entry in ipairs({
-            { id = "LFG", label = L["LFG (Need Group)"] },
-            { id = "LFM", label = L["LFM (Forming Group)"] },
-        }) do
-            local b = Theme:CreateButton(m, 140, 22, entry.label, "default")
-            Theme:AutoFitButton(b, 110, 16, 195)
-            b:SetPoint("LEFT", prevM, "RIGHT", 6, 0)
-            b:SetScript("OnClick", function()
-                m._mode = entry.id
-                for _, it in ipairs(m._modeBtns) do
-                    Theme:SetButtonActive(it.btn, m._mode == it.id, "default")
-                end
-            end)
-            table.insert(m._modeBtns, { id = entry.id, btn = b })
-            prevM = b
-        end
-
-        local roleLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        roleLbl:SetPoint("TOPLEFT", 16, -74)
-        roleLbl:SetText(L["Role:"])
-        m._role = "ANY"
-        m._roleBtns = {}
-        local prevR = roleLbl
-        for _, rId in ipairs({ "TANK", "HEALER", "DPS", "ANY" }) do
-            local rTxt = (rId == "ANY") and L["Any"] or (ROLE_LABELS[rId] or rId)
-            local b = Theme:CreateButton(m, 64, 22, rTxt, "default")
-            Theme:AutoFitButton(b, 54, 14, 96)
-            b:SetPoint("LEFT", prevR, "RIGHT", 6, 0)
-            b:SetScript("OnClick", function()
-                m._role = rId
-                for _, it in ipairs(m._roleBtns) do
-                    Theme:SetButtonActive(it.btn, m._role == it.id, "default")
-                end
-            end)
-            table.insert(m._roleBtns, { id = rId, btn = b })
-            prevR = b
-        end
-
-        local quickLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        quickLbl:SetPoint("TOPLEFT", 16, -106)
-        quickLbl:SetText(L["Quick Dungeon / Activity:"])
-
-        local quickHolder = CreateFrame("Frame", nil, m)
-        quickHolder:SetPoint("TOPLEFT", quickLbl, "BOTTOMLEFT", 0, -4)
-        quickHolder:SetPoint("TOPRIGHT", m, "TOPRIGHT", -16, 0)
-        quickHolder:SetHeight(48)
-        m._quickHolder = quickHolder
-        m._quickBtns = {}
-
-        local actLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        actLbl:SetPoint("TOPLEFT", quickHolder, "BOTTOMLEFT", 0, -8)
-        actLbl:SetText(L["Dungeon / Activity Name:"])
-
-        local actIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 40 })
-        actIn:SetPoint("TOPLEFT", actLbl, "BOTTOMLEFT", 0, -4)
-        actIn:SetPoint("RIGHT", m, "RIGHT", -112, 0)
-        m.actIn = actIn
-
-        local keyLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        keyLbl:SetPoint("LEFT", actIn, "RIGHT", 8, 0)
-        keyLbl:SetText(L["Key +:"])
-        local keyIn = Theme:CreateEditBox(m, { width = 42, height = 24, numeric = true, maxLetters = 2 })
-        keyIn:SetJustifyH("CENTER")
-        keyIn:SetPoint("LEFT", keyLbl, "RIGHT", 4, 0)
-        m.keyIn = keyIn
-
-        local noteLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        noteLbl:SetPoint("TOPLEFT", actIn, "BOTTOMLEFT", 0, -8)
-        noteLbl:SetText(L["Optional Note (e.g. +8 timed, chill run):"])
-
-        local noteIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 44 })
-        noteIn:SetPoint("TOPLEFT", noteLbl, "BOTTOMLEFT", 0, -4)
-        noteIn:SetPoint("RIGHT", m, "RIGHT", -16, 0)
-        m.noteIn = noteIn
-
-        local btnPost = Theme:CreateButton(m, 118, 24, L["Post in Clan LFG"], "primary")
-        Theme:AutoFitButton(btnPost, 108, 16)
-        btnPost:SetPoint("BOTTOMRIGHT", -16, 14)
-        m.btnPost = btnPost
-
-        local btnShareG = Theme:CreateButton(m, 118, 24, L["Post + /g Draft"], "default")
-        Theme:AutoFitButton(btnShareG, 104, 16)
-        btnShareG:SetPoint("RIGHT", btnPost, "LEFT", -6, 0)
-        m.btnShareG = btnShareG
-
-        local btnClear = Theme:CreateButton(m, 82, 24, L["Leave LFG"], "danger")
-        Theme:AutoFitButton(btnClear, 74, 14)
-        btnClear:SetPoint("BOTTOMLEFT", 16, 14)
-        m.btnClear = btnClear
-
-        local btnCancel = Theme:CreateButton(m, 76, 24, L["Cancel"], "default")
-        Theme:AutoFitButton(btnCancel, 68, 14)
-        btnCancel:SetPoint("RIGHT", btnShareG, "LEFT", -6, 0)
-        m.btnCancel = btnCancel
-
-        btnCancel:SetScript("OnClick", function() m:Hide() end)
-        actIn:SetScript("OnEscapePressed", function() m:Hide() end)
-        noteIn:SetScript("OnEscapePressed", function() m:Hide() end)
-
-        local function Submit(alsoOpenGuildChat)
-            if not ns.Clan then return end
-            local act = actIn:GetText() or ""
-            local kLvl = keyIn:GetText() or "0"
-            local nt = noteIn:GetText() or ""
-            ns.Clan:PostLFG(m._mode, m._role, act, kLvl, nt)
-            if alsoOpenGuildChat then
-                ns.Clan:OpenGuildChatLFG(m._mode, m._role, act, kLvl, nt)
-            end
-            clanRightView = "lfg"
-            m:Hide()
-            UI:Refresh(true)
-        end
-
-        btnPost:SetScript("OnClick", function() Submit(false) end)
-        btnShareG:SetScript("OnClick", function() Submit(true) end)
-        noteIn:SetScript("OnEnterPressed", function() Submit(false) end)
-        btnClear:SetScript("OnClick", function()
-            if ns.Clan then ns.Clan:ClearMyLFG() end
-            m:Hide()
-        end)
-
-        clanLfgModalFrame = m
-    end
-
-    for _, b in ipairs(clanLfgModalFrame._quickBtns) do b:Hide() end
-    wipe(clanLfgModalFrame._quickBtns)
-    if ns.Clan then
-        local presets = ns.Clan:GetDungeonQuickPresets()
-        for idx = 1, math.min(6, #presets) do
-            local pr = presets[idx]
-            local b = Theme:CreateButton(clanLfgModalFrame._quickHolder, 86, 20, pr.label, "default")
-            Theme:AutoFitButton(b, 58, 12, 165)
-            b:SetScript("OnClick", function()
-                clanLfgModalFrame.actIn:SetText(pr.activity or pr.label)
-                if (pr.keyLvl or 0) > 0 then
-                    clanLfgModalFrame.keyIn:SetText(tostring(pr.keyLvl))
-                end
-                if pr.mode then
-                    clanLfgModalFrame._mode = pr.mode
-                    for _, it in ipairs(clanLfgModalFrame._modeBtns) do
-                        Theme:SetButtonActive(it.btn, clanLfgModalFrame._mode == it.id, "default")
-                    end
-                end
-            end)
-            table.insert(clanLfgModalFrame._quickBtns, b)
-        end
-    end
-
-    local defaultRole = ns.Clan and ns.Clan:GetMySpecAndRole() or "ANY"
-    clanLfgModalFrame._role = defaultRole
-    Theme:ApplyBackdrop(clanLfgModalFrame, "window")
-    Theme:StyleButton(clanLfgModalFrame.topCloseBtn, "default")
-    Theme:StyleButton(clanLfgModalFrame.btnPost, "primary")
-    Theme:StyleButton(clanLfgModalFrame.btnShareG, "default")
-    Theme:StyleButton(clanLfgModalFrame.btnClear, "danger")
-    Theme:StyleButton(clanLfgModalFrame.btnCancel, "default")
-    for _, it in ipairs(clanLfgModalFrame._modeBtns) do
-        Theme:StyleButton(it.btn, "default")
-        Theme:SetButtonActive(it.btn, clanLfgModalFrame._mode == it.id, "default")
-    end
-    for _, it in ipairs(clanLfgModalFrame._roleBtns) do
-        Theme:StyleButton(it.btn, "default")
-        Theme:SetButtonActive(it.btn, clanLfgModalFrame._role == it.id, "default")
-    end
-
-    local sum = ns.Clan and ns.Clan:GetPlayerGameSummary()
-    clanLfgModalFrame.actIn:SetText((sum and (sum.keystoneLevel or 0) > 0 and sum.keystoneName) or "")
-    clanLfgModalFrame.keyIn:SetText((sum and (sum.keystoneLevel or 0) > 0) and tostring(sum.keystoneLevel) or "")
-    clanLfgModalFrame.noteIn:SetText("")
-    clanLfgModalFrame:Show()
-    local qh = FlowButtonGroup(clanLfgModalFrame._quickHolder, clanLfgModalFrame._quickBtns, 5, 4, 0)
-    clanLfgModalFrame._quickHolder:SetHeight(math.max(22, qh))
-    clanLfgModalFrame.actIn:SetFocus()
-end
-
-local function OpenClanLfgAlertModal()
-    if not clanAlertModalFrame then
-        local m = CreateFrame("Frame", "SocialCentralClanAlertModal", frame, "BackdropTemplate")
-        m:SetSize(468, 272)
-        m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(110)
-        if m.SetClipsChildren then m:SetClipsChildren(false) end
-        m:EnableMouse(true)
-        Theme:MakeMovable(m, { key = "modal_clan_alert" })
-        table.insert(UISpecialFrames, "SocialCentralClanAlertModal")
-
-        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        title:SetPoint("TOPLEFT", 16, -14)
-        title:SetPoint("TOPRIGHT", -36, -14)
-        title:SetJustifyH("LEFT")
-        title:SetText(L["Clan Dungeon LFG Notifications"])
-
-        local topCloseBtn = Theme:CreateButton(m, 22, 20, "X", "default")
-        topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
-        topCloseBtn:SetScript("OnClick", function()
-            if m.filterIn then m.filterIn:ClearFocus() end
-            m:Hide()
-        end)
-        m.topCloseBtn = topCloseBtn
-
-        local function MakeCheck(yOff, labelText)
-            local cb = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
-            cb:SetSize(22, 22)
-            cb:SetPoint("TOPLEFT", 14, yOff)
-            local lbl = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-            lbl:SetPoint("LEFT", cb, "RIGHT", 6, 0)
-            lbl:SetPoint("RIGHT", m, "RIGHT", -16, 0)
-            lbl:SetJustifyH("LEFT")
-            lbl:SetText(labelText)
-            return cb
-        end
-
-        m.cbEnable = MakeCheck(-46, L["Notify me when a clan member looks for a group"])
-        m.cbDngOnly = MakeCheck(-76, L["Only notify for Dungeon / Mythic+ group searches"])
-        m.cbSound = MakeCheck(-106, L["Play alert chime when a clan dungeon LFG is detected"])
-
-        local filterLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        filterLbl:SetPoint("TOPLEFT", 16, -140)
-        filterLbl:SetPoint("TOPRIGHT", -16, -140)
-        filterLbl:SetJustifyH("LEFT")
-        filterLbl:SetText(L["Optional dungeon keywords filter (comma-separated, blank = all):"])
-
-        local filterIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 80, clearButton = true })
-        filterIn:SetPoint("TOPLEFT", filterLbl, "BOTTOMLEFT", 0, -6)
-        filterIn:SetPoint("RIGHT", m, "RIGHT", -16, 0)
-        m.filterIn = filterIn
-
-        local btnSave = Theme:CreateButton(m, 96, 24, L["Save"], "primary")
-        Theme:AutoFitButton(btnSave, 90, 20)
-        btnSave:SetPoint("BOTTOMRIGHT", -16, 14)
-        m.btnSave = btnSave
-
-        local btnCancel = Theme:CreateButton(m, 96, 24, L["Cancel"], "default")
-        Theme:AutoFitButton(btnCancel, 90, 20)
-        btnCancel:SetPoint("RIGHT", btnSave, "LEFT", -8, 0)
-        m.btnCancel = btnCancel
-
-        btnCancel:SetScript("OnClick", function() m:Hide() end)
-        filterIn:SetScript("OnEscapePressed", function() m:Hide() end)
-
-        local function Commit()
-            local s = ns.db and ns.db.settings
-            if s then
-                s.clanLfgAlertEnabled = m.cbEnable:GetChecked() and true or false
-                s.clanLfgAlertDungeonsOnly = m.cbDngOnly:GetChecked() and true or false
-                s.clanLfgAlertSound = m.cbSound:GetChecked() and true or false
-                s.clanLfgAlertFilter = (m.filterIn:GetText() or ""):gsub("^%s*(.-)%s*$", "%1")
-            end
-            m:Hide()
-            ns:Emit("CLAN_UPDATED")
-        end
-
-        btnSave:SetScript("OnClick", Commit)
-        filterIn:SetScript("OnEnterPressed", Commit)
-
-        clanAlertModalFrame = m
-    end
-
-    local s = ns.db and ns.db.settings or {}
-    Theme:ApplyBackdrop(clanAlertModalFrame, "window")
-    Theme:StyleButton(clanAlertModalFrame.topCloseBtn, "default")
-    Theme:StyleButton(clanAlertModalFrame.btnSave, "primary")
-    Theme:StyleButton(clanAlertModalFrame.btnCancel, "default")
-    clanAlertModalFrame.cbEnable:SetChecked(s.clanLfgAlertEnabled == true)
-    clanAlertModalFrame.cbDngOnly:SetChecked(s.clanLfgAlertDungeonsOnly ~= false)
-    clanAlertModalFrame.cbSound:SetChecked(s.clanLfgAlertSound ~= false)
-    clanAlertModalFrame.filterIn:SetText(s.clanLfgAlertFilter or "")
-    clanAlertModalFrame:Show()
-end
-
 local function OpenClanInfoModal()
     if not clanInfoModalFrame then
         local m = CreateFrame("Frame", "SocialCentralClanInfoModal", frame, "BackdropTemplate")
@@ -1426,7 +1105,7 @@ local function OpenClanInfoModal()
         local sumLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         sumLbl:SetPoint("TOPLEFT", 16, -64)
         sumLbl:SetText(L["Clan Focus / Summary:"])
-        local sumIn = Theme:CreateEditBox(m, { height = 26, maxLetters = 160, placeholder = L["e.g. Progression Guild · Heroics & Mythic+ nightly"] })
+        local sumIn = Theme:CreateEditBox(m, { height = 26, maxLetters = 160, placeholder = L["e.g. Progression Guild · Dungeons & Raids nightly"] })
         sumIn:SetPoint("TOPLEFT", 16, -82)
         sumIn:SetPoint("TOPRIGHT", -16, -82)
         m.sumIn = sumIn
@@ -2197,7 +1876,8 @@ local function OpenRowMenu(row, item, tabOverride)
             end
         end
 
-        if targetName and tab ~= "alts" then
+        local isSelfRow = (item.isSelf == true) or (item.isMe == true) or (Compat.IsMe and targetName and Compat.IsMe(targetName, item.guid))
+        if targetName and tab ~= "alts" and not isSelfRow then
             if charKey then
                 local curMeta = ns.Store and (ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(charKey) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(charKey)))
                 local goodLabel = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
@@ -2233,9 +1913,10 @@ local function OpenRowMenu(row, item, tabOverride)
 
             root:CreateDivider()
             local bnetInfo = (charKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(charKey) or nil
+            local dirRow = (charKey and ns.Store and ns.Store.socialDirectoryByLookup) and ns.Store.socialDirectoryByLookup[charKey] or nil
             local bnetAccId = item.bnetAccountID or (bnetInfo and bnetInfo.bnetAccountID)
             local bnetName = item.bnetName or (bnetInfo and bnetInfo.bnetName)
-            local isCrossFaction = (item.sameFaction == false) or (bnetInfo and bnetInfo.sameFaction == false)
+            local isCrossFaction = (item.sameFaction == false) or (dirRow and dirRow.sameFaction == false) or (bnetInfo and bnetInfo.sameFaction == false)
             local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(charKey or targetName, bnetAccId)
             if scConfirmed and (charKey or (item.sources and item.sources.bnet and bnetAccId)) then
                 root:CreateButton(L["Open in SocialCentral Chat"], function()
@@ -2263,8 +1944,10 @@ local function OpenRowMenu(row, item, tabOverride)
                     Compat.Whisper(targetName)
                 end
             end)
+            local inGroupNow = (Compat.IsInMyGroup and Compat.IsInMyGroup(targetName, item.guid)) == true
             local canInvite = (item.online ~= false or tab == "watchlist")
                 and (not isCrossFaction)
+                and (not inGroupNow)
                 and (item.samePool ~= false)
                 and (item.hasCharacterName ~= false)
                 and (not item.bnetState or item.bnetState == "wow_forever" or (item.sources and (item.sources.friend or item.sources.guild)))
@@ -2275,7 +1958,7 @@ local function OpenRowMenu(row, item, tabOverride)
             end
         end
 
-        if targetName and not item.isSelf and item.hasCharacterName ~= false and item.samePool ~= false and ns.Spotter and ns.Spotter.TrackPlayer then
+        if targetName and not isSelfRow and item.hasCharacterName ~= false and item.samePool ~= false and ns.Spotter and ns.Spotter.TrackPlayer then
             if tab == "watchlist" or tab == "social" or tab == "nearby" or tab == "clan" then
                 local isTracked = ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(targetName, item.guid)
                 if isTracked and ns.Spotter.UntrackPlayer then
@@ -2520,8 +2203,13 @@ local function CreateListRow(parent, _, rowHeight)
 
     row.btnInvite:SetScript("OnClick", function()
         local item = row._item
-        if item and item.displayName then
-            Compat.Invite(item.displayName, item.bnetAccountID)
+        if not item then return end
+        local targetKey = item.lookupKey or item.id or item.displayName
+        local bInfo = (targetKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(targetKey) or nil
+        local bnetAccId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
+        local target = item.displayName or item.name or item.id
+        if target then
+            Compat.Invite(target, bnetAccId)
         end
     end)
 
@@ -2532,6 +2220,8 @@ local function CreateListRow(parent, _, rowHeight)
         if tab == "watchlist" and ns.Watchlist then
             if type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1 then
                 UI:OpenWatchlistDisambiguation(item.id)
+            elseif type(item.observedCandidate) == "string" and item.observedCandidate ~= "" then
+                ns.Watchlist:ResolveDisambiguation(item.id, item.observedCandidate)
             else
                 ns.Watchlist:CheckEntry(item.id)
             end
@@ -2635,7 +2325,8 @@ local function CreateListRow(parent, _, rowHeight)
                 GameTooltip:AddLine(item.note, 0.95, 0.85, 0.45, true)
             end
             if tab == "alts" then
-                if item.key == Compat.CharacterKey() then
+                local curAltKey = (Store and Store.GetCurrentAltKey and Store:GetCurrentAltKey()) or Compat.CharacterKey()
+                if item.key == curAltKey then
                     GameTooltip:AddLine(L["Current Character"] .. " — " .. L["Active on this WoW Forever account."], 0.39, 0.89, 0.60, true)
                 else
                     GameTooltip:AddLine(L["Alt"] .. " — " .. L["Saved character on this WoW Forever account."], 0.62, 0.66, 0.71, true)
@@ -2682,6 +2373,9 @@ local function FormatWatchlistSubline(item)
     end
     if item.note and item.note ~= "" then
         table.insert(parts, item.note)
+    end
+    if (not item.surname or item.surname == "") and type(item.observedCandidate) == "string" and item.observedCandidate ~= "" then
+        table.insert(parts, "|cffffd24d" .. L["Confirm: %s"]:format(item.observedCandidate) .. "|r")
     end
     if item.status ~= "online" and item.id and ns.Social and ns.Social.GetBNetLinkInfo then
         local bnetInfo = ns.Social:GetBNetLinkInfo(item.id)
@@ -2849,16 +2543,23 @@ local function UpdateListRow(row, item, idx, palette)
         local star = item.favorite and "|cffffd24d* |r" or ""
         local grp = (type(item.group) == "string" and item.group ~= "") and (" |cff8ab4f8[" .. item.group .. "]|r") or ""
         local hasAmbig = type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1
+        local hasObsCand = (not hasAmbig) and (not item.surname or item.surname == "") and type(item.observedCandidate) == "string" and item.observedCandidate ~= ""
         local warn = hasAmbig and (" |cffff9b3d[?" .. tostring(#item.ambiguousChoices) .. "]|r")
             or (item.truncatedWarning and " |cffff9b3d[!50+]|r" or "")
-        row.nameText:SetText(star .. hex .. (item.displayName or "") .. "|r" .. levelStr .. grp .. scBadge .. bnetBadge .. facBadge .. warn)
+        local fac = (bnetInfo and bnetInfo.faction)
+            or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(item.id or item.displayName, item.guid, item.bnetAccountID))
+            or (ns.Chat and ns.Chat.GetKnownCharacterFaction and ns.Chat:GetKnownCharacterFaction(item.id or item.displayName, item.guid, item.bnetAccountID))
+        local facIco = (Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
+        row.nameText:SetText(star .. facIco .. hex .. (item.displayName or "") .. "|r" .. levelStr .. grp .. scBadge .. bnetBadge .. facBadge .. warn)
         row.subText:SetText(FormatWatchlistSubline(item))
 
         row.btnRemove:Hide()
         row.btnAction:Hide()
         if item.status == "online" then
             local dirRow = (item.id and ns.Store and ns.Store.socialDirectoryByLookup) and ns.Store.socialDirectoryByLookup[item.id] or nil
-            local canInviteWatch = not ((dirRow and dirRow.sameFaction == false) or (bnetInfo and bnetInfo.sameFaction == false))
+            local isSelfWatch = (Compat.IsMe and Compat.IsMe(item.displayName, item.guid)) == true
+            local inGroupWatch = (Compat.IsInMyGroup and Compat.IsInMyGroup(item.displayName, item.guid)) == true
+            local canInviteWatch = (not isSelfWatch) and (not inGroupWatch) and not ((dirRow and dirRow.sameFaction == false) or (bnetInfo and bnetInfo.sameFaction == false))
             ApplyWhisperButtonPreference(row.btnWhisper, scConfirmed, true)
             row.btnWhisper:Show()
             row.btnWhisper:ClearAllPoints()
@@ -2878,7 +2579,7 @@ local function UpdateListRow(row, item, idx, palette)
             row.btnWhisper:Hide()
             leftMostAnchor = nil
         end
-        if hasAmbig then
+        if hasAmbig or hasObsCand then
             row._actionVariant = "primary"
             Theme:StyleButton(row.btnAction, "primary")
             Theme:SetButtonText(row.btnAction, L["Choose"])
@@ -2940,18 +2641,29 @@ local function UpdateListRow(row, item, idx, palette)
         if item.afk then flags = flags .. " |cffffd24d[AFK]|r" end
         if item.dnd then flags = flags .. " |cffff6b6b[DND]|r" end
 
+        local fac = item.faction
+            or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(item.lookupKey or item.displayName, item.guid, item.bnetAccountID))
+            or (ns.Chat and ns.Chat.GetKnownCharacterFaction and ns.Chat:GetKnownCharacterFaction(item.lookupKey or item.displayName, item.guid, item.bnetAccountID))
+        local facIco = (Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
         local nameColor = item.online and hex or "|cff8b949e"
         local displayTitle = item.displayName or item.bnetName or ""
-        row.nameText:SetText(star .. nameColor .. displayTitle .. "|r" .. levelStr .. flagBadge .. flags .. scBadge)
+        row.nameText:SetText(star .. facIco .. nameColor .. displayTitle .. "|r" .. levelStr .. flagBadge .. flags .. scBadge)
         row.subText:SetText(FormatSocialSubline(item))
 
         row.btnAction:Hide()
+        local dirRow = (item.lookupKey and ns.Store and ns.Store.socialDirectoryByLookup) and ns.Store.socialDirectoryByLookup[item.lookupKey] or nil
+        local bnetInfo = (item.lookupKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(item.lookupKey) or nil
+        local isCrossFacSoc = (item.sameFaction == false) or (dirRow and dirRow.sameFaction == false) or (bnetInfo and bnetInfo.sameFaction == false)
+        local isSelfSoc = (item.isSelf == true) or (item.isMe == true) or (Compat.IsMe and Compat.IsMe(displayTitle, item.guid)) == true
+        local inGroupSoc = (Compat.IsInMyGroup and Compat.IsInMyGroup(displayTitle, item.guid)) == true
         local canInviteNow = item.online == true
+            and (not isSelfSoc)
+            and (not inGroupSoc)
             and item.hasCharacterName ~= false
             and item.samePool ~= false
-            and item.sameFaction ~= false
+            and (not isCrossFacSoc)
             and (not item.bnetState or item.bnetState == "wow_forever" or (item.sources and (item.sources.friend or item.sources.guild)))
-        local canWhisperNow = item.online == true
+        local canWhisperNow = item.online == true and (not isSelfSoc)
 
         if canInviteNow then
             SyncRowActionStyle(row.btnInvite, L["Invite"], true)
@@ -2979,8 +2691,12 @@ local function UpdateListRow(row, item, idx, palette)
             Theme:ApplyStatusColor(row.statusBar, "nearby")
             row.statusBar:SetAlpha(0.90)
         end
+        local fac = item.faction
+            or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(item.lookupKey or item.displayName, item.guid))
+            or (ns.Chat and ns.Chat.GetKnownCharacterFaction and ns.Chat:GetKnownCharacterFaction(item.lookupKey or item.displayName, item.guid))
+        local facIco = (Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
         local srcTag = item.source and (" |cff6ec1e4[" .. item.source .. "]|r") or ""
-        row.nameText:SetText(hex .. (item.displayName or "") .. "|r" .. levelStr .. srcTag .. scBadge)
+        row.nameText:SetText(facIco .. hex .. (item.displayName or "") .. "|r" .. levelStr .. srcTag .. scBadge)
 
         local subParts = {}
         if item.guild and item.guild ~= "" then table.insert(subParts, "<" .. item.guild .. ">") end
@@ -3008,16 +2724,19 @@ local function UpdateListRow(row, item, idx, palette)
         leftMostAnchor = row.btnAction
 
     elseif tab == "alts" then
-        local isCurrent = (item.key == Compat.CharacterKey())
+        local curKey = (Store and Store.GetCurrentAltKey and Store:GetCurrentAltKey()) or Compat.CharacterKey()
+        local isCurrent = (item.key == curKey)
         Theme:ApplyStatusColor(row.dot, isCurrent and "online" or "offline")
         if row.statusBar then
             Theme:ApplyStatusColor(row.statusBar, isCurrent and "online" or "offline")
             row.statusBar:SetAlpha(isCurrent and 0.92 or 0.28)
         end
+        local fac = item.faction or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(item.fullName or item.name or item.key))
+        local facIco = (Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
         local shownName = item.fullName or item.name or ""
         local roleBadge = isCurrent and (" |cff63e29a[" .. L["Current Character"] .. "]|r") or (" |cff9da7b5[" .. L["Alt"] .. "]|r")
         local factionTag = item.faction and (" |cff9da7b5[" .. item.faction .. "]|r") or ""
-        row.nameText:SetText(hex .. shownName .. "|r" .. levelStr .. roleBadge .. factionTag)
+        row.nameText:SetText(facIco .. hex .. shownName .. "|r" .. levelStr .. roleBadge .. factionTag)
 
         local parts = {}
         if item.zone and item.zone ~= "" then table.insert(parts, item.zone) end
@@ -3026,7 +2745,7 @@ local function UpdateListRow(row, item, idx, palette)
         if item.itemLevel and item.itemLevel > 0 then
             table.insert(parts, "iLvl " .. item.itemLevel)
         end
-        if item.rested and item.rested > 0 then
+        if (tonumber(item.level) or 0) < 60 and item.rested and item.rested > 0 then
             table.insert(parts, L["Rested"] .. ": " .. tostring(math.floor(item.rested)) .. " XP")
         end
         table.insert(parts, Compat.FormatRelativeTime(item.lastActive, L))
@@ -3144,9 +2863,11 @@ local function OpenEventMenu(anchor, evt)
                 for _, s in ipairs(sum.signups) do
                     if s.name and not Compat.IsMe(s.name) then
                         local target = s.name
-                        root:CreateButton(L["Invite %s (%s)"]:format(target, ROLE_LABELS[s.role] or s.role), function()
-                            Compat.Invite(target)
-                        end)
+                        if not (Compat.IsInMyGroup and Compat.IsInMyGroup(target)) then
+                            root:CreateButton(L["Invite %s (%s)"]:format(target, ROLE_LABELS[s.role] or s.role), function()
+                                Compat.Invite(target)
+                            end)
+                        end
                         root:CreateButton(L["Whisper %s"]:format(target), function()
                             Compat.Whisper(target)
                         end)
@@ -3154,19 +2875,28 @@ local function OpenEventMenu(anchor, evt)
                 end
             end
         end
+        local myParsed = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+        local isCreator = (myParsed and evt.creatorKey and myParsed.lookupKey == evt.creatorKey)
+            or (myParsed and evt.creator and (myParsed.displayName == evt.creator or myParsed.firstName:lower() == evt.creator:lower()))
+        local canManage = (isCreator or (ns.Clan and ns.Clan.CanModerateEvents and ns.Clan:CanModerateEvents())) == true
+
         root:CreateDivider()
-        root:CreateButton(evt.isOpen == false and L["Reopen Event"] or L["Close Event"], function()
-            ns.Clan:ToggleEventOpen(evt.id)
-        end)
-        root:CreateButton(L["Reannounce Event"], function()
-            ns.Clan:ReannounceEvent(evt.id)
-        end)
+        if canManage then
+            root:CreateButton(evt.isOpen == false and L["Reopen Event"] or L["Close Event"], function()
+                ns.Clan:ToggleEventOpen(evt.id)
+            end)
+            root:CreateButton(L["Reannounce Event"], function()
+                ns.Clan:ReannounceEvent(evt.id)
+            end)
+        end
         root:CreateButton(L["Copy Name"], function()
             OpenCopyModal(evt.title or "")
         end)
-        root:CreateButton(L["Cancel / Remove Event"], function()
-            ns.Clan:RemoveEvent(evt.id)
-        end)
+        if canManage then
+            root:CreateButton(L["Cancel / Remove Event"], function()
+                ns.Clan:RemoveEvent(evt.id)
+            end)
+        end
     end)
 end
 
@@ -3608,7 +3338,7 @@ local function CreatePeerRow(parent, _, rowHeight)
                                     ns.SocialPanels:OpenProfessionModal()
                                 end
                             end)
-                        elseif not entry.isAlt and entry.displayName then
+                        elseif (not entry.isAlt) and (not entry.isMe) and entry.displayName and not (Compat.IsMe and Compat.IsMe(entry.displayName)) then
                             root:CreateButton(L["Request Craft (/w)"], function()
                                 local qWant = ns.Clan and ns.Clan._lastProfQuery
                                 local craftTopic = (qWant and qWant ~= "") and qWant or ((#pList > 0) and table.concat(pList, " / ") or L["Profession"])
@@ -3631,7 +3361,7 @@ local function CreatePeerRow(parent, _, rowHeight)
                                     end
                                 end)
                             end
-                            if entry.online ~= false then
+                            if entry.online ~= false and not (Compat.IsInMyGroup and Compat.IsInMyGroup(entry.displayName)) then
                                 root:CreateButton(L["Invite"], function()
                                     Compat.Invite(entry.displayName, entry.bnetAccountID)
                                 end)
@@ -4466,18 +4196,6 @@ do
                     table.insert(lockRows, {
                         _clanView = "locks",
                         statusColor = "online",
-                        title = title,
-                        detail = detail,
-                    })
-                end
-            end
-            if (gameSum.keystoneLevel or 0) > 0 then
-                local title = string.format("|cfff2c94c[%s]|r +%d %s", L["My Keystone"], gameSum.keystoneLevel, gameSum.keystoneName or "")
-                local detail = (gameSum.mplusScore and gameSum.mplusScore > 0) and (L["Rating"] .. ": " .. gameSum.mplusScore) or ""
-                if LockMatchesQuery(title, detail) then
-                    table.insert(lockRows, {
-                        _clanView = "locks",
-                        statusColor = "nearby",
                         title = title,
                         detail = detail,
                     })
@@ -5581,7 +5299,7 @@ local function CreateClanPanel(parent)
         profToolBar,
         locksRefreshBtn,
         L["Help: Saved Lockouts"],
-        L["Displays active dungeon and raid lockouts, boss progress, reset countdowns, and your active Group Finder/keystone status across this character and your Alts."],
+        L["Displays active dungeon and raid lockouts, boss progress, reset countdowns, and your active Group Finder status across this character and your Alts."],
         L["Switch between 'Locks' and 'Professions' in the selector or click 'Refresh' to request updated raid lockout timers from the server."]
     )
     if locksRefreshBtn._pairedHelp then
@@ -5935,8 +5653,6 @@ local EMBED_HOST_SPECS = {
         onHideModals = function(standaloneActive)
             if not standaloneActive then
                 if eventModalFrame then eventModalFrame:Hide() end
-                if clanLfgModalFrame then clanLfgModalFrame:Hide() end
-                if clanAlertModalFrame then clanAlertModalFrame:Hide() end
                 if clanInfoModalFrame then clanInfoModalFrame:Hide() end
                 if diplomacyModalFrame then diplomacyModalFrame:Hide() end
                 if allianceModalFrame then allianceModalFrame:Hide() end
@@ -5960,7 +5676,11 @@ local EMBED_HOST_SPECS = {
             if altsPanel and altsPanel.Refresh then altsPanel:Refresh(false) end
         end,
         reflowPanel = function()
-            if altsPanel and altsPanel.Refresh then altsPanel:Refresh(false) end
+            if altsPanel and altsPanel.Relayout then
+                altsPanel:Relayout()
+            elseif altsPanel and altsPanel.Refresh then
+                altsPanel:Refresh(false)
+            end
         end,
     },
     group = {
@@ -6508,26 +6228,6 @@ local function ApplyTheme()
         for _, pb in ipairs(eventModalFrame._presetBtns or {}) do
             Theme:StyleButton(pb, "default")
         end
-    end
-    if clanLfgModalFrame and clanLfgModalFrame:IsShown() then
-        Theme:ApplyBackdrop(clanLfgModalFrame, "window", p)
-        if clanLfgModalFrame.btnPost then Theme:StyleButton(clanLfgModalFrame.btnPost, "primary") end
-        if clanLfgModalFrame.btnShareG then Theme:StyleButton(clanLfgModalFrame.btnShareG, "default") end
-        if clanLfgModalFrame.btnClear then Theme:StyleButton(clanLfgModalFrame.btnClear, "danger") end
-        if clanLfgModalFrame.btnCancel then Theme:StyleButton(clanLfgModalFrame.btnCancel, "default") end
-        for _, it in ipairs(clanLfgModalFrame._modeBtns or {}) do
-            Theme:StyleButton(it.btn, "default")
-            Theme:SetButtonActive(it.btn, clanLfgModalFrame._mode == it.id, "default")
-        end
-        for _, it in ipairs(clanLfgModalFrame._roleBtns or {}) do
-            Theme:StyleButton(it.btn, "default")
-            Theme:SetButtonActive(it.btn, clanLfgModalFrame._role == it.id, "default")
-        end
-    end
-    if clanAlertModalFrame and clanAlertModalFrame:IsShown() then
-        Theme:ApplyBackdrop(clanAlertModalFrame, "window", p)
-        if clanAlertModalFrame.btnSave then Theme:StyleButton(clanAlertModalFrame.btnSave, "primary") end
-        if clanAlertModalFrame.btnCancel then Theme:StyleButton(clanAlertModalFrame.btnCancel, "default") end
     end
     if clanInfoModalFrame and clanInfoModalFrame:IsShown() then
         Theme:ApplyBackdrop(clanInfoModalFrame, "window", p)
@@ -7088,7 +6788,7 @@ local function BuildMainFrame()
         altsBar,
         L["Help: Account Alts & Gold"],
         L["Lists your active WoW Forever character ([Current Character]) alongside other characters (Alts) you have logged in on this account, including full FirstName Surname, rested XP, guild, zone, and combined gold."],
-        L["Forever surnames auto-fill from Guild Roster, Friends, or chat. Right-click any character row to set or edit its surname manually or remove old alts."],
+        L["Character names are captured automatically on login. Right-click any alt to inspect it, copy its Web Armory URL, or remove offline snapshots."],
         "RIGHT",
         "RIGHT",
         -2,
@@ -7568,23 +7268,16 @@ local function BuildMainFrame()
         watchBar,
         L["Help: Manual Watchlist & /who"],
         L["Lets you add any character manually (or your current target) and run an official single /who query outside combat with cooldown >= 5s."],
-        L["Type Name or Name-Surname and click '+ Add' (or leave empty while targeting a player), or click 'Check Next' to /who the typed character or oldest entry."],
+        L["Type Name or Name-Surname and click '+ Add' (or leave empty while targeting a player)."],
         "RIGHT",
         "RIGHT",
         -2,
         0
     )
 
-    -- Hidden compatibility button reference (Watchlist status updates automatically without manual check buttons).
-    checkNextBtn = Theme:CreateButton(watchBar, 2, 2, "", "primary")
-    checkNextBtn:Hide()
-
     ReflowWatchBar = function()
         if not watchBar or not addBox then
             return
-        end
-        if checkNextBtn then
-            checkNextBtn:Hide()
         end
         local avail = watchBar:GetWidth() or 0
         if avail <= 0 then
@@ -7743,12 +7436,6 @@ local function BuildMainFrame()
             if eventModalFrame then
                 eventModalFrame:Hide()
             end
-            if clanLfgModalFrame then
-                clanLfgModalFrame:Hide()
-            end
-            if clanAlertModalFrame then
-                clanAlertModalFrame:Hide()
-            end
             if clanInfoModalFrame then
                 clanInfoModalFrame:Hide()
             end
@@ -7851,6 +7538,12 @@ function UI:Refresh(resetScroll)
     end
     if not frame or not frame:IsShown() then
         return
+    end
+    if activeTab == "clan" and not IsTabAllowed("clan") then
+        activeTab = "watchlist"
+        if TriggerTabRefresh then
+            TriggerTabRefresh(activeTab)
+        end
     end
 
     local on, off, unk = 0, 0, 0
@@ -8345,6 +8038,10 @@ function UI:IsEmbeddedFor(hostFrame, tabId)
 end
 
 function UI:IsAltsVisible()
+    local c = embedContainers and embedContainers.alts
+    if c and c:IsShown() and c._active then
+        return true
+    end
     return frame ~= nil and frame:IsShown() and activeTab == "alts"
 end
 
@@ -8983,3 +8680,8 @@ end)
 
 ns.RegisterEvent(UI, "PLAYER_REGEN_DISABLED", UpdateWhoButtons)
 ns.RegisterEvent(UI, "PLAYER_REGEN_ENABLED", UpdateWhoButtons)
+ns.RegisterEvent(UI, "PLAYER_GUILD_UPDATE", function(_, _, unit)
+    if not unit or unit == "player" then
+        UI:QueueRefresh(false)
+    end
+end)

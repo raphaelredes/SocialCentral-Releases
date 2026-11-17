@@ -231,6 +231,20 @@ local function CopyForeverParsed(entry)
     }
 end
 
+-- Strip trailing Forever shard suffixes and accidental duplicated "-Surname" tags
+-- (e.g. "Francisco Camundongo-Camundongo" -> "Francisco Camundongo").
+local function StripForeverSuffixes(cleaned)
+    local head, tail = cleaned:match("^(.-)%-([^%-]+)$")
+    if head and tail and Compat.IsForeverShardLabel(tail) then
+        cleaned = head
+    end
+    local f3, s3, t3 = cleaned:match("^([^%s%-]+)[%s%-]+([^%s%-]+)%-([^%s%-]+)$")
+    if f3 and s3 and t3 and (s3:lower() == t3:lower() or Compat.IsForeverShardLabel(t3)) then
+        cleaned = f3 .. " " .. s3
+    end
+    return cleaned
+end
+
 -- Internal read-only memoized lookup (callers MUST NOT mutate returned tables).
 local function ParseCharInternal(raw)
     if type(raw) ~= "string" or raw == "" then return nil end
@@ -251,11 +265,7 @@ local function ParseCharInternal(raw)
         return nil
     end
 
-    -- Strip trailing Forever shard suffix if present (e.g. "Arthas-CAMWOWUS1Realm2PvP" or "Arthas Menethil-CAMWOW...").
-    local head, tail = cleaned:match("^(.-)%-([^%-]+)$")
-    if head and tail and Compat.IsForeverShardLabel(tail) then
-        cleaned = head
-    end
+    cleaned = StripForeverSuffixes(cleaned)
 
     local result
     -- Forever characters can have FirstName + Surname separated by "-" or space.
@@ -329,10 +339,7 @@ local function ParseForeverInternal(raw)
         return nil
     end
 
-    local head, tail = cleaned:match("^(.-)%-([^%-]+)$")
-    if head and tail and Compat.IsForeverShardLabel(tail) then
-        cleaned = head
-    end
+    cleaned = StripForeverSuffixes(cleaned)
 
     local result
     local first, second = cleaned:match("^([^%s%-]+)[%s%-]+([^%s%-]+)$")
@@ -858,6 +865,27 @@ function Compat.SyncRosterForeverNames(force)
     end
 end
 
+local function CleanForeverUnitRealm(resolvedParsed, rawRealm)
+    if type(rawRealm) ~= "string" or rawRealm == "" then
+        return nil
+    end
+    if Compat.IsForeverShardLabel(rawRealm) then
+        return nil
+    end
+    local ownRealm = Compat.Realm()
+    if ownRealm ~= "" and Plain(rawRealm) == Plain(ownRealm) then
+        return nil
+    end
+    -- Forever's client can populate the character's surname in UnitFullName's realm return.
+    if resolvedParsed and resolvedParsed.surname and Plain(rawRealm) == Plain(resolvedParsed.surname) then
+        return nil
+    end
+    if ownRealm ~= "" and Plain(ownRealm):match("^camwow") and resolvedParsed and resolvedParsed.surname then
+        return nil
+    end
+    return rawRealm
+end
+
 -- Resolve full WoW Forever "FirstName Surname" for any unit token ("target", "mouseover", "nameplate1", "party1", etc.).
 function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
     if not unit or Safe.IsSecret(unit) then return nil, nil end
@@ -892,23 +920,25 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
     end
 
     local baseParsed = ParseForeverInternal(rawName)
-    if not baseParsed then return nil, rawRealm end
+    if not baseParsed then return nil, CleanForeverUnitRealm(nil, rawRealm) end
     if baseParsed.surname then
-        return SaveResolved(baseParsed), rawRealm
+        local saved = SaveResolved(baseParsed)
+        return saved, CleanForeverUnitRealm(saved, rawRealm)
     end
 
     local getUnitFull = Safe.String(Safe.Call(GetUnitName, unit, false))
     if getUnitFull then
         local gParsed = ParseForeverInternal(getUnitFull)
         if gParsed and gParsed.surname and gParsed.firstName:lower() == baseParsed.firstName:lower() then
-            return SaveResolved(gParsed), rawRealm
+            local saved = SaveResolved(gParsed)
+            return saved, CleanForeverUnitRealm(saved, rawRealm)
         end
     end
 
     if guid and foreverNameByGuid[guid] then
         local exactGuidMatch = foreverNameByGuid[guid]
         if exactGuidMatch.firstName:lower() == baseParsed.firstName:lower() then
-            return exactGuidMatch, rawRealm
+            return exactGuidMatch, CleanForeverUnitRealm(exactGuidMatch, rawRealm)
         end
     end
 
@@ -918,7 +948,8 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
             if okPvp and type(pvpName) == "string" and pvpName ~= "" then
                 local pParsed = ExtractForeverNameFromLine(pvpName, baseParsed.firstName)
                 if pParsed and pParsed.surname then
-                    return SaveResolved(pParsed), rawRealm
+                    local saved = SaveResolved(pParsed)
+                    return saved, CleanForeverUnitRealm(saved, rawRealm)
                 end
             end
         end
@@ -927,24 +958,26 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
         if tooltipTitle then
             local tipParsed = ExtractForeverNameFromLine(tooltipTitle, baseParsed.firstName)
             if tipParsed then
-                return SaveResolved(tipParsed), rawRealm
+                local saved = SaveResolved(tipParsed)
+                return saved, CleanForeverUnitRealm(saved, rawRealm)
             end
         end
     end
 
     local rosterMatch = Compat.LookupForeverFullName(guid, baseParsed.firstName, not fastOnly)
     if rosterMatch then
-        return rosterMatch, rawRealm
+        return rosterMatch, CleanForeverUnitRealm(rosterMatch, rawRealm)
     end
 
     if existingFullName and existingFullName ~= "" then
         local prevParsed = ParseForeverInternal(existingFullName)
         if prevParsed and prevParsed.surname and prevParsed.firstName:lower() == baseParsed.firstName:lower() then
-            return SaveResolved(prevParsed), rawRealm
+            local saved = SaveResolved(prevParsed)
+            return saved, CleanForeverUnitRealm(saved, rawRealm)
         end
     end
 
-    return baseParsed, rawRealm
+    return baseParsed, CleanForeverUnitRealm(baseParsed, rawRealm)
 end
 
 local cachedMyGuid
@@ -1123,11 +1156,11 @@ function Compat.GetForeverTargetVariants(raw)
         end
     end
 
-    push(parsed.firstName)
     if parsed.surname and parsed.surname ~= "" then
         push(parsed.firstName .. " " .. parsed.surname)
         push(parsed.firstName .. "-" .. parsed.surname)
     end
+    push(parsed.firstName)
     return out
 end
 
@@ -1239,11 +1272,54 @@ function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
     return false
 end
 
+function Compat.IsInMyGroup(target, guid)
+    if not (Compat.IsInGroup and Compat.IsInGroup()) then
+        return false
+    end
+    local cleanGuid = Safe.String(guid)
+    local lk, first, _, surname
+    if type(target) == "string" and target ~= "" then
+        lk, first, _, surname = Compat.ParseCharacterFields(target)
+    end
+    local members = ns.Group and ns.Group.members
+    if type(members) == "table" and #members > 0 then
+        for _, m in ipairs(members) do
+            if cleanGuid and m.guid and cleanGuid == m.guid then
+                return true
+            end
+            if lk and m.lookupKey then
+                if lk == m.lookupKey then
+                    return true
+                end
+                if (not surname) and first and m.displayName then
+                    local _, mFirst = Compat.ParseCharacterFields(m.displayName)
+                    if mFirst and mFirst:lower() == first:lower() then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    if cleanGuid and Compat.IsInRaid then
+        local isRaid = Compat.IsInRaid()
+        local count = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
+        local prefix = isRaid and "raid" or "party"
+        local limit = isRaid and math.min(40, count) or math.min(4, count)
+        for i = 1, limit do
+            local mGuid = Safe.String(Safe.Call(UnitGUID, prefix .. i))
+            if mGuid and mGuid == cleanGuid then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function FindOnlineBNetGameForInvite(bnetAccountID, cleanCharName)
     local targetBNetId = Safe.Number(bnetAccountID)
-    if (not targetBNetId) and cleanCharName and ns.Store and ns.Store.socialByLookup then
+    if (not targetBNetId) and cleanCharName and ns.Store then
         local lk = Compat.ParseCharacterFields and select(1, Compat.ParseCharacterFields(cleanCharName))
-        local row = lk and ns.Store.socialByLookup[lk]
+        local row = lk and ((ns.Store.socialByLookup and ns.Store.socialByLookup[lk]) or (ns.Store.socialDirectoryByLookup and ns.Store.socialDirectoryByLookup[lk]))
         if row and row.bnetAccountID then
             targetBNetId = Safe.Number(row.bnetAccountID)
         end
@@ -1279,14 +1355,18 @@ end
 
 function Compat.Invite(target, bnetAccountID)
     local clean = Compat.FormatForeverTarget(target)
+    if clean and clean ~= "" and Compat.IsMe and Compat.IsMe(clean) then
+        return false
+    end
     local gId, giMeta = FindOnlineBNetGameForInvite(bnetAccountID, clean)
     local myFaction = UnitFactionGroup and Safe.String(Safe.Call(UnitFactionGroup, "player"))
+    local isKnownCrossFaction = (giMeta and giMeta.factionName and myFaction and giMeta.factionName ~= myFaction) == true
 
     local preferBNet = false
     if gId and BNInviteFriend then
         if not clean or clean == "" then
             preferBNet = true
-        elseif giMeta and giMeta.factionName and myFaction and giMeta.factionName ~= myFaction then
+        elseif isKnownCrossFaction then
             -- Cross-faction or BNet-mediated invite must go through Battle.net friend invite.
             preferBNet = true
         elseif giMeta and giMeta.charName and clean then
@@ -1303,7 +1383,7 @@ function Compat.Invite(target, bnetAccountID)
         if ok then return true end
     end
 
-    if clean and clean ~= "" then
+    if clean and clean ~= "" and not isKnownCrossFaction then
         if C_PartyInfo and C_PartyInfo.InviteUnit then
             local ok = pcall(C_PartyInfo.InviteUnit, clean)
             if ok then return true end
@@ -1615,4 +1695,210 @@ function Compat.LeaveGroup()
         if ok then return true end
     end
     return false
+end
+
+local ALLIANCE_RACE_SET = {
+    human = true, humano = true, humana = true,
+    dwarf = true, anao = true, ["anão"] = true, enano = true, enana = true,
+    nightelf = true, ["night elf"] = true, ["elfo noturno"] = true, ["elfa noturna"] = true, ["elfo de la noche"] = true, ["elfa de la noche"] = true,
+    gnome = true, gnomo = true, gnoma = true,
+    draenei = true, worgen = true,
+    highelf = true, ["high elf"] = true, ["alto elfo"] = true, ["alta elfa"] = true,
+}
+
+local HORDE_RACE_SET = {
+    orc = true, orco = true,
+    scourge = true, undead = true, renegado = true, renegada = true, ["morto-vivo"] = true, ["morta-viva"] = true, ["no-muerto"] = true, ["no-muerta"] = true,
+    tauren = true, troll = true, goblin = true,
+    bloodelf = true, ["blood elf"] = true, ["elfo sangrento"] = true, ["elfa sangrenta"] = true, ["elfo de sangre"] = true, ["elfa de sangre"] = true,
+}
+
+local function NormalizeFactionTag(raw)
+    if type(raw) ~= "string" or raw == "" then return nil end
+    if raw == "Alliance" or raw == "Horde" then return raw end
+    local low = raw:lower()
+    if low == "alliance" or low:find("alian", 1, true) then
+        return "Alliance"
+    elseif low == "horde" or low:find("hord", 1, true) then
+        return "Horde"
+    end
+    return nil
+end
+
+function Compat.NormalizeFaction(raw)
+    return NormalizeFactionTag(raw)
+end
+
+function Compat.FactionIconMarkup(faction, size)
+    local norm = NormalizeFactionTag(faction)
+    if not norm then return "" end
+    local sz = tonumber(size) or 13
+    if sz < 8 then sz = 8 elseif sz > 32 then sz = 32 end
+    if norm == "Alliance" then
+        return string.format("|TInterface\\TargetingFrame\\UI-PVP-Alliance:%d:%d:0:0:64:64:5:37:3:37|t ", sz, sz)
+    end
+    return string.format("|TInterface\\TargetingFrame\\UI-PVP-Horde:%d:%d:0:0:64:64:5:37:3:37|t ", sz, sz)
+end
+
+function Compat.FactionFromRace(raceStrOrId)
+    if type(raceStrOrId) == "number" then
+        if C_CreatureInfo and C_CreatureInfo.GetFactionInfo then
+            local fInfo = Safe.Call(C_CreatureInfo.GetFactionInfo, raceStrOrId)
+            local fGroup = type(fInfo) == "table" and NormalizeFactionTag(Safe.String(fInfo.groupTag))
+            if fGroup then return fGroup end
+        end
+        return nil
+    end
+    if type(raceStrOrId) ~= "string" or raceStrOrId == "" then
+        return nil
+    end
+    local clean = (Compat.Trim(raceStrOrId)):lower()
+    local compact = clean:gsub("[%s%-']", "")
+    if ALLIANCE_RACE_SET[clean] or ALLIANCE_RACE_SET[compact] then
+        return "Alliance"
+    end
+    if HORDE_RACE_SET[clean] or HORDE_RACE_SET[compact] then
+        return "Horde"
+    end
+    return nil
+end
+
+function Compat.ResolveCharacterFaction(nameOrKey, guidHint, bnetAccountID)
+    local cleanName = Safe.String(nameOrKey)
+    local cleanGuid = Safe.String(guidHint)
+    if (cleanName or cleanGuid) and Compat.IsMe and Compat.IsMe(cleanName, cleanGuid) then
+        return (Compat.PlayerFaction())
+    end
+    if cleanGuid and GetPlayerInfoByGUID then
+        local ok, _, _, locRace, engRace = pcall(GetPlayerInfoByGUID, cleanGuid)
+        if ok then
+            local fac = Compat.FactionFromRace(Safe.String(engRace) or Safe.String(locRace))
+            if fac then return fac end
+        end
+    end
+
+    local lookupKey, firstName
+    if cleanName and cleanName ~= "" then
+        lookupKey, firstName = Compat.ParseCharacterFields(cleanName)
+    end
+
+    local Store = ns.Store
+    if lookupKey then
+        local altsTbl = ns.db and ns.db.alts
+        if type(altsTbl) == "table" then
+            local curPool = Compat.RealmPool(Compat.Realm())
+            local firstLow = firstName and firstName:lower() or nil
+            local altFacMatch, altFirstCount, altFirstFac = nil, 0, nil
+            for _, alt in pairs(altsTbl) do
+                if type(alt) == "table" and alt.faction then
+                    local altPool = alt.realmPool and Compat.RealmPool(alt.realmPool) or curPool
+                    if altPool == curPool then
+                        local altParsedKey, altFirst = Compat.ParseCharacterFields(alt.fullName or alt.name or "")
+                        if altParsedKey == lookupKey then
+                            altFacMatch = alt.faction
+                            break
+                        elseif firstLow and altFirst and altFirst:lower() == firstLow then
+                            altFirstCount = altFirstCount + 1
+                            altFirstFac = alt.faction
+                        end
+                    end
+                end
+            end
+            local normAlt = NormalizeFactionTag(altFacMatch or (altFirstCount == 1 and altFirstFac or nil))
+            if normAlt then return normAlt end
+        end
+
+        if Store then
+            local myFac = Compat.PlayerFaction()
+            local oppFac = (myFac == "Horde") and "Alliance" or "Horde"
+
+            local dirRow = Store.socialDirectoryByLookup and Store.socialDirectoryByLookup[lookupKey]
+            local socRow = Store.socialByLookup and Store.socialByLookup[lookupKey]
+            for i = 1, 2 do
+                local row = (i == 1) and socRow or dirRow
+                if type(row) == "table" then
+                    local rf = NormalizeFactionTag(row.faction)
+                    if rf then return rf end
+                    if row.sameFaction == false then return oppFac end
+                    if row.sameFaction == true or (row.sources and (row.sources.guild or row.sources.friend)) then
+                        return myFac
+                    end
+                end
+            end
+
+            if ns.Social and ns.Social.GetBNetLinkInfo then
+                local bInfo = ns.Social:GetBNetLinkInfo(lookupKey)
+                if type(bInfo) == "table" then
+                    local bf = NormalizeFactionTag(bInfo.faction)
+                    if bf then return bf end
+                    if bInfo.sameFaction == false and (bInfo.activeLookupKey == lookupKey or not bInfo.activeLookupKey) then
+                        return oppFac
+                    elseif bInfo.sameFaction == true and (bInfo.activeLookupKey == lookupKey or not bInfo.activeLookupKey) then
+                        return myFac
+                    end
+                end
+            end
+
+            if Store.guildRosterRanks and Store.guildRosterRanks[lookupKey] then
+                return myFac
+            end
+            if Store.nearby and Store.nearby[lookupKey] then
+                return myFac
+            end
+            if Store.GetRecentCompanion and Store:GetRecentCompanion(lookupKey) then
+                return myFac
+            end
+        end
+    end
+
+    if bnetAccountID and Store and Store.socialDirectoryByKey then
+        local bRow = Store.socialDirectoryByKey["bnet:" .. tostring(bnetAccountID)]
+        if type(bRow) == "table" then
+            local bf = NormalizeFactionTag(bRow.faction)
+            if bf then return bf end
+            if bRow.sameFaction == false then
+                return (Compat.PlayerFaction() == "Horde") and "Alliance" or "Horde"
+            elseif bRow.sameFaction == true then
+                return Compat.PlayerFaction()
+            end
+        end
+    end
+
+    if lookupKey and ns.Chat and type(ns.Chat.knownFactionByKey) == "table" then
+        local kf = NormalizeFactionTag(ns.Chat.knownFactionByKey[lookupKey])
+        if kf then return kf end
+    end
+
+    return nil
+end
+
+function Compat.IsInGuild()
+    return (IsInGuild and Safe and Safe.Value and Safe.Value(Safe.Call(IsInGuild)) == true) or false
+end
+
+function Compat.ShouldShowGuildFeatures()
+    local s = ns.db and ns.db.settings
+    if not s or s.hideGuildFeaturesWhenNoGuild ~= false then
+        return Compat.IsInGuild()
+    end
+    return true
+end
+
+function Compat.IsWindowIntegrationEnabled(winKey)
+    local s = ns.db and ns.db.settings
+    if winKey == "O" or winKey == "social" or winKey == "watchlist" or winKey == "nearby" or winKey == "chat" then
+        return not s or s.embedSocialWindow ~= false
+    elseif winKey == "I" or winKey == "lfg" then
+        return not s or s.embedLfgWindow ~= false
+    elseif winKey == "J" or winKey == "clan" or winKey == "guild" or winKey == "diplomacy" then
+        if s and s.embedGuildWindow == false then
+            return false
+        end
+        return Compat.ShouldShowGuildFeatures()
+    elseif winKey == "C" or winKey == "alts" or winKey == "character" then
+        return not s or s.embedCharacterWindow ~= false
+    elseif winKey == "M" or winKey == "buffs" or winKey == "map" then
+        return not s or s.embedWorldMap ~= false
+    end
+    return true
 end

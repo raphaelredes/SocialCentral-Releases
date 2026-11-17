@@ -437,11 +437,53 @@ local function ScanActiveEnvironment(fromTicker)
     ScanGroup(fromTicker)
 end
 
+local RACE_TO_FACTION = {
+    Human = "Alliance",
+    Dwarf = "Alliance",
+    NightElf = "Alliance",
+    Gnome = "Alliance",
+    Draenei = "Alliance",
+    Worgen = "Alliance",
+    HighElf = "Alliance",
+    Orc = "Horde",
+    Scourge = "Horde",
+    Tauren = "Horde",
+    Troll = "Horde",
+    BloodElf = "Horde",
+    Goblin = "Horde",
+}
+
+local function IsOpposingFactionChatSpeaker(cleanGuid, cleanSender)
+    local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    if not myFac then return false end
+    local detectedFac = nil
+    if cleanGuid and GetPlayerInfoByGUID then
+        local ok, _, _, _, engRace = pcall(GetPlayerInfoByGUID, cleanGuid)
+        if ok and type(engRace) == "string" then
+            detectedFac = RACE_TO_FACTION[engRace]
+        end
+    end
+    if not detectedFac and Store then
+        local sRow = cleanGuid and Store.socialByGuid and Store.socialByGuid[cleanGuid]
+        if not sRow and cleanSender and Compat.ParseCharacterName and Store.socialByLookup then
+            local p = Compat.ParseCharacterName(cleanSender)
+            sRow = p and p.lookupKey and Store.socialByLookup[p.lookupKey]
+        end
+        if sRow and (sRow.faction == "Alliance" or sRow.faction == "Horde") then
+            detectedFac = sRow.faction
+        end
+    end
+    return (detectedFac ~= nil and detectedFac ~= myFac)
+end
+
 local function OnChat(_, eventName, text, sender, ...)
     local cleanSender = Safe.String(sender)
     if not cleanSender then return end
     local guid = select(10, ...)
     local cleanGuid = Safe.String(guid)
+    if LOCAL_PROXIMITY_CHAT_EVENTS[eventName] and IsOpposingFactionChatSpeaker(cleanGuid, cleanSender) then
+        return
+    end
     local throttleKey = cleanGuid or ("chat:" .. cleanSender:lower())
     local nowClock = (GetTime and GetTime()) or time()
     if nearbyInspectCooldown[throttleKey] and nowClock < nearbyInspectCooldown[throttleKey] then
@@ -663,6 +705,8 @@ function Nearby:Init()
         "CHAT_MSG_PARTY_LEADER",
         "CHAT_MSG_RAID",
         "CHAT_MSG_RAID_LEADER",
+        "CHAT_MSG_INSTANCE_CHAT",
+        "CHAT_MSG_INSTANCE_CHAT_LEADER",
     }) do
         ns.RegisterEvent(self, chatEvent, OnChat)
     end

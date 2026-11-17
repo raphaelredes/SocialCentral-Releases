@@ -59,6 +59,44 @@ local function ShowHUDTooltip(owner, titleText, line1, line2)
     GameTooltip:Show()
 end
 
+local function ResolveSpotterContactState(entry)
+    if not entry then
+        return false, nil, nil, false, false, nil
+    end
+    local targetName = (Compat.FormatForeverTarget and Compat.FormatForeverTarget(entry.displayName or entry.targetName))
+        or entry.displayName or entry.targetName
+    local lookupKey = entry.key or targetName
+    local bInfo = (lookupKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(lookupKey) or nil
+    local bnetAccId = bInfo and bInfo.bnetAccountID or nil
+    local bnetName = bInfo and bInfo.bnetName or nil
+    local isCrossFac = (bInfo and bInfo.sameFaction == false) == true
+
+    if (not isCrossFac) and ns.Spotter and ns.Spotter.FindLiveUnitForEntry then
+        local liveUnit = ns.Spotter:FindLiveUnitForEntry(entry)
+        if liveUnit then
+            local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+            local uFac = UnitFactionGroup and Safe.String(Safe.Call(UnitFactionGroup, liveUnit)) or nil
+            if uFac and myFac and uFac ~= myFac then
+                isCrossFac = true
+            elseif UnitIsEnemy and Safe.Value(Safe.Call(UnitIsEnemy, "player", liveUnit)) == true then
+                isCrossFac = true
+            elseif UnitIsFriend and Safe.Value(Safe.Call(UnitIsFriend, "player", liveUnit)) == false then
+                isCrossFac = true
+            end
+        end
+    end
+
+    local isMe = Compat.IsMe and targetName and Compat.IsMe(targetName, entry.guid) or false
+    local inGroup = Compat.IsInMyGroup and targetName and Compat.IsInMyGroup(targetName, entry.guid) or false
+    local canInvite = (targetName ~= nil and targetName ~= "")
+        and (entry.stance ~= "ENEMY")
+        and (entry.stance ~= "BLOCKED")
+        and (not isMe)
+        and (not inGroup)
+        and (not isCrossFac)
+    return canInvite, targetName, bnetAccId, isCrossFac, inGroup, bnetName
+end
+
 local function OpenTargetContextMenu(anchor, entry)
     if not entry then return end
     if InCombatLockdown and InCombatLockdown() then
@@ -69,16 +107,19 @@ local function OpenTargetContextMenu(anchor, entry)
         return
     end
 
+    local canInvite, targetName, bnetAccId, isCrossFac, _, bnetName = ResolveSpotterContactState(entry)
     MenuUtil.CreateContextMenu(anchor, function(_, root)
         root:CreateTitle(entry.displayName or "?")
 
-        if entry.stance ~= "ENEMY" and entry.stance ~= "BLOCKED" then
-            local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(entry.key or entry.displayName)
+        if entry.stance ~= "ENEMY" and entry.stance ~= "BLOCKED" and targetName then
+            local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(entry.key or targetName, bnetAccId)
             if scConfirmed then
                 root:CreateButton(L["Whisper in SocialCentral"], function()
                     if ns.Chat and ns.Chat.OpenDirectConversation then
                         ns.Chat:OpenDirectConversation({
-                            targetName = entry.targetName or entry.displayName,
+                            targetName = targetName,
+                            bnetAccountID = bnetAccId,
+                            bnetName = bnetName,
                             classFile = entry.classFile,
                             autoProbe = true,
                             openUI = true,
@@ -86,23 +127,29 @@ local function OpenTargetContextMenu(anchor, entry)
                         if ns.UI and ns.UI.OpenTab then
                             ns.UI:OpenTab("chat")
                         end
+                    elseif isCrossFac and bnetName and Compat.BNetWhisper then
+                        Compat.BNetWhisper(bnetName, targetName)
                     elseif Compat.Whisper then
-                        Compat.Whisper(entry.targetName or entry.displayName)
+                        Compat.Whisper(targetName)
                     end
                 end)
             end
 
-            root:CreateButton(L["Official Whisper"], function()
-                if Compat.Whisper then
-                    Compat.Whisper(entry.targetName or entry.displayName)
+            root:CreateButton((isCrossFac and bnetName) and L["Battle.net Whisper"] or L["Official Whisper"], function()
+                if isCrossFac and bnetName and Compat.BNetWhisper then
+                    Compat.BNetWhisper(bnetName, targetName)
+                elseif Compat.Whisper then
+                    Compat.Whisper(targetName)
                 end
             end)
 
-            root:CreateButton(L["Invite"], function()
-                if Compat.Invite then
-                    Compat.Invite(entry.targetName or entry.displayName)
-                end
-            end)
+            if canInvite then
+                root:CreateButton(L["Invite"], function()
+                    if Compat.Invite then
+                        Compat.Invite(targetName, bnetAccId)
+                    end
+                end)
+            end
         end
 
         root:CreateButton(L["Add to Watchlist"], function()
@@ -548,10 +595,14 @@ function SpotterHUD:BuildFrame()
     whisperBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if not e then return end
-        local hasAddon = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(e.key or e.displayName)
+        local _, targetName, bnetAccId, isCrossFac, _, bnetName = ResolveSpotterContactState(e)
+        local dest = targetName or e.displayName or e.targetName
+        local hasAddon = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(e.key or dest, bnetAccId)
         if hasAddon and ns.Chat.OpenDirectConversation then
             ns.Chat:OpenDirectConversation({
-                targetName = e.targetName or e.displayName,
+                targetName = dest,
+                bnetAccountID = bnetAccId,
+                bnetName = bnetName,
                 classFile = e.classFile,
                 autoProbe = true,
                 openUI = true,
@@ -559,8 +610,10 @@ function SpotterHUD:BuildFrame()
             if ns.UI and ns.UI.OpenTab then
                 ns.UI:OpenTab("chat")
             end
+        elseif isCrossFac and bnetName and Compat.BNetWhisper then
+            Compat.BNetWhisper(bnetName, dest)
         elseif Compat.Whisper then
-            Compat.Whisper(e.targetName or e.displayName)
+            Compat.Whisper(dest)
         end
         SpotterHUD.interactionOpen = false
         SpotterHUD:Refresh()
@@ -572,8 +625,21 @@ function SpotterHUD:BuildFrame()
     scoutBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
         if not e then return end
+        local coordsStr = ""
+        if C_Map and C_Map.GetBestMapForUnit and C_Map.GetPlayerMapPosition then
+            local mapId = Safe and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player")) or C_Map.GetBestMapForUnit("player")
+            if mapId then
+                local pos = C_Map.GetPlayerMapPosition(mapId, "player")
+                if pos and pos.GetXY then
+                    local px, py = pos:GetXY()
+                    if px and py and (px > 0 or py > 0) then
+                        coordsStr = string.format("%d, %d", math.floor(px * 100 + 0.5), math.floor(py * 100 + 0.5))
+                    end
+                end
+            end
+        end
         if ns.Clan and ns.Clan.BroadcastScoutAlert then
-            ns.Clan:BroadcastScoutAlert(e.displayName, e.guild or "", e.level or 0, e.classFile, e.zone or e.subZone or "", "")
+            ns.Clan:BroadcastScoutAlert(e.displayName, e.guild or "", e.level or 0, e.classFile, e.zone or e.subZone or "", coordsStr)
         end
         SpotterHUD.interactionOpen = false
         SpotterHUD:Refresh()
@@ -597,8 +663,11 @@ function SpotterHUD:BuildFrame()
             if ns.Spotter and ns.Spotter.DismissTarget then
                 ns.Spotter:DismissTarget(e.key)
             end
-        elseif Compat.Invite then
-            Compat.Invite(e.targetName or e.displayName)
+        else
+            local canInvite, targetName, bnetAccId = ResolveSpotterContactState(e)
+            if canInvite and Compat.Invite then
+                Compat.Invite(targetName or e.displayName or e.targetName, bnetAccId)
+            end
         end
         SpotterHUD.interactionOpen = false
         SpotterHUD:Refresh()
@@ -623,6 +692,9 @@ function SpotterHUD:BuildFrame()
         key = "spotter",
         anchor = "TOP",
         combatLock = true,
+        locked = function()
+            return ns.db and ns.db.settings and ns.db.settings.spotterLockHUD == true
+        end,
         handles = { f, actionPanel },
         onStop = function()
             if ns.NotificationToast and ns.NotificationToast.LayoutStack then
@@ -712,7 +784,11 @@ function SpotterHUD:BuildCombatArrowFrame()
     if self.combatArrowFrame then return self.combatArrowFrame end
     local cf = CreateFrame("Frame", "SocialCentralSpotterCombatArrow", UIParent, "BackdropTemplate")
     cf:SetSize(HUD_WIDTH, PILL_H)
-    cf:SetPoint("TOP", UIParent, "TOP", 0, -96)
+    if self.frame then
+        cf:SetPoint("TOP", self.frame, "TOP", 0, 0)
+    else
+        cf:SetPoint("TOP", UIParent, "TOP", 0, -64)
+    end
     cf:SetFrameStrata("MEDIUM")
     cf:SetFrameLevel(45)
 
@@ -817,7 +893,12 @@ function SpotterHUD:ShowCombatArrowFallback()
         or (entry.stance == "ALLY" and L["ALLY"] or L["CLAN"])
     local colHex = ns.Spotter:GetStanceColor(entry.stance).hex
     local classHex = Compat.ClassHex and Compat.ClassHex(entry.classFile) or "|cffffffff"
+    if self.frame then
+        cf:ClearAllPoints()
+        cf:SetPoint("TOP", self.frame, "TOP", 0, 0)
+    end
     cf.nameFs:SetText(string.format("%s[%s]|r %s%s|r", colHex, stanceTag, classHex, entry.displayName or "?"))
+    cf.distFs:SetText(entry.locationText and entry.locationText ~= "" and ("|cff8b949e" .. entry.locationText .. "|r") or ("|cff8b949e" .. L["In Combat"] .. "|r"))
     cf.subFs:SetText(entry.locationText or (entry.guild and ("<" .. entry.guild .. ">") or ""))
     cf:Show()
     self:UpdateCompassVisuals(true, 0.04)
@@ -1414,6 +1495,14 @@ function SpotterHUD:Refresh()
                 end
             end
         end
+        local wantInviteEnabled = true
+        if layoutKey == "DEFAULT" then
+            wantInviteEnabled = ResolveSpotterContactState(compassEntry) == true
+        end
+        if f.actionPanel.inviteBtn and f.actionPanel._lastInviteEnabled ~= wantInviteEnabled then
+            f.actionPanel._lastInviteEnabled = wantInviteEnabled
+            f.actionPanel.inviteBtn:SetEnabled(wantInviteEnabled)
+        end
         if f._lastActionOpen ~= true then
             f._lastActionOpen = true
             f.actionPanel:Show()
@@ -1600,7 +1689,7 @@ function SpotterHUD:CreateRadarTutorialDialog()
     bodyFs:SetJustifyH("LEFT")
     bodyFs:SetWordWrap(true)
     bodyFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-    bodyFs:SetText(L["The Target Radar scans players within ~100 yards around your character. When a tracked player enters your area, a floating directional arrow and distance indicator appear on screen with a safe click-to-target button."])
+    bodyFs:SetText(L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates. When a tracked player is detected, a compact HUD appears with click-to-target and range tracking when selected."])
     dlg.bodyFs = bodyFs
 
     local keysBox = CreateFrame("Frame", nil, dlg, "BackdropTemplate")

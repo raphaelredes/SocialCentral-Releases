@@ -209,15 +209,13 @@ local TARGET_ARROW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\arrow"
 local TARGET_GLOW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\toast-glow"
 
 local ITEM_RANGES = {
-    { range = 8, item = 8149 },    -- Voodoo Charm
-    { range = 13, item = 17626 },  -- Frostwolf Muzzle
-    { range = 18, item = 6450 },   -- Silk Bandage (friendly-only check)
-    { range = 23, item = 17757 },  -- Amulet of Spirits
-    { range = 28, item = 13289 },  -- Egan's Blaster
-    { range = 33, item = 17202 },  -- Snowball
-    { range = 38, item = 18904 },  -- Zorbin's Ultra-Shrinker
-    { range = 48, item = 221316 }, -- Premo's Poise-Demanding Uniform
-    { range = 103, item = 5418 },  -- Weapon of Mass Destruction
+    { range = 8, item = 8149 },                     -- Voodoo Charm
+    { range = 13, item = 17626 },                   -- Frostwolf Muzzle
+    { range = 18, item = 6450, friendOnly = true }, -- Silk Bandage (friendly-only check)
+    { range = 23, item = 17757 },                   -- Amulet of Spirits
+    { range = 28, item = 13289 },                   -- Egan's Blaster
+    { range = 33, item = 17202 },                   -- Snowball
+    { range = 38, item = 18904 },                   -- Zorbin's Ultra-Shrinker
 }
 
 local STANCE_PRIORITY = {
@@ -514,11 +512,16 @@ local function SanitizeMacroTargetName(rawName, rawRealm)
     if not clean or clean == "" then return nil end
     clean = clean:gsub("[%c%|%/%\\%[%]%;]", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
     if clean == "" then return nil end
+    if Compat.FormatForeverTarget then
+        clean = Compat.FormatForeverTarget(clean) or clean
+    end
 
     local realm = Safe.String(rawRealm)
-    if realm and realm ~= "" and not Compat.IsForeverShardLabel(realm) then
+    local hasSurname = clean:find("[%s%-]") ~= nil
+    local onForeverPool = Compat.Realm and Compat.Plain and (Compat.Plain(Compat.Realm()):match("^camwow") ~= nil)
+    if (not hasSurname) and (not onForeverPool) and realm and realm ~= "" and not Compat.IsForeverShardLabel(realm) then
         local cleanRealm = realm:gsub("[%c%|%/%\\%[%]%;%s]", "")
-        if cleanRealm ~= "" and not clean:find("-", 1, true) then
+        if cleanRealm ~= "" then
             local myRealm = Compat.Realm and Compat.Realm() or ""
             if cleanRealm:lower() ~= myRealm:lower() then
                 clean = clean .. "-" .. cleanRealm
@@ -573,8 +576,9 @@ local function GetPlayerNormalizedGuild()
             gName = info.name
         end
     end
-    if (not gName or gName == "") and ns.db and ns.db.alts and Compat.CharacterKey then
-        local altRec = ns.db.alts[Compat.CharacterKey()]
+    if (not gName or gName == "") and ns.db and ns.db.alts then
+        local altRec = (ns.Store and ns.Store.GetCurrentAltRecord and ns.Store:GetCurrentAltRecord())
+            or (Compat.CharacterKey and ns.db.alts[Compat.CharacterKey()])
         if altRec and altRec.guild and altRec.guild ~= "" then
             gName = altRec.guild
         end
@@ -862,9 +866,12 @@ local function CacheRangeCheckItems()
     end
 end
 
-local function ProbeRangeItem(unit, idx)
+local function ProbeRangeItem(unit, idx, isFriend)
     local spec = ITEM_RANGES[idx]
     if not spec or not ITEM_IN_RANGE_FN then return nil end
+    if spec.friendOnly and not isFriend then
+        return nil
+    end
     EnsureRangeItemRequested(spec.item)
     local okR, raw = pcall(ITEM_IN_RANGE_FN, spec.item, unit)
     local val = okR and Safe.Value(raw) or nil
@@ -876,21 +883,55 @@ local function ProbeRangeItem(unit, idx)
     return nil
 end
 
+local function SaveDistBracket(tGuid, isFriend, maxRange)
+    if not tGuid or not maxRange then
+        Spotter._lastDistBracket = nil
+        return
+    end
+    local loIdx, hiIdx
+    if maxRange == 13 then
+        loIdx, hiIdx = 1, 2
+    elseif maxRange == 18 and isFriend then
+        loIdx, hiIdx = 2, 3
+    elseif maxRange == 23 then
+        loIdx, hiIdx = (isFriend and 3 or 2), 4
+    elseif maxRange == 28 then
+        loIdx, hiIdx = 4, 5
+    elseif maxRange == 33 then
+        loIdx, hiIdx = 5, 6
+    elseif maxRange == 38 then
+        loIdx, hiIdx = 6, 7
+    else
+        Spotter._lastDistBracket = nil
+        return
+    end
+    Spotter._lastDistGuid = tGuid
+    Spotter._lastDistBracket = {
+        friend = isFriend,
+        loIdx = loIdx,
+        hiIdx = hiIdx,
+        range = maxRange,
+    }
+end
+
 local function MeasureUnitDistance(unit)
     if not unit or Safe.Value(Safe.Call(UnitExists, unit)) ~= true then
+        Spotter._lastDistBracket = nil
         return nil, nil
     end
 
     local inCombat = (InCombatLockdown and InCombatLockdown()) or false
     local isFriend = Safe.Value(Safe.Call(UnitIsFriend, "player", unit)) == true
     local canCheckFriendly = not (inCombat and isFriend)
+    local tGuid = (unit == "target") and Safe.String(Safe.Call(UnitGUID, unit)) or nil
 
     local d3, d2, d1
     if canCheckFriendly and CheckInteractDistance then
         d3 = Safe.Value(Safe.Call(CheckInteractDistance, unit, 3))
         if d3 == true then
+            Spotter._lastDistBracket = nil
             if ITEM_IN_RANGE_FN and ITEM_RANGES[1] then
-                if ProbeRangeItem(unit, 1) == true then
+                if ProbeRangeItem(unit, 1, isFriend) == true then
                     return 8, "< 8m"
                 end
             end
@@ -898,6 +939,7 @@ local function MeasureUnitDistance(unit)
         end
         d2 = Safe.Value(Safe.Call(CheckInteractDistance, unit, 2))
         if d2 == true then
+            Spotter._lastDistBracket = nil
             return 11, L["~11m"]
         end
         d1 = Safe.Value(Safe.Call(CheckInteractDistance, unit, 1))
@@ -913,111 +955,136 @@ local function MeasureUnitDistance(unit)
     local minRange = 0
     local maxRange = nil
     if canCheckFriendly and ITEM_IN_RANGE_FN then
-        -- Domain-partitioned binary probing: O(2-3) probes vs O(9) linear scan.
-        if d1 == true then
-            local r18 = ProbeRangeItem(unit, 3)
-            if r18 == true then
-                local r13 = ProbeRangeItem(unit, 2)
-                if r13 == true then
-                    maxRange = 13
-                else
-                    if r13 == false then minRange = 13 end
-                    maxRange = 18
+        -- O(1) Continuity prediction: verify cached bracket in 1-2 probes before binary search.
+        local br = (tGuid and tGuid == Spotter._lastDistGuid) and Spotter._lastDistBracket or nil
+        if br and br.friend == isFriend and (not in43Checked or in43)
+            and (d1 == nil or ((d1 == true) == (br.range <= 28))) then
+            if ProbeRangeItem(unit, br.hiIdx, isFriend) == true then
+                if br.hiIdx == 2 and d2 == false then
+                    maxRange = br.range
+                elseif br.loIdx and ProbeRangeItem(unit, br.loIdx, isFriend) == false then
+                    minRange = ITEM_RANGES[br.loIdx].range
+                    maxRange = br.range
                 end
-            elseif r18 == false then
-                minRange = 18
-                local r23 = ProbeRangeItem(unit, 4)
-                if r23 == true then
-                    maxRange = 23
+            end
+        end
+
+        -- Domain-partitioned binary probing: O(2-3) probes for both friend and enemy targets.
+        if maxRange == nil and d1 == true then
+            if isFriend then
+                local r18 = ProbeRangeItem(unit, 3, true)
+                if r18 == true then
+                    local r13 = ProbeRangeItem(unit, 2, true)
+                    if r13 == true then
+                        maxRange = 13
+                    else
+                        if r13 == false then minRange = 13 end
+                        maxRange = 18
+                    end
+                elseif r18 == false then
+                    minRange = 18
+                    local r23 = ProbeRangeItem(unit, 4, true)
+                    if r23 == true then
+                        maxRange = 23
+                    else
+                        if r23 == false then minRange = 23 end
+                        local r28 = ProbeRangeItem(unit, 5, true)
+                        if r28 == true then
+                            maxRange = 28
+                        elseif r28 == false then
+                            minRange = 28
+                        end
+                    end
                 else
-                    if r23 == false then minRange = 23 end
-                    local r28 = ProbeRangeItem(unit, 5)
+                    for i = 2, 5 do
+                        local res = ProbeRangeItem(unit, i, true)
+                        if res == true then
+                            maxRange = ITEM_RANGES[i].range
+                            break
+                        elseif res == false then
+                            minRange = ITEM_RANGES[i].range
+                        end
+                    end
+                end
+            else
+                local r23 = ProbeRangeItem(unit, 4, false)
+                if r23 == true then
+                    local r13 = ProbeRangeItem(unit, 2, false)
+                    if r13 == true then
+                        maxRange = 13
+                    else
+                        if r13 == false then minRange = 13 end
+                        maxRange = 23
+                    end
+                elseif r23 == false then
+                    minRange = 23
+                    local r28 = ProbeRangeItem(unit, 5, false)
                     if r28 == true then
                         maxRange = 28
                     elseif r28 == false then
                         minRange = 28
                     end
-                end
-            else
-                for i = 2, 5 do
-                    local res = ProbeRangeItem(unit, i)
-                    if res == true then
-                        maxRange = ITEM_RANGES[i].range
-                        break
-                    elseif res == false then
-                        minRange = ITEM_RANGES[i].range
+                else
+                    for i = 2, 5 do
+                        local res = ProbeRangeItem(unit, i, false)
+                        if res == true then
+                            maxRange = ITEM_RANGES[i].range
+                            break
+                        elseif res == false then
+                            minRange = ITEM_RANGES[i].range
+                        end
                     end
                 end
             end
-        elseif d1 == false and in43Checked and in43 then
+        elseif maxRange == nil and d1 == false and in43Checked and in43 then
             minRange = 28
-            local r33 = ProbeRangeItem(unit, 6)
+            local r33 = ProbeRangeItem(unit, 6, isFriend)
             if r33 == true then
                 maxRange = 33
             else
                 if r33 == false then minRange = 33 end
-                local r38 = ProbeRangeItem(unit, 7)
+                local r38 = ProbeRangeItem(unit, 7, isFriend)
                 if r38 == true then
                     maxRange = 38
-                else
-                    if r38 == false then minRange = 38 end
-                    local r48 = ProbeRangeItem(unit, 8)
-                    if r48 == true then
-                        maxRange = 48
-                    elseif r48 == false then
-                        minRange = 48
-                    end
+                elseif r38 == false then
+                    minRange = 38
                 end
             end
-        elseif d1 == false and in43Checked and not in43 then
+        elseif maxRange == nil and d1 == false and in43Checked and not in43 then
             minRange = 43
-            local r48 = ProbeRangeItem(unit, 8)
-            if r48 == true then
-                maxRange = 48
-            else
-                if r48 == false then minRange = 48 end
-                local r103 = ProbeRangeItem(unit, 9)
-                if r103 == true then
-                    maxRange = 103
-                elseif r103 == false then
-                    minRange = 103
-                end
-            end
-        else
-            local r28 = ProbeRangeItem(unit, 5)
+        elseif maxRange == nil then
+            local r28 = ProbeRangeItem(unit, 5, isFriend)
             if r28 == true then
-                if d2 ~= false and ProbeRangeItem(unit, 1) == true then
+                if d2 ~= false and ProbeRangeItem(unit, 1, isFriend) == true then
                     maxRange = 8
-                else
-                    local r18 = ProbeRangeItem(unit, 3)
+                elseif isFriend then
+                    local r18 = ProbeRangeItem(unit, 3, true)
                     if r18 == true then
-                        maxRange = (ProbeRangeItem(unit, 2) == true) and 13 or 18
+                        maxRange = (ProbeRangeItem(unit, 2, true) == true) and 13 or 18
                     elseif r18 == false then
                         minRange = 18
-                        maxRange = (ProbeRangeItem(unit, 4) == true) and 23 or 28
+                        maxRange = (ProbeRangeItem(unit, 4, true) == true) and 23 or 28
+                    else
+                        maxRange = 28
+                    end
+                else
+                    local r23 = ProbeRangeItem(unit, 4, false)
+                    if r23 == true then
+                        maxRange = (ProbeRangeItem(unit, 2, false) == true) and 13 or 23
+                    elseif r23 == false then
+                        minRange = 23
+                        maxRange = 28
                     else
                         maxRange = 28
                     end
                 end
             elseif r28 == false then
                 minRange = 28
-                local r38 = ProbeRangeItem(unit, 7)
+                local r38 = ProbeRangeItem(unit, 7, isFriend)
                 if r38 == true then
-                    maxRange = (ProbeRangeItem(unit, 6) == true) and 33 or 38
-                else
-                    if r38 == false then minRange = 38 end
-                    local r48 = ProbeRangeItem(unit, 8)
-                    if r48 == true then
-                        maxRange = 48
-                    else
-                        if r48 == false then minRange = 48 end
-                        local r103 = ProbeRangeItem(unit, 9)
-                        if r103 == true then
-                            maxRange = 103
-                        elseif r103 == false then
-                            minRange = 103
-                        end
-                    end
+                    maxRange = (ProbeRangeItem(unit, 6, isFriend) == true) and 33 or 38
+                elseif r38 == false then
+                    minRange = 38
                 end
             else
                 local startIdx = (d2 == false) and 2 or 1
@@ -1025,7 +1092,7 @@ local function MeasureUnitDistance(unit)
                     if d1 == true and ITEM_RANGES[i].range > 28 then
                         break
                     end
-                    local res = ProbeRangeItem(unit, i)
+                    local res = ProbeRangeItem(unit, i, isFriend)
                     if res == true then
                         maxRange = ITEM_RANGES[i].range
                         break
@@ -1036,6 +1103,8 @@ local function MeasureUnitDistance(unit)
             end
         end
     end
+
+    SaveDistBracket(tGuid, isFriend, maxRange)
 
     if maxRange == 8 then
         return 8, "< 8m"
@@ -1063,34 +1132,13 @@ local function MeasureUnitDistance(unit)
     if maxRange == 38 then
         return 36, "~36m"
     end
-    if maxRange == 48 then
-        if in43Checked then
-            if in43 then
-                return 41, "~41m"
-            end
-            return 46, "~46m"
-        end
-        return 43, "~43m"
-    end
-    if maxRange == 103 then
-        if minRange >= 48 then
-            return 60, "> 48m"
-        elseif in43Checked and in43 then
-            return 38, L["29-40m"]
-        elseif minRange >= 38 then
-            return 45, "> 38m"
-        end
-        return 50, "> 28m"
-    end
 
-    if minRange >= 103 then
-        return 105, "> 100m"
-    elseif minRange >= 48 then
-        return 60, "> 48m"
-    elseif in43Checked and in43 then
-        return 35, L["29-40m"]
+    if in43Checked and in43 then
+        return 38, L["29-40m"]
     elseif in43Checked and not in43 then
-        return 50, "> 43m"
+        return 45, "> 43m"
+    elseif minRange >= 38 then
+        return 42, "> 38m"
     elseif d1 == false then
         return 35, "> 28m"
     end
@@ -1324,7 +1372,7 @@ function Spotter:UpdatePlateBadge(plate, unit, entry)
     if arrowEnabled then
         if unit and Safe.Value(Safe.Call(UnitExists, unit)) == true and Safe.Value(Safe.Call(UnitIsUnit, unit, "target")) == true then
             isTarget = true
-        elseif entry and IsEntryCurrentlyTargeted(entry) then
+        elseif entry and entry.guid and Safe.String(Safe.Call(UnitGUID, "target")) == entry.guid then
             isTarget = true
         elseif entry and ns.SpotterHUD and ns.SpotterHUD._compassEntry and ns.SpotterHUD._compassEntry.key == entry.key then
             local hudShown = (ns.SpotterHUD.frame and ns.SpotterHUD.frame:IsShown()) or (ns.SpotterHUD.combatArrowFrame and ns.SpotterHUD.combatArrowFrame:IsShown())
@@ -1551,7 +1599,7 @@ function Spotter:MaybeTriggerAlert(entry)
 
     local kin = self:GetTargetKinematics(entry)
     local distStr = (kin and kin.distText) or entry.lastDistText or L["Nearby"]
-    local bearingStr = (kin and kin.hasAngle) and FormatBearingLabel(kin.angle) or nil
+    local bearingStr = nil
     local proxSummary = bearingStr and (distStr .. " · " .. bearingStr) or distStr
     local locLabel = (entry.fullLocationText and entry.fullLocationText ~= "") and entry.fullLocationText
         or ((entry.locationText and entry.locationText ~= "") and entry.locationText or "")
@@ -2264,6 +2312,13 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
         self:MaybeTriggerAlert(entry)
     end
 
+    if (stance == "ENEMY" or stance == "BLOCKED" or stance == "WATCHLIST" or stance == "ALLY")
+        and entry.surname and entry.surname ~= "" and entry.guid and not entry.dead
+        and (not IsInInstanceCached()) and (not IsCrowdMode())
+        and ns.Clan and ns.Clan.QueueCooperativeSighting then
+        ns.Clan:QueueCooperativeSighting(entry.displayName, entry.guid, entry.level, entry.classFile, entry.guild, entry.zone)
+    end
+
     if isSelectedTarget or (ns.SpotterHUD and ns.SpotterHUD._compassEntry and ns.SpotterHUD._compassEntry.key == key) or isNewOrChanged or newPlateMapped then
         self:UpdateFocusedPlateMarker()
     end
@@ -2566,7 +2621,7 @@ function Spotter:RefreshVisibleNameplates(fromTicker)
     end
 
     local staleUnits
-    for boundUnit in pairs(activePlateBadgesByUnit) do
+    for boundUnit in pairs(activePlatesByUnit) do
         local p = activePlatesByUnit[boundUnit]
         local k = self.visibleUnits[boundUnit]
         if not p or not k or not self.entries[k] then
@@ -3036,7 +3091,7 @@ function Spotter:UntrackPlayer(rawName, guid)
     if ns.SpotterHUD and ns.SpotterHUD.focusedKey == key then
         ns.SpotterHUD.focusedKey = nil
     end
-    self:InvalidatePositiveIndex()
+    MarkPositiveIndexDirty()
     ns:Emit("SPOTTER_UPDATED")
     return true
 end
@@ -3078,7 +3133,7 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
             ns.SpotterHUD:ShowRadarTutorial(true)
         end
         if ns.Print then
-            ns:Print("|cff70b5f9[%s]|r %s", L["Target Radar"], L["Radar active! Monitors players within 100m. A directional arrow and range will appear when nearby (does not show on World Map)."])
+            ns:Print("|cff70b5f9[%s]|r %s", L["Target Radar"], L["Radar active! Monitors nearby tracked players and measures distance when targeted."])
         end
     end
 
@@ -3153,10 +3208,19 @@ function Spotter:GetActiveTargets(filterStance)
         end
     end
     table.sort(out, function(a, b)
+        local aAlive = (a.dead ~= true)
+        local bAlive = (b.dead ~= true)
+        if aAlive ~= bAlive then return aAlive end
         if a.onScreen ~= b.onScreen then return a.onScreen end
         local pa = STANCE_PRIORITY[a.stance] or 9
         local pb = STANCE_PRIORITY[b.stance] or 9
         if pa ~= pb then return pa < pb end
+        local aMan = (a._manualTracked == true)
+        local bMan = (b._manualTracked == true)
+        if aMan ~= bMan then return aMan end
+        local ad = a.lastDistYards or 999
+        local bd = b.lastDistYards or 999
+        if ad ~= bd then return ad < bd end
         return (a.lastSeen or 0) > (b.lastSeen or 0)
     end)
     return out

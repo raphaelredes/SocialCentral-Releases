@@ -10,14 +10,28 @@ local Compat = ns.Compat
 -- maintains per-realm peak drop hour histograms, supports opt-in Guild sync (SCentral1 WB),
 -- and prepares Blizzard-compliant chat drafts to inform group/guild members.
 
+local CHRONOBOON_SPELL_ID = 349981
+
 local function NowServerTime()
     return (GetServerTime and GetServerTime()) or time()
+end
+
+local function GetBuffShardScope()
+    local realm = Compat.Realm and Compat.Realm()
+    if type(realm) == "string" and realm ~= "" then
+        return realm
+    end
+    return (Compat.RealmPool and Compat.RealmPool()) or "forever"
 end
 
 local WorldBuffs = {
     incomingDrop = nil,
     previousAuraState = {},
     sessionSyncSource = {},
+    _lastDropAlertAt = {},
+    _heardGuildDropAt = {},
+    _pendingDropSyncSeq = {},
+    _unboonSuppressUntil = 0,
 }
 ns.WorldBuffs = WorldBuffs
 
@@ -102,11 +116,11 @@ local BUFF_DEFINITIONS = {
         spellId = 22820,
         icon = 136077,
         duration = 7200,
-        cooldown = 7200,
+        isInstanceBuff = true,
         faction = "Both",
         effect = L["+3% Spell Crit"],
-        source = L["Guard Slip'kik in Dire Maul North (Tribute run)"],
-        foreverStatus = L["Active in Open World & Dungeons; No effect inside Raid Instances"],
+        source = L["Dire Maul North (Tribute run — talk to Guards after King Gordok)"],
+        foreverStatus = L["Open-world & Dungeons; Cleared on Death; No server cooldown"],
         yellDelay = 0,
         keywords = {},
     },
@@ -116,11 +130,11 @@ local BUFF_DEFINITIONS = {
         spellId = 22817,
         icon = 132334,
         duration = 7200,
-        cooldown = 7200,
+        isInstanceBuff = true,
         faction = "Both",
         effect = L["+200 Attack Power"],
-        source = L["Guard Fengus in Dire Maul North (Tribute run)"],
-        foreverStatus = L["Active in Open World & Dungeons; No effect inside Raid Instances"],
+        source = L["Dire Maul North (Tribute run — talk to Guards after King Gordok)"],
+        foreverStatus = L["Open-world & Dungeons; Cleared on Death; No server cooldown"],
         yellDelay = 0,
         keywords = {},
     },
@@ -130,11 +144,11 @@ local BUFF_DEFINITIONS = {
         spellId = 22818,
         icon = 132204,
         duration = 7200,
-        cooldown = 7200,
+        isInstanceBuff = true,
         faction = "Both",
         effect = L["+15% Stamina"],
-        source = L["Guard Mol'dar in Dire Maul North (Tribute run)"],
-        foreverStatus = L["Active in Open World & Dungeons; No effect inside Raid Instances"],
+        source = L["Dire Maul North (Tribute run — talk to Guards after King Gordok)"],
+        foreverStatus = L["Open-world & Dungeons; Cleared on Death; No server cooldown"],
         yellDelay = 0,
         keywords = {},
     },
@@ -187,6 +201,10 @@ local function FindPlayerAura(spellId, altSpellIds)
     return nil
 end
 
+function WorldBuffs:IsChronoboonSuspended()
+    return FindPlayerAura(CHRONOBOON_SPELL_ID) ~= nil
+end
+
 function WorldBuffs:GetDefinitions()
     return BUFF_DEFINITIONS
 end
@@ -237,25 +255,32 @@ function WorldBuffs:GetActiveBuffs()
 end
 
 function WorldBuffs:GetLastDropTime(buffId)
-    local realmPool = Compat.RealmPool()
-    if ns.db and ns.db.worldBuffsDrops and ns.db.worldBuffsDrops[realmPool] then
-        return ns.db.worldBuffsDrops[realmPool][buffId]
+    local drops = ns.db and ns.db.worldBuffsDrops
+    if type(drops) ~= "table" then return nil end
+    local realmScope = GetBuffShardScope()
+    local val = drops[realmScope] and drops[realmScope][buffId]
+    if val ~= nil then
+        return val
+    end
+    local poolScope = Compat.RealmPool and Compat.RealmPool(Compat.Realm())
+    if poolScope and poolScope ~= realmScope and drops[poolScope] then
+        return drops[poolScope][buffId]
     end
     return nil
 end
 
-local function RecordPeakHourSample(realmPool, buffId, ts)
+local function RecordPeakHourSample(realmScope, buffId, ts)
     if not (ns.db and buffId and ts and ts > 0) then return end
     if type(ns.db.worldBuffsHistory) ~= "table" then
         ns.db.worldBuffsHistory = {}
     end
-    if type(ns.db.worldBuffsHistory[realmPool]) ~= "table" then
-        ns.db.worldBuffsHistory[realmPool] = {}
+    if type(ns.db.worldBuffsHistory[realmScope]) ~= "table" then
+        ns.db.worldBuffsHistory[realmScope] = {}
     end
-    local hist = ns.db.worldBuffsHistory[realmPool][buffId]
+    local hist = ns.db.worldBuffsHistory[realmScope][buffId]
     if type(hist) ~= "table" then
         hist = { _last = 0, _total = 0 }
-        ns.db.worldBuffsHistory[realmPool][buffId] = hist
+        ns.db.worldBuffsHistory[realmScope][buffId] = hist
     end
     if math.abs(ts - (hist._last or 0)) < 300 then
         return
@@ -269,21 +294,40 @@ local function RecordPeakHourSample(realmPool, buffId, ts)
 end
 
 function WorldBuffs:GetPeakWindowText(buffId)
-    local realmPool = Compat.RealmPool()
-    local poolHist = ns.db and ns.db.worldBuffsHistory and ns.db.worldBuffsHistory[realmPool]
+    local allHist = ns.db and ns.db.worldBuffsHistory
+    if type(allHist) ~= "table" then return nil end
+    local realmScope = GetBuffShardScope()
+    local poolHist = allHist[realmScope]
     local hist = poolHist and poolHist[buffId]
+    if type(hist) ~= "table" or (hist._total or 0) < 2 then
+        local poolScope = Compat.RealmPool and Compat.RealmPool(Compat.Realm())
+        if poolScope and poolScope ~= realmScope and type(allHist[poolScope]) == "table" then
+            local fallbackHist = allHist[poolScope][buffId]
+            if type(fallbackHist) == "table" and (fallbackHist._total or 0) >= 2 then
+                hist = fallbackHist
+            end
+        end
+    end
     if type(hist) ~= "table" or (hist._total or 0) < 2 then
         return nil
     end
-    local bestHour, bestCount = nil, 0
+    -- Circular 2-hour sliding window over Z_24 with 0.25 neighboring kernel smoothing.
+    local bestHour, bestWindowCount, bestScore = nil, 0, -1
     for h = 0, 23 do
-        local c = hist[h] or 0
-        if c > bestCount then
-            bestCount = c
-            bestHour = h
+        local hNext = (h + 1) % 24
+        local hPrev = (h + 23) % 24
+        local hAfter = (h + 2) % 24
+        local winCount = (hist[h] or 0) + (hist[hNext] or 0)
+        if winCount > 0 then
+            local smoothScore = winCount + 0.25 * ((hist[hPrev] or 0) + (hist[hAfter] or 0)) + ((hist[h] or 0) * 0.01)
+            if smoothScore > bestScore then
+                bestScore = smoothScore
+                bestWindowCount = winCount
+                bestHour = h
+            end
         end
     end
-    if not bestHour or bestCount <= 0 then
+    if not bestHour or bestWindowCount <= 0 then
         return nil
     end
     local endHour = (bestHour + 2) % 24
@@ -291,21 +335,21 @@ function WorldBuffs:GetPeakWindowText(buffId)
 end
 
 function WorldBuffs:RecordDropTime(buffId, ts, syncSource)
-    local realmPool = Compat.RealmPool()
+    local realmScope = GetBuffShardScope()
     if not ns.db then return end
     if type(ns.db.worldBuffsDrops) ~= "table" then
         ns.db.worldBuffsDrops = {}
     end
-    if type(ns.db.worldBuffsDrops[realmPool]) ~= "table" then
-        ns.db.worldBuffsDrops[realmPool] = {}
+    if type(ns.db.worldBuffsDrops[realmScope]) ~= "table" then
+        ns.db.worldBuffsDrops[realmScope] = {}
     end
     local stamp = ts or NowServerTime()
-    local prev = ns.db.worldBuffsDrops[realmPool][buffId] or 0
+    local prev = ns.db.worldBuffsDrops[realmScope][buffId] or 0
     if stamp >= prev then
-        ns.db.worldBuffsDrops[realmPool][buffId] = stamp
+        ns.db.worldBuffsDrops[realmScope][buffId] = stamp
         self.sessionSyncSource[buffId] = syncSource or "local"
     end
-    RecordPeakHourSample(realmPool, buffId, stamp)
+    RecordPeakHourSample(realmScope, buffId, stamp)
 end
 
 local function BuildCooldownEntry(lastDrop, cooldownSec)
@@ -370,6 +414,41 @@ function WorldBuffs:GetDarkmoonFaireStatus()
         daysUntil = daysUntil,
         text = L["Next Darkmoon Faire in ~%dd (%s)"]:format(daysUntil, location),
     }
+end
+
+local function FlushSaygeOnlineTime(keepActive)
+    local cKey = (ns.Store and ns.Store.GetCurrentAltKey and ns.Store:GetCurrentAltKey()) or Compat.CharacterKey()
+    local legacyKey = Compat.CharacterKey and Compat.CharacterKey() or nil
+    local personalTbl = ns.db and ns.db.worldBuffsPersonal
+    if type(personalTbl) == "table" and cKey and legacyKey and cKey ~= legacyKey and type(personalTbl[legacyKey]) == "table" then
+        if type(personalTbl[cKey]) ~= "table" then
+            personalTbl[cKey] = personalTbl[legacyKey]
+        end
+        personalTbl[legacyKey] = nil
+    end
+    local personal = cKey and personalTbl and personalTbl[cKey]
+    if type(personal) ~= "table" then
+        WorldBuffs._saygeTickAt = nil
+        return 0
+    end
+    local rem = tonumber(personal.saygeRemaining)
+    if rem == nil and personal.saygeAt and personal.saygeAt > 0 then
+        rem = math.max(0, 14400 - math.max(0, NowServerTime() - personal.saygeAt))
+        personal.saygeRemaining = rem
+        personal.saygeAt = nil
+    end
+    if not rem or rem <= 0 then
+        personal.saygeRemaining = 0
+        WorldBuffs._saygeTickAt = nil
+        return 0
+    end
+    local now = NowServerTime()
+    if WorldBuffs._saygeTickAt and now > WorldBuffs._saygeTickAt then
+        rem = math.max(0, rem - (now - WorldBuffs._saygeTickAt))
+        personal.saygeRemaining = rem
+    end
+    WorldBuffs._saygeTickAt = (rem > 0 and keepActive ~= false) and now or nil
+    return rem
 end
 
 function WorldBuffs:GetDropCooldownStatus(def)
@@ -445,20 +524,14 @@ function WorldBuffs:GetDropCooldownStatus(def)
 
     if def.id == "dmf" then
         local faire = self:GetDarkmoonFaireStatus()
-        local cKey = Compat.CharacterKey()
-        local personal = ns.db and ns.db.worldBuffsPersonal and ns.db.worldBuffsPersonal[cKey]
-        local saygeAt = personal and personal.saygeAt
-        if saygeAt and saygeAt > 0 then
-            local elapsed = NowServerTime() - saygeAt
-            local rem = (def.cooldown or 14400) - elapsed
-            if rem > 0 then
-                return {
-                    status = "COOLDOWN",
-                    remaining = rem,
-                    faire = faire,
-                    text = L["Sayge personal cooldown: >= %s (/played)"]:format(self:FormatDuration(rem)),
-                }
-            end
+        local rem = FlushSaygeOnlineTime(true)
+        if rem and rem > 0 then
+            return {
+                status = "COOLDOWN",
+                remaining = rem,
+                faire = faire,
+                text = L["Sayge personal cooldown: >= %s (/played)"]:format(self:FormatDuration(rem)),
+            }
         end
         return {
             status = faire and faire.isActive and "READY" or "SCHEDULED",
@@ -508,6 +581,14 @@ function WorldBuffs:CheckExpiringBuffAlerts()
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     local now = GetTime and GetTime() or 0
     local nextDelay = nil
+    -- World buffs are suppressed inside raids/battlegrounds on Forever; do not warn about expiry there.
+    do
+        local okI, inI, iType = pcall(IsInInstance or function() return false end)
+        iType = okI and Safe.String(iType) or nil
+        if okI and Safe.Value(inI) == true and (iType == "raid" or iType == "pvp") then
+            return 30
+        end
+    end
     self._warnedExpiring = self._warnedExpiring or {}
     for _, def in ipairs(BUFF_DEFINITIONS) do
         local aura = FindPlayerAura(def.spellId, def.altSpellIds)
@@ -579,12 +660,31 @@ local function SyncIdToDefId(syncId)
     return syncId
 end
 
-function WorldBuffs:ReceiveSyncedDrop(syncId, ts, sender)
+local function ComputeTrickleDelay(syncId)
+    local myName = (Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName())
+        or (UnitName and Safe.String(Safe.Call(UnitName, "player")))
+        or "player"
+    local key = tostring(type(myName) == "table" and (myName.fullName or myName.displayName) or myName) .. ":" .. tostring(syncId or "")
+    local h = 5381
+    for i = 1, #key do
+        h = (h * 131 + key:byte(i)) % 2147483647
+    end
+    local slot = (h % 14) * 0.10 -- 0.00s .. 1.30s deterministic spacing
+    return 0.25 + slot + (math.random() * 0.08)
+end
+
+function WorldBuffs:ReceiveSyncedDrop(syncId, ts, sender, shardName)
     if type(syncId) ~= "string" or type(ts) ~= "number" then return end
+    if type(shardName) == "string" and shardName ~= "" and shardName ~= GetBuffShardScope() then
+        return
+    end
     local now = NowServerTime()
     if ts <= 0 or ts > (now + 120) or ts < (now - 43200) then
         return
     end
+    -- Record Trickle suppression before dedup return so concurrent witnesses cancel duplicate guild sends.
+    self._heardGuildDropAt = self._heardGuildDropAt or {}
+    self._heardGuildDropAt[syncId] = (GetTime and GetTime()) or 0
     local existing = self:GetLastDropTime(syncId) or 0
     if math.abs(ts - existing) <= 180 or ts < existing then
         return
@@ -617,6 +717,13 @@ function WorldBuffs:ReceiveSyncedDrop(syncId, ts, sender)
 end
 
 function WorldBuffs:HandleIncomingDrop(def, now, syncId)
+    local recordKey = syncId or def.id
+    self._lastDropAlertAt = self._lastDropAlertAt or {}
+    if (now - (self._lastDropAlertAt[recordKey] or 0)) < 25 then
+        return
+    end
+    self._lastDropAlertAt[recordKey] = now
+
     local dropAt = now + def.yellDelay
     self.incomingDrop = {
         def = def,
@@ -626,14 +733,34 @@ function WorldBuffs:HandleIncomingDrop(def, now, syncId)
     }
 
     local nowTs = NowServerTime()
-    local recordKey = syncId or def.id
     self:RecordDropTime(recordKey, nowTs, "local")
     if recordKey ~= def.id then
         self:RecordDropTime(def.id, nowTs, "local")
     end
 
     if ns.Clan and ns.Clan.SendWorldBuffSync then
-        ns.Clan:SendWorldBuffSync(recordKey, nowTs)
+        self._pendingDropSyncSeq = self._pendingDropSyncSeq or {}
+        local seq = (self._pendingDropSyncSeq[recordKey] or 0) + 1
+        self._pendingDropSyncSeq[recordKey] = seq
+        local sentTs = nowTs
+        if C_Timer and C_Timer.After then
+            local waitSec = ComputeTrickleDelay(recordKey)
+            C_Timer.After(waitSec, function()
+                if WorldBuffs._pendingDropSyncSeq and WorldBuffs._pendingDropSyncSeq[recordKey] ~= seq then
+                    return
+                end
+                local heardAt = WorldBuffs._heardGuildDropAt and WorldBuffs._heardGuildDropAt[recordKey]
+                local monoNow = (GetTime and GetTime()) or 0
+                if heardAt and (monoNow - heardAt) < 10 then
+                    return
+                end
+                if ns.Clan and ns.Clan.SendWorldBuffSync then
+                    ns.Clan:SendWorldBuffSync(recordKey, sentTs)
+                end
+            end)
+        else
+            ns.Clan:SendWorldBuffSync(recordKey, sentTs)
+        end
     end
 
     if ns.db and ns.db.settings and ns.db.settings.worldBuffsAlerts ~= false then
@@ -680,10 +807,23 @@ local function IsNefarianDrop(def, lowerMsg, lowerSender)
     return false
 end
 
+local function IsInsideInstance()
+    if not IsInInstance then return false end
+    local ok, inInst, instType = pcall(IsInInstance)
+    if not ok then return false end
+    inInst = Safe.Value(inInst)
+    instType = Safe.String(instType)
+    return inInst == true and instType ~= nil and instType ~= "none"
+end
+
 local function OnMonsterMessage(_, msg, sender)
     msg = Safe.String(msg)
     sender = Safe.String(sender)
     if not msg or msg == "" then
+        return
+    end
+    -- Capital-city world buff yells never happen inside dungeons/raids/battlegrounds; ignore boss/quest RP there.
+    if IsInsideInstance() then
         return
     end
 
@@ -792,16 +932,28 @@ end
 
 local function TrackFreshOpenWorldAuras(isInitial)
     local nowTs = NowServerTime()
+    local monoNow = (GetTime and GetTime()) or 0
     local songflowerDef = BUFF_DEFINITIONS[5]
     local dmfDef = BUFF_DEFINITIONS[9]
     local changed = false
+
+    local hasBoon = WorldBuffs:IsChronoboonSuspended()
+    local wasBoon = (WorldBuffs.previousAuraState.chronoboon == true)
+    if hasBoon ~= wasBoon then
+        changed = true
+        if wasBoon and not hasBoon and not isInitial then
+            WorldBuffs._unboonSuppressUntil = monoNow + 5.0
+        end
+    end
+    WorldBuffs.previousAuraState.chronoboon = hasBoon
+    local unboonRecent = monoNow <= (WorldBuffs._unboonSuppressUntil or 0)
 
     if songflowerDef then
         local hasSong = FindPlayerAura(songflowerDef.spellId) ~= nil
         if hasSong ~= WorldBuffs.previousAuraState.songflower then
             changed = true
         end
-        if hasSong and not WorldBuffs.previousAuraState.songflower and not isInitial then
+        if hasSong and not WorldBuffs.previousAuraState.songflower and not isInitial and not unboonRecent then
             local mapId = C_Map and C_Map.GetBestMapForUnit and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
             local zoneLow = (Compat.CurrentZoneName and Compat.CurrentZoneName() or ""):lower()
             if mapId == 1448 or zoneLow:find("felwood", 1, true) or zoneLow:find("selva maleva", 1, true) or zoneLow:find("frondavil", 1, true) then
@@ -816,13 +968,15 @@ local function TrackFreshOpenWorldAuras(isInitial)
         if hasDmf ~= WorldBuffs.previousAuraState.dmf then
             changed = true
         end
-        if hasDmf and not WorldBuffs.previousAuraState.dmf and not isInitial and ns.db then
+        if hasDmf and not WorldBuffs.previousAuraState.dmf and not isInitial and not unboonRecent and ns.db then
             if type(ns.db.worldBuffsPersonal) ~= "table" then
                 ns.db.worldBuffsPersonal = {}
             end
-            local cKey = Compat.CharacterKey()
+            local cKey = (ns.Store and ns.Store.GetCurrentAltKey and ns.Store:GetCurrentAltKey()) or Compat.CharacterKey()
             ns.db.worldBuffsPersonal[cKey] = ns.db.worldBuffsPersonal[cKey] or {}
-            ns.db.worldBuffsPersonal[cKey].saygeAt = nowTs
+            ns.db.worldBuffsPersonal[cKey].saygeRemaining = 14400
+            ns.db.worldBuffsPersonal[cKey].saygeAt = nil
+            WorldBuffs._saygeTickAt = nowTs
         end
         WorldBuffs.previousAuraState.dmf = hasDmf
     end
@@ -881,9 +1035,14 @@ function WorldBuffs:Init()
         end)
     end
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        FlushSaygeOnlineTime(true)
         TrackFreshOpenWorldAuras(true)
         self:ScheduleNextExpiryCheck()
         ns:Emit("WORLD_BUFFS_UPDATED")
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_LOGOUT", function()
+        FlushSaygeOnlineTime(false)
     end)
 
     ns:On("SETTINGS_UPDATED", function()

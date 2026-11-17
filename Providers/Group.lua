@@ -134,7 +134,7 @@ function Group:Scan()
                         self._avoidNotified = self._avoidNotified or {}
                         local alertKey = guid or parsed.lookupKey
                         if not self._avoidNotified[alertKey] then
-                            local meta = Store and Store.GetEffectiveSocialMeta and Store:GetEffectiveSocialMeta(parsed.lookupKey)
+                            local meta = Store and Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(parsed.lookupKey)
                             if meta and meta.flag == "AVOID" then
                                 self._avoidNotified[alertKey] = true
                                 local noteText = (meta.note and meta.note ~= "") and (L["Note: %s"]:format(meta.note)) or L["In your group! Flagged as Avoid."]

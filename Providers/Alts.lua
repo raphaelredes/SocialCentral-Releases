@@ -13,6 +13,13 @@ local cachedMyGuid
 local mySurnameConfirmed = false
 local surnameChatRegistered = false
 
+local function CurrentAltKey()
+    if ns.Store and ns.Store.GetCurrentAltKey then
+        return ns.Store:GetCurrentAltKey()
+    end
+    return Compat.CharacterKey and Compat.CharacterKey() or nil
+end
+
 local SURNAME_CHAT_EVENTS = {
     "CHAT_MSG_GUILD",
     "CHAT_MSG_OFFICER",
@@ -46,18 +53,13 @@ local function ApplyAuthorSurname(author, guid)
     local cleanAuthor = Safe.String(author)
     if not cleanAuthor then return end
 
-    local key = Compat.CharacterKey()
-    local rec = ns.db.alts[key]
+    local key = CurrentAltKey()
+    local rec = key and ns.db.alts[key]
     if not rec then
         Alts:Snapshot()
-        rec = ns.db.alts[key]
+        rec = key and ns.db.alts[key]
     end
     if not rec then return end
-    if rec.userSetSurname then
-        mySurnameConfirmed = true
-        UnregisterSurnameChatEvents()
-        return
-    end
 
     local parsed = Compat.ParseForeverFullName(cleanAuthor)
     if parsed and parsed.surname and parsed.firstName:lower() == (rec.firstName or rec.name or ""):lower() then
@@ -78,13 +80,12 @@ end
 local EQUIP_SLOT_COUNT = 19
 local BAG_IDS = { 0, 1, 2, 3, 4 }
 local BANK_BAG_IDS = { -1, 5, 6, 7, 8, 9, 10, 11 }
-local MAX_CONTAINER_ITEMS = 220
+local MAX_CONTAINER_ITEMS = 260
 
 local SECONDARY_PROF_PATTERNS = {
     "first aid", "primeiros socorros", "primeros auxilios",
     "cooking", "culinaria", "culinária", "cocina",
     "fishing", "pescaria", "pesca",
-    "archaeology", "arqueologia", "arqueología",
 }
 
 local function IsSecondarySkillName(skillName)
@@ -161,7 +162,8 @@ local function SnapshotProfessions(prevProfs)
         end
     end
 
-    if #out == 0 and type(prevProfs) == "table" and #prevProfs > 0 then
+    local skillCount = GetNumSkillLines and (Safe.Number(Safe.Call(GetNumSkillLines)) or 0) or 0
+    if #out == 0 and skillCount == 0 and type(prevProfs) == "table" and #prevProfs > 0 then
         return prevProfs
     end
     return out
@@ -224,24 +226,54 @@ local function ResolveItemVisuals(itemRef, icon, quality, link)
     return icon, quality or 1, link
 end
 
+local function ReadEquipSlot(slotId)
+    local itemID = Safe.Number(Safe.Call(GetInventoryItemID, "player", slotId))
+    local link = Safe.String(Safe.Call(GetInventoryItemLink, "player", slotId))
+    local icon = Safe.Value(Safe.Call(GetInventoryItemTexture, "player", slotId))
+    local quality = Safe.Number(Safe.Call(GetInventoryItemQuality, "player", slotId))
+    if itemID or link then
+        icon, quality, link = ResolveItemVisuals(link or itemID, icon, quality, link)
+        return {
+            itemID = itemID,
+            link = link,
+            icon = icon,
+            quality = quality or 1,
+        }
+    end
+    return nil
+end
+
 local function SnapshotEquipment()
     local equip = {}
     for slotId = 1, EQUIP_SLOT_COUNT do
-        local itemID = Safe.Number(Safe.Call(GetInventoryItemID, "player", slotId))
-        local link = Safe.String(Safe.Call(GetInventoryItemLink, "player", slotId))
-        local icon = Safe.Value(Safe.Call(GetInventoryItemTexture, "player", slotId))
-        local quality = Safe.Number(Safe.Call(GetInventoryItemQuality, "player", slotId))
-        if itemID or link then
-            icon, quality, link = ResolveItemVisuals(link or itemID, icon, quality, link)
-            equip[slotId] = {
-                itemID = itemID,
-                link = link,
-                icon = icon,
-                quality = quality or 1,
-            }
+        local slotRec = ReadEquipSlot(slotId)
+        if slotRec then
+            equip[slotId] = slotRec
         end
     end
     return equip
+end
+
+local function SnapshotEquipmentDelta(prevEquip, dirtySlots, isFull, ownerKey)
+    if isFull or type(prevEquip) ~= "table" or not Alts._equipCacheValid or Alts._equipCacheOwner ~= ownerKey then
+        local equip = SnapshotEquipment()
+        Alts._equipCacheValid = true
+        Alts._equipCacheOwner = ownerKey
+        return equip, true
+    end
+    if type(dirtySlots) ~= "table" or next(dirtySlots) == nil then
+        return prevEquip, false
+    end
+    local out = {}
+    for k, v in pairs(prevEquip) do
+        out[k] = v
+    end
+    for slotId in pairs(dirtySlots) do
+        if type(slotId) == "number" and slotId >= 1 and slotId <= EQUIP_SLOT_COUNT then
+            out[slotId] = ReadEquipSlot(slotId)
+        end
+    end
+    return out, true
 end
 
 local function SnapshotContainerRange(bagList)
@@ -318,8 +350,43 @@ local function SnapshotContainerRange(bagList)
     return items, freeSlots, totalSlots
 end
 
+local function SnapshotBagsIncremental(prevAlt, dirtyBags, isFull, ownerKey)
+    Alts._bagContainerCache = Alts._bagContainerCache or {}
+    local cacheValid = (not isFull) and Alts._bagCacheValid and (Alts._bagCacheOwner == ownerKey)
+    if cacheValid and type(prevAlt) == "table" and type(prevAlt.bags) == "table" and type(dirtyBags) == "table" and next(dirtyBags) == nil then
+        return prevAlt.bags, prevAlt.bagFree or 0, prevAlt.bagTotal or 0, false
+    end
+
+    local bags = {}
+    local bagFree = 0
+    local bagTotal = 0
+    for _, bagId in ipairs(BAG_IDS) do
+        local bagCache = Alts._bagContainerCache[bagId]
+        if (not cacheValid) or (not bagCache) or (dirtyBags and dirtyBags[bagId]) then
+            local bItems, bFree, bTot = SnapshotContainerRange({ bagId })
+            bagCache = {
+                items = bItems,
+                free = bFree,
+                total = bTot,
+            }
+            Alts._bagContainerCache[bagId] = bagCache
+        end
+        bagFree = bagFree + (bagCache.free or 0)
+        bagTotal = bagTotal + (bagCache.total or 0)
+        if type(bagCache.items) == "table" then
+            for i = 1, #bagCache.items do
+                if #bags >= MAX_CONTAINER_ITEMS then break end
+                bags[#bags + 1] = bagCache.items[i]
+            end
+        end
+    end
+    Alts._bagCacheValid = true
+    Alts._bagCacheOwner = ownerKey
+    return bags, bagFree, bagTotal, true
+end
+
 function Alts:GetHearthstoneStatus(altData)
-    local isCurrent = (not altData) or (altData.key == Compat.CharacterKey())
+    local isCurrent = (not altData) or (altData.key == CurrentAltKey())
     if isCurrent then
         local getItemCd = (C_Container and C_Container.GetItemCooldown) or _G.GetItemCooldown
         local getItemCnt = (C_Item and C_Item.GetItemCount) or _G.GetItemCount
@@ -355,31 +422,31 @@ function Alts:GetArmoryURL(altEntry)
     full = full:gsub("^%s+", ""):gsub("%s+$", "")
     if full == "" then return nil end
     local slug = full:gsub("%s+", "-")
-    return "https://armorywowforever.com/c/forever/us/pvp/" .. slug
+    slug = slug:gsub("[^%w%-]", function(ch)
+        return string.format("%%%02X", string.byte(ch))
+    end)
+    -- Region and ruleset come from the character's realm pool (e.g. "camwowus1realmpvp").
+    local pool = tostring(altEntry.realmPool or Compat.RealmPool(Compat.Realm()) or ""):lower()
+    local region = pool:match("^camwow(%a%a)%d*") or "us"
+    local ruleset = pool:match("realm(%a+)$") or "pvp"
+    if region ~= "us" and region ~= "eu" then region = "us" end
+    return "https://armorywowforever.com/c/forever/" .. region .. "/" .. ruleset .. "/" .. slug
 end
 
-function Alts:Snapshot(includeBank)
+function Alts:Snapshot(includeBank, force)
     if not (ns.db and ns.db.alts) then return end
+    local monoNow = GetTime and GetTime() or 0
+    if not includeBank and not force and self._lastSnapshotAt and (monoNow - self._lastSnapshotAt) < 0.5 then
+        return
+    end
     local name = Safe.String(Safe.Call(UnitName, "player"))
     if not name then return end
 
-    local key = Compat.CharacterKey()
+    local key = CurrentAltKey()
+    if not key then return end
     local prev = ns.db.alts[key]
     local prevFull = (type(prev) == "table") and prev.fullName or nil
-    local userSet = (type(prev) == "table") and (prev.userSetSurname == true) or false
-
-    local resolved
-    if userSet and type(prev) == "table" and prev.surname and prev.surname ~= "" then
-        local baseParsed = Compat.ParseForeverFullName(name)
-        local first = (baseParsed and baseParsed.firstName) or name
-        resolved = {
-            firstName = first,
-            surname = prev.surname,
-            fullName = first .. " " .. prev.surname,
-        }
-    else
-        resolved = Compat.ResolvePlayerFullName(prevFull) or Compat.ParseForeverFullName(name)
-    end
+    local resolved = Compat.ResolvePlayerFullName(prevFull) or Compat.ParseForeverFullName(name)
 
     local className, classFile = Safe.Call(UnitClass, "player")
     local raceName, raceFile = Safe.Call(UnitRace, "player")
@@ -389,7 +456,12 @@ function Alts:Snapshot(includeBank)
     if (not bindLocation or bindLocation == "") and type(prev) == "table" then
         bindLocation = prev.bindLocation
     end
-    local professions = SnapshotProfessions(type(prev) == "table" and prev.professions or nil)
+    local isOwnerMatch = (self._snapshotOwnerKey == key)
+    self._snapshotOwnerKey = key
+
+    local fullProfs = force or (not isOwnerMatch) or (self._dirtyProfs ~= false) or type(prev) ~= "table" or type(prev.professions) ~= "table" or #prev.professions == 0
+    local professions = fullProfs and SnapshotProfessions(type(prev) == "table" and prev.professions or nil) or prev.professions
+    self._dirtyProfs = false
     local level = Safe.Number(Safe.Call(UnitLevel, "player")) or (type(prev) == "table" and prev.level) or 1
     local xp = Safe.Number(Safe.Call(UnitXP, "player")) or 0
     local xpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
@@ -401,9 +473,6 @@ function Alts:Snapshot(includeBank)
     end
     local rested = Safe.Number(Safe.Call(GetXPExhaustion)) or 0
     local money = Safe.Number(Safe.Call(GetMoney)) or 0
-    if money == 0 and type(prev) == "table" and (prev.money or 0) > 0 then
-        money = prev.money
-    end
     local guild = Safe.String(Safe.Call(GetGuildInfo, "player"))
     if (not guild or guild == "") and ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name then
         guild = ns.Store.guildInfo.name
@@ -427,18 +496,31 @@ function Alts:Snapshot(includeBank)
         or (prev and prev.itemLevel)
         or nil
 
-    local equipment = SnapshotEquipment()
-    local bags, bagFree, bagTotal = SnapshotContainerRange(BAG_IDS)
+    local dirtyEquip = self._dirtyEquipSlots
+    self._dirtyEquipSlots = {}
+    local fullEquip = force or (not isOwnerMatch) or (self._dirtyEquipAll == true)
+    self._dirtyEquipAll = false
+    local equipment, equipChanged = SnapshotEquipmentDelta(type(prev) == "table" and prev.equipment or nil, dirtyEquip, fullEquip, key)
+
+    local dirtyBags = self._dirtyBags
+    self._dirtyBags = {}
+    local fullBags = force or (not isOwnerMatch) or (self._dirtyBagsAll == true)
+    self._dirtyBagsAll = false
+    local bags, bagFree, bagTotal, bagsChanged = SnapshotBagsIncremental(prev, dirtyBags, fullBags, key)
     local bank = type(prev) == "table" and prev.bank or nil
     local bankFree = type(prev) == "table" and prev.bankFree or 0
     local bankTotal = type(prev) == "table" and prev.bankTotal or 0
     local bankUpdatedAt = type(prev) == "table" and prev.bankUpdatedAt or nil
+    local bankChanged = false
     if includeBank then
-        local bankBags = { -1, 5, 6, 7, 8, 9, 10, 11 }
-        local reagentBag = REAGENTBANK_CONTAINER or -3
+        local bankBags = {}
+        for i = 1, #BANK_BAG_IDS do
+            bankBags[i] = BANK_BAG_IDS[i]
+        end
         local getNum = (C_Container and C_Container.GetContainerNumSlots) or _G.GetContainerNumSlots
         if getNum then
-            local okR, rSlots = pcall(getNum, reagentBag)
+            local reagentBag = REAGENTBANK_CONTAINER
+            local okR, rSlots = reagentBag and pcall(getNum, reagentBag)
             if okR and (Safe.Number(rSlots) or 0) > 0 then
                 bankBags[#bankBags + 1] = reagentBag
             end
@@ -449,6 +531,7 @@ function Alts:Snapshot(includeBank)
             bankFree = bFree
             bankTotal = bTot
             bankUpdatedAt = time()
+            bankChanged = true
         end
     end
 
@@ -456,7 +539,9 @@ function Alts:Snapshot(includeBank)
     if (not currentZone or currentZone == "") and type(prev) == "table" and prev.zone and prev.zone ~= "" then
         currentZone = prev.zone
     end
-    local lockouts = SnapshotLockouts(prev and prev.lockouts)
+    local fullLocks = force or (not isOwnerMatch) or (self._dirtyLocks ~= false) or type(prev) ~= "table" or type(prev.lockouts) ~= "table"
+    local lockouts = fullLocks and SnapshotLockouts(prev and prev.lockouts) or prev.lockouts
+    self._dirtyLocks = false
     local hasNewMail = (HasNewMail and Safe.Value(Safe.Call(HasNewMail)) == true) or false
     local mailSenders = nil
     local mailSince = nil
@@ -482,12 +567,16 @@ function Alts:Snapshot(includeBank)
         mailSince = (type(prev) == "table" and prev.hasMail and prev.mailSince) or time()
     end
     local hearthReadyAt = self:GetHearthstoneStatus(nil)
+    local nextItemSeq = (type(prev) == "table" and tonumber(prev._itemSeq)) or 0
+    local itemsChanged = (equipChanged or bagsChanged or bankChanged or type(prev) ~= "table") and true or false
+    if itemsChanged then
+        nextItemSeq = nextItemSeq + 1
+    end
     ns.db.alts[key] = {
         name = name,
         firstName = resolved and resolved.firstName or name,
         surname = resolved and resolved.surname or nil,
         fullName = resolved and resolved.fullName or name,
-        userSetSurname = userSet and (resolved and resolved.surname ~= nil) or false,
         realmPool = Compat.RealmPool(Compat.Realm()),
         faction = faction,
         className = Safe.String(className) or (type(prev) == "table" and prev.className or nil),
@@ -519,6 +608,7 @@ function Alts:Snapshot(includeBank)
         hasMail = hasNewMail,
         mailSenders = mailSenders,
         mailSince = mailSince,
+        _itemSeq = nextItemSeq,
         lastActive = time(),
     }
 
@@ -526,15 +616,18 @@ function Alts:Snapshot(includeBank)
         Compat.CacheForeverFullName(myGuid, resolved.fullName, resolved.firstName)
     end
 
-    self.itemIndex = nil
+    self._lastSnapshotAt = GetTime and GetTime() or 0
+    if itemsChanged then
+        self.itemIndex = nil
+    end
     ns:Emit("ALTS_UPDATED")
 end
 
 --- Lightweight O(1) update for currency, XP, level, and zone without scanning containers or skills.
 function Alts:UpdateScalars()
     if not (ns.db and ns.db.alts) then return end
-    local key = Compat.CharacterKey()
-    local rec = ns.db.alts[key]
+    local key = CurrentAltKey()
+    local rec = key and ns.db.alts[key]
     if type(rec) ~= "table" then
         self:QueueSnapshot(false, 0.5)
         return
@@ -606,82 +699,92 @@ local function ExtractItemID(item)
 end
 
 local function CompareAltOwners(a, b)
-    local curKey = Compat.CharacterKey()
-    local aCur = (a.altKey == curKey)
-    local bCur = (b.altKey == curKey)
+    local curKey = CurrentAltKey()
+    local aCur = (a.key == curKey or a.altKey == curKey)
+    local bCur = (b.key == curKey or b.altKey == curKey)
     if aCur ~= bCur then return aCur end
     if a.total ~= b.total then return a.total > b.total end
     return (a.displayName or "") < (b.displayName or "")
 end
 
-function Alts:RebuildItemIndex()
+function Alts:RebuildItemIndex(factionFilter)
     local index = {}
     local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
-    local curKey = Compat.CharacterKey()
+    local curKey = CurrentAltKey()
+    local wantFaction = factionFilter
+    if wantFaction == nil then
+        wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    end
     local buckets = self._altBuckets
-    if type(buckets) ~= "table" then
+    if type(buckets) ~= "table" or self._itemIndexBuilt == false then
         buckets = {}
         self._altBuckets = buckets
+        self._itemIndexBuilt = true
     end
 
     local liveKeys = {}
     for _, alt in ipairs(alts) do
-        liveKeys[alt.key] = true
-        local displayName = alt.fullName or alt.name or alt.key or "?"
-        local classFile = alt.classFile
-        local stamp = alt.lastActive or alt.updatedAt or 0
-        local cached = (alt.key ~= curKey) and buckets[alt.key]
-        local perItem
+        local sameFac = (not wantFaction) or (not alt.faction) or (alt.faction == wantFaction)
+        if sameFac then
+            liveKeys[alt.key] = true
+            local displayName = alt.fullName or alt.name or alt.key or "?"
+            local classFile = alt.classFile
+            local stamp = alt.lastActive or alt.updatedAt or 0
+            local itemSeq = tonumber(alt._itemSeq) or 0
+            local cached = buckets[alt.key]
+            local perItem
 
-        if cached and cached.updatedAt == stamp and cached.displayName == displayName and cached.classFile == classFile then
-            perItem = cached.perItem
-        else
-            perItem = {}
+            if cached and cached.updatedAt == stamp and cached.itemSeq == itemSeq and cached.displayName == displayName and cached.classFile == classFile and (alt.key ~= curKey or itemSeq > 0) then
+                perItem = cached.perItem
+            else
+                perItem = {}
 
-            local function AddBucket(list, field)
-                if type(list) ~= "table" then return end
-                for _, item in pairs(list) do
-                    local itemID = ExtractItemID(item)
-                    if itemID then
-                        local rec = perItem[itemID]
-                        if not rec then
-                            rec = {
-                                altKey = alt.key,
-                                displayName = displayName,
-                                classFile = classFile,
-                                equipped = 0,
-                                bags = 0,
-                                bank = 0,
-                                total = 0,
-                            }
-                            perItem[itemID] = rec
+                local function AddBucket(list, field)
+                    if type(list) ~= "table" then return end
+                    for _, item in pairs(list) do
+                        local itemID = ExtractItemID(item)
+                        if itemID then
+                            local rec = perItem[itemID]
+                            if not rec then
+                                rec = {
+                                    altKey = alt.key,
+                                    displayName = displayName,
+                                    classFile = classFile,
+                                    equipped = 0,
+                                    bags = 0,
+                                    bank = 0,
+                                    total = 0,
+                                }
+                                perItem[itemID] = rec
+                            end
+                            local qty = math.max(1, tonumber(item.count) or 1)
+                            rec[field] = rec[field] + qty
+                            rec.total = rec.total + qty
                         end
-                        local qty = math.max(1, tonumber(item.count) or 1)
-                        rec[field] = rec[field] + qty
-                        rec.total = rec.total + qty
                     end
                 end
+
+                AddBucket(alt.equipment, "equipped")
+                AddBucket(alt.bags, "bags")
+                AddBucket(alt.bank, "bank")
+
+                buckets[alt.key] = {
+                    updatedAt = stamp,
+                    itemSeq = itemSeq,
+                    displayName = displayName,
+                    classFile = classFile,
+                    perItem = perItem,
+                }
             end
 
-            AddBucket(alt.equipment, "equipped")
-            AddBucket(alt.bags, "bags")
-            AddBucket(alt.bank, "bank")
-
-            buckets[alt.key] = {
-                updatedAt = stamp,
-                displayName = displayName,
-                classFile = classFile,
-                perItem = perItem,
-            }
-        end
-
-        for itemID, rec in pairs(perItem) do
-            local owners = index[itemID]
-            if not owners then
-                owners = {}
-                index[itemID] = owners
+            for itemID, rec in pairs(perItem) do
+                local owners = index[itemID]
+                if not owners then
+                    owners = {}
+                    index[itemID] = owners
+                end
+                owners[#owners + 1] = rec
             end
-            owners[#owners + 1] = rec
         end
     end
 
@@ -697,17 +800,32 @@ function Alts:RebuildItemIndex()
         end
     end
 
+    self._itemIndexFaction = wantFaction
     self.itemIndex = index
     return index
 end
 
-function Alts:GetItemOwners(itemID)
+function Alts:GetItemOwners(itemID, factionFilter)
     local numId = tonumber(itemID)
     if not numId or numId <= 0 then return nil end
-    if not self.itemIndex then
-        self:RebuildItemIndex()
+    local wantFaction = factionFilter
+    if wantFaction == nil then
+        wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    end
+    if not self.itemIndex or self._itemIndexFaction ~= wantFaction or self._itemIndexBuilt == false then
+        self:RebuildItemIndex(wantFaction)
     end
     return self.itemIndex and self.itemIndex[numId]
+end
+
+function Alts:GetAccountItemTotal(itemID, factionFilter)
+    local owners = self:GetItemOwners(itemID, factionFilter)
+    if not owners then return 0 end
+    local total = 0
+    for _, o in ipairs(owners) do
+        total = total + (o.total or 0)
+    end
+    return total
 end
 
 local function ExtractItemDisplayName(link)
@@ -715,30 +833,104 @@ local function ExtractItemDisplayName(link)
     return link:match("%[(.-)%]") or ""
 end
 
+function Alts:ResolveItemName(item)
+    if type(item) ~= "table" then return "" end
+    local fromLink = ExtractItemDisplayName(item.link)
+    if fromLink ~= "" then return fromLink end
+    if type(item.name) == "string" and item.name ~= "" then return item.name end
+    local id = tonumber(item.itemID)
+    if id and id > 0 and C_Item and C_Item.GetItemNameByID then
+        local ok, iName = pcall(C_Item.GetItemNameByID, id)
+        local clean = ok and Safe.String(iName) or nil
+        if clean and clean ~= "" then
+            return clean
+        end
+    end
+    if id and id > 0 then
+        return "Item #" .. tostring(id)
+    end
+    return ""
+end
+
+function Alts:GetLockouts(altData)
+    if type(altData) ~= "table" then return {} end
+    local now = time()
+    local curKey = CurrentAltKey()
+    local raw = (altData.key == curKey) and SnapshotLockouts(altData.lockouts) or altData.lockouts
+    local out = {}
+    if type(raw) ~= "table" then return out end
+    for _, lk in ipairs(raw) do
+        if type(lk) == "table" then
+            local rem
+            if altData.key == curKey then
+                rem = tonumber(lk.reset) or 0
+            elseif (lk.expiresAt or 0) > now then
+                rem = math.max(0, (lk.expiresAt or 0) - now)
+            end
+            if rem ~= nil and (rem > 0 or lk.locked or lk.extended) then
+                out[#out + 1] = {
+                    name = lk.name or "?",
+                    id = lk.id or 0,
+                    reset = rem,
+                    locked = lk.locked == true,
+                    extended = lk.extended == true,
+                    isRaid = lk.isRaid == true,
+                    difficultyName = lk.difficultyName or "",
+                    numEncounters = lk.numEncounters or 0,
+                    encounterProgress = lk.encounterProgress or 0,
+                }
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        return (a.reset or 0) < (b.reset or 0)
+    end)
+    return out
+end
+
+function Alts:GetMailStatus(altData)
+    if type(altData) ~= "table" or not altData.hasMail then
+        return false, 0, 30, nil
+    end
+    local ageDays = 0
+    if type(altData.mailSince) == "number" and altData.mailSince > 0 then
+        ageDays = math.floor(math.max(0, time() - altData.mailSince) / 86400)
+    end
+    local remDays = math.max(0, 30 - ageDays)
+    return true, ageDays, remDays, altData.mailSenders
+end
+
 --- Search items across all recorded characters on the current realm pool.
-function Alts:SearchAllItems(queryText, excludeAltKey)
+function Alts:SearchAllItems(queryText, excludeAltKey, sourceFilter, factionFilter)
     local q = Compat.Trim and Compat.Trim(queryText or "") or tostring(queryText or "")
     local qLow = q:lower()
+    local src = sourceFilter or "all"
     local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
-    local curKey = Compat.CharacterKey()
+    local curKey = CurrentAltKey()
+    local wantFaction = factionFilter
+    if wantFaction == nil then
+        wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    end
     local groups = {}
 
     local function ItemMatches(item)
         if qLow == "" then return true end
-        local iName = ExtractItemDisplayName(item.link):lower()
+        local iName = Alts:ResolveItemName(item):lower()
         return iName:find(qLow, 1, true) ~= nil
     end
 
     for _, alt in ipairs(alts) do
-        if type(alt) == "table" and alt.key ~= excludeAltKey then
+        local sameFac = (not wantFaction) or (not alt.faction) or (alt.faction == wantFaction)
+        if type(alt) == "table" and alt.key ~= excludeAltKey and sameFac then
             local matched = {}
-            if type(alt.equipment) == "table" then
+            if (src == "all" or src == "all_alts" or src == "equip") and type(alt.equipment) == "table" then
                 for slotId = 1, EQUIP_SLOT_COUNT do
                     local entry = alt.equipment[slotId]
                     if entry and (entry.icon or entry.itemID or entry.link) and ItemMatches(entry) then
                         matched[#matched + 1] = {
                             itemID = entry.itemID,
                             link = entry.link,
+                            name = entry.name,
                             icon = entry.icon,
                             quality = entry.quality,
                             count = 1,
@@ -749,12 +941,13 @@ function Alts:SearchAllItems(queryText, excludeAltKey)
                     end
                 end
             end
-            if type(alt.bags) == "table" then
+            if (src == "all" or src == "all_alts" or src == "bags") and type(alt.bags) == "table" then
                 for _, entry in ipairs(alt.bags) do
                     if ItemMatches(entry) then
                         matched[#matched + 1] = {
                             itemID = entry.itemID,
                             link = entry.link,
+                            name = entry.name,
                             icon = entry.icon,
                             quality = entry.quality,
                             count = entry.count or 1,
@@ -763,12 +956,13 @@ function Alts:SearchAllItems(queryText, excludeAltKey)
                     end
                 end
             end
-            if type(alt.bank) == "table" then
+            if (src == "all" or src == "all_alts" or src == "bank") and type(alt.bank) == "table" then
                 for _, entry in ipairs(alt.bank) do
                     if ItemMatches(entry) then
                         matched[#matched + 1] = {
                             itemID = entry.itemID,
                             link = entry.link,
+                            name = entry.name,
                             icon = entry.icon,
                             quality = entry.quality,
                             count = entry.count or 1,
@@ -886,47 +1080,9 @@ local function RegisterItemTooltipIntegration()
     end
 end
 
-function Alts:SetSurname(altKey, rawSurname)
-    if not (ns.db and ns.db.alts and altKey and ns.db.alts[altKey]) then
-        return false
-    end
-    local rec = ns.db.alts[altKey]
-    local first = rec.firstName or rec.name or Safe.String(Safe.Call(UnitName, "player")) or ""
-    local cleaned = Compat.CleanInput(rawSurname)
-    if cleaned then
-        -- Accept either "Surname" or "FirstName Surname"; store the Forever surname token cleanly.
-        local firstLower = first:lower()
-        local parsed = Compat.ParseForeverFullName(cleaned)
-        local surnameToken
-        if parsed and parsed.surname and parsed.firstName:lower() == firstLower then
-            surnameToken = parsed.surname
-        else
-            surnameToken = cleaned:match("^([^%s%-]+)")
-        end
-        if not surnameToken or surnameToken == "" then
-            return false
-        end
-        rec.firstName = first
-        rec.surname = surnameToken
-        rec.fullName = first .. " " .. surnameToken
-        rec.userSetSurname = true
-        if altKey == Compat.CharacterKey() and Compat.CacheForeverFullName then
-            local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
-            Compat.CacheForeverFullName(myGuid, rec.fullName, rec.firstName)
-        end
-    else
-        rec.firstName = first
-        rec.surname = nil
-        rec.fullName = first
-        rec.userSetSurname = false
-    end
-    ns:Emit("ALTS_UPDATED")
-    return true
-end
-
 function Alts:RemoveAlt(altKey)
     if not (ns.db and ns.db.alts and altKey) then return false end
-    if altKey == Compat.CharacterKey() then
+    if altKey == CurrentAltKey() then
         ns:Print(L["Cannot remove the currently logged-in character."])
         return false
     end
@@ -945,25 +1101,35 @@ end
 function Alts:Init()
     RegisterItemTooltipIntegration()
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
-        if ns.db and ns.db.alts and not ns.db.alts[Compat.CharacterKey()] then
+        local curKey = CurrentAltKey()
+        if ns.db and ns.db.alts and curKey and not ns.db.alts[curKey] then
             self:Snapshot(false)
         else
             self:QueueSnapshot(false, 1.5)
         end
+        if RequestRaidInfo and not self._raidInfoRequested and C_Timer and C_Timer.After then
+            self._raidInfoRequested = true
+            C_Timer.After(3.0, function()
+                pcall(RequestRaidInfo)
+            end)
+        end
         if not self._mailExpiryWarned and C_Timer and C_Timer.After then
             self._mailExpiryWarned = true
             C_Timer.After(6.5, function()
-                local curKey = Compat.CharacterKey()
+                local myAltKey = CurrentAltKey()
                 local nowTs = time()
                 local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
+                local pendingAlts = {}
                 for _, alt in ipairs(alts) do
-                    if type(alt) == "table" and alt.key ~= curKey and alt.hasMail and alt.mailSince then
+                    if type(alt) == "table" and alt.key ~= myAltKey and alt.hasMail and alt.mailSince then
                         local ageDays = math.floor((nowTs - alt.mailSince) / 86400)
-                        if ageDays >= 15 then
-                            ns:Print(string.format(L["Mail Reminder: %s has had unclaimed mail for %d days (expires after 30 days)."], alt.fullName or alt.name or "Alt", ageDays))
-                            break
+                        if ageDays >= 7 then
+                            pendingAlts[#pendingAlts + 1] = ("%s (%dd+)"):format(alt.fullName or alt.name or "Alt", ageDays)
                         end
                     end
+                end
+                if #pendingAlts > 0 then
+                    ns:Print(string.format(L["Mail Reminder: Unclaimed mail detected earlier on: %s."], table.concat(pendingAlts, ", ")))
                 end
             end)
         end
@@ -991,6 +1157,7 @@ function Alts:Init()
     end
 
     ns.RegisterEvent(self, "PLAYER_LEVEL_UP", function()
+        self._dirtyLocks = true
         self:QueueSnapshot(false, 1.0)
     end)
 
@@ -1000,33 +1167,53 @@ function Alts:Init()
         end
     end)
 
-    for _, itemEvent in ipairs({
-        "PLAYER_EQUIPMENT_CHANGED",
-        "SKILL_LINES_CHANGED",
-        "TRADE_SKILL_UPDATE",
-        "PLAYER_AVG_ITEM_LEVEL_UPDATE",
-    }) do
-        ns.RegisterEvent(self, itemEvent, function()
+    ns.RegisterEvent(self, "PLAYER_EQUIPMENT_CHANGED", function(_, _, slotId)
+        local sid = tonumber(slotId)
+        if sid and sid >= 1 and sid <= EQUIP_SLOT_COUNT then
+            self._dirtyEquipSlots = self._dirtyEquipSlots or {}
+            self._dirtyEquipSlots[sid] = true
+        else
+            self._dirtyEquipAll = true
+        end
+        self:QueueSnapshot(false, 0.8)
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_AVG_ITEM_LEVEL_UPDATE", function()
+        self:QueueSnapshot(false, 1.0)
+    end)
+
+    for _, skillEvent in ipairs({ "SKILL_LINES_CHANGED", "TRADE_SKILL_UPDATE" }) do
+        ns.RegisterEvent(self, skillEvent, function()
+            self._dirtyProfs = true
             self:QueueSnapshot(false, 1.5)
         end)
     end
 
+    ns.RegisterEvent(self, "BAG_UPDATE", function(_, _, bagId)
+        self._sawBagUpdateEvent = true
+        local b = tonumber(bagId)
+        if b and b >= 0 and b <= 4 then
+            self._dirtyBags = self._dirtyBags or {}
+            self._dirtyBags[b] = true
+        elseif b == nil then
+            self._dirtyBagsAll = true
+        end
+    end)
+
     ns.RegisterEvent(self, "BAG_UPDATE_DELAYED", function()
-        local bankShown = _G.BankFrame and _G.BankFrame.IsShown and _G.BankFrame:IsShown()
+        if not self._sawBagUpdateEvent then
+            self._dirtyBagsAll = true
+        end
+        local bankShown = (self._bankOpen == true) or (_G.BankFrame and _G.BankFrame.IsShown and _G.BankFrame:IsShown())
         self:QueueSnapshot(bankShown == true, bankShown and 0.4 or 1.5)
     end)
 
     ns.RegisterEvent(self, "GUILD_ROSTER_UPDATE", function()
         if mySurnameConfirmed or not (ns.db and ns.db.alts) then return end
-        local key = Compat.CharacterKey()
-        local rec = ns.db.alts[key]
-        if type(rec) ~= "table" or rec.userSetSurname then
-            if type(rec) == "table" and rec.userSetSurname then
-                mySurnameConfirmed = true
-                UnregisterSurnameChatEvents()
-            end
-            return
-        end
+        local key = CurrentAltKey()
+        local rec = key and ns.db.alts[key]
+        if type(rec) ~= "table" then return end
+        if rec.userSetSurname ~= nil then rec.userSetSurname = nil end
         local resolved = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName(rec.fullName)
         if resolved and resolved.surname and resolved.fullName and resolved.fullName ~= rec.fullName then
             rec.firstName = resolved.firstName or rec.firstName
@@ -1041,11 +1228,20 @@ function Alts:Init()
 
     ns.RegisterEvent(self, "UPDATE_INSTANCE_INFO", function()
         self._instanceInfoReady = true
+        self._dirtyLocks = true
         self:QueueSnapshot(false, 0.8)
     end)
 
+    ns.RegisterEvent(self, "BANKFRAME_OPENED", function()
+        self._bankOpen = true
+        self:QueueSnapshot(true, 0.25)
+    end)
+
+    ns.RegisterEvent(self, "BANKFRAME_CLOSED", function()
+        self._bankOpen = false
+    end)
+
     for _, bankEvent in ipairs({
-        "BANKFRAME_OPENED",
         "PLAYERBANKSLOTS_CHANGED",
         "PLAYERREAGENTBANKSLOTS_CHANGED",
         "REAGENTBANK_UPDATE",
@@ -1059,13 +1255,21 @@ function Alts:Init()
     ns.RegisterEvent(self, "PLAYER_INTERACTION_MANAGER_FRAME_SHOW", function(_, _, interactionType)
         local bankerType = Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.Banker
         if bankerType and interactionType == bankerType then
-            self:QueueSnapshot(true, 0.5)
+            self._bankOpen = true
+            self:QueueSnapshot(true, 0.35)
         end
     end)
 
-    local key = Compat.CharacterKey and Compat.CharacterKey()
+    ns.RegisterEvent(self, "PLAYER_INTERACTION_MANAGER_FRAME_HIDE", function(_, _, interactionType)
+        local bankerType = Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.Banker
+        if bankerType and interactionType == bankerType then
+            self._bankOpen = false
+        end
+    end)
+
+    local key = CurrentAltKey()
     local rec = key and ns.db and ns.db.alts and ns.db.alts[key]
-    if rec and (rec.userSetSurname or (rec.surname and rec.surname ~= "")) then
+    if rec and rec.surname and rec.surname ~= "" then
         mySurnameConfirmed = true
     end
 

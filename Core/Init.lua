@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.14"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.14" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.15"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.15" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -147,6 +147,13 @@ local DEFAULTS = {
         worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
         worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
         worldBuffsMapPins = true,   -- show minimalist World Buff pins & hover summary on World Map (M)
+        embedSocialWindow = true,   -- integrate SocialCentral side-tab inside Social / Friends (O)
+        embedLfgWindow = true,      -- integrate Clans & Allies LFG tab inside Group Finder (I)
+        embedGuildWindow = true,    -- integrate Guild Hub & Diplomacy side-tab inside Communities / Guild (J)
+        embedCharacterWindow = true, -- integrate My Alts side-tab inside Character window (C)
+        embedWorldMap = true,       -- integrate World Buffs badge & pins inside World Map (M)
+        hideGuildFeaturesWhenNoGuild = true, -- automatically hide guild tabs/options when current character has no guild
+        spotterScoutAlert = true,   -- notify on shared Scout sighting alerts from guildmates
         tooltipItemAlts = true,     -- show alt bag/bank/equipped item counts inside item tooltips
         tooltipPlayerNotes = true,  -- show Social Card notes, red flags & companion context inside player tooltips
         globalChatLfgScan = true,   -- passively index dungeon/raid LFG posts from public chat channels
@@ -307,7 +314,7 @@ local function HandleSlash(raw)
         ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"])
         ns:Print("  |cffffd200/sc toast [invite|friend|watchlist|buff|queue|clear]|r — %s", L["Test Notification Toast"])
         ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
-        ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Next"])
+        ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Watchlist character"])
         ns:Print("  |cffffd200/sc resetpos|r — %s", L["Reset Window Positions"])
     else
         if ns.Settings and ns.Settings.Toggle then
@@ -569,8 +576,13 @@ function ns:NavigateToModule(modName, opts)
     if (opts.socialFilter or opts.socialSearch or opts.watchlistSearch ~= nil) and ns.UI and ns.UI.SetSocialNavigation then
         ns.UI:SetSocialNavigation(opts)
     end
-    if opts.clanRightView and ns.Clan and ns.Clan.SetPreferredRightView then
+    if opts.clanRightView == "browse" and ns.LFGFrameTab then
+        ns.LFGFrameTab.viewMode = "browse"
+    elseif opts.clanRightView and ns.Clan and ns.Clan.SetPreferredRightView then
         ns.Clan:SetPreferredRightView(opts.clanRightView)
+    end
+    if opts.pendingRoomId and not opts.threadKey and ns.Chat and ns.Chat.SetActiveThread and ns.Chat.GetRoom and ns.Chat:GetRoom(opts.pendingRoomId) then
+        ns.Chat:SetActiveThread("room:" .. tostring(opts.pendingRoomId))
     end
     if opts.threadKey and ns.Chat and ns.Chat.SetActiveThread then
         ns.Chat:SetActiveThread(opts.threadKey)
@@ -677,9 +689,17 @@ if EventRegistry and EventRegistry.RegisterCallback then
         else
             local who = link:match("addon:SCentral:w:([^|]+)")
             if who and who ~= "" then
-                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(who)
+                local lookup = ns.Compat and ns.Compat.ParseCharacterFields and ns.Compat.ParseCharacterFields(who) or who:lower()
+                local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and lookup and ns.Social:GetBNetLinkInfo(lookup)
+                local bnetAccId = bInfo and bInfo.bnetAccountID or nil
+                local bnetName = bInfo and bInfo.bnetName or nil
+                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(who, bnetAccId)
                 if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
-                    ns:NavigateToModule("chat", { targetName = who })
+                    ns:NavigateToModule("chat", {
+                        targetName = who,
+                        bnetAccountID = bnetAccId,
+                        bnetName = bnetName,
+                    })
                 elseif ns.Compat and ns.Compat.Whisper then
                     ns.Compat.Whisper(who)
                 end

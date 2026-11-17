@@ -188,7 +188,7 @@ local function PopulateTooltip(tt)
     local clickMode = (ns.db and ns.db.settings and ns.db.settings.minimapLeftClickAction) or "smart"
     local leftHint = (clickMode == "menu") and L["Left-click: choose Main Window or Settings"]
         or (clickMode == "hub" and L["Left-click: open Main Window"] or L["Left-click: open Unread Chat or Main Window"])
-    tt:AddLine(leftHint .. "\n" .. L["Alt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+    tt:AddLine(leftHint .. "\n" .. L["Alt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
 end
 
 function MinimapBtn:PopulateSummaryTooltip(tt)
@@ -217,15 +217,19 @@ local function OpenContextMenu(anchor)
                 end
             end)
             root:CreateDivider()
-            root:CreateButton(L["Looking for Group (I)"], function()
-                OpenViaOfficialOrHub("lfg")
-            end)
+            if not ns.Compat or not ns.Compat.IsWindowIntegrationEnabled or ns.Compat.IsWindowIntegrationEnabled("I") then
+                root:CreateButton(L["Looking for Group (I)"], function()
+                    OpenViaOfficialOrHub("lfg")
+                end)
+            end
             root:CreateButton(L["Social & Watchlist (O)"], function()
                 OpenViaOfficialOrHub("watchlist")
             end)
-            root:CreateButton(L["Clan Hub & Diplomacy (J)"], function()
-                OpenViaOfficialOrHub("clan")
-            end)
+            if not ns.Compat or not ns.Compat.ShouldShowGuildFeatures or ns.Compat.ShouldShowGuildFeatures() then
+                root:CreateButton(L["Clan Hub & Diplomacy (J)"], function()
+                    OpenViaOfficialOrHub("clan")
+                end)
+            end
             root:CreateButton(L["My Alts (C)"], function()
                 OpenViaOfficialOrHub("alts")
             end)
@@ -235,7 +239,7 @@ local function OpenContextMenu(anchor)
             root:CreateButton(L["World Buffs (M)"], function()
                 OpenViaOfficialOrHub("buffs")
             end)
-            root:CreateButton(L["Open Unified Hub"], function()
+            root:CreateButton(L["Open Main Window"], function()
                 if ns.UI and ns.UI.ShowHub then
                     ns.UI:ShowHub()
                 elseif ns.UI then
@@ -252,9 +256,6 @@ local function OpenContextMenu(anchor)
             end
             root:CreateButton(radarLabel, function()
                 if ns.SpotterHUD and ns.SpotterHUD.Toggle then ns.SpotterHUD:Toggle() end
-            end)
-            root:CreateButton(L["Check Next"], function()
-                if ns.Watchlist then ns.Watchlist:CheckNext() end
             end)
             if ns.Chat and ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(true) > 0 then
                 root:CreateButton(L["Mark All Conversations Read"], function()

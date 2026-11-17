@@ -201,9 +201,17 @@ local function SystemChatFilter(_, _, msg)
 end
 
 local function CleanupPending()
-    local wasSilentUi = Watchlist.pending and Watchlist.pending.mode == "silent_ui"
+    local pending = Watchlist.pending
+    local wasSilentUi = pending and pending.mode == "silent_ui"
+    local prevWhoToUi = pending and pending.prevWhoToUi
     RestoreFriendsFrameEvent()
-    if wasSilentUi then
+    if wasSilentUi and prevWhoToUi ~= nil then
+        if C_FriendList and C_FriendList.SetWhoToUi then
+            pcall(C_FriendList.SetWhoToUi, prevWhoToUi == true)
+        elseif SetWhoToUI then
+            pcall(SetWhoToUI, prevWhoToUi == true and 1 or 0)
+        end
+    elseif wasSilentUi then
         if C_FriendList and C_FriendList.SetWhoToUi then
             pcall(C_FriendList.SetWhoToUi, false)
         elseif SetWhoToUI then
@@ -606,6 +614,11 @@ function Watchlist:GetNameSuggestions(queryText, maxResults)
         if parsed.surname and parsed.surname ~= "" then score = score + 40 end
         if online then score = score + 25 end
         if startsFull then score = score + 35 elseif startsFirst or startsSurname then score = score + 20 end
+        local aff = (Store and Store.GetPlayerAffinityScore) and Store:GetPlayerAffinityScore(parsed.lookupKey) or 0
+        if aff <= -500 then
+            return
+        end
+        score = score + math.max(0, math.min(120, math.floor(aff * 0.4)))
 
         local existing = candidates[parsed.lookupKey]
         if existing then
@@ -650,8 +663,8 @@ function Watchlist:GetNameSuggestions(queryText, maxResults)
     end
     if Store and Store.GetRecentCompanionsList then
         for _, comp in ipairs(Store:GetRecentCompanionsList()) do
-            if type(comp) == "table" and comp.name then
-                Consider(comp.name, comp.classFile, comp.level, false, nil, L["Recent"], 20)
+            if type(comp) == "table" and (comp.displayName or comp.name) then
+                Consider(comp.displayName or comp.name, comp.classFile, comp.level, false, nil, L["Recent"], 20)
             end
         end
     end
@@ -705,7 +718,6 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
         local isPendingTarget = (entry.id == pending.id or listKey == pending.id)
 
         if isMultiFirstCollision then
-            local prevStatus = entry.status
             entry.status = "online"
             entry.source = "who"
             entry.lastChecked = now
@@ -727,14 +739,13 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                 matchedTarget = true
                 disambiguateTarget = entry
             end
-            if prevStatus ~= "online" then
-                Store:NotifyWatchlistOnline(entry)
-            end
         else
             for _, m in ipairs(matches) do
                 local parsed = m.parsed
                 if parsed and MatchEntry(entry, parsed) then
                     local prevStatus = entry.status
+                    local hasSurname = type(entry.surname) == "string" and entry.surname ~= ""
+                    local candidateOnly = (not hasSurname) and parsed.surname and parsed.surname ~= ""
                     entry.status = "online"
                     entry.source = "who"
                     entry.lastChecked = now
@@ -745,22 +756,16 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                     if m.classFile then entry.classFile = m.classFile end
                     if m.area and m.area ~= "" then entry.area = m.area end
                     if m.guild and m.guild ~= "" then entry.guild = m.guild end
-                    if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
-                        local oldId = entry.id or listKey
-                        entry.surname = parsed.surname
-                        entry.displayName = parsed.displayName
-                        entry.id = parsed.lookupKey
-                        entry.observedCandidate = nil
-                        if oldId ~= entry.id then
-                            toRekey = toRekey or {}
-                            toRekey[#toRekey + 1] = { oldId = oldId, listKey = listKey, newId = entry.id, entry = entry }
-                        end
+                    if candidateOnly then
+                        entry.observedCandidate = parsed.displayName
                         if Compat.CacheForeverFullName then
                             Compat.CacheForeverFullName(nil, parsed.displayName, parsed.firstName)
                         end
-                    end
-                    if prevStatus ~= "online" then
+                    elseif prevStatus ~= "online" then
                         Store:NotifyWatchlistOnline(entry)
+                    end
+                    if not candidateOnly and parsed.surname and parsed.surname ~= "" and ns.Clan and ns.Clan.QueueCooperativeSighting then
+                        ns.Clan:QueueCooperativeSighting(parsed.displayName, entry.guid, m.level, m.classFile, m.guild, m.area)
                     end
                     if isPendingTarget then
                         matchedTarget = true
@@ -856,6 +861,7 @@ function Watchlist:CheckEntry(id, silent)
             classFile = socRow.classFile,
             area = socRow.area,
             guildName = socRow.guild,
+            guild = socRow.guild,
             source = src,
         }, { suppressAlert = true })
         return true, "social_online"
@@ -909,10 +915,19 @@ function Watchlist:CheckEntry(id, silent)
     local token = self.tokenCounter
     local mode = GetWhoMode()
 
+    local prevWhoToUi = nil
+    if mode == "silent_ui" then
+        if C_FriendList and C_FriendList.GetWhoToUi then
+            local okW, curW = pcall(C_FriendList.GetWhoToUi)
+            if okW then prevWhoToUi = (curW == true) end
+        end
+    end
+
     self.pending = {
         id = entry.id,
         displayName = entry.displayName,
         mode = mode,
+        prevWhoToUi = prevWhoToUi,
         token = token,
         silent = silent == true,
     }
@@ -965,6 +980,30 @@ function Watchlist:CheckEntry(id, silent)
     return true
 end
 
+-- Expected Information Gain (VOI) priority for /who checks (unknown & active favorites first, O(M) single pass).
+local function ComputeWatchlistCheckPriority(entry, now)
+    if type(entry) ~= "table" then return -1 end
+    local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
+    local isPassiveKnown = (socRow ~= nil) or (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
+    if socRow and socRow.online == true then
+        return -1
+    end
+    local age = entry.lastChecked and math.max(0, now - entry.lastChecked) or 999999
+    local isUnknown = (entry.status == "unknown")
+    if not isUnknown then
+        local minAge = isPassiveKnown and 120 or 45
+        if age < minAge then
+            return -1
+        end
+    end
+    local favMult = (entry.favorite == true) and 1.8 or 1.0
+    local seenAge = entry.lastSeen and math.max(0, now - entry.lastSeen) or (14 * 86400)
+    local activePrior = 1.0 + (0.5 / (1 + (seenAge / 86400)))
+    local passivePenalty = isPassiveKnown and 0.15 or 1.0
+    local base = isUnknown and (1000000 + math.min(age, 86400)) or age
+    return base * favMult * activePrior * passivePenalty
+end
+
 -- Picks the entry needing verification most urgently, skipping Friends/Guildmates already confirmed online in Social.
 function Watchlist:CheckNext(silent)
     if ns.Social and ns.Social.Scan then
@@ -978,16 +1017,31 @@ function Watchlist:CheckNext(silent)
         return false, "empty"
     end
 
-    local needWho = {}
+    local now = time()
+    local needCount = 0
+    local best, bestPrio = nil, -1
+    local oldestFallback, oldestChecked, oldestAdded = nil, nil, nil
     for _, entry in ipairs(entries) do
         local isPassiveOnline = (entry.status == "online")
             and (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
         if not isPassiveOnline then
-            needWho[#needWho + 1] = entry
+            needCount = needCount + 1
+            local prio = ComputeWatchlistCheckPriority(entry, now)
+            if prio > bestPrio then
+                bestPrio = prio
+                best = entry
+            end
+            local lc = entry.lastChecked or 0
+            local aa = entry.addedAt or 0
+            if (not oldestFallback) or lc < oldestChecked or (lc == oldestChecked and aa < oldestAdded) then
+                oldestFallback = entry
+                oldestChecked = lc
+                oldestAdded = aa
+            end
         end
     end
 
-    if #needWho == 0 then
+    if needCount == 0 then
         if not silent then
             ns:Print(L["All %d Watchlist players are already confirmed online via Friends or Guild."]:format(#entries))
         end
@@ -995,14 +1049,8 @@ function Watchlist:CheckNext(silent)
         return true, "passive_ok"
     end
 
-    table.sort(needWho, function(a, b)
-        local ca = a.lastChecked or 0
-        local cb = b.lastChecked or 0
-        if ca ~= cb then return ca < cb end
-        return (a.addedAt or 0) < (b.addedAt or 0)
-    end)
-
-    return self:CheckEntry(needWho[1].id, silent)
+    local chosen = best or oldestFallback
+    return chosen and self:CheckEntry(chosen.id, silent) or false
 end
 
 -- Automatically checks the next non-friend/non-guild (or stale) Watchlist entry from a genuine hardware click.
@@ -1028,20 +1076,12 @@ function Watchlist:AutoCheckNextFromHardwareClick(preferredId)
     local entries = self:GetEntries()
     if #entries == 0 then return false end
 
-    local best = nil
-    local bestScore = -1
+    local best, bestScore = nil, -1
     for _, entry in ipairs(entries) do
-        local socRow = Store.socialByLookup and Store.socialByLookup[entry.id]
-        if not (socRow and socRow.online == true) then
-            local age = entry.lastChecked and (now - entry.lastChecked) or 999999
-            local isFriendOrGuild = (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
-            if entry.status == "unknown" or (not isFriendOrGuild and age >= 45) or (isFriendOrGuild and age >= 120) then
-                local score = age + ((entry.status == "unknown") and 1000000 or 0)
-                if score > bestScore then
-                    bestScore = score
-                    best = entry
-                end
-            end
+        local prio = ComputeWatchlistCheckPriority(entry, now)
+        if prio > bestScore then
+            bestScore = prio
+            best = entry
         end
     end
 
