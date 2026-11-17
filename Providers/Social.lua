@@ -19,6 +19,7 @@ local FRIEND_LOGIN_GRACE_SEC = 8.0
 local scanQueued = false
 local lastScanAt = 0
 local loginMonoAt = (GetTime and GetTime()) or 0
+local reconnectGraceUntil = 0
 local hasInitialScan = false
 
 local prevWowOnline = {}
@@ -543,7 +544,7 @@ local function CheckFriendOnlineTransitions(dirMap)
     local monoNow = (GetTime and GetTime()) or 0
     local settings = ns.db and ns.db.settings
     local alertMode = settings and settings.friendOnlineAlertMode or "all"
-    local inGrace = (not hasInitialScan) or ((monoNow - loginMonoAt) < FRIEND_LOGIN_GRACE_SEC)
+    local inGrace = (not hasInitialScan) or ((monoNow - loginMonoAt) < FRIEND_LOGIN_GRACE_SEC) or (monoNow < reconnectGraceUntil)
     local notifiedByLookup = {}
 
     if inGrace or alertMode == "off" then
@@ -564,16 +565,13 @@ local function CheckFriendOnlineTransitions(dirMap)
                 local wlEntry = row.lookupKey and wl and wl[row.lookupKey]
                 local isMuted = Store.IsPlayerNotifyMuted and Store:IsPlayerNotifyMuted(row.lookupKey, wlEntry, row.bnetAccountID)
                 local isFav = row.bnetFavorite == true or (row.lookupKey and Store.IsSocialFavorite and Store:IsSocialFavorite(row.lookupKey))
-                if ns.Chat and ns.Chat.QueuePoliteDiscoveryPing and row.bnetAccountID then
-                    local isSavedPeer = row.lookupKey and ns.Chat.GetSavedPeerRecord and ns.Chat:GetSavedPeerRecord(row.lookupKey)
-                    if isSavedPeer then
-                        ns.Chat:QueuePoliteDiscoveryPing({
-                            targetName = row.hasCharacterName ~= false and row.displayName or nil,
-                            bnetAccountID = row.bnetAccountID,
-                            lookupKey = row.lookupKey,
-                            guid = row.guid,
-                        })
-                    end
+                if ns.Chat and ns.Chat.QueuePoliteDiscoveryPing and row.bnetAccountID and row.bnetState == "wow_forever" then
+                    ns.Chat:QueuePoliteDiscoveryPing({
+                        targetName = row.hasCharacterName ~= false and row.displayName or nil,
+                        bnetAccountID = row.bnetAccountID,
+                        lookupKey = row.lookupKey,
+                        guid = row.guid,
+                    })
                 end
                 local shouldNotify = (not isMuted) and (isOptedGuild or alertMode == "all" or (alertMode == "favorites" and isFav))
                 if shouldNotify then
@@ -613,7 +611,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                             didChat = true
                         end
                         if settings.friendOnlineAlertSound ~= false and PlaySound and SOUNDKIT then
-                            local sid = SOUNDKIT.UI_BNET_TOAST or SOUNDKIT.TELL_MESSAGE
+                            local sid = SOUNDKIT.MAP_PING or 3175
                             if sid then
                                 pcall(PlaySound, sid, "Master")
                                 didSound = true
@@ -995,6 +993,15 @@ function Social:Init()
             Social:QueueScan()
         end)
     end
+
+    ns.RegisterEvent(self, "BN_CONNECTED", function()
+        reconnectGraceUntil = ((GetTime and GetTime()) or 0) + 10.0
+        Social:QueueScan(1.5)
+    end)
+    ns.RegisterEvent(self, "BN_DISCONNECTED", function()
+        reconnectGraceUntil = ((GetTime and GetTime()) or 0) + 10.0
+        Social:QueueScan(0.5)
+    end)
 
     C_Timer.After(2, function()
         self:RequestRosters(true)

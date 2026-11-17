@@ -502,6 +502,164 @@ local function MatchEntry(entry, candidateParsed)
     return false
 end
 
+function Watchlist:ResolveDisambiguation(entryId, chosenFullName, choiceMeta)
+    if not entryId or not chosenFullName then return false end
+    local list = Store:GetWatchlistTable()
+    local entry = list[entryId] or self:GetEntry(entryId)
+    if not entry then return false end
+    local parsed = Compat.ParseCharacterName(chosenFullName)
+    if not parsed then return false end
+
+    local oldId = entry.id or entryId
+    local now = time()
+    entry.firstName = parsed.firstName
+    entry.surname = parsed.surname
+    entry.displayName = parsed.displayName
+    entry.id = parsed.lookupKey
+    entry.observedCandidate = nil
+    entry.ambiguousChoices = nil
+    entry.truncatedWarning = nil
+    entry.lastChecked = now
+    if type(choiceMeta) == "table" then
+        entry.status = "online"
+        entry.source = "who"
+        entry.lastSeen = now
+        if choiceMeta.level and choiceMeta.level > 0 then entry.level = choiceMeta.level end
+        if choiceMeta.classFile then entry.classFile = choiceMeta.classFile end
+        if choiceMeta.area and choiceMeta.area ~= "" then entry.area = choiceMeta.area end
+        if choiceMeta.guild and choiceMeta.guild ~= "" then entry.guild = choiceMeta.guild end
+    end
+
+    if Compat.CacheForeverFullName then
+        Compat.CacheForeverFullName(entry.guid, parsed.displayName, parsed.firstName)
+    end
+
+    if oldId ~= parsed.lookupKey then
+        local existing = list[parsed.lookupKey]
+        if existing and existing ~= entry then
+            existing.favorite = existing.favorite or entry.favorite
+            if (not existing.note or existing.note == "") and entry.note and entry.note ~= "" then
+                existing.note = entry.note
+            end
+            existing.status = entry.status or existing.status
+            existing.source = entry.source or existing.source
+            existing.lastChecked = entry.lastChecked or existing.lastChecked
+            existing.lastSeen = entry.lastSeen or existing.lastSeen
+            if entry.level and entry.level > 0 then existing.level = entry.level end
+            if entry.classFile then existing.classFile = entry.classFile end
+            if entry.area and entry.area ~= "" then existing.area = entry.area end
+            if entry.guild and entry.guild ~= "" then existing.guild = entry.guild end
+        else
+            list[parsed.lookupKey] = entry
+        end
+        list[oldId] = nil
+        list[entryId] = nil
+    end
+
+    Watchlist._wlIndexDirty = true
+    if Store and Store.InvalidateWatchlistIndex then
+        Store:InvalidateWatchlistIndex()
+    end
+    ns:Print(L["Watchlist updated to exact character: %s"]:format(parsed.displayName))
+    ns:Emit("WATCHLIST_UPDATED")
+    return true
+end
+
+function Watchlist:GetNameSuggestions(queryText, maxResults)
+    local q = (Compat.CleanInput and Compat.CleanInput(queryText or "")) or tostring(queryText or "")
+    q = Compat.Trim and Compat.Trim(q) or q:match("^%s*(.-)%s*$")
+    if #q < 2 then return {} end
+
+    local qLow = q:lower()
+    local limit = tonumber(maxResults) or 6
+    local list = Store:GetWatchlistTable()
+    local candidates = {}
+
+    local function Consider(displayName, classFile, level, online, guild, srcLabel, priorityBase)
+        local parsed = displayName and Compat.ParseCharacterName and Compat.ParseCharacterName(displayName)
+        if not parsed or not parsed.lookupKey then return end
+        if Compat.IsMe and Compat.IsMe(parsed.displayName) then return end
+        if list[parsed.lookupKey] then return end
+
+        local dLow = parsed.displayName:lower()
+        local fLow = (parsed.firstName or ""):lower()
+        local sLow = (parsed.surname or ""):lower()
+        local startsFirst = fLow:sub(1, #qLow) == qLow
+        local startsFull = dLow:sub(1, #qLow) == qLow
+        local startsSurname = sLow ~= "" and sLow:sub(1, #qLow) == qLow
+        local containsAny = dLow:find(qLow, 1, true) ~= nil
+        if not (startsFirst or startsFull or startsSurname or containsAny) then
+            return
+        end
+
+        local score = priorityBase or 10
+        if parsed.surname and parsed.surname ~= "" then score = score + 40 end
+        if online then score = score + 25 end
+        if startsFull then score = score + 35 elseif startsFirst or startsSurname then score = score + 20 end
+
+        local existing = candidates[parsed.lookupKey]
+        if existing then
+            if score > existing.score then existing.score = score end
+            if not existing.classFile and classFile then existing.classFile = classFile end
+            if (not existing.level or existing.level <= 0) and level and level > 0 then existing.level = level end
+            if (not existing.guild or existing.guild == "") and guild and guild ~= "" then existing.guild = guild end
+            if online then existing.online = true end
+            return
+        end
+        candidates[parsed.lookupKey] = {
+            displayName = parsed.displayName,
+            firstName = parsed.firstName,
+            surname = parsed.surname,
+            lookupKey = parsed.lookupKey,
+            classFile = classFile,
+            level = (level and level > 0) and level or nil,
+            online = online == true,
+            guild = (guild and guild ~= "") and guild or nil,
+            sourceLabel = srcLabel,
+            score = score,
+        }
+    end
+
+    if Store and type(Store.socialDirectory) == "table" then
+        for _, row in pairs(Store.socialDirectory) do
+            if type(row) == "table" and row.samePool ~= false and row.hasCharacterName ~= false and row.displayName then
+                local src = (row.sources and row.sources.friend and L["Friend"])
+                    or (row.sources and row.sources.guild and L["Guild"])
+                    or (row.sources and row.sources.bnet and "Battle.net")
+                    or L["Social"]
+                Consider(row.displayName, row.classFile, row.level, row.online, row.guild, src, 50)
+            end
+        end
+    end
+    if Store and type(Store.nearby) == "table" then
+        for _, row in pairs(Store.nearby) do
+            if type(row) == "table" and row.displayName then
+                Consider(row.displayName, row.classFile, row.level, true, row.guild, L["Nearby"], 30)
+            end
+        end
+    end
+    if Store and Store.GetRecentCompanionsList then
+        for _, comp in ipairs(Store:GetRecentCompanionsList()) do
+            if type(comp) == "table" and comp.name then
+                Consider(comp.name, comp.classFile, comp.level, false, nil, L["Recent"], 20)
+            end
+        end
+    end
+
+    local out = {}
+    for _, item in pairs(candidates) do
+        out[#out + 1] = item
+    end
+    table.sort(out, function(a, b)
+        if a.score ~= b.score then return a.score > b.score end
+        return (a.displayName or "") < (b.displayName or "")
+    end)
+    while #out > limit do
+        table.remove(out)
+    end
+    return out
+end
+
 function Watchlist:ApplyWhoResults(matches, totalCount)
     local pending = self.pending
     if not pending then return end
@@ -510,40 +668,93 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
     local now = time()
     local matchedTarget = false
     local toRekey
+    local disambiguateTarget
 
     for listKey, entry in pairs(list) do
+        local firstCandidates = {}
+        local seenKeys = {}
         for _, m in ipairs(matches) do
             local parsed = m.parsed
             if parsed and MatchEntry(entry, parsed) then
-                local prevStatus = entry.status
-                local isPendingTarget = (entry.id == pending.id or listKey == pending.id)
-                entry.status = "online"
-                entry.source = "who"
-                entry.lastChecked = now
-                entry.lastSeen = now
-                entry.truncatedWarning = nil
-                if m.level and m.level > 0 then entry.level = m.level end
-                if m.classFile then entry.classFile = m.classFile end
-                if m.area and m.area ~= "" then entry.area = m.area end
-                if m.guild and m.guild ~= "" then entry.guild = m.guild end
-                if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
-                    local oldId = entry.id or listKey
-                    entry.surname = parsed.surname
-                    entry.displayName = parsed.displayName
-                    entry.id = parsed.lookupKey
-                    if oldId ~= entry.id then
-                        toRekey = toRekey or {}
-                        toRekey[#toRekey + 1] = { oldId = oldId, listKey = listKey, newId = entry.id, entry = entry }
-                    end
-                    if Compat.CacheForeverFullName then
-                        Compat.CacheForeverFullName(nil, parsed.displayName, parsed.firstName)
-                    end
+                if (not entry.surname or entry.surname == "") and not seenKeys[parsed.lookupKey] then
+                    seenKeys[parsed.lookupKey] = true
+                    firstCandidates[#firstCandidates + 1] = {
+                        fullName = parsed.displayName,
+                        lookupKey = parsed.lookupKey,
+                        parsed = parsed,
+                        level = m.level,
+                        classFile = m.classFile,
+                        area = m.area,
+                        guild = m.guild,
+                    }
                 end
-                if prevStatus ~= "online" then
-                    Store:NotifyWatchlistOnline(entry)
-                end
-                if isPendingTarget then
-                    matchedTarget = true
+            end
+        end
+
+        local isMultiFirstCollision = (not entry.surname or entry.surname == "") and #firstCandidates > 1
+        local isPendingTarget = (entry.id == pending.id or listKey == pending.id)
+
+        if isMultiFirstCollision then
+            local prevStatus = entry.status
+            entry.status = "online"
+            entry.source = "who"
+            entry.lastChecked = now
+            entry.lastSeen = now
+            entry.truncatedWarning = true
+            entry.ambiguousChoices = {}
+            for i = 1, math.min(8, #firstCandidates) do
+                local c = firstCandidates[i]
+                entry.ambiguousChoices[i] = {
+                    fullName = c.fullName,
+                    lookupKey = c.lookupKey,
+                    level = c.level,
+                    classFile = c.classFile,
+                    area = c.area,
+                    guild = c.guild,
+                }
+            end
+            if isPendingTarget then
+                matchedTarget = true
+                disambiguateTarget = entry
+            end
+            if prevStatus ~= "online" then
+                Store:NotifyWatchlistOnline(entry)
+            end
+        else
+            for _, m in ipairs(matches) do
+                local parsed = m.parsed
+                if parsed and MatchEntry(entry, parsed) then
+                    local prevStatus = entry.status
+                    entry.status = "online"
+                    entry.source = "who"
+                    entry.lastChecked = now
+                    entry.lastSeen = now
+                    entry.truncatedWarning = nil
+                    entry.ambiguousChoices = nil
+                    if m.level and m.level > 0 then entry.level = m.level end
+                    if m.classFile then entry.classFile = m.classFile end
+                    if m.area and m.area ~= "" then entry.area = m.area end
+                    if m.guild and m.guild ~= "" then entry.guild = m.guild end
+                    if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
+                        local oldId = entry.id or listKey
+                        entry.surname = parsed.surname
+                        entry.displayName = parsed.displayName
+                        entry.id = parsed.lookupKey
+                        entry.observedCandidate = nil
+                        if oldId ~= entry.id then
+                            toRekey = toRekey or {}
+                            toRekey[#toRekey + 1] = { oldId = oldId, listKey = listKey, newId = entry.id, entry = entry }
+                        end
+                        if Compat.CacheForeverFullName then
+                            Compat.CacheForeverFullName(nil, parsed.displayName, parsed.firstName)
+                        end
+                    end
+                    if prevStatus ~= "online" then
+                        Store:NotifyWatchlistOnline(entry)
+                    end
+                    if isPendingTarget then
+                        matchedTarget = true
+                    end
                 end
             end
         end
@@ -597,6 +808,11 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
     Watchlist.suppressPopupUntil = GetTime() + 0.35
     CleanupPending()
     ns:Emit("WATCHLIST_UPDATED")
+    if disambiguateTarget then
+        local pickLink = "|Haddon:SCentral:wldisambig:" .. tostring(disambiguateTarget.id) .. "|h|cff58a6ff[" .. L["Choose"] .. "]|r|h"
+        ns:Print("%s %s", L["Multiple characters match '%s'; select the exact FirstName Surname:"]:format(disambiguateTarget.displayName), pickLink)
+        ns:Emit("WATCHLIST_DISAMBIGUATE", disambiguateTarget.id)
+    end
 end
 
 function Watchlist:FinishChatFilterQuery()
@@ -718,8 +934,11 @@ function Watchlist:CheckEntry(id, silent)
     return true
 end
 
--- Picks the entry needing verification most urgently (never checked first, then oldest check).
+-- Picks the entry needing verification most urgently, skipping Friends/Guildmates already confirmed online in Social.
 function Watchlist:CheckNext(silent)
+    if ns.Social and ns.Social.Scan then
+        pcall(ns.Social.Scan, ns.Social)
+    end
     local entries = self:GetEntries()
     if #entries == 0 then
         if not silent then
@@ -728,14 +947,31 @@ function Watchlist:CheckNext(silent)
         return false, "empty"
     end
 
-    table.sort(entries, function(a, b)
+    local needWho = {}
+    for _, entry in ipairs(entries) do
+        local isPassiveOnline = (entry.status == "online")
+            and (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
+        if not isPassiveOnline then
+            needWho[#needWho + 1] = entry
+        end
+    end
+
+    if #needWho == 0 then
+        if not silent then
+            ns:Print(L["All %d Watchlist players are already confirmed online via Friends or Guild."]:format(#entries))
+        end
+        ns:Emit("WATCHLIST_UPDATED")
+        return true, "passive_ok"
+    end
+
+    table.sort(needWho, function(a, b)
         local ca = a.lastChecked or 0
         local cb = b.lastChecked or 0
         if ca ~= cb then return ca < cb end
         return (a.addedAt or 0) < (b.addedAt or 0)
     end)
 
-    return self:CheckEntry(entries[1].id, silent)
+    return self:CheckEntry(needWho[1].id, silent)
 end
 
 -- Automatically checks the next non-friend/non-guild (or stale) Watchlist entry from a genuine hardware click.
@@ -902,6 +1138,10 @@ local function AppendPlayerTooltipLines(tooltip)
         end
     end
     local comp = Store and Store.GetRecentCompanion and Store:GetRecentCompanion(fullName)
+    local linkedAlts = Store and Store.GetLinkedAltsForCharacter and Store:GetLinkedAltsForCharacter(fullName)
+    local dirEntry = ns.Social and ns.Social.GetDirectoryEntry and ns.Social:GetDirectoryEntry(lookupKey) or nil
+    local nativeNote = (dirEntry and ((dirEntry.friendNote and dirEntry.friendNote ~= "" and dirEntry.friendNote)
+        or (dirEntry.bnetNote and dirEntry.bnetNote ~= "" and dirEntry.bnetNote))) or nil
     local isPeer = ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(lookupKey)
     local savedPeer = (not isPeer) and ns.Chat and ns.Chat.GetSavedPeerRecord and ns.Chat:GetSavedPeerRecord(lookupKey) or nil
     local unitGuild = GetGuildInfo and Safe.String(Safe.Call(GetGuildInfo, unit))
@@ -911,7 +1151,7 @@ local function AppendPlayerTooltipLines(tooltip)
         guildStance = nil
     end
 
-    if not meta and not wl and not comp and not isPeer and not savedPeer and not guildStance then
+    if not meta and not wl and not comp and not isPeer and not savedPeer and not guildStance and not linkedAlts and not nativeNote then
         return
     end
 
@@ -942,6 +1182,14 @@ local function AppendPlayerTooltipLines(tooltip)
         if meta.note and meta.note ~= "" and (not wl or wl.note ~= meta.note) then
             tooltip:AddLine(L["Note"] .. ": " .. meta.note, 1.0, 0.90, 0.48, true)
         end
+    end
+
+    if nativeNote and (not meta or meta.note ~= nativeNote) and (not wl or wl.note ~= nativeNote) then
+        tooltip:AddLine(L["Friend Note"] .. ": " .. nativeNote, 0.72, 0.88, 1.0, true)
+    end
+
+    if type(linkedAlts) == "table" and #linkedAlts > 0 then
+        tooltip:AddDoubleLine(L["Known Alts"], table.concat(linkedAlts, ", "), 0.68, 0.78, 0.90, 0.80, 0.92, 1.0)
     end
 
     if comp and comp.lastSeen then
@@ -1040,8 +1288,22 @@ local function RegisterUnitContextMenus()
         end
         local isWatched = existingEntry ~= nil
 
+        local bnId = contextData and Safe.Number(contextData.bnetIDAccount)
+        local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(parsed.lookupKey or parsed.displayName, bnId)
+
         rootDescription:CreateDivider()
-        rootDescription:CreateTitle("SocialCentral")
+        rootDescription:CreateTitle("SocialCentral (" .. parsed.displayName .. ")")
+
+        if scConfirmed then
+            rootDescription:CreateButton(L["Message in SocialCentral"], function()
+                if ns.NavigateToModule then
+                    ns:NavigateToModule("chat", {
+                        targetName = parsed.displayName,
+                        bnetAccountID = bnId,
+                    })
+                end
+            end)
+        end
 
         if isWatched and existingEntry then
             rootDescription:CreateButton(L["Remove from Watchlist"], function()

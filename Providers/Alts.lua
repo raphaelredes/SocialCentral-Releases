@@ -293,6 +293,37 @@ local function SnapshotContainerRange(bagList)
     return items, freeSlots, totalSlots
 end
 
+function Alts:GetHearthstoneStatus(altData)
+    local isCurrent = (not altData) or (altData.key == Compat.CharacterKey())
+    if isCurrent then
+        local getItemCd = (C_Container and C_Container.GetItemCooldown) or _G.GetItemCooldown
+        local getItemCnt = (C_Item and C_Item.GetItemCount) or _G.GetItemCount
+        if getItemCd then
+            local hasHs = (not getItemCnt) or (Safe.Number(Safe.Call(getItemCnt, 6948)) or 0) > 0
+            if hasHs then
+                local okCd, st, dur = pcall(getItemCd, 6948)
+                st = okCd and Safe.Number(st) or nil
+                dur = okCd and Safe.Number(dur) or nil
+                if st and dur and st > 0 and dur > 1.5 then
+                    local nowClock = (GetTime and GetTime()) or 0
+                    local rem = (st + dur) - nowClock
+                    if rem > 1 then
+                        return time() + math.ceil(rem), math.ceil(rem)
+                    end
+                end
+                return 0, 0
+            end
+        end
+        return nil, nil
+    end
+
+    if type(altData.hearthReadyAt) == "number" then
+        local rem = math.max(0, altData.hearthReadyAt - time())
+        return altData.hearthReadyAt, rem
+    end
+    return nil, nil
+end
+
 function Alts:GetArmoryURL(altEntry)
     if not altEntry then return nil end
     local full = altEntry.fullName or altEntry.name or ""
@@ -378,7 +409,16 @@ function Alts:Snapshot(includeBank)
     local bankTotal = type(prev) == "table" and prev.bankTotal or 0
     local bankUpdatedAt = type(prev) == "table" and prev.bankUpdatedAt or nil
     if includeBank then
-        local bItems, bFree, bTot = SnapshotContainerRange(BANK_BAG_IDS)
+        local bankBags = { -1, 5, 6, 7, 8, 9, 10, 11 }
+        local reagentBag = REAGENTBANK_CONTAINER or -3
+        local getNum = (C_Container and C_Container.GetContainerNumSlots) or _G.GetContainerNumSlots
+        if getNum then
+            local okR, rSlots = pcall(getNum, reagentBag)
+            if okR and (Safe.Number(rSlots) or 0) > 0 then
+                bankBags[#bankBags + 1] = reagentBag
+            end
+        end
+        local bItems, bFree, bTot = SnapshotContainerRange(bankBags)
         if bTot > 0 then
             bank = bItems
             bankFree = bFree
@@ -392,6 +432,31 @@ function Alts:Snapshot(includeBank)
         currentZone = prev.zone
     end
     local lockouts = SnapshotLockouts(prev and prev.lockouts)
+    local hasNewMail = (HasNewMail and Safe.Value(Safe.Call(HasNewMail)) == true) or false
+    local mailSenders = nil
+    local mailSince = nil
+    if hasNewMail then
+        if GetLatestThreeSenders then
+            local okM, s1, s2, s3 = pcall(GetLatestThreeSenders)
+            if okM then
+                local list = {}
+                for _, rawS in ipairs({ s1, s2, s3 }) do
+                    local cleanS = Safe.String(rawS)
+                    if cleanS and cleanS ~= "" then
+                        list[#list + 1] = cleanS
+                    end
+                end
+                if #list > 0 then
+                    mailSenders = list
+                end
+            end
+        end
+        if not mailSenders and type(prev) == "table" and type(prev.mailSenders) == "table" then
+            mailSenders = prev.mailSenders
+        end
+        mailSince = (type(prev) == "table" and prev.hasMail and prev.mailSince) or time()
+    end
+    local hearthReadyAt = self:GetHearthstoneStatus(nil)
     ns.db.alts[key] = {
         name = name,
         firstName = resolved and resolved.firstName or name,
@@ -414,6 +479,7 @@ function Alts:Snapshot(includeBank)
         money = money,
         zone = currentZone or "",
         bindLocation = bindLocation or "",
+        hearthReadyAt = hearthReadyAt,
         professions = professions,
         lockouts = lockouts,
         guild = guild,
@@ -425,6 +491,9 @@ function Alts:Snapshot(includeBank)
         bankFree = bankFree,
         bankTotal = bankTotal,
         bankUpdatedAt = bankUpdatedAt,
+        hasMail = hasNewMail,
+        mailSenders = mailSenders,
+        mailSince = mailSince,
         lastActive = time(),
     }
 
@@ -459,6 +528,16 @@ function Alts:UpdateScalars()
     local currentZone = Compat.CurrentZoneName()
     if currentZone and currentZone ~= "" then
         rec.zone = currentZone
+    end
+    if HasNewMail then
+        local hasNew = Safe.Value(Safe.Call(HasNewMail)) == true
+        rec.hasMail = hasNew
+        if hasNew then
+            rec.mailSince = rec.mailSince or time()
+        else
+            rec.mailSince = nil
+            rec.mailSenders = nil
+        end
     end
     rec.lastActive = time()
 
@@ -512,7 +591,7 @@ end
 
 function Alts:RebuildItemIndex()
     local index = {}
-    local alts = Store and Store.GetAltsList and Store:GetAltsList() or {}
+    local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
     local curKey = Compat.CharacterKey()
     local buckets = self._altBuckets
     if type(buckets) ~= "table" then
@@ -604,6 +683,87 @@ function Alts:GetItemOwners(itemID)
         self:RebuildItemIndex()
     end
     return self.itemIndex and self.itemIndex[numId]
+end
+
+local function ExtractItemDisplayName(link)
+    if type(link) ~= "string" then return "" end
+    return link:match("%[(.-)%]") or ""
+end
+
+--- Search items across all recorded characters on the current realm pool.
+function Alts:SearchAllItems(queryText, excludeAltKey)
+    local q = Compat.Trim and Compat.Trim(queryText or "") or tostring(queryText or "")
+    local qLow = q:lower()
+    local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
+    local curKey = Compat.CharacterKey()
+    local groups = {}
+
+    local function ItemMatches(item)
+        if qLow == "" then return true end
+        local iName = ExtractItemDisplayName(item.link):lower()
+        return iName:find(qLow, 1, true) ~= nil
+    end
+
+    for _, alt in ipairs(alts) do
+        if type(alt) == "table" and alt.key ~= excludeAltKey then
+            local matched = {}
+            if type(alt.equipment) == "table" then
+                for slotId = 1, EQUIP_SLOT_COUNT do
+                    local entry = alt.equipment[slotId]
+                    if entry and (entry.icon or entry.itemID or entry.link) and ItemMatches(entry) then
+                        matched[#matched + 1] = {
+                            itemID = entry.itemID,
+                            link = entry.link,
+                            icon = entry.icon,
+                            quality = entry.quality,
+                            count = 1,
+                            _isEquip = true,
+                            _slotId = slotId,
+                            _locLabel = L["Equipped"],
+                        }
+                    end
+                end
+            end
+            if type(alt.bags) == "table" then
+                for _, entry in ipairs(alt.bags) do
+                    if ItemMatches(entry) then
+                        matched[#matched + 1] = {
+                            itemID = entry.itemID,
+                            link = entry.link,
+                            icon = entry.icon,
+                            quality = entry.quality,
+                            count = entry.count or 1,
+                            _locLabel = L["Bags"],
+                        }
+                    end
+                end
+            end
+            if type(alt.bank) == "table" then
+                for _, entry in ipairs(alt.bank) do
+                    if ItemMatches(entry) then
+                        matched[#matched + 1] = {
+                            itemID = entry.itemID,
+                            link = entry.link,
+                            icon = entry.icon,
+                            quality = entry.quality,
+                            count = entry.count or 1,
+                            _locLabel = L["Bank"],
+                        }
+                    end
+                end
+            end
+            if #matched > 0 then
+                groups[#groups + 1] = {
+                    altKey = alt.key,
+                    displayName = alt.fullName or alt.name or alt.key or "?",
+                    classFile = alt.classFile,
+                    isCurrent = (alt.key == curKey),
+                    items = matched,
+                }
+            end
+        end
+    end
+    return groups
 end
 
 local itemTooltipRegistered = false
@@ -765,7 +925,34 @@ function Alts:Init()
         else
             self:QueueSnapshot(false, 1.5)
         end
+        if not self._mailExpiryWarned and C_Timer and C_Timer.After then
+            self._mailExpiryWarned = true
+            C_Timer.After(6.5, function()
+                local curKey = Compat.CharacterKey()
+                local nowTs = time()
+                local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
+                for _, alt in ipairs(alts) do
+                    if type(alt) == "table" and alt.key ~= curKey and alt.hasMail and alt.mailSince then
+                        local ageDays = math.floor((nowTs - alt.mailSince) / 86400)
+                        if ageDays >= 15 then
+                            ns:Print(string.format(L["Mail Reminder: %s has had unclaimed mail for %d days (expires after 30 days)."], alt.fullName or alt.name or "Alt", ageDays))
+                            break
+                        end
+                    end
+                end
+            end)
+        end
     end)
+
+    for _, mailEvent in ipairs({
+        "UPDATE_PENDING_MAIL",
+        "MAIL_SHOW",
+        "MAIL_CLOSED",
+    }) do
+        ns.RegisterEvent(self, mailEvent, function()
+            self:QueueSnapshot(false, 0.6)
+        end)
+    end
 
     for _, scalarEvent in ipairs({
         "PLAYER_XP_UPDATE",
@@ -790,7 +977,6 @@ function Alts:Init()
 
     for _, itemEvent in ipairs({
         "PLAYER_EQUIPMENT_CHANGED",
-        "BAG_UPDATE_DELAYED",
         "SKILL_LINES_CHANGED",
         "TRADE_SKILL_UPDATE",
         "PLAYER_AVG_ITEM_LEVEL_UPDATE",
@@ -800,6 +986,32 @@ function Alts:Init()
         end)
     end
 
+    ns.RegisterEvent(self, "BAG_UPDATE_DELAYED", function()
+        local bankShown = _G.BankFrame and _G.BankFrame.IsShown and _G.BankFrame:IsShown()
+        self:QueueSnapshot(bankShown == true, bankShown and 0.4 or 1.5)
+    end)
+
+    ns.RegisterEvent(self, "GUILD_ROSTER_UPDATE", function()
+        if mySurnameConfirmed or not (ns.db and ns.db.alts) then return end
+        local key = Compat.CharacterKey()
+        local rec = ns.db.alts[key]
+        if type(rec) ~= "table" or rec.userSetSurname then
+            if type(rec) == "table" and rec.userSetSurname then
+                mySurnameConfirmed = true
+            end
+            return
+        end
+        local resolved = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName(rec.fullName)
+        if resolved and resolved.surname and resolved.fullName and resolved.fullName ~= rec.fullName then
+            rec.firstName = resolved.firstName or rec.firstName
+            rec.surname = resolved.surname
+            rec.fullName = resolved.fullName
+            mySurnameConfirmed = true
+            self.itemIndex = nil
+            ns:Emit("ALTS_UPDATED")
+        end
+    end)
+
     ns.RegisterEvent(self, "UPDATE_INSTANCE_INFO", function()
         self._instanceInfoReady = true
         self:QueueSnapshot(false, 0.8)
@@ -808,11 +1020,21 @@ function Alts:Init()
     for _, bankEvent in ipairs({
         "BANKFRAME_OPENED",
         "PLAYERBANKSLOTS_CHANGED",
+        "PLAYERREAGENTBANKSLOTS_CHANGED",
+        "REAGENTBANK_UPDATE",
+        "BANK_TABS_CHANGED",
     }) do
         ns.RegisterEvent(self, bankEvent, function()
             self:QueueSnapshot(true, 0.4)
         end)
     end
+
+    ns.RegisterEvent(self, "PLAYER_INTERACTION_MANAGER_FRAME_SHOW", function(_, _, interactionType)
+        local bankerType = Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.Banker
+        if bankerType and interactionType == bankerType then
+            self:QueueSnapshot(true, 0.5)
+        end
+    end)
 
     for _, chatEvent in ipairs({
         "CHAT_MSG_GUILD",

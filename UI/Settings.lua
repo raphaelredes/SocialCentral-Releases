@@ -179,7 +179,7 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(590, 3480)
+    content:SetSize(590, 4020)
     scrollFrame:SetScrollChild(content)
     scrollFrame:SetScript("OnSizeChanged", function(self)
         local w = math.max(460, (self:GetWidth() or 590) - 10)
@@ -444,11 +444,30 @@ local function BuildPanel()
         L["Enable after positioning your Minimap button where you want it."]
     )
 
+    local minimapClickHeader = AddSectionHeader(
+        content,
+        L["Minimap Left-Click behavior"],
+        lockCb,
+        -10,
+        L["Help: Minimap Left-Click"],
+        L["Chooses what happens when you left-click the Minimap button or Addon Compartment icon."],
+        L["'Smart' jumps straight to unread Conversations when whispers wait for you, otherwise opening the Main Window."]
+    )
+    local minimapClickRow = CreateChoiceRow(content, minimapClickHeader, -6, {
+        { value = "smart", label = L["Smart: Unread or Hub"], width = 186 },
+        { value = "hub", label = L["Always Main Window"], width = 170 },
+        { value = "menu", label = L["Quick Chooser Menu"], width = 170 },
+    }, function()
+        return ns.db and ns.db.settings.minimapLeftClickAction or "smart"
+    end, function(val)
+        ns.db.settings.minimapLeftClickAction = val
+    end)
+
     local alertCb = CreateCheckbox(
         content,
         L["Online alerts for Watchlist"],
-        lockCb,
-        -6,
+        minimapClickRow,
+        -10,
         function() return ns.db and ns.db.settings.alerts and ns.db.settings.alerts.chat end,
         function(checked)
             if ns.db and ns.db.settings.alerts then
@@ -646,10 +665,24 @@ local function BuildPanel()
         L["Select 'Global Chat LFG' in Group Finder to browse clean server chat requests separated from your Guild and Allies."]
     )
 
+    local lfgDraftCb = CreateCheckbox(
+        content,
+        L["Pre-fill Level, Class & Role when applying in Group Finder (I)"],
+        globalChatLfgCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.lfgAutoApplyDraft ~= false end,
+        function(checked)
+            ns.db.settings.lfgAutoApplyDraft = checked
+        end,
+        L["Help: LFG Quick Apply Draft"],
+        L["Automatically builds a ready-to-send whisper draft containing your Level, Class, and currently selected Group Finder Role when contacting a leader."],
+        L["Click Send Message or Quick Apply on any group listing to open your message ready to confirm or send in 1 click."]
+    )
+
     local autoStatusCb = CreateCheckbox(
         content,
         L["Auto-tag Busy inside dungeons/raids (opt-in)"],
-        globalChatLfgCb,
+        lfgDraftCb,
         -6,
         function() return ns.db and ns.db.settings.autoStatusInstance end,
         function(checked)
@@ -774,10 +807,38 @@ local function BuildPanel()
         L["Triggers only on events you created so your chat stays clutter-free."]
     )
 
+    local clanEventRemindersCb = CreateCheckbox(
+        content,
+        L["Remind me 15m and 5m before confirmed Guild & Calendar events"],
+        clanSignupAlertCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.clanEventReminders ~= false end,
+        function(checked)
+            ns.db.settings.clanEventReminders = checked
+        end,
+        L["Help: Guild Event Reminders"],
+        L["Shows clickable reminders 15 minutes and 5 minutes before scheduled Guild Events or Blizzard Calendar raids you confirmed or organized."],
+        L["Click the reminder toast or chat link to jump straight to your Events tab in Guild (J)."]
+    )
+
+    local clanAutoCloseLfgCb = CreateCheckbox(
+        content,
+        L["Auto-close my Dungeon LFM listing when party reaches 5 players"],
+        clanEventRemindersCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.clanAutoCloseFullLfg ~= false end,
+        function(checked)
+            ns.db.settings.clanAutoCloseFullLfg = checked
+        end,
+        L["Help: Auto-Close Full Dungeon LFM"],
+        L["Automatically clears your own active Guild/Allied Dungeon LFM post once your party reaches 5 members or enters a 5-player dungeon instance."],
+        L["Runs safely out of combat so guildmates stop whispering for already full groups."]
+    )
+
     local chatSettingsHeader = AddSectionHeader(
         content,
         L["Conversations & Sound Alerts"],
-        clanSignupAlertCb,
+        clanAutoCloseLfgCb,
         -14,
         L["Help: Conversations & Sounds"],
         L["Separately control sound chimes by channel type and decide whether WoW native Guild/Group channels are mirrored inside Conversations."],
@@ -914,10 +975,25 @@ local function BuildPanel()
         L["When unchecked or when the other player lacks SocialCentral, Conversations show a single button to open the pre-addressed official WoW chat instead."]
     )
 
+    local chatDirectOfficialCb = CreateCheckbox(
+        content,
+        L["Send /w, Battle.net & Guild/Group messages directly in 1 click"],
+        addonDirectCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.chatDirectOfficialSend ~= false end,
+        function(checked)
+            ns.db.settings.chatDirectOfficialSend = checked
+            ns:Emit("CHAT_UPDATED")
+        end,
+        L["Help: 1-Click Direct Official Chat"],
+        L["When checked, clicking Send or pressing Enter in Conversations sends Whispers, Battle.net, Guild, and Group messages immediately without needing a second Enter."],
+        L["Strictly triggered only by your manual Send click/Enter outside combat or boss chat lockdowns; safely falls back to pre-filling the chat bar when restricted."]
+    )
+
     local addonNotifyHeader = AddSectionHeader(
         content,
         L["Addon Message Notifications"],
-        addonDirectCb,
+        chatDirectOfficialCb,
         -14,
         L["Help: Addon Message Notifications"],
         L["Customize how SocialCentral alerts you when incoming addon-only messages (Direct Messages, Private Rooms, Invites, Alliance Chat, and Guild Alerts) arrive."],
@@ -939,10 +1015,33 @@ local function BuildPanel()
         L["Left-click the pill to jump directly to the conversation (deferred automatically after combat), hover to pause, or right-click to dismiss."]
     )
 
+    local toastResetRow = CreateFrame("Frame", nil, content)
+    toastResetRow:SetSize(460, 26)
+    toastResetRow:SetPoint("TOPLEFT", addonToastCb, "BOTTOMLEFT", 0, -4)
+
+    local resetToastPosBtn = ns.Theme:CreateButton(toastResetRow, 190, 22, L["Reset Notification Position"], "default")
+    ns.Theme:AutoFitButton(resetToastPosBtn, 160, 18, 280)
+    resetToastPosBtn:SetPoint("LEFT", toastResetRow, "LEFT", 24, 0)
+    resetToastPosBtn:SetScript("OnClick", function()
+        if ns.Theme and ns.Theme.ResetWindowPosition then
+            ns.Theme:ResetWindowPosition("notification_toast")
+        end
+    end)
+    HelpBtn(
+        toastResetRow,
+        resetToastPosBtn,
+        L["Help: Reset Notification Position"],
+        L["Moves the floating notification popup back to its default top-center screen position."],
+        L["Also available anytime by right-clicking any floating notification."]
+    )
+    syncFns[#syncFns + 1] = function()
+        ns.Theme:StyleButton(resetToastPosBtn, "default")
+    end
+
     local addonEchoCb = CreateCheckbox(
         content,
-        L["Print clickable [SC] summary in Chat window for addon messages"],
-        addonToastCb,
+        L["Print received [SC] addon messages in Blizzard Chat immediately"],
+        toastResetRow,
         -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgChatEcho ~= false end,
         function(checked)
@@ -950,14 +1049,95 @@ local function BuildPanel()
             ns:Emit("SETTINGS_UPDATED")
         end,
         L["Help: Addon Chat Echo"],
-        L["Blizzard hides raw addon packets from standard chat frames. Enabling this echoes a clean one-line summary with a clickable [Open] link in your chat."],
-        L["Skipped automatically while you are actively viewing that exact thread inside SocialCentral."]
+        L["Blizzard hides raw addon packets from standard chat frames. Enabling this echoes incoming [SC] messages with a clickable sender link immediately into selected Blizzard chat tabs."],
+        L["Also works even while SocialCentral's Conversations window is open so you can read messages directly in WoW's native chat box."]
     )
+
+    local addonEchoSentCb = CreateCheckbox(
+        content,
+        L["Also show my sent [SC] addon messages in Blizzard Chat immediately"],
+        addonEchoCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgChatEchoSent ~= false end,
+        function(checked)
+            ns.db.settings.addonMsgChatEchoSent = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Echo Sent Addon Chat"],
+        L["Displays messages you send inside SocialCentral immediately as [SC] whisper lines in your checked Blizzard chat tabs."],
+        L["Helps follow the full back-and-forth conversation right inside Blizzard's General or custom chat tabs."]
+    )
+
+    local officialChatTabsRow = CreateFrame("Frame", nil, content)
+    officialChatTabsRow:SetSize(540, 48)
+    officialChatTabsRow:SetPoint("TOPLEFT", addonEchoSentCb, "BOTTOMLEFT", 4, -6)
+
+    local tabsRowLbl = officialChatTabsRow:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    tabsRowLbl:SetPoint("TOPLEFT", 0, -2)
+    tabsRowLbl:SetText("|cffb8c2d0" .. L["Blizzard chat tabs displaying [SC] addon chat:"] .. "|r")
+
+    HelpBtn(
+        officialChatTabsRow,
+        tabsRowLbl,
+        L["Help: Official Chat Tabs for [SC]"],
+        L["Choose which Blizzard chat windows (General, custom Whispers tab, etc.) display incoming and sent [SC] addon messages."],
+        L["You can also toggle this directly inside Blizzard's right-click Tab Settings window via the '[SC] Addon Chat' checkbox."]
+    )
+
+    local tabCheckboxes = {}
+    for cid = 1, 6 do
+        local tcb = CreateFrame("CheckButton", nil, officialChatTabsRow, "UICheckButtonTemplate")
+        tcb:SetSize(22, 22)
+        tcb.text = tcb:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        tcb.text:SetPoint("LEFT", tcb, "RIGHT", 2, 0)
+        tcb:SetScript("OnClick", function(self)
+            if ns.db and ns.db.settings then
+                if type(ns.db.settings.addonChatFrames) ~= "table" then
+                    ns.db.settings.addonChatFrames = { [1] = true }
+                end
+                ns.db.settings.addonChatFrames[cid] = self:GetChecked() and true or false
+                ns:Emit("SETTINGS_UPDATED")
+            end
+        end)
+        tabCheckboxes[cid] = tcb
+    end
+
+    syncFns[#syncFns + 1] = function()
+        local framesCfg = ns.db and ns.db.settings and ns.db.settings.addonChatFrames
+        local xOff, yOff = 0, -20
+        for cid = 1, 6 do
+            local tcb = tabCheckboxes[cid]
+            local cf = _G["ChatFrame" .. tostring(cid)]
+            local winName, _, _, _, _, _, isShownFlag = nil, nil, nil, nil, nil, nil, false
+            if GetChatWindowInfo then
+                winName, _, _, _, _, _, isShownFlag = GetChatWindowInfo(cid)
+            end
+            local isActive = (cid == 1) or (cf and (cf.isDocked or cf:IsShown())) or (winName and winName ~= "" and isShownFlag)
+            if isActive then
+                local label = (winName and winName ~= "" and winName) or (cf and cf.name) or tostring(cid)
+                tcb.text:SetText(label)
+                local itemW = math.min(130, math.max(58, (tcb.text:GetStringWidth() or 40) + 30))
+                if xOff > 0 and (xOff + itemW) > 520 then
+                    xOff = 0
+                    yOff = -42
+                end
+                tcb:ClearAllPoints()
+                tcb:SetPoint("TOPLEFT", officialChatTabsRow, "TOPLEFT", xOff, yOff)
+                local checked = (type(framesCfg) ~= "table" and cid == 1) or (type(framesCfg) == "table" and framesCfg[cid] == true)
+                tcb:SetChecked(checked and true or false)
+                tcb:Show()
+                xOff = xOff + itemW + 6
+            else
+                tcb:Hide()
+            end
+        end
+        officialChatTabsRow:SetHeight((yOff < -30) and 68 or 48)
+    end
 
     local addonFlashCb = CreateCheckbox(
         content,
         L["Pulse taskbar icon when high-priority addon messages arrive"],
-        addonEchoCb,
+        officialChatTabsRow,
         -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgTaskbarFlash ~= false end,
         function(checked)
@@ -1112,12 +1292,27 @@ local function BuildPanel()
         L["Close the HUD manually at any time or use '/sc radar' to toggle it."]
     )
 
+    local spotterPlateArrowCb = CreateCheckbox(
+        content,
+        L["Show animated red arrow above Radar target nameplate (when visible)"],
+        spotterAutoHudCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNameplateArrow ~= false end,
+        function(checked)
+            ns.db.settings.spotterNameplateArrow = checked
+            ns:Emit("SETTINGS_UPDATED")
+        end,
+        L["Help: Animated Target Nameplate Arrow"],
+        L["Displays a highly visible pulsing red arrow above your focused or selected Radar target whenever WoW renders their nameplate."],
+        L["Blizzard controls player nameplates: press Shift+V for allies/friends or V for enemies anytime to show or hide nameplates."]
+    )
+
     local spotterBadgesCb = CreateCheckbox(
         content,
         L["Show Enemy/Ally/Clan badge tags above visible nameplates"],
-        spotterAutoHudCb,
+        spotterPlateArrowCb,
         -6,
-        function() return ns.db and ns.db.settings and ns.db.settings.spotterNameplateBadges == true end,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNameplateBadges ~= false end,
         function(checked)
             ns.db.settings.spotterNameplateBadges = checked
             ns:Emit("SETTINGS_UPDATED")
@@ -1247,46 +1442,10 @@ local function BuildPanel()
         L["Uncheck for silent visual alerts only."]
     )
 
-    local spotterMapPinsCb = CreateCheckbox(
-        content,
-        L["Show detected targets on Minimap and World Map"],
-        spotterSoundCb,
-        -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterMapPins ~= false end,
-        function(checked)
-            ns.db.settings.spotterMapPins = checked
-            ns:Emit("SETTINGS_UPDATED")
-        end,
-        L["Help: Spotter Map Pins"],
-        L["Displays a small icon on the Minimap and World Map indicating the location of tracked targets and peers sharing their coordinates."],
-        L["Uncheck to hide target pins from your map and minimap."]
-    )
-
-    local spotterSharePosCb = CreateCheckbox(
-        content,
-        L["Share my map position with Guild and Friends"],
-        spotterMapPinsCb,
-        -6,
-        function() return ns.db and ns.db.settings and ns.db.settings.spotterSharePosition == true end,
-        function(checked)
-            ns.db.settings.spotterSharePosition = checked
-            if not checked and C_ChatInfo and C_ChatInfo.SendAddonMessage and IsInGuild and IsInGuild()
-                and not (InCombatLockdown and InCombatLockdown())
-                and not (UnitAffectingCombat and UnitAffectingCombat("player"))
-                and not (ns.Clan and (ns.Clan.isStoppedThisSession or (ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked()))) then
-                pcall(C_ChatInfo.SendAddonMessage, "OpenMapLoc", "L0", "GUILD")
-            end
-            ns:Emit("SETTINGS_UPDATED")
-        end,
-        L["Help: Spotter Share Position"],
-        L["Broadcasts your map coordinates periodically to guildmates and friends using SocialCentral or OpenMap so they can see your position on their map."],
-        L["Only broadcasts outside instances and combat. Uncheck to stop sharing your location."]
-    )
-
     local buffsHeader = AddSectionHeader(
         content,
         L["World Buffs (Classic & Forever)"],
-        spotterSharePosCb,
+        spotterSoundCb,
         -14,
         L["Help: World Buffs"],
         L["Tracks active Classic World Buffs, detects city drop announcements in real time, and lets you report your current buffs to party, raid, or guild."],
@@ -1325,10 +1484,26 @@ local function BuildPanel()
         L["Uncheck if you prefer silent chat notifications only."]
     )
 
+    local buffExpiryCb = CreateCheckbox(
+        content,
+        L["Warn me out of combat when an active World Buff has under 5m left"],
+        buffSoundCb,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsExpiryAlert ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then
+                ns.db.settings.worldBuffsExpiryAlert = checked
+            end
+        end,
+        L["Help: World Buff Expiry Warning"],
+        L["Alerts you with a chat line and toast outside combat when one of your active Classic World Buffs drops below 5 minutes remaining."],
+        L["Helpful before starting a dungeon run or chronobooning / refreshing your buffs."]
+    )
+
     local buffMapPinsCb = CreateCheckbox(
         content,
         L["Show World Buff pins on World Map (M)"],
-        buffSoundCb,
+        buffExpiryCb,
         -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsMapPins ~= false end,
         function(checked)
@@ -1397,23 +1572,23 @@ local function BuildPanel()
         L["Use this if any window was moved off-screen or after changing screen resolution."]
     )
 
-    local resetPromptBtn = ns.Theme:CreateButton(content, 210, 24, L["Reset Radar Prompt"], "default")
-    ns.Theme:AutoFitButton(resetPromptBtn, 180, 20, 290)
-    resetPromptBtn:SetPoint("TOPLEFT", openRadarBtn, "BOTTOMLEFT", 0, -8)
-    resetPromptBtn:SetScript("OnClick", function()
+    local viewTutorialBtn = ns.Theme:CreateButton(content, 210, 24, L["View Nameplate Tutorial"], "default")
+    ns.Theme:AutoFitButton(viewTutorialBtn, 180, 20, 290)
+    viewTutorialBtn:SetPoint("TOPLEFT", openRadarBtn, "BOTTOMLEFT", 0, -8)
+    viewTutorialBtn:SetScript("OnClick", function()
         if ns.db and ns.db.settings then
-            ns.db.settings.spotterPromptAnswered = false
+            ns.db.settings.spotterPlateTutorialShown = false
         end
-        if ns.SpotterHUD and ns.SpotterHUD.ShowFirstTimePrompt then
-            ns.SpotterHUD:ShowFirstTimePrompt()
+        if ns.SpotterHUD and ns.SpotterHUD.ShowNameplateTutorial then
+            ns.SpotterHUD:ShowNameplateTutorial(true)
         end
     end)
     HelpBtn(
         content,
-        resetPromptBtn,
-        L["Help: Reset Radar Prompt"],
-        L["Resets the first-time Target Radar confirmation so the prompt dialog appears again."],
-        L["Use if you previously dismissed the radar prompt and wish to review the setup options."]
+        viewTutorialBtn,
+        L["Help: Nameplate Tutorial"],
+        L["Opens the quick visual guide showing how to toggle friendly (Shift+V) and enemy (V) nameplates so the Radar arrow and badges appear over targets."],
+        L["Click anytime to review how nameplate shortcuts work alongside Target Radar."]
     )
 
     syncFns[#syncFns + 1] = function()
@@ -1422,7 +1597,7 @@ local function BuildPanel()
         ns.Theme:StyleButton(openBuffsBtn, "default")
         ns.Theme:StyleButton(openRadarBtn, "primary")
         ns.Theme:StyleButton(resetPosBtn, "default")
-        ns.Theme:StyleButton(resetPromptBtn, "default")
+        ns.Theme:StyleButton(viewTutorialBtn, "default")
     end
 
     if ns.Theme and ns.Theme.RegisterListener then

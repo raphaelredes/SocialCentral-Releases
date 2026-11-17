@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.12"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.12" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.13"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.13" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -93,6 +93,7 @@ local DEFAULTS = {
             angle = 215,
             lock = false,
         },
+        minimapLeftClickAction = "smart", -- "smart" (unread chat or main hub) | "hub" | "menu"
         versionCheck = true,        -- passive DBM-style peer version check (rate-limited)
         clanSync = false,           -- opt-in for clan guild addon messages (status/events/signups/lfg)
         guildChatFinder = false,    -- opt-in passive /g LFM line detector (read-only, zero auto-reply)
@@ -102,6 +103,7 @@ local DEFAULTS = {
         clanLfgAlertSound = true,    -- sound chime when a Clan Dungeon LFG alert triggers
         clanEventAlertEnabled = false, -- opt-in alert when a guildmate posts a new Guild Event
         clanSignupAlertEnabled = true, -- alert event creator when guildmates sign up or decline
+        clanEventReminders = true,   -- show 15m and 5m notifications before confirmed Guild/Calendar events
         autoStatusInstance = false, -- opt-in contextual activity tag out-of-combat
         chatSound = true,           -- master chime toggle for direct/room conversations
         chatSoundWhispers = true,   -- chime on Character & Battle.net whispers
@@ -114,8 +116,11 @@ local DEFAULTS = {
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
         chatHistoryLimit = 30,      -- local lines kept per character conversation thread
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
+        chatDirectOfficialSend = true, -- send official /w, Battle.net, and guild/group replies in 1 click from Conversations (hardware-event only)
         addonMsgToast = true,       -- show compact floating toast pill when addon messages arrive
-        addonMsgChatEcho = true,    -- echo clickable [SC] summary line to chat frame for addon messages
+        addonMsgChatEcho = true,    -- echo clickable [SC] summary line to Blizzard chat windows for incoming addon messages
+        addonMsgChatEchoSent = true, -- echo sent [SC] addon messages into Blizzard chat windows immediately
+        addonChatFrames = { [1] = true }, -- [chatFrameIndex 1..10] Blizzard chat tabs showing [SC] addon chat (1 = General)
         addonMsgTaskbarFlash = true, -- pulse game taskbar icon on incoming addon messages
         addonMsgMinimapBadge = true, -- display compact unread counter badge on Minimap button
         addonMsgTabBadges = true,   -- display compact unread badges on Social (O) & Guild (J) side-tabs
@@ -131,17 +136,20 @@ local DEFAULTS = {
         spotterAutoShowHUD = true,  -- auto-open floating HUD pill on flagged sighting (out of combat)
         spotterPromptAnswered = true, -- keep HUD clutter-free without unsolicited confirmation popups
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
-        spotterNameplateBadges = false, -- default off to keep world nameplates uncluttered (user can opt in)
-        spotterSharePosition = true,    -- share map position with guild/friends so radar pins lock in world space
-        spotterMapPins = true,          -- show detected targets and shared positions as pins on Minimap & World Map
+        spotterNameplateArrow = true, -- show animated red arrow above focused/selected target nameplate when visible
+        spotterNameplateBadges = true, -- show lightweight stance tags above visible tracked player nameplates
+        spotterPlateTutorialShown = false, -- show one-time nameplate tutorial (Shift+V / V) on first radar sighting
         spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
-        spotterSharePosV1Migrated = false, -- one-time upgrade enabling shared map coords on existing profiles
         worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
         worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
         worldBuffsMapPins = true,   -- show minimalist World Buff pins & hover summary on World Map (M)
         tooltipItemAlts = true,     -- show alt bag/bank/equipped item counts inside item tooltips
         tooltipPlayerNotes = true,  -- show Social Card notes, red flags & companion context inside player tooltips
         globalChatLfgScan = true,   -- passively index dungeon/raid LFG posts from public chat channels
+        lfgAutoApplyDraft = true,   -- pre-fill your Level, Class & Role when whispering LFG posts
+        lfgHideAvoidEnemy = false,  -- hide LFG posts from Avoid-flagged or Enemy Guild leaders
+        clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
+        worldBuffsExpiryAlert = true, -- warn out of combat when an active World Buff has < 5 minutes left
     },
     window = {
         point = nil,
@@ -155,6 +163,7 @@ local DEFAULTS = {
     socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note, flag, favorite } }
     friendPresence = {},           -- [scopeKey] = { [lookupKey] = { lastSeen, lastArea, lastClass, lastLevel, favorite } } (strictly zero BattleTag/Real ID)
     recentCompanions = {},         -- [scopeKey] = { [lookupKey] = { name, classFile, level, zone, role, lastSeen } }
+    locationShareAllow = {},       -- [scopeKey] = { [lookupKey] = true } permanently approved live map-tracking peers (char keys only, zero BattleTag/Real ID)
     chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
     chatRooms = {},                -- [scopeKey] = { [roomId] = { id, name, owner, scope, members } }
     addonPeers = {},               -- [scopeKey] = { [lookupKey] = { displayName, version, lastSeenAt } } (strictly WoW char names, zero Real ID)
@@ -318,10 +327,6 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         SocialCentralDB.settings.friendAlertAllMigrated = true
     end
     ns.db = SocialCentralDB
-    if SocialCentralDB.settings and SocialCentralDB.settings.spotterSharePosV1Migrated ~= true then
-        SocialCentralDB.settings.spotterSharePosition = true
-        SocialCentralDB.settings.spotterSharePosV1Migrated = true
-    end
     ns.charDb = SocialCentralCharDB
     ns.UnregisterEvent(boot, "ADDON_LOADED")
 end)
@@ -345,8 +350,111 @@ ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
         pcall(ns.Minimap.Update, ns.Minimap)
     end
 
+    if ns.SetupOfficialChatConfigToggle then
+        ns:SetupOfficialChatConfigToggle()
+    end
+
     ns.UnregisterEvent(boot, "PLAYER_LOGIN")
 end)
+
+local officialChatToggleHooked = false
+local officialChatConfigBtn = nil
+
+local function RefreshOfficialChatToggleState()
+    local btn = officialChatConfigBtn
+    local cfg = _G.ChatConfigFrame
+    if not (btn and cfg and cfg:IsShown()) then return end
+    local chatFrame = cfg.chatFrame or _G.SELECTED_CHAT_FRAME or _G.DEFAULT_CHAT_FRAME
+    local chatID = (chatFrame and chatFrame.GetID and tonumber(chatFrame:GetID())) or 1
+    if chatID < 1 or chatID > 10 then
+        btn:Hide()
+        return
+    end
+    btn._scChatID = chatID
+    local tabLabel = (chatFrame and chatFrame.name and chatFrame.name ~= "") and tostring(chatFrame.name)
+        or (GetChatWindowInfo and select(1, GetChatWindowInfo(chatID)))
+        or tostring(chatID)
+    local framesTbl = ns.db and ns.db.settings and ns.db.settings.addonChatFrames
+    local checked = (type(framesTbl) ~= "table") and (chatID == 1) or (framesTbl[chatID] == true)
+    btn:SetChecked(checked and true or false)
+    if btn.Text then
+        btn.Text:SetText(string.format(L["[SC] Addon Chat (%s)"], tabLabel))
+    end
+    btn:Show()
+end
+
+function ns:RefreshOfficialChatConfigToggle()
+    RefreshOfficialChatToggleState()
+end
+
+function ns:SetupOfficialChatConfigToggle()
+    if officialChatToggleHooked then return true end
+    local cfg = _G.ChatConfigFrame
+    if not cfg then
+        if not self._scWaitingBlizzChatConfig then
+            self._scWaitingBlizzChatConfig = true
+            local waitHost = {}
+            ns.RegisterEvent(waitHost, "ADDON_LOADED", function(_, _, loaded)
+                if loaded == "Blizzard_ChatConfig" or _G.ChatConfigFrame then
+                    ns.UnregisterEvent(waitHost, "ADDON_LOADED")
+                    ns:SetupOfficialChatConfigToggle()
+                end
+            end)
+        end
+        return false
+    end
+
+    officialChatToggleHooked = true
+    -- Standalone non-secure CheckButton attached cleanly onto ChatConfigFrame (never mutates Blizzard's CHAT_CONFIG_CHAT_LEFT secure arrays).
+    if not officialChatConfigBtn and not (InCombatLockdown and InCombatLockdown()) then
+        local btn = CreateFrame("CheckButton", "SocialCentralOfficialChatTabToggle", cfg, "UICheckButtonTemplate")
+        btn:SetSize(22, 22)
+        if _G.ChatConfigFrameDefaultButton then
+            btn:SetPoint("LEFT", _G.ChatConfigFrameDefaultButton, "RIGHT", 16, 0)
+        else
+            btn:SetPoint("BOTTOM", cfg, "BOTTOM", -40, 14)
+        end
+        local txt = btn.Text or _G[btn:GetName() .. "Text"]
+        if txt then
+            btn.Text = txt
+            txt:SetFontObject(GameFontNormalSmall)
+            txt:SetTextColor(0.35, 0.78, 1.0)
+            txt:ClearAllPoints()
+            txt:SetPoint("LEFT", btn, "RIGHT", 3, 0)
+            txt:SetText(L["[SC] Addon Chat"])
+        end
+        btn:SetScript("OnClick", function(self)
+            local cid = self._scChatID or 1
+            if ns.db and ns.db.settings then
+                if type(ns.db.settings.addonChatFrames) ~= "table" then
+                    ns.db.settings.addonChatFrames = { [1] = true }
+                end
+                ns.db.settings.addonChatFrames[cid] = self:GetChecked() and true or false
+                ns:Emit("SETTINGS_CHANGED")
+            end
+        end)
+        btn:SetScript("OnEnter", function(self)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(L["SocialCentral Addon Chat Display"], 0.35, 0.78, 1.0)
+            GameTooltip:AddLine(L["Show direct & room [SC] addon messages inside this Blizzard chat tab immediately as they arrive or are sent."], 0.85, 0.88, 0.92, true)
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
+        officialChatConfigBtn = btn
+    end
+
+    if cfg.HookScript then
+        cfg:HookScript("OnShow", RefreshOfficialChatToggleState)
+    end
+    if type(_G.ChatConfig_UpdateCheckboxes) == "function" then
+        hooksecurefunc("ChatConfig_UpdateCheckboxes", RefreshOfficialChatToggleState)
+    end
+    RefreshOfficialChatToggleState()
+    return true
+end
 
 ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
     ns.UnregisterEvent(boot, "PLAYER_ENTERING_WORLD")
@@ -362,20 +470,35 @@ ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
 end)
 
 -- Addon Compartment integration (WoW: Forever / modern minimap menu).
-function SocialCentral_OnAddonCompartmentClick()
-    if ns.Settings and ns.Settings.Toggle then
+function SocialCentral_OnAddonCompartmentClick(_, mouseInput)
+    local btnName = type(mouseInput) == "table" and mouseInput.buttonName or mouseInput
+    if btnName == "RightButton" then
+        if ns.Settings and ns.Settings.Toggle then
+            ns.Settings:Toggle()
+        elseif ns.Settings and ns.Settings.Open then
+            ns.Settings:Open()
+        end
+        return
+    end
+    if ns.Minimap and ns.Minimap.PerformSmartLeftClick then
+        ns.Minimap:PerformSmartLeftClick()
+    elseif ns.UI and ns.UI.ShowHub then
+        ns.UI:ShowHub()
+    elseif ns.Settings and ns.Settings.Toggle then
         ns.Settings:Toggle()
-    elseif ns.Settings and ns.Settings.Open then
-        ns.Settings:Open()
-    elseif ns.UI and ns.UI.Toggle then
-        ns.UI:Toggle()
     end
 end
 
 function SocialCentral_OnAddonCompartmentEnter(_, owner)
+    if ns.Minimap and ns.Minimap.PopulateSummaryTooltip then
+        GameTooltip:SetOwner(owner, "ANCHOR_LEFT")
+        ns.Minimap:PopulateSummaryTooltip(GameTooltip)
+        GameTooltip:Show()
+        return
+    end
     GameTooltip:SetOwner(owner, "ANCHOR_LEFT")
     GameTooltip:SetText("|cff58a6ffSocial|rCentral")
-    GameTooltip:AddLine(L["Click to open SocialCentral settings."], 0.85, 0.88, 0.92, true)
+    GameTooltip:AddLine(L["Click to open SocialCentral."], 0.85, 0.88, 0.92, true)
     GameTooltip:Show()
 end
 
@@ -385,14 +508,35 @@ end
 
 local navRegenHost = {}
 local pendingNavigation = nil
+local pendingCombatTasks = {}
+
+--- Run a non-protected UI/UX callback right away outside combat, or defer once until combat ends.
+function ns:RunAfterCombat(actionId, fn, noticeText)
+    if type(fn) ~= "function" then return false end
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+    if not inCombat then
+        local ok, err = pcall(fn)
+        if not ok and geterrorhandler then geterrorhandler()(err) end
+        return ok
+    end
+    local key = tostring(actionId or ("task_" .. tostring(#pendingCombatTasks + 1)))
+    pendingCombatTasks[key] = fn
+    if noticeText ~= false then
+        ns:Print("%s", (type(noticeText) == "string" and noticeText ~= "") and noticeText or L["Will finish right after combat ends."])
+    end
+    return false
+end
 
 --- Navigate to a SocialCentral module safely, deferring official Blizzard frame opens if currently in combat.
 function ns:NavigateToModule(modName, opts)
     opts = opts or {}
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     if inCombat then
+        local alreadySame = (pendingNavigation and pendingNavigation.mod == modName)
         pendingNavigation = { mod = modName, opts = opts }
-        ns:Print("%s", L["Will open right after combat ends."])
+        if not alreadySame then
+            ns:Print("%s", L["Will open right after combat ends."])
+        end
         return false
     end
 
@@ -410,6 +554,7 @@ function ns:NavigateToModule(modName, opts)
             targetName = opts.targetName,
             bnetAccountID = opts.bnetAccountID,
             bnetName = opts.bnetName,
+            draftText = opts.draftText,
         })
     end
 
@@ -430,6 +575,20 @@ ns.RegisterEvent(navRegenHost, "PLAYER_REGEN_ENABLED", function()
         local job = pendingNavigation
         pendingNavigation = nil
         ns:NavigateToModule(job.mod, job.opts)
+    end
+    if next(pendingCombatTasks) ~= nil then
+        local queued = {}
+        for k, fn in pairs(pendingCombatTasks) do
+            queued[k] = fn
+            pendingCombatTasks[k] = nil
+        end
+        for _, fn in pairs(queued) do
+            if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+                break
+            end
+            local ok, err = pcall(fn)
+            if not ok and geterrorhandler then geterrorhandler()(err) end
+        end
     end
 end)
 
@@ -467,6 +626,14 @@ if EventRegistry and EventRegistry.RegisterCallback then
         elseif link:find("addon:SCentral:social:", 1, true) then
             local who = link:match("addon:SCentral:social:([^|]+)")
             ns:NavigateToModule("social", { socialSearch = who or "" })
+        elseif link:find("addon:SCentral:wldisambig:", 1, true) then
+            local entryId = link:match("addon:SCentral:wldisambig:([^|]+)")
+            if entryId and ns.UI and ns.UI.OpenWatchlistDisambiguation then
+                ns:RunAfterCombat("watchlist_disambig", function()
+                    ns:NavigateToModule("watchlist")
+                    ns.UI:OpenWatchlistDisambiguation(entryId)
+                end)
+            end
         elseif link:find("addon:SCentral:room:", 1, true) then
             local roomId = link:match("addon:SCentral:room:([^|]+)")
             if roomId and roomId ~= "" then
@@ -480,7 +647,8 @@ if EventRegistry and EventRegistry.RegisterCallback then
         else
             local who = link:match("addon:SCentral:w:([^|]+)")
             if who and who ~= "" then
-                if ns.Chat and ns.Chat.OpenDirectConversation then
+                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(who)
+                if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
                     ns:NavigateToModule("chat", { targetName = who })
                 elseif ns.Compat and ns.Compat.Whisper then
                     ns.Compat.Whisper(who)

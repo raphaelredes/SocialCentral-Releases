@@ -221,6 +221,29 @@ local function GetItemIdentityKey(item)
     return tostring(item.sourceType or "LFG") .. ":" .. tostring(item.eventId or item.lookupKey or item.displayName or "?")
 end
 
+local function GetActivityLockout(item, cachedLocks)
+    if not (item and type(cachedLocks) == "table" and #cachedLocks > 0) then
+        return nil
+    end
+    local hay = ((item.activity or "") .. " " .. (item.note or "")):lower()
+    if #hay < 3 then return nil end
+    for _, lk in ipairs(cachedLocks) do
+        if type(lk) == "table" and lk.locked and not lk.extended then
+            local inst = lk.name and tostring(lk.name):lower()
+            if inst and #inst >= 4 then
+                if hay:find(inst, 1, true) then
+                    return lk
+                end
+                local shortInst = inst:gsub("^the ", ""):gsub("^o ", ""):gsub("^a ", "")
+                if #shortInst >= 5 and hay:find(shortInst, 1, true) then
+                    return lk
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local function MatchesCategoryFilter(item, catId)
     if not catId or catId == "ALL" then
         return true
@@ -1306,20 +1329,41 @@ function LFGFrameTab:RefreshTheme()
     self:UpdateViewLayout()
 end
 
+local function BuildLfgApplyDraft(item)
+    if ns.db and ns.db.settings and ns.db.settings.lfgAutoApplyDraft == false then
+        return nil
+    end
+    local roleId = (LFGFrameTab.GetPrimaryListingRole and LFGFrameTab:GetPrimaryListingRole()) or "DPS"
+    local roleName = (roleId == "TANK" and L["Tank"]) or (roleId == "HEALER" and L["Healer"]) or L["DPS"]
+    local lvl = (UnitLevel and ns.Safe and ns.Safe.Number(ns.Safe.Call(UnitLevel, "player"))) or 0
+    local classLoc = UnitClass and ns.Safe and ns.Safe.String(ns.Safe.Call(UnitClass, "player")) or ""
+    local act = item and item.activity and item.activity ~= "" and item.activity or nil
+    if lvl > 0 and classLoc ~= "" then
+        if act then
+            return string.format(L["Hi! Lv %d %s (%s) available for %s"], lvl, classLoc, roleName, act)
+        end
+        return string.format(L["Hi! Lv %d %s (%s) available!"], lvl, classLoc, roleName)
+    end
+    return act and string.format(L["Hi! Available (%s) for %s"], roleName, act) or nil
+end
+
 local function OpenPlayerWhisper(item)
     if not item or item.isSelf then return end
     local targetName = item.displayName or item.lookupKey
     if not targetName or targetName == "" then return end
-    if ns.Chat and ns.Chat.OpenDirectConversation then
+    local draft = BuildLfgApplyDraft(item)
+    local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or targetName, item.bnetAccountID)
+    if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
         ns.Chat:OpenDirectConversation({
             targetName = targetName,
             classFile = item.classFile,
             autoProbe = true,
             openUI = true,
+            draftText = draft,
         })
         LFGFrameTab:OpenOfficialModule("chat")
     elseif Compat.Whisper then
-        Compat.Whisper(targetName)
+        Compat.Whisper(targetName, draft)
     end
 end
 
@@ -1405,11 +1449,11 @@ local function OpenLfgRowContextMenu(anchor, item)
             root:CreateButton(L["Whisper"], function()
                 OpenPlayerWhisper(item)
             end)
-            root:CreateButton("/w (" .. L["Whisper"] .. ")", function()
-                if Compat.Whisper then Compat.Whisper(targetName) end
+            root:CreateButton(L["Quick Apply (/w)"], function()
+                if Compat.Whisper then Compat.Whisper(targetName, BuildLfgApplyDraft(item)) end
             end)
             root:CreateButton(L["Invite to Group"], function()
-                if Compat.Invite then Compat.Invite(targetName) end
+                if Compat.Invite then Compat.Invite(targetName, item.bnetAccountID) end
             end)
             root:CreateButton(L["Track on Radar"], function()
                 if ns.Spotter and ns.Spotter.TrackPlayer then
@@ -1621,6 +1665,12 @@ local function CreateLfgRow(parent)
         if it.hasFriendOrWatchlistSignup and it.friendOrWatchlistNames and it.friendOrWatchlistNames ~= "" then
             GameTooltip:AddLine(L["In group"] .. ": " .. it.friendOrWatchlistNames, 1.0, 0.72, 0.30, true)
         end
+        if it._lockoutInfo then
+            local lk = it._lockoutInfo
+            local prog = (lk.numEncounters and lk.numEncounters > 0) and string.format("%d/%d", lk.encounterProgress or 0, lk.numEncounters) or L["Saved"]
+            local resetStr = (Compat.FormatDurationShort and Compat.FormatDurationShort(lk.reset or 0)) or ""
+            GameTooltip:AddLine(string.format(L["Saved Lockout: %s (%s · %s)"], lk.name or "?", prog, resetStr), 1.0, 0.62, 0.24, true)
+        end
         GameTooltip:AddLine(L["Double-click: Whisper  |  Right-click: More actions"], 0.60, 0.66, 0.74)
         GameTooltip:Show()
     end)
@@ -1687,8 +1737,26 @@ local function UpdateLfgRow(row, item, _, palette)
     if sMeta and sMeta.flag == "AVOID" then
         badges = badges .. "|cffff4d4d[" .. L["AVOID"] .. "]|r "
     end
+    if item._lockoutInfo then
+        local lk = item._lockoutInfo
+        local lockProg = (lk.numEncounters and lk.numEncounters > 0)
+            and string.format("%s %d/%d", L["LOCKED"], lk.encounterProgress or 0, lk.numEncounters)
+            or L["LOCKED"]
+        badges = badges .. "|cffff9b3d[" .. lockProg .. "]|r "
+    end
     if item.sourceType == "PUBLIC_CHAT" then
         badges = badges .. "|cffb48eff[" .. L["Global Chat"] .. "]|r "
+        local rawKw = ns.db and ns.db.settings and ns.db.settings.clanLfgAlertFilter
+        if type(rawKw) == "string" and rawKw ~= "" then
+            local haystack = ((item.activity or "") .. " " .. (item.note or "")):lower()
+            for kw in rawKw:gmatch("([^,]+)") do
+                local trimmed = kw:match("^%s*(.-)%s*$"):lower()
+                if trimmed ~= "" and haystack:find(trimmed, 1, true) then
+                    badges = badges .. "|cff3fb950[" .. L["MATCH"] .. "]|r "
+                    break
+                end
+            end
+        end
     end
     if item.isAllied then
         local gShort = (item.guild and item.guild ~= "") and (" " .. item.guild) or ""
@@ -2152,10 +2220,24 @@ function LFGFrameTab:RefreshData()
         and ns.Clan:GetClanLFGList(self.query, self.dungeonsOnly, self.sourceFilter)
         or {}
 
+    local hideAvoidEnemy = ns.db and ns.db.settings and ns.db.settings.lfgHideAvoidEnemy == true
+    local activeLockouts = (ns.Clan and ns.Clan.GetSavedLockouts) and ns.Clan:GetSavedLockouts(true) or {}
+
     local rows = {}
     local foundSelected = nil
     for _, item in ipairs(rawRows) do
-        if MatchesCategoryFilter(item, self.categoryFilter) then
+        local suppressed = false
+        if hideAvoidEnemy and not item.isSelf then
+            local lkKey = item.lookupKey or item.displayName
+            local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(lkKey) or (Store.GetSocialMeta and Store:GetSocialMeta(lkKey)))
+            if sMeta and sMeta.flag == "AVOID" then
+                suppressed = true
+            elseif item.guild and item.guild ~= "" and ns.Spotter and ns.Spotter.ClassifyGuild and ns.Spotter:ClassifyGuild(item.guild) == "ENEMY" then
+                suppressed = true
+            end
+        end
+        if (not suppressed) and MatchesCategoryFilter(item, self.categoryFilter) then
+            item._lockoutInfo = GetActivityLockout(item, activeLockouts)
             rows[#rows + 1] = item
             if self.selectedKey and GetItemIdentityKey(item) == self.selectedKey then
                 foundSelected = item
@@ -2334,6 +2416,16 @@ function LFGFrameTab:BuildSubPanel()
                 end)
             end
             if root.CreateDivider then root:CreateDivider() end
+            if root.CreateCheckbox then
+                root:CreateCheckbox(L["Hide Avoid / Enemy"], function()
+                    return ns.db and ns.db.settings and ns.db.settings.lfgHideAvoidEnemy == true
+                end, function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.lfgHideAvoidEnemy = not (ns.db.settings.lfgHideAvoidEnemy == true)
+                        LFGFrameTab:RefreshData()
+                    end
+                end)
+            end
             root:CreateButton(L["List Group"], function()
                 LFGFrameTab.viewMode = "categories"
                 LFGFrameTab:RefreshData()
@@ -2653,7 +2745,7 @@ function LFGFrameTab:BuildSubPanel()
     inviteBtn:SetScript("OnClick", function()
         local sel = LFGFrameTab.selectedItem
         if sel and not sel.isSelf and Compat.Invite then
-            Compat.Invite(sel.displayName or sel.lookupKey)
+            Compat.Invite(sel.displayName or sel.lookupKey, sel.bnetAccountID)
         end
     end)
     self.controls.inviteBtn = inviteBtn

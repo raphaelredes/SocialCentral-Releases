@@ -276,7 +276,7 @@ function Store:NotifyWatchlistOnline(entry, opts)
     end
 
     if alerts.sound and not (opts and opts.suppressSound) and PlaySound and SOUNDKIT then
-        local soundId = SOUNDKIT.UI_BNET_TOAST or SOUNDKIT.TELL_MESSAGE
+        local soundId = SOUNDKIT.MAP_PING or 3175
         if soundId then
             pcall(PlaySound, soundId, "Master")
         end
@@ -345,6 +345,8 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
         if not (exactMatch or firstMatch) then return end
 
         local prevStatus = entry.status
+        local trustedSurnameSource = (data.source == "friend" or data.source == "bnet" or data.source == "guild" or data.source == "target" or data.source == "who")
+            or (data.guid and entry.guid and data.guid == entry.guid)
         if data.online ~= nil then
             entry.status = data.online and "online" or "offline"
             entry.lastChecked = now
@@ -355,14 +357,23 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
         if data.classFile then entry.classFile = data.classFile end
         if data.area and data.area ~= "" then entry.area = data.area end
         if data.guild and data.guild ~= "" then entry.guild = data.guild end
+        if data.guid and data.guid ~= "" and (not entry.guid or trustedSurnameSource) then
+            entry.guid = data.guid
+        end
         if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
-            entry.surname = parsed.surname
-            entry.displayName = parsed.displayName
-            entry.truncatedWarning = nil
-            self._wlIndexDirty = true
-            if parsed.lookupKey ~= idKey and not list[parsed.lookupKey] then
-                keysToReindex = keysToReindex or {}
-                keysToReindex[#keysToReindex + 1] = { oldId = idKey, newId = parsed.lookupKey, entry = entry }
+            if trustedSurnameSource then
+                entry.surname = parsed.surname
+                entry.displayName = parsed.displayName
+                entry.observedCandidate = nil
+                entry.truncatedWarning = nil
+                self._wlIndexDirty = true
+                if parsed.lookupKey ~= idKey and not list[parsed.lookupKey] then
+                    keysToReindex = keysToReindex or {}
+                    keysToReindex[#keysToReindex + 1] = { oldId = idKey, newId = parsed.lookupKey, entry = entry }
+                end
+            else
+                -- Passive nearby/chat sighting: suggest candidate without permanently hijacking FirstName-only entry.
+                entry.observedCandidate = parsed.displayName
             end
         end
         if data.online then

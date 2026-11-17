@@ -476,6 +476,102 @@ function WorldBuffs:GetDropCooldownStatus(def)
     return entry
 end
 
+function WorldBuffs:GetCatchupSyncEntries()
+    local now = NowServerTime()
+    local ids = { "dragonslayer_ony", "dragonslayer_nef", "warchief", "stormwind", "zandalar" }
+    local maxAges = {
+        dragonslayer_ony = 21600,
+        dragonslayer_nef = 28800,
+        warchief = 10800,
+        stormwind = 10800,
+        zandalar = 7200,
+    }
+    local out = {}
+    for _, id in ipairs(ids) do
+        local ts = self:GetLastDropTime(id)
+        local maxAge = maxAges[id] or 21600
+        if ts and ts > 0 and (now - ts) >= 0 and (now - ts) < maxAge then
+            out[#out + 1] = { id = id, ts = ts }
+        end
+    end
+    table.sort(out, function(a, b)
+        return a.ts > b.ts
+    end)
+    return out
+end
+
+function WorldBuffs:CheckExpiringBuffAlerts()
+    local s = ns.db and ns.db.settings
+    if s and (s.worldBuffsAlerts == false or s.worldBuffsExpiryAlert == false) then
+        return nil
+    end
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+    local now = GetTime and GetTime() or 0
+    local nextDelay = nil
+    self._warnedExpiring = self._warnedExpiring or {}
+    for _, def in ipairs(BUFF_DEFINITIONS) do
+        local aura = FindPlayerAura(def.spellId, def.altSpellIds)
+        if aura and aura.expirationTime and aura.expirationTime > now then
+            local rem = aura.expirationTime - now
+            if rem > 300 then
+                local wait = rem - 299
+                if not nextDelay or wait < nextDelay then
+                    nextDelay = wait
+                end
+            elseif rem >= 20 then
+                local sig = def.id .. "_" .. tostring(math.floor(aura.expirationTime))
+                if not self._warnedExpiring[sig] then
+                    if inCombat then
+                        if not nextDelay or 10 < nextDelay then
+                            nextDelay = 10
+                        end
+                    else
+                        self._warnedExpiring[sig] = true
+                        local durStr = self:FormatDuration(rem)
+                        ns:Print(L["[World Buff Expiring] %s ends in ~%s!"]:format(def.name, durStr))
+                        ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                            id = "wbexp:" .. def.id,
+                            kind = "WORLDBUFF",
+                            sourceTag = L["World Buff Expiring"],
+                            sender = def.name,
+                            text = L["Ends in ~%s"]:format(durStr),
+                            buffDef = def,
+                            ts = time(),
+                            priority = 1,
+                        })
+                    end
+                end
+            end
+        end
+    end
+    return nextDelay
+end
+
+function WorldBuffs:ScheduleNextExpiryCheck()
+    if self._expiryTimer and self._expiryTimer.Cancel then
+        self._expiryTimer:Cancel()
+    end
+    self._expiryTimer = nil
+
+    local nextDelay = self:CheckExpiringBuffAlerts()
+    if nextDelay and nextDelay > 0 and C_Timer and C_Timer.NewTimer then
+        local bounded = math.max(1.0, math.min(nextDelay, 1800))
+        self._expiryTimer = C_Timer.NewTimer(bounded, function()
+            WorldBuffs._expiryTimer = nil
+            WorldBuffs:ScheduleNextExpiryCheck()
+        end)
+    elseif nextDelay and nextDelay > 0 and C_Timer and C_Timer.After then
+        local seq = (self._expirySeq or 0) + 1
+        self._expirySeq = seq
+        local bounded = math.max(1.0, math.min(nextDelay, 1800))
+        C_Timer.After(bounded, function()
+            if WorldBuffs._expirySeq == seq then
+                WorldBuffs:ScheduleNextExpiryCheck()
+            end
+        end)
+    end
+end
+
 local function SyncIdToDefId(syncId)
     if syncId == "dragonslayer_ony" or syncId == "dragonslayer_nef" then
         return "dragonslayer"
@@ -504,11 +600,12 @@ function WorldBuffs:ReceiveSyncedDrop(syncId, ts, sender)
                 local openLink = "|Haddon:SCentral:buffs|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
                 ns:Print("%s %s", L["[World Buff Sync] %s reported %s!"]:format(sender or L["Guild"], def.name), openLink)
                 ns:Emit("ADDON_MESSAGE_NOTIFY", {
-                    id = "wb:" .. syncId .. ":" .. tostring(ts),
+                    id = "wb:" .. tostring(defId),
                     kind = "WORLDBUFF",
                     sourceTag = L["World Buffs"],
                     sender = sender or L["Guild"],
                     text = def.name,
+                    buffDef = def,
                     ts = time(),
                     priority = 1,
                 })
@@ -541,6 +638,18 @@ function WorldBuffs:HandleIncomingDrop(def, now, syncId)
 
     if ns.db and ns.db.settings and ns.db.settings.worldBuffsAlerts ~= false then
         ns:Print(L["[World Buff Alert] %s will drop in ~%ds!"]:format(def.name, def.yellDelay))
+        ns:Emit("ADDON_MESSAGE_NOTIFY", {
+            id = "wb:" .. tostring(def.id),
+            kind = "WORLDBUFF",
+            sourceTag = L["World Buff Incoming"],
+            sender = def.name,
+            text = L["Dropping in ~%ds!"]:format(def.yellDelay),
+            countdownUntil = dropAt,
+            buffDef = def,
+            ts = nowTs,
+            priority = 2,
+            totalDuration = math.max(12, def.yellDelay + 4),
+        })
     end
 
     if ns.db and ns.db.settings and ns.db.settings.worldBuffsSound ~= false then
@@ -745,6 +854,7 @@ function WorldBuffs:Init()
         if changed or mapShown or scShown then
             ns:Emit("WORLD_BUFFS_UPDATED")
         end
+        WorldBuffs:ScheduleNextExpiryCheck()
     end
 
     local auraFrame = CreateFrame and CreateFrame("Frame")
@@ -772,8 +882,15 @@ function WorldBuffs:Init()
     end
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
         TrackFreshOpenWorldAuras(true)
+        self:ScheduleNextExpiryCheck()
         ns:Emit("WORLD_BUFFS_UPDATED")
     end)
+
+    ns:On("SETTINGS_UPDATED", function()
+        WorldBuffs:ScheduleNextExpiryCheck()
+    end)
+
+    self:ScheduleNextExpiryCheck()
 end
 
 WorldBuffs:Init()

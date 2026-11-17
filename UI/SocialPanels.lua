@@ -153,7 +153,7 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
         noteLbl:SetText(L["Social Note:"])
         m.noteLbl = noteLbl
 
-        local noteIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 60 })
+        local noteIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 60, insertLinkMode = "full" })
         m.noteIn = noteIn
 
         local nativeNoteLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -1141,6 +1141,30 @@ function SocialPanels:CreateGroupPanel(parent)
     listCard:SetPoint("BOTTOMRIGHT", 0, 0)
     panel.listCard = listCard
 
+    local recentSearch = Theme:CreateEditBox(listCard, {
+        height = 22,
+        clearButton = true,
+        placeholder = L["Search companions by name or zone..."],
+    })
+    recentSearch:SetPoint("TOPLEFT", 8, -6)
+    recentSearch:SetPoint("TOPRIGHT", -8, -6)
+    recentSearch:Hide()
+    recentSearch:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    recentSearch:HookScript("OnTextChanged", function()
+        if panel._view ~= "recent" then return end
+        panel._recentSearchToken = (panel._recentSearchToken or 0) + 1
+        local tok = panel._recentSearchToken
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.12, function()
+                if panel:IsShown() and panel._view == "recent" and panel._recentSearchToken == tok then
+                    panel:Refresh(true)
+                end
+            end)
+        else
+            panel:Refresh(true)
+        end
+    end)
+
     local scroll = Theme:CreateScrollList(listCard, 40, function(rowParent, _, rowHeight)
         local row = CreateFrame("Button", nil, rowParent, "BackdropTemplate")
         row:SetHeight(rowHeight)
@@ -1182,7 +1206,8 @@ function SocialPanels:CreateGroupPanel(parent)
                 return
             end
             if row._item.displayName then
-                if ns.Chat and ns.Chat.OpenDirectConversation then
+                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(row._item.lookupKey or row._item.displayName, row._item.bnetAccountID)
+                if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
                     ns.Chat:OpenDirectConversation({
                         targetName = row._item.lookupKey or row._item.displayName,
                         classFile = row._item.classFile,
@@ -1207,20 +1232,23 @@ function SocialPanels:CreateGroupPanel(parent)
                             ns.Spotter:TrackPlayer(item.displayName, item.guild, item.classFile, item.level, item.guid, nil)
                         end)
                     end
-                    root:CreateButton(L["Whisper"], function()
-                        if ns.Chat and ns.Chat.OpenDirectConversation then
-                            ns.Chat:OpenDirectConversation({
-                                targetName = item.lookupKey or item.displayName,
-                                classFile = item.classFile,
-                                autoProbe = true,
-                            })
-                            if ns.UI and ns.UI.OpenTab then
-                                ns.UI:OpenTab("chat")
+                    local scConfirmed = (not item.isMe) and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or item.displayName, item.bnetAccountID)
+                    if scConfirmed then
+                        root:CreateButton(L["Whisper in SocialCentral"], function()
+                            if ns.Chat and ns.Chat.OpenDirectConversation then
+                                ns.Chat:OpenDirectConversation({
+                                    targetName = item.lookupKey or item.displayName,
+                                    classFile = item.classFile,
+                                    autoProbe = true,
+                                })
+                                if ns.UI and ns.UI.OpenTab then
+                                    ns.UI:OpenTab("chat")
+                                end
+                            elseif Compat.Whisper then
+                                Compat.Whisper(item.displayName)
                             end
-                        else
-                            Compat.Whisper(item.displayName)
-                        end
-                    end)
+                        end)
+                    end
                     root:CreateButton(L["WoW Whisper (/w)"], function()
                         Compat.Whisper(item.displayName)
                     end)
@@ -1237,10 +1265,15 @@ function SocialPanels:CreateGroupPanel(parent)
                                 root:CreateButton(L["Promote"], function()
                                     if ns.Group then ns.Group:PromoteMember(item.unit) end
                                 end)
+                                if Compat.IsInRaid and Compat.IsInRaid() and ns.Group and ns.Group.ToggleAssistant then
+                                    root:CreateButton(item.isAssistant and L["Demote Assistant"] or L["Promote to Assistant"], function()
+                                        ns.Group:ToggleAssistant(item.unit)
+                                    end)
+                                end
                             end
                         end
                         root:CreateButton(L["Invite"], function()
-                            Compat.Invite(item.displayName)
+                            Compat.Invite(item.displayName, item.bnetAccountID)
                         end)
                         root:CreateButton(L["Add to Watchlist"], function()
                             if ns.Watchlist then ns.Watchlist:Add(item.lookupKey or item.displayName) end
@@ -1277,7 +1310,7 @@ function SocialPanels:CreateGroupPanel(parent)
         local hex = Compat.ClassHex(item.classFile)
         local lvl = (item.level and item.level > 0) and (" |cff9da7b5Lv." .. item.level .. "|r") or ""
         local roleTag = ROLE_BADGES[item.role or "NONE"] or ""
-        local leadTag = item.isLeader and " |cffffd24d[Leader]|r" or ""
+        local leadTag = item.isLeader and (" |cffffd24d[" .. L["Leader"] .. "]|r") or (item.isAssistant and (" |cff58a6ff[" .. L["Assistant"] .. "]|r") or "")
         local readyTag = ""
         if item.ready == true then
             readyTag = " |cff3fb950[OK]|r"
@@ -1285,6 +1318,8 @@ function SocialPanels:CreateGroupPanel(parent)
             readyTag = " |cffff6b6b[NO]|r"
         elseif item.inCurrentGroup then
             readyTag = " |cff3fb950[" .. L["Group"] .. "]|r"
+        elseif panel._view == "recent" and ns.Store and ns.Store.socialByLookup and item.lookupKey and ns.Store.socialByLookup[item.lookupKey] then
+            readyTag = " |cff3fb950[" .. L["Online"] .. "]|r"
         end
         local scTag = (not item.isMe and ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(item.lookupKey or item.displayName))
             and " |cff3fb950[SC]|r" or ""
@@ -1301,6 +1336,9 @@ function SocialPanels:CreateGroupPanel(parent)
 
         local subParts = {}
         if item.zone and item.zone ~= "" then table.insert(subParts, item.zone) end
+        if panel._view == "recent" and (item.runs or 0) > 1 then
+            table.insert(subParts, L["%d runs"]:format(item.runs))
+        end
         if meta and meta.folder then table.insert(subParts, "[" .. meta.folder .. "]") end
         if meta and meta.note then table.insert(subParts, meta.note) end
         if item.lastSeen then
@@ -1410,28 +1448,43 @@ function SocialPanels:CreateGroupPanel(parent)
         Theme:SetButtonText(btnView, ((self._view == "recent") and L["Recent Companions"] or L["Current Group"]) .. "  v")
         LayoutGroupTopBar()
 
-        local counts = ns.Group and ns.Group:GetSummaryCounts() or { total = 0, TANK = 0, HEALER = 0, DAMAGER = 0 }
-        if self._view == "recent" then
-            local rCount = #(ns.Group and ns.Group:GetRecentCompanions() or {})
-            titleLbl:SetText(L["Recent Companions"])
-            countLbl:SetText(string.format("%s: %d", L["Recent Companions"], rCount))
-        elseif ch then
-            titleLbl:SetText(L["Active Group"] .. "  |cff3fb950[" .. ch .. "]|r")
-            countLbl:SetText(string.format("%s: %d  (T:%d  H:%d  D:%d)", L["Members"], counts.total, counts.TANK, counts.HEALER, counts.DAMAGER))
-        else
-            titleLbl:SetText(L["Not currently in a Party/Raid/Instance group"])
-            countLbl:SetText(L["Switch to 'Recent Companions' to re-contact past instance teammates."])
-        end
-        countLbl:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        local showRecentSearch = (self._view == "recent")
+        recentSearch:SetShown(showRecentSearch)
+        scroll.container:ClearAllPoints()
+        scroll.container:SetPoint("TOPLEFT", 6, showRecentSearch and -32 or -6)
+        scroll.container:SetPoint("BOTTOMRIGHT", -6, 6)
 
-        local rows, emptyText
-        if self._view == "current" then
+        local counts = ns.Group and ns.Group:GetSummaryCounts() or { total = 0, TANK = 0, HEALER = 0, DAMAGER = 0 }
+        local rQuery = showRecentSearch and (recentSearch:GetText() or "") or nil
+        if self._view == "recent" then
+            local allRecent = ns.Group and ns.Group:GetRecentCompanions(rQuery) or {}
+            local onlineRecent = 0
+            for _, rec in ipairs(allRecent) do
+                if rec.inCurrentGroup or (ns.Store and ns.Store.socialByLookup and rec.lookupKey and ns.Store.socialByLookup[rec.lookupKey]) then
+                    onlineRecent = onlineRecent + 1
+                end
+            end
+            titleLbl:SetText(L["Recent Companions"])
+            countLbl:SetText(string.format("%s: %d  |cff3fb950(%d %s)|r", L["Recent Companions"], #allRecent, onlineRecent, L["Online"]))
+            rows = allRecent
+            emptyText = (rQuery and rQuery ~= "") and L["No matching players found."] or L["No recent companions recorded yet."]
+        elseif ch then
+            local rcTag = ""
+            if ns.Group and ns.Group.readyCheckActive and ns.Group.GetReadyCheckProgress then
+                local rOk, _, _, rTot = ns.Group:GetReadyCheckProgress()
+                rcTag = "  |cffffd24d[" .. string.format(L["Ready Check: %d/%d"], rOk, rTot) .. "]|r"
+            end
+            titleLbl:SetText(L["Active Group"] .. "  |cff3fb950[" .. ch .. "]|r" .. rcTag)
+            countLbl:SetText(string.format("%s: %d  (T:%d  H:%d  D:%d)", L["Members"], counts.total, counts.TANK, counts.HEALER, counts.DAMAGER))
             rows = ns.Group and ns.Group:GetMembers() or {}
             emptyText = L["Join a Party, Raid, or Instance group to track live members and roles."]
         else
-            rows = ns.Group and ns.Group:GetRecentCompanions() or {}
-            emptyText = L["No recent companions recorded yet."]
+            titleLbl:SetText(L["Not currently in a Party/Raid/Instance group"])
+            countLbl:SetText(L["Switch to 'Recent Companions' to re-contact past instance teammates."])
+            rows = ns.Group and ns.Group:GetMembers() or {}
+            emptyText = L["Join a Party, Raid, or Instance group to track live members and roles."]
         end
+        countLbl:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
         scroll:SetData(rows, emptyText, resetScroll)
     end
 
@@ -1534,22 +1587,25 @@ local function OpenNewDirectChatModal()
                 local added = 0
                 for _, item in ipairs(entries) do
                     if added >= 18 then break end
-                    local sc = (ns.Chat and ns.Chat:IsLookupKeyVerified(item.lookupKey or item.displayName)) and " [SC]" or ""
-                    local lblItem = (item.displayName or "?") .. sc
-                    root:CreateButton(lblItem, function()
-                        if ns.Chat and ns.Chat.OpenDirectConversation then
-                            ns.Chat:OpenDirectConversation({
-                                targetName = item.displayName or item.lookupKey,
-                                bnetAccountID = item.bnetAccountID,
-                                bnetName = (item.sources and item.sources.bnet) and (item.bnetName or item.displayName) or nil,
-                                classFile = item.classFile,
-                                autoProbe = true,
-                            })
-                        end
-                        input:ClearFocus()
-                        m:Hide()
-                    end)
-                    added = added + 1
+                    if item and item.online and not item.isMe then
+                        local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or item.displayName, item.bnetAccountID)
+                        local sc = scConfirmed and " [SC]" or ""
+                        local lblItem = (item.displayName or "?") .. sc
+                        root:CreateButton(lblItem, function()
+                            if ns.Chat and ns.Chat.OpenDirectConversation then
+                                ns.Chat:OpenDirectConversation({
+                                    targetName = (item.hasCharacterName ~= false) and (item.displayName or item.lookupKey) or nil,
+                                    bnetAccountID = item.bnetAccountID,
+                                    bnetName = (item.sources and item.sources.bnet) and (item.bnetName or item.displayName) or nil,
+                                    classFile = item.classFile,
+                                    autoProbe = true,
+                                })
+                            end
+                            input:ClearFocus()
+                            m:Hide()
+                        end)
+                        added = added + 1
+                    end
                 end
                 if added == 0 then
                     root:CreateTitle(L["No entries match your filter."])
@@ -1746,6 +1802,28 @@ function SocialPanels:CreateChatPanel(parent)
     leftCard:SetPoint("BOTTOMLEFT", 0, 0)
     leftCard:SetWidth(238)
 
+    local threadSearch = Theme:CreateEditBox(leftCard, {
+        height = 22,
+        clearButton = true,
+        placeholder = L["Search conversations..."],
+    })
+    threadSearch:SetPoint("TOPLEFT", 6, -6)
+    threadSearch:SetPoint("TOPRIGHT", -6, -6)
+    threadSearch:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    threadSearch:HookScript("OnTextChanged", function()
+        panel._chatSearchToken = (panel._chatSearchToken or 0) + 1
+        local tok = panel._chatSearchToken
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.10, function()
+                if panel:IsShown() and panel._chatSearchToken == tok then
+                    panel:Refresh(true)
+                end
+            end)
+        else
+            panel:Refresh(true)
+        end
+    end)
+
     local threadsScroll = Theme:CreateScrollList(leftCard, 38, function(rowParent, _, rowHeight)
         local r = CreateFrame("Button", nil, rowParent, "BackdropTemplate")
         r:SetHeight(rowHeight)
@@ -1830,6 +1908,25 @@ function SocialPanels:CreateChatPanel(parent)
             end
             panel:Refresh(false)
         end)
+        r:SetScript("OnEnter", function(selfBtn)
+            local it = selfBtn._item
+            if not (it and GameTooltip) then return end
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+            GameTooltip:SetText(it.title or it.key or "?", 1, 1, 1)
+            local st, stMsg = ns.Chat and ns.Chat.GetThreadAvailabilityStatus and ns.Chat:GetThreadAvailabilityStatus(it.key)
+            if st then
+                local stTag = (st == "DND") and L["DND"] or L["AFK"]
+                local stFull = (stMsg and stMsg ~= "") and (stTag .. ": " .. stMsg) or stTag
+                GameTooltip:AddLine(stFull, 1.0, 0.65, 0.25, true)
+            end
+            if it.preview and it.preview ~= "" then
+                GameTooltip:AddLine(it.preview, 0.80, 0.85, 0.92, true)
+            end
+            GameTooltip:Show()
+        end)
+        r:SetScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
         return r
     end, function(r, item, idx, pal)
         r._item = item
@@ -1891,8 +1988,14 @@ function SocialPanels:CreateChatPanel(parent)
             end
         end
         local mutedTag = item.muted and (" |cffff9b3d[" .. L["Muted"] .. "]|r") or ""
+        local availTag = ""
+        if item.statusTag == "DND" then
+            availTag = " |cfff54747[" .. L["DND"] .. "]|r"
+        elseif item.statusTag == "AFK" then
+            availTag = " |cffff9b3d[" .. L["AFK"] .. "]|r"
+        end
         local hex = item.classFile and Compat.ClassHex(item.classFile) or "|cffffffff"
-        r.title:SetText(prefix .. scTag .. hex .. (item.title or "") .. "|r" .. mutedTag)
+        r.title:SetText(prefix .. scTag .. hex .. (item.title or "") .. "|r" .. availTag .. mutedTag)
 
         r.sub:SetText((item.preview ~= "" and item.preview) or (Compat.FormatRelativeTime(item.lastAt, L)))
         if hasUnread then
@@ -1902,7 +2005,7 @@ function SocialPanels:CreateChatPanel(parent)
             r.sub:SetTextColor(pal.textMuted[1], pal.textMuted[2], pal.textMuted[3])
         end
     end)
-    threadsScroll.container:SetPoint("TOPLEFT", 6, -6)
+    threadsScroll.container:SetPoint("TOPLEFT", 6, -32)
     threadsScroll.container:SetPoint("BOTTOMRIGHT", -6, 6)
 
     -- Right: Active conversation & composer
@@ -2087,6 +2190,7 @@ function SocialPanels:CreateChatPanel(parent)
     local replyInput = Theme:CreateEditBox(composer, {
         height = 24,
         maxLetters = 200,
+        insertLinkMode = "full",
         placeholder = L["Select a conversation to reply..."],
     })
     replyInput:SetPoint("LEFT", 0, 0)
@@ -2095,7 +2199,7 @@ function SocialPanels:CreateChatPanel(parent)
     local function SubmitReply()
         if not (ns.Chat and ns.Chat.activeThreadKey) then return end
         local txt = replyInput:GetText() or ""
-        if ns.Chat:SendOrOpenReply(ns.Chat.activeThreadKey, txt) then
+        if ns.Chat:SendOrOpenReply(ns.Chat.activeThreadKey, txt, true) then
             replyInput:SetText("")
         end
     end
@@ -2254,11 +2358,23 @@ function SocialPanels:CreateChatPanel(parent)
         LayoutChatPanels()
 
         local threads = ns.Chat and ns.Chat:GetThreadsList(self._filter) or {}
+        local tQuery = threadSearch and threadSearch:GetText() or ""
+        if tQuery ~= "" then
+            local qLow = tQuery:lower()
+            local filtered = {}
+            for _, th in ipairs(threads) do
+                local hay = ((th.title or "") .. " " .. (th.preview or "")):lower()
+                if hay:find(qLow, 1, true) then
+                    filtered[#filtered + 1] = th
+                end
+            end
+            threads = filtered
+        end
         if ns.Chat and (not ns.Chat.activeThreadKey or not ns.Chat.threads[ns.Chat.activeThreadKey]) and #threads > 0 then
             ns.Chat:SetActiveThread(threads[1].key, (threads[1].unread or 0) > 0)
         end
-        local emptyMsg = (self._filter == "unread")
-            and L["No unread conversations right now."]
+        local emptyMsg = (tQuery ~= "" and L["No matching conversations found."])
+            or (self._filter == "unread" and L["No unread conversations right now."])
             or L["No conversations yet. Whispers, group chats, and Private Rooms appear here."]
         threadsScroll:SetData(threads, emptyMsg, resetScroll)
 
@@ -2304,7 +2420,11 @@ function SocialPanels:CreateChatPanel(parent)
                 for _ in pairs(room.members) do memberCount = memberCount + 1 end
             end
             local unreadHdrTag = (activeUnread > 0) and ("  |cffff5555[" .. string.format(L["%d unread"], activeUnread) .. "]|r") or ""
-            hdrTitle:SetText((active.title or "") .. (isRoom and ("  |cff3fb950[" .. memberCount .. "]|r") or "") .. unreadHdrTag)
+            local availState = ns.Chat and ns.Chat.GetThreadAvailabilityStatus and ns.Chat:GetThreadAvailabilityStatus(activeKey)
+            local availHdrTag = (availState == "DND" and ("  |cfff54747[" .. L["DND"] .. "]|r"))
+                or (availState == "AFK" and ("  |cffff9b3d[" .. L["AFK"] .. "]|r"))
+                or ""
+            hdrTitle:SetText((active.title or "") .. (isRoom and ("  |cff3fb950[" .. memberCount .. "]|r") or "") .. availHdrTag .. unreadHdrTag)
 
             btnRoomInvite:SetShown(isRoom)
             btnLeaveRoom:SetShown(isRoom)
@@ -2432,7 +2552,7 @@ function SocialPanels:CreateChatPanel(parent)
                 local destInfo = (ns.Chat and ns.Chat.GetOfficialDestinationInfo) and ns.Chat:GetOfficialDestinationInfo(activeKey)
                 local btnLabel = (destInfo and destInfo.compactButtonText) or L["WoW Whisper (/w)"]
                 Theme:SetButtonText(btnSend, btnLabel)
-                Theme:AutoFitButton(btnSend, 84, 14, 165)
+                Theme:AutoFitButton(btnSend, 84, 14, 196)
                 btnSend:SetEnabled(destInfo ~= nil)
                 if replyInput.SetPlaceholder then
                     replyInput:SetPlaceholder((destInfo and destInfo.buttonText) or L["Select a conversation to reply..."])
@@ -2441,6 +2561,17 @@ function SocialPanels:CreateChatPanel(parent)
             replyInput:ClearAllPoints()
             replyInput:SetPoint("LEFT", 0, 0)
             replyInput:SetPoint("RIGHT", btnSend, "LEFT", -8, 0)
+            if ns.Chat and ns.Chat.pendingDraftText then
+                local draft = ns.Chat.pendingDraftText
+                ns.Chat.pendingDraftText = nil
+                replyInput:SetText(draft)
+                if replyInput.SetCursorPosition then
+                    replyInput:SetCursorPosition(#draft)
+                end
+                if replyInput.SetFocus then
+                    replyInput:SetFocus()
+                end
+            end
 
             if needMsgRebuild then
                 if #lines == 0 then
@@ -2448,19 +2579,24 @@ function SocialPanels:CreateChatPanel(parent)
                 else
                     for _, entry in ipairs(lines) do
                         local ts = entry.ts and entry.ts > 0 and date("|cff9da7b5[%H:%M]|r ", entry.ts) or ""
-                        local addonTag = (entry.viaAddon and not isRoom) and "|cff3fb950[SC]|r " or ""
-                        local tick = ""
-                        if not entry.incoming and entry.viaAddon and not isRoom then
-                            if entry.deliveryState == "delivered" then
-                                tick = " |cff3fb950[" .. L["ok"] .. "]|r"
-                            elseif entry.deliveryState == "off" or entry.deliveryState == "declined" then
-                                tick = " |cfff54747[" .. L["off"] .. "]|r"
-                            else
-                                tick = " |cff9da7b5[" .. L["sent"] .. "]|r"
+                        if entry.isStatusNotice then
+                            local sCol = (entry.statusKind == "DND") and "|cfff54747" or "|cffff9b3d"
+                            msgFrame:AddMessage(ts .. sCol .. "[" .. (entry.sender or L["Status"]) .. "]|r |cffb8c2d0" .. (entry.text or "") .. "|r")
+                        else
+                            local addonTag = (entry.viaAddon and not isRoom) and "|cff3fb950[SC]|r " or ""
+                            local tick = ""
+                            if not entry.incoming and entry.viaAddon and not isRoom then
+                                if entry.deliveryState == "delivered" then
+                                    tick = " |cff3fb950[" .. L["ok"] .. "]|r"
+                                elseif entry.deliveryState == "off" or entry.deliveryState == "declined" then
+                                    tick = " |cfff54747[" .. L["off"] .. "]|r"
+                                else
+                                    tick = " |cff9da7b5[" .. L["sent"] .. "]|r"
+                                end
                             end
+                            local hex = entry.classFile and Compat.ClassHex(entry.classFile) or (entry.incoming and "|cffd2a8ff" or "|cff58a6ff")
+                            msgFrame:AddMessage(ts .. addonTag .. hex .. (entry.sender or "") .. "|r: " .. (entry.text or "") .. tick)
                         end
-                        local hex = entry.classFile and Compat.ClassHex(entry.classFile) or (entry.incoming and "|cffd2a8ff" or "|cff58a6ff")
-                        msgFrame:AddMessage(ts .. addonTag .. hex .. (entry.sender or "") .. "|r: " .. (entry.text or "") .. tick)
                     end
                 end
                 if msgFrame.ScrollToBottom then
@@ -3365,7 +3501,9 @@ function SocialPanels:CreateAltsPanel(parent)
     bagGridScroll.container:SetPoint("BOTTOMRIGHT", mainCard, "BOTTOMRIGHT", -4, 4)
 
     local function GetFilterButtonLabel(altData)
-        if panel._bagSource == "equip" then
+        if panel._bagSource == "all_alts" then
+            return L["All Characters"] .. "  v"
+        elseif panel._bagSource == "equip" then
             return L["Equipped"] .. "  v"
         elseif panel._bagSource == "bags" then
             local used = altData and math.max(0, (altData.bagTotal or 0) - (altData.bagFree or 0)) or 0
@@ -3379,10 +3517,34 @@ function SocialPanels:CreateAltsPanel(parent)
         return L["All"] .. "  v"
     end
 
+    local function AppendGlobalSearchSections(sections, queryText, excludeAltKey, headingPrefix)
+        if not (ns.Alts and ns.Alts.SearchAllItems) then return end
+        local groups = ns.Alts:SearchAllItems(queryText, excludeAltKey)
+        for _, g in ipairs(groups) do
+            local hex = Compat.ClassHex(g.classFile)
+            local lbl = headingPrefix
+                and ("|cff8ab4f8" .. headingPrefix .. "|r " .. hex .. (g.displayName or "?") .. "|r |cffc6ceda(" .. #g.items .. ")|r")
+                or (hex .. (g.displayName or "?") .. "|r |cffc6ceda(" .. #g.items .. ")|r")
+            sections[#sections + 1] = {
+                title = lbl,
+                items = g.items,
+            }
+        end
+    end
+
     local function CollectFilteredItems(altData)
         if not altData then return {}, "" end
         local src = panel._bagSource or "all"
         local query = Compat.Trim(bagSearch:GetText() or ""):lower()
+
+        if src == "all_alts" then
+            local sections = {}
+            AppendGlobalSearchSections(sections, query, nil, nil)
+            if #sections == 0 then
+                return {}, (query ~= "" and L["No matching items found across any character."] or L["No items recorded yet."])
+            end
+            return sections, ""
+        end
 
         local function MatchesQuery(item)
             if query == "" then return true end
@@ -3455,6 +3617,10 @@ function SocialPanels:CreateAltsPanel(parent)
 
         if #sections == 0 then
             if query ~= "" then
+                AppendGlobalSearchSections(sections, query, altData.key, L["Other Alt:"])
+                if #sections > 0 then
+                    return sections, ""
+                end
                 return {}, L["No matching items found."]
             elseif src == "bank" and type(altData.bank) ~= "table" then
                 return {}, L["Visit a Bank NPC to snapshot bank items."]
@@ -3556,7 +3722,9 @@ function SocialPanels:CreateAltsPanel(parent)
             local xpMaxVal = math.max(1, tonumber(altData.xpMax) or 1)
             local xpPct = math.min(100, math.floor((xpVal / xpMaxVal) * 100 + 0.5))
             local restedVal = tonumber(altData.rested) or 0
-            local xpTxt = restedVal > 0 and ("%d%% (+%s)"):format(xpPct, L["Rested"]) or ("%d%%"):format(xpPct)
+            local restedMaxCap = (restedVal > 0 and xpMaxVal > 1 and (restedVal / xpMaxVal) >= 1.48)
+            local restedBadge = restedMaxCap and (" |cff58a6ff[" .. L["150% MAX"] .. "]|r") or ""
+            local xpTxt = restedVal > 0 and ("%d%% (+%s)%s"):format(xpPct, L["Rested"], restedBadge) or ("%d%%"):format(xpPct)
             local xr, xg, xb = restedVal > 0 and 0.45 or 0.90, restedVal > 0 and 0.76 or 0.92, restedVal > 0 and 1.0 or 0.95
             AddDossierLine(L["Experience"], xpTxt, 0.75, 0.78, 0.85, xr, xg, xb, 16)
         end
@@ -3594,16 +3762,50 @@ function SocialPanels:CreateAltsPanel(parent)
         AddDossierLine(L["Zone"], zoneTxt, 0.75, 0.78, 0.85, 1.0, 1.0, 1.0, 16)
 
         local bindTxt = (altData.bindLocation and altData.bindLocation ~= "") and altData.bindLocation or "-"
+        if ns.Alts and ns.Alts.GetHearthstoneStatus and altData.bindLocation and altData.bindLocation ~= "" then
+            local hsReadyAt, hsRem = ns.Alts:GetHearthstoneStatus(altData)
+            if hsReadyAt ~= nil then
+                if hsRem and hsRem > 1 then
+                    local hsCdTxt = hsRem >= 60 and ("%dm"):format(math.ceil(hsRem / 60)) or ("%ds"):format(hsRem)
+                    bindTxt = bindTxt .. " |cffff9b3d[" .. hsCdTxt .. "]|r"
+                else
+                    bindTxt = bindTxt .. " |cff3fb950[" .. L["Ready"] .. "]|r"
+                end
+            end
+        end
         AddDossierLine(L["Hearthstone"], bindTxt, 0.75, 0.78, 0.85, 0.65, 0.88, 1.0, 16)
 
         local eqCount = CountEquippedSlots(altData.equipment)
-        local bagUsed = math.max(0, (altData.bagTotal or 0) - (altData.bagFree or 0))
+        local bagFreeVal = tonumber(altData.bagFree) or 0
         local bagCap = altData.bagTotal or 0
-        local bankTxt = type(altData.bank) == "table" and ("%d %s"):format(#altData.bank, L["items"]) or "-"
+        local bagUsed = math.max(0, bagCap - bagFreeVal)
+        local bagText = ("%d / %d"):format(bagUsed, bagCap)
+        local bagR, bagG, bagB = 0.92, 0.94, 0.96
+        if bagCap > 0 and bagFreeVal <= 2 then
+            local bagTagCol = (bagFreeVal <= 1) and "|cfff54747" or "|cffff9b3d"
+            bagText = bagText .. " " .. bagTagCol .. "(" .. L["%d free"]:format(bagFreeVal) .. ")|r"
+            if bagFreeVal <= 1 then bagR, bagG, bagB = 0.96, 0.30, 0.30 else bagR, bagG, bagB = 1.0, 0.65, 0.24 end
+        end
+
+        local bankTxt = "-"
+        if type(altData.bank) == "table" then
+            bankTxt = ("%d %s"):format(#altData.bank, L["items"])
+            if altData.bankUpdatedAt and altData.bankUpdatedAt > 0 then
+                bankTxt = bankTxt .. " · " .. Compat.FormatRelativeTime(altData.bankUpdatedAt, L)
+            end
+        end
 
         AddDossierLine(L["Equipped"], tostring(eqCount), 0.75, 0.78, 0.85, 0.92, 0.94, 0.96, 16)
-        AddDossierLine(L["Bags"], ("%d / %d"):format(bagUsed, bagCap), 0.75, 0.78, 0.85, 0.92, 0.94, 0.96, 16)
+        AddDossierLine(L["Bags"], bagText, 0.75, 0.78, 0.85, bagR, bagG, bagB, 16)
         AddDossierLine(L["Bank"], bankTxt, 0.75, 0.78, 0.85, type(altData.bank) == "table" and 0.92 or 0.58, type(altData.bank) == "table" and 0.94 or 0.62, type(altData.bank) == "table" and 0.96 or 0.68, 16)
+
+        if altData.hasMail then
+            local mailStr = "|cffffd24d[" .. L["Pending Mail"] .. "]|r"
+            if type(altData.mailSenders) == "table" and #altData.mailSenders > 0 then
+                mailStr = mailStr .. " " .. table.concat(altData.mailSenders, ", ")
+            end
+            AddDossierLine(L["Mailbox"], mailStr, 0.75, 0.78, 0.85, 1.0, 0.82, 0.30, 16)
+        end
 
         if altData.key ~= Compat.CharacterKey() and altData.lastActive then
             AddDossierLine(L["Last Seen"], Compat.FormatRelativeTime(altData.lastActive, L), 0.58, 0.62, 0.68, 0.58, 0.62, 0.68, 16)
@@ -3690,6 +3892,7 @@ function SocialPanels:CreateAltsPanel(parent)
     filterBtn:SetScript("OnClick", function(self)
         local opts = {
             { id = "all", label = L["All"] },
+            { id = "all_alts", label = L["All Characters"] },
             { id = "equip", label = L["Equipped"] },
             { id = "bags", label = L["Bags"] },
             { id = "bank", label = L["Bank"] },

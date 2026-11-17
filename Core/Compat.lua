@@ -1140,53 +1140,179 @@ function Compat.FormatForeverTarget(raw)
     return parsed.firstName
 end
 
-function Compat.Whisper(target)
+local function GetActiveEditableChatBox()
+    local eb = (ChatFrameUtil and ChatFrameUtil.GetActiveWindow and ChatFrameUtil.GetActiveWindow())
+        or (ChatEdit_GetActiveWindow and ChatEdit_GetActiveWindow())
+    if (not eb) and _G.DEFAULT_CHAT_FRAME and _G.DEFAULT_CHAT_FRAME.editBox then
+        local defBox = _G.DEFAULT_CHAT_FRAME.editBox
+        if defBox.IsShown and defBox:IsShown() then
+            eb = defBox
+        end
+    end
+    return eb
+end
+
+local function InsertDraftIntoActiveChatBox(draftText)
+    local draft = Compat.CleanInput(draftText)
+    if not draft or draft == "" then return true end
+    local eb = GetActiveEditableChatBox()
+    if eb and eb.IsShown and eb:IsShown() and eb.Insert and eb.GetText then
+        local cur = eb:GetText() or ""
+        if cur == "" or cur:match("^/%S+%s*$") then
+            local ok = pcall(eb.Insert, eb, draft)
+            if ok then
+                local after = eb:GetText() or ""
+                if after:find(draft, 1, true) then
+                    if eb.SetCursorPosition then
+                        pcall(eb.SetCursorPosition, eb, #after)
+                    end
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+function Compat.Whisper(target, draftText)
     local clean = Compat.FormatForeverTarget(target)
-    if not clean then return end
+    if not clean then return false end
+    local slashName = clean:gsub("%s+", "-")
+    local draft = Compat.CleanInput(draftText)
+    local hasDraft = (draft and draft ~= "") and true or false
+
     if ChatFrameUtil and ChatFrameUtil.SendTell then
         local ok = pcall(ChatFrameUtil.SendTell, clean)
-        if ok then return end
+        if ok then
+            if (not hasDraft) or InsertDraftIntoActiveChatBox(draft) then
+                return true
+            end
+        end
     end
     if ChatFrame_SendTell then
         local ok = pcall(ChatFrame_SendTell, clean)
-        if ok then return end
+        if ok then
+            if (not hasDraft) or InsertDraftIntoActiveChatBox(draft) then
+                return true
+            end
+        end
     end
+    local line = "/w " .. slashName .. " " .. (draft or "")
     if ChatFrameUtil and ChatFrameUtil.OpenChat then
-        local ok = pcall(ChatFrameUtil.OpenChat, "/w " .. clean .. " ")
-        if ok then return end
+        local ok = pcall(ChatFrameUtil.OpenChat, line)
+        if ok then return true end
     end
     if ChatFrame_OpenChat then
-        pcall(ChatFrame_OpenChat, "/w " .. clean .. " ")
+        local ok = pcall(ChatFrame_OpenChat, line)
+        if ok then return true end
     end
+    return false
 end
 
-function Compat.BNetWhisper(bnetName, fallbackTarget)
+function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
     local cleanBNet = Compat.CleanInput(bnetName)
     if cleanBNet then
         if ChatFrameUtil and ChatFrameUtil.SendBNetTell then
             local ok = pcall(ChatFrameUtil.SendBNetTell, cleanBNet)
-            if ok then return end
+            if ok then
+                InsertDraftIntoActiveChatBox(draftText)
+                return true
+            end
         end
         if ChatFrame_SendBNetTell then
             local ok = pcall(ChatFrame_SendBNetTell, cleanBNet)
-            if ok then return end
+            if ok then
+                InsertDraftIntoActiveChatBox(draftText)
+                return true
+            end
         end
     end
     if fallbackTarget then
-        Compat.Whisper(fallbackTarget)
+        return Compat.Whisper(fallbackTarget, draftText)
     end
+    return false
 end
 
-function Compat.Invite(target)
+local function FindOnlineBNetGameForInvite(bnetAccountID, cleanCharName)
+    local targetBNetId = Safe.Number(bnetAccountID)
+    if (not targetBNetId) and cleanCharName and ns.Store and ns.Store.socialByLookup then
+        local lk = Compat.ParseCharacterFields and select(1, Compat.ParseCharacterFields(cleanCharName))
+        local row = lk and ns.Store.socialByLookup[lk]
+        if row and row.bnetAccountID then
+            targetBNetId = Safe.Number(row.bnetAccountID)
+        end
+    end
+    if not targetBNetId or not (C_BattleNet and C_BattleNet.GetAccountInfoByID) then
+        return nil, nil
+    end
+    local ok, accInfo = pcall(C_BattleNet.GetAccountInfoByID, targetBNetId)
+    if not (ok and type(accInfo) == "table") then return nil, nil end
+    local gi = accInfo.gameAccountInfo
+    if type(gi) ~= "table" or Safe.Value(gi.isOnline) ~= true then
+        return nil, nil
+    end
+    local wowProg = BNET_CLIENT_WOW or "WoW"
+    if Safe.String(gi.clientProgram) ~= wowProg then
+        return nil, nil
+    end
+    local gId = Safe.Number(gi.gameAccountID)
+    if not gId then return nil, nil end
+    local canCoop = true
+    if CanCooperateWithGameAccount then
+        local okC, coop = pcall(CanCooperateWithGameAccount, accInfo)
+        if okC and coop ~= nil then
+            canCoop = Safe.Value(coop) == true
+        end
+    end
+    return gId, {
+        canCoop = canCoop,
+        charName = Safe.String(gi.characterName),
+        factionName = Safe.String(gi.factionName),
+    }
+end
+
+function Compat.Invite(target, bnetAccountID)
     local clean = Compat.FormatForeverTarget(target)
-    if not clean then return end
-    if C_PartyInfo and C_PartyInfo.InviteUnit then
-        local ok = pcall(C_PartyInfo.InviteUnit, clean)
-        if ok then return end
+    local gId, giMeta = FindOnlineBNetGameForInvite(bnetAccountID, clean)
+    local myFaction = UnitFactionGroup and Safe.String(Safe.Call(UnitFactionGroup, "player"))
+
+    local preferBNet = false
+    if gId and BNInviteFriend then
+        if not clean or clean == "" then
+            preferBNet = true
+        elseif giMeta and giMeta.factionName and myFaction and giMeta.factionName ~= myFaction then
+            -- Cross-faction or BNet-mediated invite must go through Battle.net friend invite.
+            preferBNet = true
+        elseif giMeta and giMeta.charName and clean then
+            local cFirst = Compat.ParseCharacterFields and select(2, Compat.ParseCharacterFields(clean))
+            local bFirst = Compat.ParseCharacterFields and select(2, Compat.ParseCharacterFields(giMeta.charName))
+            if cFirst and bFirst and cFirst:lower() ~= bFirst:lower() then
+                preferBNet = true
+            end
+        end
     end
-    if InviteUnit then
-        pcall(InviteUnit, clean)
+
+    if preferBNet and gId and BNInviteFriend then
+        local ok = pcall(BNInviteFriend, gId)
+        if ok then return true end
     end
+
+    if clean and clean ~= "" then
+        if C_PartyInfo and C_PartyInfo.InviteUnit then
+            local ok = pcall(C_PartyInfo.InviteUnit, clean)
+            if ok then return true end
+        end
+        if InviteUnit then
+            local ok = pcall(InviteUnit, clean)
+            if ok then return true end
+        end
+    end
+
+    if gId and BNInviteFriend then
+        local ok = pcall(BNInviteFriend, gId)
+        if ok then return true end
+    end
+    return false
 end
 
 local function IsInCombatNow()

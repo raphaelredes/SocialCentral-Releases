@@ -20,6 +20,8 @@ local chatPanel
 local buffsPanel
 local altsPanel
 local modalFrame
+local disambigModalFrame
+local watchSuggestFrame
 local eventModalFrame
 local clanLfgModalFrame
 local clanAlertModalFrame
@@ -358,6 +360,107 @@ end
 
 function UI:OpenCopyModal(text, customTitle, noteText)
     OpenCopyModal(text, customTitle, noteText)
+end
+
+function UI:OpenWatchlistDisambiguation(entryId)
+    if not (ns.Watchlist and entryId) then return end
+    local entry = ns.Watchlist:GetEntry(entryId)
+    if not entry or type(entry.ambiguousChoices) ~= "table" or #entry.ambiguousChoices == 0 then
+        return
+    end
+
+    if not disambigModalFrame then
+        local m = CreateFrame("Frame", "SocialCentralDisambigModal", frame or UIParent, "BackdropTemplate")
+        m:SetSize(410, 260)
+        m:SetPoint("CENTER")
+        m:SetFrameStrata("DIALOG")
+        m:SetFrameLevel(125)
+        m:EnableMouse(true)
+        Theme:MakeMovable(m, { key = "modal_disambig" })
+        m:Hide()
+        if type(UISpecialFrames) == "table" then
+            table.insert(UISpecialFrames, "SocialCentralDisambigModal")
+        end
+
+        m.title = m:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        m.title:SetPoint("TOPLEFT", 16, -14)
+        m.title:SetPoint("TOPRIGHT", -42, -14)
+        m.title:SetJustifyH("LEFT")
+        m.title:SetWordWrap(true)
+
+        local topClose = Theme:CreateButton(m, 22, 20, "X", "default")
+        topClose:SetPoint("TOPRIGHT", -10, -10)
+        topClose:SetScript("OnClick", function() m:Hide() end)
+        m.topClose = topClose
+
+        m.rows = {}
+        for i = 1, 8 do
+            local rb = Theme:CreateButton(m, 378, 24, "", "default")
+            rb:SetPoint("TOPLEFT", 16, -46 - (i - 1) * 27)
+            rb:SetPoint("TOPRIGHT", -16, -46 - (i - 1) * 27)
+            rb:SetScript("OnClick", function(selfBtn)
+                if selfBtn._choice and m._entryId and ns.Watchlist and ns.Watchlist.ResolveDisambiguation then
+                    ns.Watchlist:ResolveDisambiguation(m._entryId, selfBtn._choice.fullName, selfBtn._choice)
+                end
+                m:Hide()
+            end)
+            rb:Hide()
+            m.rows[i] = rb
+        end
+
+        disambigModalFrame = m
+    end
+
+    local m = disambigModalFrame
+    m._entryId = entry.id or entryId
+    Theme:ApplyBackdrop(m, "window")
+    Theme:StyleButton(m.topClose, "default")
+    m.topClose:SetFrameLevel((m:GetFrameLevel() or 125) + 12)
+    m.title:SetText(L["Multiple characters match '%s'; select the exact FirstName Surname:"]:format(entry.displayName or entry.firstName or "?"))
+
+    local dirByLookup = ns.Store and ns.Store.socialDirectoryByLookup
+    local choices = {}
+    for _, c in ipairs(entry.ambiguousChoices) do
+        local dirRow = c.lookupKey and dirByLookup and dirByLookup[c.lookupKey]
+        local isGuild = (dirRow and dirRow.sources and dirRow.sources.guild == true) or (Compat.IsGuildMember and Compat.IsGuildMember(c.fullName))
+        local isFriend = dirRow and dirRow.sources and (dirRow.sources.friend == true or dirRow.sources.bnet == true)
+        choices[#choices + 1] = {
+            data = c,
+            isGuild = isGuild == true,
+            isFriend = isFriend == true,
+        }
+    end
+    table.sort(choices, function(a, b)
+        if a.isGuild ~= b.isGuild then return a.isGuild end
+        if a.isFriend ~= b.isFriend then return a.isFriend end
+        return (a.data.level or 0) > (b.data.level or 0)
+    end)
+
+    local shown = math.min(#choices, 8)
+    for i = 1, 8 do
+        local rb = m.rows[i]
+        if i <= shown then
+            local rec = choices[i]
+            local c = rec.data
+            rb._choice = c
+            local hex = Compat.ClassHex(c.classFile)
+            local details = {}
+            if rec.isGuild then details[#details + 1] = "|cff40d973[" .. L["Guild"] .. "]|r" end
+            if rec.isFriend then details[#details + 1] = "|cff59c7ff[" .. L["Friend"] .. "]|r" end
+            if c.level and c.level > 0 then details[#details + 1] = L["Lv %d"]:format(c.level) end
+            if c.guild and c.guild ~= "" then details[#details + 1] = "<" .. c.guild .. ">" end
+            if c.area and c.area ~= "" then details[#details + 1] = c.area end
+            local suffix = (#details > 0) and ("  |cff9da7b5" .. table.concat(details, " · ") .. "|r") or ""
+            Theme:StyleButton(rb, "default")
+            Theme:SetButtonText(rb, hex .. (c.fullName or "?") .. "|r" .. suffix)
+            rb:Show()
+        else
+            rb._choice = nil
+            rb:Hide()
+        end
+    end
+    m:SetHeight(64 + shown * 27)
+    m:Show()
 end
 
 local function OpenAddFriendModal()
@@ -1950,6 +2053,17 @@ local function OpenRowMenu(row, item, tabOverride)
     MenuUtil.CreateContextMenu(row, function(_, root)
         root:CreateTitle(targetName or "")
         if tab == "watchlist" then
+            if type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1 then
+                root:CreateButton(L["Choose Exact Character..."], function()
+                    UI:OpenWatchlistDisambiguation(item.id)
+                end)
+            elseif type(item.observedCandidate) == "string" and item.observedCandidate ~= "" then
+                root:CreateButton(L["Confirm: %s"]:format(item.observedCandidate), function()
+                    if ns.Watchlist and ns.Watchlist.ResolveDisambiguation then
+                        ns.Watchlist:ResolveDisambiguation(item.id, item.observedCandidate)
+                    end
+                end)
+            end
             root:CreateButton(L["Check"], function()
                 if ns.Watchlist then
                     ns.Watchlist:CheckEntry(item.id)
@@ -2055,7 +2169,8 @@ local function OpenRowMenu(row, item, tabOverride)
             end
 
             root:CreateDivider()
-            if charKey or (item.sources and item.sources.bnet and item.bnetAccountID) then
+            local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(charKey or targetName, item.bnetAccountID)
+            if scConfirmed and (charKey or (item.sources and item.sources.bnet and item.bnetAccountID)) then
                 root:CreateButton(L["Open in SocialCentral Chat"], function()
                     if ns.Chat and ns.Chat.OpenDirectConversation then
                         ns.Chat:OpenDirectConversation({
@@ -2291,7 +2406,9 @@ local function CreateListRow(parent, _, rowHeight)
         local item = row._item
         if not item then return end
         local tab = item._tab or activeTab
-        if ns.Chat and ns.Chat.OpenDirectConversation then
+        local targetKey = item.lookupKey or item.displayName
+        local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(targetKey, item.bnetAccountID)
+        if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
             ns.Chat:OpenDirectConversation({
                 targetName = item.hasCharacterName ~= false and item.displayName or nil,
                 bnetAccountID = item.bnetAccountID,
@@ -2310,7 +2427,7 @@ local function CreateListRow(parent, _, rowHeight)
     row.btnInvite:SetScript("OnClick", function()
         local item = row._item
         if item and item.displayName then
-            Compat.Invite(item.displayName)
+            Compat.Invite(item.displayName, item.bnetAccountID)
         end
     end)
 
@@ -2319,7 +2436,11 @@ local function CreateListRow(parent, _, rowHeight)
         if not item then return end
         local tab = item._tab or activeTab
         if tab == "watchlist" and ns.Watchlist then
-            ns.Watchlist:CheckEntry(item.id)
+            if type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1 then
+                UI:OpenWatchlistDisambiguation(item.id)
+            else
+                ns.Watchlist:CheckEntry(item.id)
+            end
         elseif (tab == "social" or tab == "nearby") and ns.Watchlist then
             ns.Watchlist:Add(item.lookupKey or item.displayName)
         end
@@ -2583,7 +2704,9 @@ local function UpdateListRow(row, item, idx, palette)
         end
         local star = item.favorite and "|cffffd24d* |r" or ""
         local grp = (type(item.group) == "string" and item.group ~= "") and (" |cff8ab4f8[" .. item.group .. "]|r") or ""
-        local warn = item.truncatedWarning and " |cffff9b3d[!50+]|r" or ""
+        local hasAmbig = type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1
+        local warn = hasAmbig and (" |cffff9b3d[?" .. tostring(#item.ambiguousChoices) .. "]|r")
+            or (item.truncatedWarning and " |cffff9b3d[!50+]|r" or "")
         row.nameText:SetText(star .. hex .. (item.displayName or "") .. "|r" .. levelStr .. grp .. scBadge .. warn)
         row.subText:SetText(FormatWatchlistSubline(item))
 
@@ -2603,6 +2726,22 @@ local function UpdateListRow(row, item, idx, palette)
             row.btnInvite:Hide()
             row.btnWhisper:Hide()
             leftMostAnchor = nil
+        end
+        if hasAmbig then
+            row._actionVariant = "primary"
+            Theme:StyleButton(row.btnAction, "primary")
+            Theme:SetButtonText(row.btnAction, L["Choose"])
+            Theme:SetButtonActive(row.btnAction, false, "primary")
+            row.btnAction:SetEnabled(true)
+            Theme:AutoFitButton(row.btnAction, compactRow and 62 or 76, btnPad, maxRowBtnW)
+            row.btnAction:ClearAllPoints()
+            if leftMostAnchor then
+                row.btnAction:SetPoint("RIGHT", leftMostAnchor, "LEFT", btnGap, 0)
+            else
+                row.btnAction:SetPoint("RIGHT", compactRow and -5 or -8, 0)
+            end
+            row.btnAction:Show()
+            leftMostAnchor = row.btnAction
         end
 
     elseif tab == "social" then
@@ -3300,22 +3439,31 @@ local function CreatePeerRow(parent, _, rowHeight)
                                 end
                             end)
                         elseif not entry.isAlt and entry.displayName then
-                            root:CreateButton(L["Whisper Craft Request (/w)"], function()
-                                Compat.Whisper(entry.displayName)
+                            root:CreateButton(L["Request Craft (/w)"], function()
+                                local qWant = ns.Clan and ns.Clan._lastProfQuery
+                                local craftTopic = (qWant and qWant ~= "") and qWant or ((#pList > 0) and table.concat(pList, " / ") or L["Profession"])
+                                local draft = string.format(L["Hi! Could you craft %s for me?"], craftTopic)
+                                Compat.Whisper(entry.displayName, draft)
                             end)
-                            root:CreateButton(L["Open in SocialCentral Chat"], function()
-                                if ns.Chat and ns.Chat.OpenDirectConversation then
-                                    ns.Chat:OpenDirectConversation({
-                                        targetName = entry.displayName,
-                                        classFile = entry.classFile,
-                                        autoProbe = true,
-                                    })
-                                    UI:OpenTab("chat")
-                                end
-                            end)
+                            local profConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(entry.lookupKey or entry.displayName, entry.bnetAccountID)
+                            if profConfirmed then
+                                root:CreateButton(L["Open in SocialCentral Chat"], function()
+                                    local qWant = ns.Clan and ns.Clan._lastProfQuery
+                                    local draft = (qWant and qWant ~= "") and string.format(L["Hi! Could you craft %s for me?"], qWant) or nil
+                                    if ns.Chat and ns.Chat.OpenDirectConversation then
+                                        ns.Chat:OpenDirectConversation({
+                                            targetName = entry.displayName,
+                                            classFile = entry.classFile,
+                                            draftText = draft,
+                                            autoProbe = true,
+                                        })
+                                        UI:OpenTab("chat")
+                                    end
+                                end)
+                            end
                             if entry.online ~= false then
                                 root:CreateButton(L["Invite"], function()
-                                    Compat.Invite(entry.displayName)
+                                    Compat.Invite(entry.displayName, entry.bnetAccountID)
                                 end)
                             end
                             local isWatched = ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(entry.lookupKey or entry.displayName)
@@ -6708,8 +6856,97 @@ local function BuildMainFrame()
     })
     addBox:SetPoint("LEFT", 4, 0)
 
+    local function HideWatchSuggestions()
+        if watchSuggestFrame then
+            watchSuggestFrame:Hide()
+        end
+    end
+
+    local function UpdateWatchSuggestions()
+        if not (addBox and addBox:HasFocus() and ns.Watchlist and ns.Watchlist.GetNameSuggestions) then
+            HideWatchSuggestions()
+            return
+        end
+        local items = ns.Watchlist:GetNameSuggestions(addBox:GetText() or "", 6)
+        if not items or #items == 0 then
+            HideWatchSuggestions()
+            return
+        end
+        if not watchSuggestFrame then
+            local sf = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+            sf:SetFrameStrata("DIALOG")
+            sf:SetFrameLevel((frame:GetFrameLevel() or 20) + 65)
+            sf:SetClampedToScreen(true)
+            sf:EnableMouse(true)
+            sf:Hide()
+            sf.rows = {}
+            for i = 1, 6 do
+                local rb = CreateFrame("Button", nil, sf)
+                rb:SetHeight(22)
+                rb:SetPoint("TOPLEFT", sf, "TOPLEFT", 6, -6 - (i - 1) * 23)
+                rb:SetPoint("TOPRIGHT", sf, "TOPRIGHT", -6, -6 - (i - 1) * 23)
+                local hl = rb:CreateTexture(nil, "HIGHLIGHT")
+                hl:SetAllPoints()
+                hl:SetColorTexture(1, 0.85, 0.35, 0.14)
+                local lTxt = rb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                lTxt:SetPoint("LEFT", 6, 0)
+                lTxt:SetJustifyH("LEFT")
+                lTxt:SetWordWrap(false)
+                local rTxt = rb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                rTxt:SetPoint("RIGHT", -6, 0)
+                rTxt:SetJustifyH("RIGHT")
+                rTxt:SetWordWrap(false)
+                lTxt:SetPoint("RIGHT", rTxt, "LEFT", -8, 0)
+                rb.leftText = lTxt
+                rb.rightText = rTxt
+                rb:SetScript("OnClick", function(selfBtn)
+                    local picked = selfBtn._cand
+                    if not picked or not ns.Watchlist then return end
+                    HideWatchSuggestions()
+                    local addedOk = ns.Watchlist:Add(picked.displayName)
+                    addBox:SetText("")
+                    addBox:ClearFocus()
+                    if addedOk and not picked.online and ns.Watchlist.AutoCheckNextFromHardwareClick then
+                        ns.Watchlist:AutoCheckNextFromHardwareClick(picked.lookupKey)
+                    end
+                end)
+                rb:Hide()
+                sf.rows[i] = rb
+            end
+            watchSuggestFrame = sf
+        end
+
+        Theme:ApplyBackdrop(watchSuggestFrame, "window")
+        local w = math.max(250, addBox:GetWidth() or 260)
+        watchSuggestFrame:SetWidth(w)
+        watchSuggestFrame:ClearAllPoints()
+        watchSuggestFrame:SetPoint("TOPLEFT", addBox, "BOTTOMLEFT", 0, -2)
+        local shown = math.min(#items, 6)
+        for i = 1, 6 do
+            local rb = watchSuggestFrame.rows[i]
+            if i <= shown then
+                local c = items[i]
+                rb._cand = c
+                local hex = Compat.ClassHex(c.classFile)
+                local lv = (c.level and c.level > 0) and (" |cff9da7b5" .. L["Lv %d"]:format(c.level) .. "|r") or ""
+                rb.leftText:SetText(hex .. (c.displayName or "") .. "|r" .. lv)
+                local rParts = {}
+                if c.guild and c.guild ~= "" then rParts[#rParts + 1] = "<" .. c.guild .. ">" end
+                if c.sourceLabel and c.sourceLabel ~= "" then rParts[#rParts + 1] = c.sourceLabel end
+                rb.rightText:SetText("|cff8ab4f8" .. table.concat(rParts, " · ") .. "|r")
+                rb:Show()
+            else
+                rb._cand = nil
+                rb:Hide()
+            end
+        end
+        watchSuggestFrame:SetHeight(12 + shown * 23)
+        watchSuggestFrame:Show()
+    end
+
     local function SubmitAdd()
         if not ns.Watchlist then return end
+        HideWatchSuggestions()
         local raw = addBox:GetText() or ""
         local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(raw)
         local ok, reasonOrEntry = ns.Watchlist:Add(raw)
@@ -6727,7 +6964,23 @@ local function BuildMainFrame()
     end
 
     addBox:SetScript("OnEnterPressed", SubmitAdd)
-    addBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    addBox:SetScript("OnEscapePressed", function(self)
+        HideWatchSuggestions()
+        self:ClearFocus()
+    end)
+    addBox:HookScript("OnTextChanged", function()
+        UpdateWatchSuggestions()
+    end)
+    addBox:HookScript("OnEditFocusLost", function()
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.18, function()
+                if addBox and not addBox:HasFocus() and not (watchSuggestFrame and watchSuggestFrame:IsMouseOver()) then
+                    HideWatchSuggestions()
+                end
+            end)
+        end
+    end)
+    watchBar:HookScript("OnHide", HideWatchSuggestions)
 
     local addBtn = Theme:CreateButton(watchBar, 92, 24, "+ " .. L["Add"], "primary")
     Theme:AutoFitButton(addBtn, 86, 20, 140)
@@ -7843,6 +8096,12 @@ for _, ev in ipairs({ "WATCHLIST_UPDATED", "SOCIAL_UPDATED", "NEARBY_UPDATED", "
         UI:QueueRefresh(false)
     end)
 end
+
+ns:On("WATCHLIST_DISAMBIGUATE", function(entryId)
+    if entryId and UI:IsMainVisible() then
+        UI:OpenWatchlistDisambiguation(entryId)
+    end
+end)
 
 ns.RegisterEvent(UI, "PLAYER_REGEN_DISABLED", UpdateWhoButtons)
 ns.RegisterEvent(UI, "PLAYER_REGEN_ENABLED", UpdateWhoButtons)

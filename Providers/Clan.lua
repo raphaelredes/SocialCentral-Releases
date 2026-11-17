@@ -33,6 +33,8 @@ local Clan = {
     lastClanSoundAt = 0,
     isStoppedThisSession = false,
     throttledCount = 0,
+    throttleStrike = 0,
+    backoffUntil = 0,
     unreadAlertsCount = 0,
     latestRemoteVersion = nil,
     latestReportedBy = nil,
@@ -53,10 +55,21 @@ local function PlayClanAlertSound(self, kit)
     if (nowMono - (self.lastClanSoundAt or 0)) < 2.5 then
         return
     end
-    local resolvedKit = kit or (SOUNDKIT and (SOUNDKIT.READY_CHECK or SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_QUEST_LOG_OPEN))
+    local resolvedKit = kit or (SOUNDKIT and (SOUNDKIT.MAP_PING or 3175)) or 3175
     if PlaySound and resolvedKit then
         self.lastClanSoundAt = nowMono
         pcall(PlaySound, resolvedKit, "Master")
+    end
+end
+
+local function RecordClanThrottleStrike(self)
+    local monoNow = GetTime and GetTime() or 0
+    local nextStrikes = math.max(self.throttledCount or 0, self.throttleStrike or 0) + 1
+    self.throttledCount = nextStrikes
+    self.throttleStrike = nextStrikes
+    self.backoffUntil = monoNow + 12
+    if nextStrikes >= 3 then
+        self.isStoppedThisSession = true
     end
 end
 
@@ -291,13 +304,20 @@ local function TransmitAddonMessage(self, payload, channel, isVersionMsg)
     if payload:find("[%c|]") then return false end
 
     local now = GetTime()
+    if self.backoffUntil and now < self.backoffUntil then return false end
     if isVersionMsg then
         if not (ns.db and ns.db.settings and ns.db.settings.versionCheck ~= false) then
             return false
         end
-        if (now - (self.lastVersionSentAt or 0)) < self.VERSION_MIN_INTERVAL then
+        self.lastVersionSentByChannel = self.lastVersionSentByChannel or {}
+        local prevChanAt = self.lastVersionSentByChannel[channel] or 0
+        if (now - prevChanAt) < self.VERSION_MIN_INTERVAL then
             return false
         end
+        if (now - (self.lastVersionSentAt or 0)) < self.MIN_SEND_INTERVAL then
+            return false
+        end
+        self.lastVersionSentByChannel[channel] = now
         self.lastVersionSentAt = now
     else
         if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
@@ -318,10 +338,7 @@ local function TransmitAddonMessage(self, payload, channel, isVersionMsg)
     if Enum and Enum.SendAddonMessageResult and type(result) == "number" then
         for name, value in pairs(Enum.SendAddonMessageResult) do
             if value == result and name:find("Throttle") then
-                self.throttledCount = self.throttledCount + 1
-                if self.throttledCount >= 3 then
-                    self.isStoppedThisSession = true
-                end
+                RecordClanThrottleStrike(self)
                 return false
             end
         end
@@ -349,6 +366,43 @@ function Clan:SendWorldBuffSync(syncId, ts)
     return TransmitAddonMessage(self, payload, "GUILD", false)
 end
 
+function Clan:RequestWorldBuffCatchup()
+    if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return false end
+    if self.isStoppedThisSession or self:IsMessagingLocked() then return false end
+    if not (IsInGuild and IsInGuild()) then return false end
+    local monoNow = GetTime and GetTime() or 0
+    if self._lastWbCatchupReqAt and (monoNow - self._lastWbCatchupReqAt) < 45 then
+        return false
+    end
+    self._lastWbCatchupReqAt = monoNow
+    return self:SendGuildSync("WBR~" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24))
+end
+
+function Clan:CheckAutoCloseFullDungeonLFG()
+    if not (ns.db and ns.db.settings and ns.db.settings.clanAutoCloseFullLfg ~= false) then
+        return false
+    end
+    if self:IsMessagingLocked() or not Compat.IsInGroup() then
+        return false
+    end
+    local _, myKey = ResolveSelfIdentity()
+    if not myKey then return false end
+    local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+    local mine = bucket and bucket.lfg and bucket.lfg[myKey]
+    if type(mine) ~= "table" or mine.mode ~= "LFM" or mine.isDungeon ~= true then
+        return false
+    end
+    local numMembers = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
+    local inInst, instType = Safe.Call(IsInInstance)
+    if (not Compat.IsInRaid()) and (numMembers >= 5 or (inInst == true and instType == "party")) then
+        if self:ClearMyLFG() then
+            ns:Print("%s", L["Auto-closed your full Dungeon LFM listing (party complete)."])
+            return true
+        end
+    end
+    return false
+end
+
 local function GetActiveGroupChannel()
     if not Compat.IsInGroup() then return nil end
     if LE_PARTY_CATEGORY_INSTANCE and IsInGroup and IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
@@ -362,6 +416,7 @@ end
 
 local function SendExternalLFGPacket(self, payload, channel, target)
     if self.isStoppedThisSession or self:IsMessagingLocked() then return false end
+    if self.backoffUntil and (GetTime and GetTime() or 0) < self.backoffUntil then return false end
     if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return false end
     local sendFn = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
     if not sendFn then return false end
@@ -380,10 +435,7 @@ local function SendExternalLFGPacket(self, payload, channel, target)
     if Enum and Enum.SendAddonMessageResult and type(result) == "number" then
         for name, value in pairs(Enum.SendAddonMessageResult) do
             if value == result and name:find("Throttle") then
-                self.throttledCount = self.throttledCount + 1
-                if self.throttledCount >= 3 then
-                    self.isStoppedThisSession = true
-                end
+                RecordClanThrottleStrike(self)
                 return false
             end
         end
@@ -398,7 +450,8 @@ local function CollectExternalLFGRecipients(self, maxCount)
 
     local function PushTarget(rawName)
         if #targets >= limit then return end
-        local clean = Compat.CleanPayloadField and Compat.CleanPayloadField(rawName or "", 40) or Safe.String(rawName)
+        local foreverClean = (Compat.FormatForeverTarget and Compat.FormatForeverTarget(rawName)) or rawName
+        local clean = Compat.CleanPayloadField and Compat.CleanPayloadField(foreverClean or "", 40) or Safe.String(foreverClean)
         if not clean or clean == "" or Compat.IsMe(clean) then return end
         local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(clean)
         local key = (parsed and parsed.lookupKey) or clean:lower()
@@ -480,17 +533,14 @@ function Clan:SendVersionHello(preferChannel)
     return TransmitAddonMessage(self, "VH~" .. ns.version, channel, true)
 end
 
-local function ProcessPeerVersion(senderDisplay, senderLookupKey, remoteVer, chatType)
-    if not IsSaneRemoteSemVer(remoteVer) then return end
-
-    if chatType == "GUILD" and type(senderLookupKey) == "string" and not senderLookupKey:find("-", 1, true) then
+local function ResolveForeverGuildSender(senderDisplay, senderLookupKey)
+    if type(senderLookupKey) == "string" and not senderLookupKey:find("-", 1, true) then
         local cached = Compat.LookupForeverFullName and Compat.LookupForeverFullName(nil, senderLookupKey, false)
         local cParsed = cached and cached.fullName and Compat.ParseCharacterName and Compat.ParseCharacterName(cached.fullName)
         if cParsed and cParsed.displayName and cParsed.lookupKey then
-            senderDisplay = cParsed.displayName
-            senderLookupKey = cParsed.lookupKey
+            return cParsed.displayName, cParsed.lookupKey
         end
-        if not senderLookupKey:find("-", 1, true) and Store and type(Store.guildRosterRanks) == "table" then
+        if Store and type(Store.guildRosterRanks) == "table" then
             local matchCount, matchRec = 0, nil
             for _, rk in pairs(Store.guildRosterRanks) do
                 if type(rk) == "table" and rk.displayName and not rk.isSelf then
@@ -503,10 +553,18 @@ local function ProcessPeerVersion(senderDisplay, senderLookupKey, remoteVer, cha
                 end
             end
             if matchCount == 1 and matchRec and matchRec.lookupKey then
-                senderDisplay = matchRec.displayName
-                senderLookupKey = matchRec.lookupKey
+                return matchRec.displayName, matchRec.lookupKey
             end
         end
+    end
+    return senderDisplay, senderLookupKey
+end
+
+local function ProcessPeerVersion(senderDisplay, senderLookupKey, remoteVer, chatType)
+    if not IsSaneRemoteSemVer(remoteVer) then return end
+
+    if chatType == "GUILD" then
+        senderDisplay, senderLookupKey = ResolveForeverGuildSender(senderDisplay, senderLookupKey)
     end
 
     Clan.peerVersions = Clan.peerVersions or {}
@@ -652,6 +710,13 @@ local function DrainIntelQueue()
     if Clan.isStoppedThisSession or Clan:IsMessagingLocked() then
         return
     end
+    if Clan.backoffUntil and (GetTime and GetTime() or 0) < Clan.backoffUntil then
+        if #Clan.intelQueue > 0 and C_Timer and C_Timer.After then
+            Clan._intelDrainScheduled = true
+            C_Timer.After(4.0, DrainIntelQueue)
+        end
+        return
+    end
     if not (ns.db and ns.db.settings and ns.db.settings.clanSync) or not (IsInGuild and IsInGuild()) then
         wipe(Clan.intelQueue)
         return
@@ -666,9 +731,8 @@ local function DrainIntelQueue()
         if ok and Enum and Enum.SendAddonMessageResult and type(result) == "number" then
             for name, value in pairs(Enum.SendAddonMessageResult) do
                 if value == result and name:find("Throttle") then
-                    Clan.throttledCount = (Clan.throttledCount or 0) + 1
-                    if Clan.throttledCount >= 3 then
-                        Clan.isStoppedThisSession = true
+                    RecordClanThrottleStrike(Clan)
+                    if Clan.isStoppedThisSession then
                         wipe(Clan.intelQueue)
                         return
                     end
@@ -1399,7 +1463,7 @@ function Clan:SendAllianceChat(rawText)
         ns:Print(L["You do not have permission to use Alliance Chat."])
         return false
     end
-    local cleanText = Compat.CleanPayloadField(rawText or "", 130)
+    local cleanText = Compat.CleanPayloadField(rawText or "", 120)
     if cleanText == "" then return false end
 
     local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
@@ -1410,7 +1474,7 @@ function Clan:SendAllianceChat(rawText)
     local payload = string.format(
         "ALM~%s~%s~%s~%s~%s",
         Compat.CleanPayloadField(myGuild, 32),
-        Compat.CleanPayloadField(myName, 25),
+        Compat.CleanPayloadField(myName, 36),
         myClass or "",
         cleanText,
         msgId
@@ -2317,6 +2381,27 @@ function Clan:AutoDetectMyProfessions(forceApply)
     if changed then
         ns:Emit("CLAN_UPDATED")
     end
+    local profSig = table.concat({ p1, p2, r1, r2 }, "|")
+    if profSig ~= "NONE|NONE||" and profSig ~= self._lastAutoSyncedProfSig then
+        local hadPrev = (self._lastAutoSyncedProfSig ~= nil)
+        self._lastAutoSyncedProfSig = profSig
+        if hadPrev and ns.db and ns.db.settings and ns.db.settings.clanSync and not self:IsMessagingLocked() and IsInGuild and IsInGuild() then
+            if C_Timer and C_Timer.After and not self._autoProfSyncQueued then
+                self._autoProfSyncQueued = true
+                C_Timer.After(4.5, function()
+                    Clan._autoProfSyncQueued = false
+                    if not (ns.db and ns.db.settings and ns.db.settings.clanSync) or Clan:IsMessagingLocked() then return end
+                    local curB = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+                    if curB then
+                        local cp1 = IsValidProfession(curB.myProf1) and curB.myProf1 or "NONE"
+                        local cp2 = IsValidProfession(curB.myProf2) and curB.myProf2 or "NONE"
+                        local cNote = Compat.CleanPayloadField(curB.myCraftNote or "", 40)
+                        Clan:SendGuildSync(("PRF~%s~%s~%s~%s~%s"):format(cp1, cp2, cNote, curB.myProf1Rank or "", curB.myProf2Rank or ""))
+                    end
+                end)
+            end
+        end
+    end
     return (#primaries > 0 or next(secondaries) ~= nil), p1, p2, r1, r2
 end
 
@@ -2407,6 +2492,21 @@ function Clan:PublishProfessionsToGuildNote(customNote)
     return false, L["Unable to update Guild Public Note right now."]
 end
 
+local CRAFT_KEYWORD_PROF_MAP = {
+    flask = "ALCHEMY", frasco = "ALCHEMY", elixir = "ALCHEMY", potion = "ALCHEMY", pocao = "ALCHEMY", pocion = "ALCHEMY", pot = "ALCHEMY", transmut = "ALCHEMY",
+    gem = "JEWELCRAFTING", gema = "JEWELCRAFTING", ring = "JEWELCRAFTING", anel = "JEWELCRAFTING", anillo = "JEWELCRAFTING", neck = "JEWELCRAFTING", colar = "JEWELCRAFTING", collar = "JEWELCRAFTING",
+    bag = "TAILORING", bolsa = "TAILORING", mochila = "TAILORING", cloth = "TAILORING", tecido = "TAILORING", tela = "TAILORING", spellthread = "TAILORING",
+    enchant = "ENCHANTING", encant = "ENCHANTING", vellum = "ENCHANTING", pergaminho = "ENCHANTING", rod = "ENCHANTING",
+    scope = "ENGINEERING", mira = "ENGINEERING", bot = "ENGINEERING", repair = "ENGINEERING", jeeves = "ENGINEERING", ammo = "ENGINEERING", bullet = "ENGINEERING",
+    buckle = "BLACKSMITHING", fivela = "BLACKSMITHING", hebilla = "BLACKSMITHING", plate = "BLACKSMITHING", placa = "BLACKSMITHING", shield = "BLACKSMITHING", escudo = "BLACKSMITHING",
+    glyph = "INSCRIPTION", glifo = "INSCRIPTION", shoulder = "INSCRIPTION", deck = "INSCRIPTION", card = "INSCRIPTION",
+    kit = "LEATHERWORKING", drum = "LEATHERWORKING", tambor = "LEATHERWORKING", leg = "LEATHERWORKING", leather = "LEATHERWORKING", couro = "LEATHERWORKING", cuero = "LEATHERWORKING",
+    feast = "COOKING", banquete = "COOKING", food = "COOKING", comida = "COOKING",
+    bandage = "FIRST_AID", atadura = "FIRST_AID", venda = "FIRST_AID",
+    herb = "HERBALISM", erva = "HERBALISM", planta = "HERBALISM",
+    ore = "MINING", miner = "MINING", bar = "MINING", barra = "MINING",
+}
+
 function Clan:GetProfessionsList(query, profFilter, sourceFilter)
     local nowClock = (GetTime and GetTime()) or 0
     if not self._myDetectedPrimary or (nowClock - (self._lastProfAutoDetectAt or 0)) >= 15 then
@@ -2414,6 +2514,16 @@ function Clan:GetProfessionsList(query, profFilter, sourceFilter)
     end
     local bucket = Store:GetClanScopeData()
     local q = (type(query) == "string" and query ~= "") and FoldProfText(query) or nil
+    self._lastProfQuery = (type(query) == "string" and query ~= "") and Compat.CleanInput(query) or nil
+    local craftProfHint = nil
+    if q then
+        for kw, mappedProf in pairs(CRAFT_KEYWORD_PROF_MAP) do
+            if q:find(kw, 1, true) then
+                craftProfHint = mappedProf
+                break
+            end
+        end
+    end
     local pf = (type(profFilter) == "string" and profFilter ~= "" and profFilter ~= "ALL") and NormalizeProfId(profFilter) or nil
     local sf = (type(sourceFilter) == "string" and sourceFilter ~= "") and sourceFilter:upper() or "ALL"
 
@@ -2717,7 +2827,12 @@ function Clan:GetProfessionsList(query, profFilter, sourceFilter)
                         (entry.rankName or "") .. " " ..
                         (entry.area or "")
                     )
-                    if not hay:find(q, 1, true) then
+                    local matchesCraftHint = craftProfHint and (
+                        entry.prof1 == craftProfHint
+                        or entry.prof2 == craftProfHint
+                        or (entry.secProfIds and entry.secProfIds[craftProfHint] == true)
+                    )
+                    if not matchesCraftHint and not hay:find(q, 1, true) then
                         passQuery = false
                     end
                 end
@@ -2827,7 +2942,7 @@ function Clan:MaybeNotifyClanLFG(lookupKey, displayName, classFile, summaryText,
     ns:Print(("|cff3fb950[%s]|r %s: %s %s %s"):format(L["Dungeon LFG Alert"], nameCol, cleanMsg, wLink, cLink))
 
     if s.clanLfgAlertSound ~= false then
-        PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.READY_CHECK or SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_QUEST_LOG_OPEN))
+        PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
     end
 
     self:IncrementNotificationCount(1)
@@ -4235,7 +4350,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             return
         end
         local senderGuild = Compat.CleanPayloadField(parts[2] or "", 32)
-        local authorName = Compat.CleanPayloadField(parts[3] or "", 25)
+        local authorName = Compat.CleanPayloadField(parts[3] or "", 36)
         local classFile = parts[4]
         local msgText = Compat.CleanPayloadField(parts[5] or "", 140)
         local msgId = Compat.CleanPayloadField(parts[6] or "", 24)
@@ -4291,6 +4406,10 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
 
     local bucket = Store:GetClanScopeData()
     local now = time()
+
+    local resolvedDisplay, resolvedLookup = ResolveForeverGuildSender(parsed.displayName, parsed.lookupKey)
+    parsed.displayName = resolvedDisplay or parsed.displayName
+    parsed.lookupKey = resolvedLookup or parsed.lookupKey
 
     if ns.Chat and ns.Chat.MarkPeerVerified then
         ns.Chat:MarkPeerVerified(parsed.displayName, nil, nil, "GUILD")
@@ -4403,7 +4522,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
                     ns:Print("%s", ("|cff58a6ff[%s]|r %s: %s (%s) %s"):format(L["Guild Event"], parsed.displayName, title, evtWhen, openLink))
                     if s.clanLfgAlertSound ~= false then
-                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.IG_QUEST_LIST_OPEN or SOUNDKIT.TELL_MESSAGE))
+                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
                     end
                     Clan:IncrementNotificationCount(1)
                     ns:Emit("ADDON_MESSAGE_NOTIFY", {
@@ -4483,7 +4602,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
                     ns:Print("%s", "|cff3fb950[" .. L["Event Signup"] .. "]|r " .. msgBody .. " " .. openLink)
                     if s.chatSound ~= false then
-                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.TELL_MESSAGE or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON))
+                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
                     end
                     Clan:IncrementNotificationCount(1)
                     ns:Emit("ADDON_MESSAGE_NOTIFY", {
@@ -4685,7 +4804,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             ns:Print("%s", string.format("|cffff4444[SocialCentral Scout] %s%s%s%s (%s)|r %s", targetName, guildTag, lvlTag, locTag, parsed.displayName, radarLink))
             local s = ns.db and ns.db.settings
             if not s or s.spotterSound ~= false then
-                PlayClanAlertSound(Clan, SOUNDKIT and SOUNDKIT.RAID_WARNING)
+                PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.INTERFACE_SOUND_LOST_TARGET_UNIT or 180))
             end
             Clan:IncrementNotificationCount(1)
             ns:Emit("ADDON_MESSAGE_NOTIFY", {
@@ -4705,6 +4824,47 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local ts = tonumber(parts[3])
         if VALID_WB_SYNC_IDS[syncId] and ts and ts > 0 and ns.WorldBuffs and ns.WorldBuffs.ReceiveSyncedDrop then
             ns.WorldBuffs:ReceiveSyncedDrop(syncId, ts, parsed.displayName)
+        end
+
+    elseif cmd == "WBR" then
+        if not ns.WorldBuffs or not ns.WorldBuffs.GetCatchupSyncEntries then return end
+        local entries = ns.WorldBuffs:GetCatchupSyncEntries()
+        if not entries or #entries == 0 then return end
+        local monoNow = GetTime and GetTime() or 0
+        if Clan.lastWbCatchupReplyAt and (monoNow - Clan.lastWbCatchupReplyAt) < 30 then
+            return
+        end
+        Clan.lastWbCatchupReplyAt = monoNow
+        local delay = 1.0 + math.random() * 2.5
+        if C_Timer and C_Timer.After then
+            C_Timer.After(delay, function()
+                if Clan:IsMessagingLocked() or not (IsInGuild and IsInGuild()) or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
+                    return
+                end
+                local curEntries = ns.WorldBuffs and ns.WorldBuffs.GetCatchupSyncEntries and ns.WorldBuffs:GetCatchupSyncEntries() or {}
+                if #curEntries == 0 then return end
+                local chunks = {}
+                for idx = 1, math.min(3, #curEntries) do
+                    local it = curEntries[idx]
+                    if VALID_WB_SYNC_IDS[it.id] and it.ts and it.ts > 0 then
+                        chunks[#chunks + 1] = it.id .. ":" .. tostring(math.floor(it.ts))
+                    end
+                end
+                if #chunks > 0 then
+                    TransmitAddonMessage(Clan, "WBC~" .. table.concat(chunks, ","), "GUILD", false)
+                end
+            end)
+        end
+
+    elseif cmd == "WBC" then
+        local listStr = parts[2]
+        if type(listStr) ~= "string" or listStr == "" or not (ns.WorldBuffs and ns.WorldBuffs.ReceiveSyncedDrop) then return end
+        for token in listStr:gmatch("[^,]+") do
+            local sId, sTs = token:match("^([%w_]+):(%d+)$")
+            local tsNum = tonumber(sTs)
+            if sId and VALID_WB_SYNC_IDS[sId] and tsNum and tsNum > 0 then
+                ns.WorldBuffs:ReceiveSyncedDrop(sId, tsNum, parsed.displayName)
+            end
         end
     end
 end
@@ -4954,6 +5114,9 @@ function Clan:ApplyAutoInstanceStatus()
         if self._didAutoBusyTag then
             self._didAutoBusyTag = false
             bucket.myTag = "NONE"
+            if ns.db.settings.clanSync and (GetTime() - (self.lastSyncSentAt or 0)) >= (self.MIN_SEND_INTERVAL or 5) then
+                self:SendGuildSync(("TAG~%s~NONE~%s"):format(ns.version or "0.0.0", Compat.CleanPayloadField(bucket.myNote or "", 36)))
+            end
             ns:Emit("CLAN_UPDATED")
         end
         return
@@ -4970,10 +5133,148 @@ function Clan:ApplyAutoInstanceStatus()
     if bucket.myTag == autoTag then return end
     self._didAutoBusyTag = true
     bucket.myTag = autoTag
-    if ns.db.settings.clanSync and (GetTime() - (self.lastSyncSentAt or 0)) >= self.VERSION_MIN_INTERVAL then
+    if ns.db.settings.clanSync and (GetTime() - (self.lastSyncSentAt or 0)) >= (self.MIN_SEND_INTERVAL or 5) then
         self:SendGuildSync(("TAG~%s~%s~%s"):format(ns.version or "0.0.0", autoTag, Compat.CleanPayloadField(bucket.myNote or "", 36)))
     end
     ns:Emit("CLAN_UPDATED")
+end
+
+local function ParseEventCountdownMinutes(whenText, createdAt)
+    if type(whenText) ~= "string" or whenText == "" then return nil end
+    local low = whenText:lower()
+
+    -- Relative offsets written by players: "in 20m", "em 30 min", "1h", etc.
+    if createdAt and createdAt > 0 then
+        local relMins = tonumber(low:match("^%s*[ie][nm]%s+(%d+)%s*m")) or tonumber(low:match("^(%d+)%s*min"))
+        if relMins and relMins > 0 and relMins <= 720 then
+            return ((createdAt + relMins * 60) - time()) / 60
+        end
+        local relHours = tonumber(low:match("^%s*[ie][nm]%s+(%d+)%s*h"))
+        if relHours and relHours > 0 and relHours <= 12 then
+            return ((createdAt + relHours * 3600) - time()) / 60
+        end
+    end
+
+    -- Clock timestamps like "21:00", "21h30", "21h", "9:30 pm" (only for events created within the past 20 hours).
+    if createdAt and (time() - createdAt) > 72000 then
+        return nil
+    end
+    local hStr, mStr = low:match("(%d%d?):(%d%d)")
+    if not hStr then
+        hStr, mStr = low:match("(%d%d?)h(%d%d)")
+    end
+    if not hStr then
+        hStr = low:match("(%d%d?)h")
+        mStr = "0"
+    end
+    local hour = tonumber(hStr)
+    local minute = tonumber(mStr) or 0
+    if not hour or hour > 24 or minute > 59 then
+        return nil
+    end
+    if low:find("pm", 1, true) and hour < 12 then
+        hour = hour + 12
+    elseif low:find("am", 1, true) and hour == 12 then
+        hour = 0
+    end
+    if hour == 24 then hour = 0 end
+
+    local nowTbl = date("*t")
+    local nowMins = (nowTbl.hour or 0) * 60 + (nowTbl.min or 0)
+    local evtMins = hour * 60 + minute
+    local diff = evtMins - nowMins
+    if diff < -60 then
+        diff = diff + 1440
+    end
+    return diff
+end
+
+local function ComputeCalendarCountdownMinutes(calEvt)
+    if type(calEvt) ~= "table" or (calEvt.dayDelta or 99) > 1 then
+        return nil
+    end
+    local today = (C_DateAndTime and C_DateAndTime.GetCurrentCalendarTime and Safe.Call(C_DateAndTime.GetCurrentCalendarTime)) or date("*t")
+    local curHour = tonumber(today and today.hour) or 0
+    local curMin = tonumber(today and today.minute) or 0
+    local nowMins = curHour * 60 + curMin
+    local targetMins = ((calEvt.dayDelta or 0) * 1440) + ((calEvt.hour or 0) * 60) + (calEvt.minute or 0)
+    return targetMins - nowMins
+end
+
+function Clan:CheckUpcomingEventReminders()
+    local s = ns.db and ns.db.settings
+    if s and s.clanEventReminders == false then return end
+    local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+    local hasGuildEvents = (bucket and type(bucket.events) == "table" and next(bucket.events) ~= nil)
+    local hasCalEvents = (type(self.calendarEvents) == "table" and #self.calendarEvents > 0)
+    if not hasGuildEvents and not hasCalEvents then
+        return
+    end
+    self._remindedEventStages = self._remindedEventStages or {}
+
+    local function FireReminder(remKey, title, minsUntil, eventId, rightView)
+        if minsUntil > 15 or minsUntil < -1 then return end
+        local stage = (minsUntil <= 5) and 5 or 15
+        if (self._remindedEventStages[remKey] or 99) <= stage then
+            return
+        end
+        self._remindedEventStages[remKey] = stage
+
+        local timeLabel = (minsUntil <= 1) and L["Starting now!"] or L["Starts in ~%d min"]:format(math.max(1, math.ceil(minsUntil)))
+        local evtLink = eventId
+            and ("|Haddon:SCentral:clanevt:" .. tostring(eventId) .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h")
+            or ("|Haddon:SCentral:clanevt:calendar|h|cff58a6ff[" .. L["Open"] .. "]|r|h")
+        ns:Print("|cfff2c94c[%s]|r %s — %s %s", L["Event Reminder"], title, timeLabel, evtLink)
+        PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+        ns:Emit("ADDON_MESSAGE_NOTIFY", {
+            id = "evrem:" .. remKey .. ":" .. tostring(stage),
+            kind = "CLAN_EVENT",
+            sourceTag = L["Event Reminder"],
+            sender = title,
+            text = timeLabel,
+            eventId = eventId,
+            clanRightView = rightView or "events",
+            ts = time(),
+            priority = 2,
+            totalDuration = 16.0,
+        })
+    end
+
+    local _, myKey = ResolveSelfIdentity()
+    if hasGuildEvents and myKey then
+        for _, evt in pairs(bucket.events) do
+            if type(evt) == "table" and evt.isOpen ~= false and evt.signups and evt.signups[myKey] then
+                local mins = ParseEventCountdownMinutes(evt.whenText, evt.createdAt)
+                if mins then
+                    FireReminder("sc:" .. tostring(evt.id), evt.title or L["Guild Event"], mins, evt.id, "events")
+                end
+            end
+        end
+    end
+
+    local calEnum = Enum and Enum.CalendarStatus
+    local statusAvail = (calEnum and calEnum.Available) or 1
+    local statusConf = (calEnum and calEnum.Confirmed) or 3
+    local statusStandby = (calEnum and calEnum.Standby) or 5
+    local statusSigned = (calEnum and calEnum.Signedup) or 6
+    local statusTent = (calEnum and calEnum.Tentative) or 8
+
+    if type(self.calendarEvents) == "table" then
+        for _, cal in ipairs(self.calendarEvents) do
+            if type(cal) == "table" then
+                local st = tonumber(cal.inviteStatus)
+                local attending = (st == statusAvail or st == statusConf or st == statusStandby or st == statusSigned or st == statusTent)
+                    or (cal.invitedBy and cal.invitedBy ~= "" and Compat.IsMe(cal.invitedBy))
+                if attending then
+                    local mins = ComputeCalendarCountdownMinutes(cal)
+                    if mins then
+                        local calKey = "cal:" .. tostring(cal.eventID or cal.title) .. ":" .. tostring(cal.hour) .. ":" .. tostring(cal.minute)
+                        FireReminder(calKey, cal.title or L["Calendar Event"], mins, nil, "events")
+                    end
+                end
+            end
+        end
+    end
 end
 
 function Clan:GetRosterHistory()
@@ -5105,9 +5406,15 @@ function Clan:Init()
             Clan:AutoDetectMyProfessions(false)
             Clan:SendVersionHello()
             Clan:ApplyAutoInstanceStatus()
+            Clan:CheckAutoCloseFullDungeonLFG()
             Clan:RefreshGameCalendar(false)
             if ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
                 Clan:RequestIntelSync()
+            end
+        end)
+        C_Timer.After(12.5, function()
+            if ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
+                Clan:RequestWorldBuffCatchup()
             end
         end)
     end)
@@ -5132,20 +5439,72 @@ function Clan:Init()
             ns:Emit("CLAN_DIPLOMACY_UPDATED")
         end
     end)
+    local function HasUnverifiedGroupMembers()
+        if not (Compat.IsInGroup and Compat.IsInGroup()) then return false end
+        local isRaid = Compat.IsInRaid and Compat.IsInRaid()
+        local prefix = isRaid and "raid" or "party"
+        local count = (GetNumGroupMembers and Safe.Number(GetNumGroupMembers())) or 0
+        local maxIdx = isRaid and count or math.min(4, count)
+        for i = 1, maxIdx do
+            local u = prefix .. i
+            if UnitExists and Safe.Value(Safe.Call(UnitExists, u)) == true then
+                local uGuid = Safe.String(Safe.Call(UnitGUID, u))
+                if not Compat.IsMe(nil, uGuid) then
+                    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(u, uGuid, nil, true)
+                    local fullName = (resolved and resolved.fullName) or Safe.String(Safe.Call(UnitName, u))
+                    local lk = fullName and Compat.ParseCharacterFields and select(1, Compat.ParseCharacterFields(fullName))
+                    if lk and not ((Clan.peerVersions and Clan.peerVersions[lk]) or (ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(lk))) then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
     for _, grpEv in ipairs({ "GROUP_ROSTER_UPDATE", "PARTY_MEMBERS_CHANGED", "RAID_ROSTER_UPDATE" }) do
         ns.RegisterEvent(self, grpEv, function()
-            if Clan._groupVerPending then return end
-            local grpChan = GetActiveGroupChannel()
-            if grpChan then
-                Clan._groupVerPending = true
-                C_Timer.After(4, function()
-                    Clan._groupVerPending = false
-                    local ch = GetActiveGroupChannel()
-                    if ch then
-                        Clan:SendVersionHello(ch)
-                    end
+            if C_Timer and C_Timer.After and not Clan._autoCloseLfgQueued then
+                Clan._autoCloseLfgQueued = true
+                C_Timer.After(2.0, function()
+                    Clan._autoCloseLfgQueued = false
+                    Clan:CheckAutoCloseFullDungeonLFG()
                 end)
             end
+            local grpChan = GetActiveGroupChannel()
+            if not grpChan then
+                Clan._wasInGroupForVer = false
+                if Clan.lastVersionSentByChannel then
+                    Clan.lastVersionSentByChannel["PARTY"] = nil
+                    Clan.lastVersionSentByChannel["RAID"] = nil
+                    Clan.lastVersionSentByChannel["INSTANCE_CHAT"] = nil
+                end
+                return
+            end
+            if not Clan._wasInGroupForVer then
+                Clan._wasInGroupForVer = true
+            end
+            if Clan._groupVerPending then return end
+            Clan._groupVerPending = true
+            C_Timer.After(2.8, function()
+                Clan._groupVerPending = false
+                local ch = GetActiveGroupChannel()
+                if ch and HasUnverifiedGroupMembers() then
+                    Clan:SendVersionHello(ch)
+                end
+            end)
+        end)
+    end
+
+    ns.RegisterEvent(self, "ZONE_CHANGED_NEW_AREA", function()
+        C_Timer.After(2.0, function()
+            Clan:ApplyAutoInstanceStatus()
+        end)
+    end)
+
+    if C_Timer and C_Timer.NewTicker then
+        C_Timer.NewTicker(30.0, function()
+            Clan:CheckUpcomingEventReminders()
         end)
     end
 end

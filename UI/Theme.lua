@@ -1069,9 +1069,41 @@ function Theme:StyleEditBox(box)
 end
 
 --- Create a crisp, theme-aware, responsively padded EditBox (replaces inconsistent InputBoxTemplate 9-slices).
+function Theme:InstallEditBoxLinkHook()
+    if self._editBoxLinkHooked then return end
+    self._editBoxLinkHooked = true
+    if type(_G.ChatEdit_InsertLink) == "function" then
+        hooksecurefunc("ChatEdit_InsertLink", function(text)
+            local box = Theme._focusedEditBox
+            if not (box and box.HasFocus and box:HasFocus() and box:IsVisible()) then
+                return
+            end
+            if ns.Safe and ns.Safe.IsSecret and ns.Safe.IsSecret(text) then
+                return
+            end
+            if type(text) ~= "string" or text == "" then
+                return
+            end
+            local inserted = text
+            if box._scInsertLinkMode ~= "full" then
+                inserted = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+                    :gsub("|r", "")
+                    :gsub("|H[^|]+|h%[?([^%]]*)%]?|h", "%1")
+                    :gsub("^%s+", "")
+                    :gsub("%s+$", "")
+            end
+            if inserted ~= "" and box.Insert then
+                box:Insert(inserted)
+            end
+        end)
+    end
+end
+
 function Theme:CreateEditBox(parent, opts)
     opts = opts or {}
+    self:InstallEditBoxLinkHook()
     local box = CreateFrame("EditBox", opts.name, parent, "BackdropTemplate")
+    box._scInsertLinkMode = opts.insertLinkMode or "name"
     box:SetSize(opts.width or 180, opts.height or 24)
     box:SetAutoFocus(opts.autoFocus == true)
     box:SetFontObject(opts.font or GameFontHighlight)
@@ -1141,11 +1173,15 @@ function Theme:CreateEditBox(parent, opts)
 
     box:SetScript("OnEditFocusGained", function(self)
         self._scFocused = true
+        Theme._focusedEditBox = self
         self:UpdatePlaceholder()
         Theme:StyleEditBox(self)
     end)
     box:SetScript("OnEditFocusLost", function(self)
         self._scFocused = false
+        if Theme._focusedEditBox == self then
+            Theme._focusedEditBox = nil
+        end
         self:UpdatePlaceholder()
         Theme:StyleEditBox(self)
     end)
@@ -1433,6 +1469,38 @@ function Theme:MakeMovable(win, opts)
     return win
 end
 
+function Theme:ResetWindowPosition(key, silent)
+    if InCombatLockdown and InCombatLockdown() then
+        ns:Print(L["In Combat"])
+        return false
+    end
+    if not key or key == "" then return false end
+    if ns.db then
+        if type(ns.db.windowPositions) == "table" then
+            ns.db.windowPositions[key] = nil
+        end
+        if key == "main" and type(ns.db.window) == "table" then
+            ns.db.window.point = nil
+            ns.db.window.relativePoint = nil
+            ns.db.window.x = nil
+            ns.db.window.y = nil
+        end
+    end
+    local entry = movableRegistry[key]
+    if entry and entry.win then
+        local w = entry.win
+        w:ClearAllPoints()
+        w:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        if type(entry.onReset) == "function" then
+            pcall(entry.onReset, w)
+        end
+    end
+    if not silent then
+        ns:Print(L["Position reset to default."])
+    end
+    return true
+end
+
 function Theme:ResetAllWindowPositions()
     if InCombatLockdown and InCombatLockdown() then
         ns:Print(L["In Combat"])
@@ -1447,15 +1515,8 @@ function Theme:ResetAllWindowPositions()
             ns.db.window.y = nil
         end
     end
-    for _, entry in pairs(movableRegistry) do
-        local w = entry.win
-        if w then
-            w:ClearAllPoints()
-            w:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-            if type(entry.onReset) == "function" then
-                pcall(entry.onReset, w)
-            end
-        end
+    for key in pairs(movableRegistry) do
+        self:ResetWindowPosition(key, true)
     end
     ns:Print(L["All window positions reset to center."])
     return true

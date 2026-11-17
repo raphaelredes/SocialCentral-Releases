@@ -107,6 +107,7 @@ function Group:Scan()
                 local role = NormalizeRole(Safe.String(Safe.Call(UnitGroupRolesAssigned, unit)))
                 local online = not UnitIsConnected or Safe.Value(UnitIsConnected(unit)) ~= false
                 local isLeader = Compat.IsGroupLeader(unit)
+                local isAssistant = (not isLeader) and (Compat.IsGroupAssistant and Compat.IsGroupAssistant(unit)) or false
                 local isMe = Compat.IsMe(rawName, guid)
 
                 local item = {
@@ -119,6 +120,7 @@ function Group:Scan()
                     role = role,
                     online = online,
                     isLeader = isLeader,
+                    isAssistant = isAssistant,
                     isMe = isMe,
                     ready = self.readyStates[parsed.lookupKey],
                     zone = currentZone,
@@ -240,6 +242,41 @@ function Group:PromoteMember(unit)
         return true
     end
     return false
+end
+
+function Group:ToggleAssistant(unit)
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print(L["In Combat"])
+        return false
+    end
+    if not (Compat.IsGroupLeader("player") and Compat.IsInRaid() and unit) then
+        return false
+    end
+    local isAssist = UnitIsGroupAssistant and Safe.Value(Safe.Call(UnitIsGroupAssistant, unit)) == true
+    if isAssist and DemoteAssistant then
+        pcall(DemoteAssistant, unit)
+        return true
+    elseif not isAssist and PromoteToAssistant then
+        pcall(PromoteToAssistant, unit)
+        return true
+    end
+    return false
+end
+
+function Group:GetReadyCheckProgress()
+    if not self.readyCheckActive then return 0, 0, 0, 0 end
+    local okCount, noCount, pendCount, total = 0, 0, 0, 0
+    for _, m in ipairs(self.members or {}) do
+        total = total + 1
+        if m.ready == true then
+            okCount = okCount + 1
+        elseif m.ready == false then
+            noCount = noCount + 1
+        else
+            pendCount = pendCount + 1
+        end
+    end
+    return okCount, noCount, pendCount, total
 end
 
 function Group:LeaveGroup()

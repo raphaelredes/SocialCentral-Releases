@@ -226,6 +226,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
 
     Store:SyncWatchlistObservation(parsed.displayName, {
         online = true,
+        guid = row.guid,
         source = source or "nearby",
         level = row.level,
         classFile = row.classFile,
@@ -291,10 +292,50 @@ local function InspectUnit(unit, source, fromTicker)
     classFile = Safe.String(classFile)
     local level = Safe.Number(Safe.Call(UnitLevel, unit))
     local area = Compat.CurrentZoneName()
+    local subZone = Safe.String(Safe.Call(GetSubZoneText))
+    if subZone and subZone ~= "" and area and area ~= "" and subZone ~= area then
+        area = area .. " — " .. subZone
+    elseif subZone and subZone ~= "" and (not area or area == "") then
+        area = subZone
+    end
+    local isPhysicalGroupNear = true
+    if source == "group" then
+        local isVis = UnitIsVisible and Safe.Value(Safe.Call(UnitIsVisible, unit)) == true
+        if not isVis and C_Map and C_Map.GetBestMapForUnit then
+            local myMap = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
+            local uMap = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, unit))
+            if myMap and uMap and uMap ~= myMap then
+                isPhysicalGroupNear = false
+                if C_Map.GetMapInfo then
+                    local info = Safe.Call(C_Map.GetMapInfo, uMap)
+                    area = (type(info) == "table" and Safe.String(info.name)) or nil
+                else
+                    area = nil
+                end
+            end
+        end
+    end
+
     local guild = Safe.String(Safe.Call(GetGuildInfo, unit))
     if (not guild or guild == "") and Compat.ReadUnitTooltipGuild then
         local cacheOnly = not (unit == "target" or unit == "focus" or unit == "mouseover")
         guild = Compat.ReadUnitTooltipGuild(unit, guid, cacheOnly)
+    end
+
+    if source == "group" and not isPhysicalGroupNear then
+        local parsed = Compat.ParseCharacterName(name)
+        if parsed and Store and Store.SyncWatchlistObservation then
+            Store:SyncWatchlistObservation(parsed.displayName, {
+                online = true,
+                guid = guid,
+                source = "group",
+                level = level,
+                classFile = classFile,
+                area = area,
+                guild = guild,
+            })
+        end
+        return
     end
 
     RecordSighting(name, guid, level, classFile, area, source, guild)
@@ -334,29 +375,56 @@ local function ScanGroup(fromTicker)
     end
 end
 
+local LOCAL_PROXIMITY_CHAT_EVENTS = {
+    CHAT_MSG_SAY = true,
+    CHAT_MSG_YELL = true,
+    CHAT_MSG_EMOTE = true,
+    CHAT_MSG_TEXT_EMOTE = true,
+}
+
+local plateScanCursor = 0
+
 local function ScanActiveEnvironment(fromTicker)
-    local skipNameplates = (InCombatLockdown and InCombatLockdown()) or not IsMainWindowOpen()
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+    local uiOpen = IsMainWindowOpen()
+    local inInst, instType = Safe.Call(IsInInstance)
+    local heavyInstClosed = (not uiOpen) and (Compat.IsInRaid() or (inInst == true and (instType == "pvp" or instType == "arena")))
+    local skipNameplates = inCombat or heavyInstClosed
     if not skipNameplates then
+        local maxPlatesPerTick = (fromTicker and not uiOpen) and 12 or 40
         local hasPlatesApi = false
         if C_NamePlate and C_NamePlate.GetNamePlates then
             local ok, plates = pcall(C_NamePlate.GetNamePlates)
             if ok and type(plates) == "table" then
                 hasPlatesApi = true
-                for _, plate in ipairs(plates) do
-                    local token = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
-                    if type(token) == "string" and token ~= "" then
-                        InspectUnit(token, "nearby", fromTicker)
-                        InspectUnit(token .. "target", "nearby", fromTicker)
+                local total = #plates
+                if total > 0 then
+                    local toScan = math.min(total, maxPlatesPerTick)
+                    local startIdx = (total > toScan) and ((plateScanCursor % total) + 1) or 1
+                    for step = 0, toScan - 1 do
+                        local idx = ((startIdx + step - 1) % total) + 1
+                        local plate = plates[idx]
+                        local token = plate and (plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit))
+                        if type(token) == "string" and token ~= "" then
+                            InspectUnit(token, "nearby", fromTicker)
+                            if uiOpen then
+                                InspectUnit(token .. "target", "nearby", fromTicker)
+                            end
+                        end
                     end
+                    plateScanCursor = (total > toScan) and ((startIdx + toScan - 1) % total) or 0
                 end
             end
         end
         if not hasPlatesApi then
-            for i = 1, 20 do
+            local limit = (fromTicker and not uiOpen) and 12 or 20
+            for i = 1, limit do
                 local token = "nameplate" .. i
                 if UnitExists and UnitExists(token) then
                     InspectUnit(token, "nearby", fromTicker)
-                    InspectUnit(token .. "target", "nearby", fromTicker)
+                    if uiOpen then
+                        InspectUnit(token .. "target", "nearby", fromTicker)
+                    end
                 end
             end
         end
@@ -369,7 +437,7 @@ local function ScanActiveEnvironment(fromTicker)
     ScanGroup(fromTicker)
 end
 
-local function OnChat(_, _, text, sender, ...)
+local function OnChat(_, eventName, text, sender, ...)
     local cleanSender = Safe.String(sender)
     if not cleanSender then return end
     local guid = select(10, ...)
@@ -392,7 +460,47 @@ local function OnChat(_, _, text, sender, ...)
         end
     end
     local guild = cleanGuid and Compat.ReadUnitTooltipGuild and Compat.ReadUnitTooltipGuild(nil, cleanGuid, true) or nil
-    RecordSighting(bestName, cleanGuid, nil, nil, Compat.CurrentZoneName(), "chat", guild)
+
+    -- Only physically nearby channels (Say/Yell/Emote) assert the speaker is standing in the player's current zone.
+    if LOCAL_PROXIMITY_CHAT_EVENTS[eventName] then
+        local z = Compat.CurrentZoneName()
+        local sz = Safe.String(Safe.Call(GetSubZoneText))
+        if sz and sz ~= "" and z and z ~= "" and sz ~= z then
+            z = z .. " — " .. sz
+        end
+        RecordSighting(bestName, cleanGuid, nil, nil, z, "chat", guild)
+        return
+    end
+
+    local parsed = Compat.ParseCharacterName(bestName)
+    if not parsed or Compat.IsMe(parsed.displayName, cleanGuid) then
+        return
+    end
+
+    if (not guild or guild == "") and Store then
+        local sRow = (cleanGuid and Store.socialByGuid and Store.socialByGuid[cleanGuid])
+            or (Store.socialByLookup and Store.socialByLookup[parsed.lookupKey])
+        if sRow and sRow.guild and sRow.guild ~= "" then
+            guild = sRow.guild
+        end
+    end
+
+    -- Refresh already-recorded Nearby rows without overwriting their real map zone, and notify Watchlist cleanly without a fake zone.
+    local existing = Store.nearby and ((cleanGuid and nearbyByGuid[cleanGuid]) or Store.nearby[parsed.lookupKey])
+    if existing then
+        existing.displayName = parsed.displayName
+        existing.guid = cleanGuid or existing.guid
+        if guild and guild ~= "" then existing.guild = guild end
+        existing.lastSeen = time()
+        QueueEmit()
+    end
+
+    Store:SyncWatchlistObservation(parsed.displayName, {
+        online = true,
+        guid = cleanGuid,
+        source = "chat",
+        guild = guild,
+    })
 end
 
 function Nearby:Prune(silent)
@@ -524,7 +632,19 @@ function Nearby:Init()
     end
 
     if C_Timer and C_Timer.NewTicker then
+        local hiddenIdleStep = 0
         C_Timer.NewTicker(8.0, function()
+            if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+                return
+            end
+            if not IsMainWindowOpen() and not Compat.IsInGroup() then
+                hiddenIdleStep = (hiddenIdleStep + 1) % 3
+                if hiddenIdleStep ~= 0 then
+                    return
+                end
+            else
+                hiddenIdleStep = 0
+            end
             ScanActiveEnvironment(true)
         end)
     end

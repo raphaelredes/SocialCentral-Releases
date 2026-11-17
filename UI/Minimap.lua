@@ -185,7 +185,16 @@ local function PopulateTooltip(tt)
     end
 
     tt:AddLine(" ")
-    tt:AddLine(L["Left-click: choose Main Window or Settings\nAlt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+    local clickMode = (ns.db and ns.db.settings and ns.db.settings.minimapLeftClickAction) or "smart"
+    local leftHint = (clickMode == "menu") and L["Left-click: choose Main Window or Settings"]
+        or (clickMode == "hub" and L["Left-click: open Main Window"] or L["Left-click: open Unread Chat or Main Window"])
+    tt:AddLine(leftHint .. "\n" .. L["Alt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nShift+Click: check next /who\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+end
+
+function MinimapBtn:PopulateSummaryTooltip(tt)
+    if tt then
+        PopulateTooltip(tt)
+    end
 end
 
 local function OpenViaOfficialOrHub(modId)
@@ -424,6 +433,30 @@ local function OpenLeftClickMenu(anchor)
     leftChooserFrame:Show()
 end
 
+function MinimapBtn:PerformSmartLeftClick(anchor)
+    local clickMode = (ns.db and ns.db.settings and ns.db.settings.minimapLeftClickAction) or "smart"
+    if clickMode == "menu" then
+        OpenLeftClickMenu(anchor or button)
+        return
+    end
+    if clickMode == "smart" and ns.Chat then
+        local unreadCount = (ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount())
+            or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))
+            or 0
+        if unreadCount > 0 then
+            local unreadThreads = ns.Chat.GetThreadsList and ns.Chat:GetThreadsList("unread") or {}
+            local topThread = unreadThreads[1]
+            if topThread and topThread.key and ns.NavigateToModule then
+                ns:NavigateToModule("chat", { threadKey = topThread.key })
+                return
+            end
+            OpenViaOfficialOrHub("chat")
+            return
+        end
+    end
+    OpenMainWindowFromMinimap()
+end
+
 local function HandleMinimapClick(anchor, mouseButton)
     if mouseButton == "RightButton" then
         if leftChooserFrame and leftChooserFrame:IsShown() then leftChooserFrame:Hide() end
@@ -441,7 +474,7 @@ local function HandleMinimapClick(anchor, mouseButton)
         end
     else
         if GameTooltip then GameTooltip:Hide() end
-        OpenLeftClickMenu(anchor)
+        MinimapBtn:PerformSmartLeftClick(anchor)
     end
 end
 
