@@ -97,13 +97,30 @@ local function PopulateTooltip(tt)
     local langLabel = ns.activeLangLabel or "English"
     tt:AddDoubleLine(L["Theme"], designLabel .. " | " .. langLabel, 0.78, 0.84, 0.92, 0.88, 0.92, 0.98)
 
-    local sndLabel, sr, sg, sb = GetChatSoundLabel()
-    tt:AddDoubleLine(L["Chat Sounds"], sndLabel, 0.78, 0.84, 0.92, sr, sg, sb)
+    local focusReason = ns.Compat and ns.Compat.GetFocusSilenceReason and ns.Compat.GetFocusSilenceReason()
+    if focusReason == "dnd" then
+        tt:AddDoubleLine(L["Focus Mode"], L["Do Not Disturb (Active)"], 0.78, 0.84, 0.92, 1.0, 0.65, 0.24)
+    elseif focusReason == "instance" then
+        tt:AddDoubleLine(L["Focus Mode"], L["Silenced in Instance"], 0.78, 0.84, 0.92, 1.0, 0.78, 0.30)
+    end
+
+    local watchOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("watchlist")
+    local socOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("social")
+    local clanOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("clan")
+    local nearbyOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("nearby")
+    local chatOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
+    local radarOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("radar")
+    local groupOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("group")
+
+    if chatOnMod then
+        local sndLabel, sr, sg, sb = GetChatSoundLabel()
+        tt:AddDoubleLine(L["Chat Sounds"], sndLabel, 0.78, 0.84, 0.92, sr, sg, sb)
+    end
 
     tt:AddLine(" ")
 
     local watchOn, watchOff, watchUnk = 0, 0, 0
-    if ns.Watchlist then
+    if watchOnMod and ns.Watchlist then
         watchOn, watchOff, watchUnk = ns.Watchlist:GetStats()
         tt:AddDoubleLine(
             L["Watchlist"],
@@ -112,22 +129,30 @@ local function PopulateTooltip(tt)
         )
     end
 
-    if ns.Social and ns.Social.GetCount then
-        local guildCount = ns.Social:GetCount("guild")
+    if socOnMod and ns.Social and ns.Social.GetCount then
         local friendCount = ns.Social:GetCount("friend")
         local bnetCount = ns.Social:GetCount("bnet")
-        tt:AddDoubleLine(
-            L["Social"],
-            string.format("%s: %d  |  %s: %d  |  %s: %d", L["Guild"], guildCount, L["Friends"], friendCount, "BNet", bnetCount),
-            0.88, 0.92, 0.98, 0.72, 0.85, 0.98
-        )
+        if clanOnMod then
+            local guildCount = ns.Social:GetCount("guild")
+            tt:AddDoubleLine(
+                L["Social"],
+                string.format("%s: %d  |  %s: %d  |  %s: %d", L["Guild"], guildCount, L["Friends"], friendCount, "BNet", bnetCount),
+                0.88, 0.92, 0.98, 0.72, 0.85, 0.98
+            )
+        else
+            tt:AddDoubleLine(
+                L["Social"],
+                string.format("%s: %d  |  %s: %d", L["Friends"], friendCount, "BNet", bnetCount),
+                0.88, 0.92, 0.98, 0.72, 0.85, 0.98
+            )
+        end
     end
 
-    if ns.Nearby and ns.Nearby.GetCount then
+    if nearbyOnMod and ns.Nearby and ns.Nearby.GetCount then
         tt:AddDoubleLine(L["Nearby"], tostring(ns.Nearby:GetCount()), 0.88, 0.92, 0.98, 0.35, 0.80, 1.0)
     end
 
-    if ns.Spotter then
+    if radarOnMod and ns.Spotter then
         local eCount, aCount, sCount, totalCount = ns.Spotter:GetCounts()
         if totalCount > 0 then
             tt:AddDoubleLine(
@@ -138,12 +163,12 @@ local function PopulateTooltip(tt)
         end
     end
 
-    local grpCount = ns.Group and #ns.Group:GetMembers() or 0
+    local grpCount = (groupOnMod and ns.Group and #ns.Group:GetMembers()) or 0
     if grpCount > 0 then
         tt:AddDoubleLine(L["Group"], tostring(grpCount), 0.78, 0.84, 0.92, 0.45, 0.80, 1.0)
     end
 
-    if ns.Watchlist and watchOn > 0 then
+    if watchOnMod and ns.Watchlist and watchOn > 0 then
         tt:AddLine(" ")
         local shown = 0
         for _, entry in ipairs(ns.Watchlist:GetEntries("all", "status")) do
@@ -157,11 +182,11 @@ local function PopulateTooltip(tt)
         end
     end
 
-    local summary = ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
-    local unreadDirect = summary and summary.totalDirect or (ns.Chat and ns.Chat:GetTotalUnread() or 0)
+    local summary = chatOnMod and ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
+    local unreadDirect = summary and summary.totalDirect or (chatOnMod and ns.Chat and ns.Chat:GetTotalUnread() or 0)
     local mirrorUnread = summary and summary.channels or 0
 
-    if unreadDirect > 0 or mirrorUnread > 0 then
+    if chatOnMod and (unreadDirect > 0 or mirrorUnread > 0) then
         tt:AddLine(" ")
         if unreadDirect > 0 then
             local msgCount = (summary and (summary.direct + summary.rooms)) or unreadDirect
@@ -188,7 +213,12 @@ local function PopulateTooltip(tt)
     local clickMode = (ns.db and ns.db.settings and ns.db.settings.minimapLeftClickAction) or "smart"
     local leftHint = (clickMode == "menu") and L["Left-click: choose Main Window or Settings"]
         or (clickMode == "hub" and L["Left-click: open Main Window"] or L["Left-click: open Unread Chat or Main Window"])
-    tt:AddLine(leftHint .. "\n" .. L["Alt+Click: toggle Target Radar\nCtrl+Click: open Conversations\nRight-click: quick menu\nDrag: move button"], 0.75, 0.80, 0.88, true)
+    local extraLines = { leftHint }
+    if radarOnMod then extraLines[#extraLines + 1] = L["Alt+Click: toggle Target Radar"] end
+    if chatOnMod then extraLines[#extraLines + 1] = L["Ctrl+Click: open Conversations"] end
+    extraLines[#extraLines + 1] = L["Right-click: quick menu"]
+    extraLines[#extraLines + 1] = L["Drag: move button"]
+    tt:AddLine(table.concat(extraLines, "\n"), 0.75, 0.80, 0.88, true)
 end
 
 function MinimapBtn:PopulateSummaryTooltip(tt)
@@ -222,23 +252,31 @@ local function OpenContextMenu(anchor)
                     OpenViaOfficialOrHub("lfg")
                 end)
             end
-            root:CreateButton(L["Social & Watchlist (O)"], function()
-                OpenViaOfficialOrHub("watchlist")
-            end)
-            if not ns.Compat or not ns.Compat.ShouldShowGuildFeatures or ns.Compat.ShouldShowGuildFeatures() then
+            if not ns.Compat or not ns.Compat.IsWindowIntegrationEnabled or ns.Compat.IsWindowIntegrationEnabled("O") then
+                root:CreateButton(L["Social & Watchlist (O)"], function()
+                    OpenViaOfficialOrHub("watchlist")
+                end)
+            end
+            if not ns.Compat or not ns.Compat.IsWindowIntegrationEnabled or ns.Compat.IsWindowIntegrationEnabled("J") then
                 root:CreateButton(L["Clan Hub & Diplomacy (J)"], function()
                     OpenViaOfficialOrHub("clan")
                 end)
             end
-            root:CreateButton(L["My Alts (C)"], function()
-                OpenViaOfficialOrHub("alts")
-            end)
-            root:CreateButton(L["Conversations (Chat)"], function()
-                OpenViaOfficialOrHub("chat")
-            end)
-            root:CreateButton(L["World Buffs (M)"], function()
-                OpenViaOfficialOrHub("buffs")
-            end)
+            if not ns.Compat or not ns.Compat.IsWindowIntegrationEnabled or ns.Compat.IsWindowIntegrationEnabled("C") then
+                root:CreateButton(L["My Alts (C)"], function()
+                    OpenViaOfficialOrHub("alts")
+                end)
+            end
+            if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled("chat") then
+                root:CreateButton(L["Conversations (Chat)"], function()
+                    OpenViaOfficialOrHub("chat")
+                end)
+            end
+            if not ns.Compat or not ns.Compat.IsWindowIntegrationEnabled or ns.Compat.IsWindowIntegrationEnabled("M") then
+                root:CreateButton(L["World Buffs (M)"], function()
+                    OpenViaOfficialOrHub("buffs")
+                end)
+            end
             root:CreateButton(L["Open Main Window"], function()
                 if ns.UI and ns.UI.ShowHub then
                     ns.UI:ShowHub()
@@ -247,17 +285,21 @@ local function OpenContextMenu(anchor)
                 end
             end)
             root:CreateDivider()
-            local radarLabel = L["Target Radar"]
-            if ns.Spotter then
-                local _, _, _, totalCount = ns.Spotter:GetCounts()
-                if totalCount > 0 then
-                    radarLabel = string.format("%s (%d)", L["Target Radar"], totalCount)
+            if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled("radar") then
+                local radarLabel = L["Target Radar"]
+                if ns.Spotter then
+                    local _, _, _, totalCount = ns.Spotter:GetCounts()
+                    if totalCount > 0 then
+                        radarLabel = string.format("%s (%d)", L["Target Radar"], totalCount)
+                    end
                 end
+                root:CreateButton(radarLabel, function()
+                    if ns.SpotterHUD and ns.SpotterHUD.Toggle then ns.SpotterHUD:Toggle() end
+                end)
             end
-            root:CreateButton(radarLabel, function()
-                if ns.SpotterHUD and ns.SpotterHUD.Toggle then ns.SpotterHUD:Toggle() end
-            end)
-            if ns.Chat and ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(true) > 0 then
+            local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
+            local watchModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("watchlist")
+            if chatModOn and ns.Chat and ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(true) > 0 then
                 root:CreateButton(L["Mark All Conversations Read"], function()
                     if ns.Chat and ns.Chat.MarkAllRead then
                         ns.Chat:MarkAllRead()
@@ -265,21 +307,34 @@ local function OpenContextMenu(anchor)
                 end)
             end
             root:CreateDivider()
-            root:CreateCheckbox(L["Mute All Chat Sounds"], function()
-                return ns.db and ns.db.settings and ns.db.settings.chatSound == false
+            root:CreateCheckbox(L["Do Not Disturb"], function()
+                return ns.db and ns.db.settings and ns.db.settings.doNotDisturb == true
             end, function()
                 if ns.db and ns.db.settings then
-                    ns.db.settings.chatSound = (ns.db.settings.chatSound == false)
-                    ns:Emit("CHAT_UPDATED")
+                    ns.db.settings.doNotDisturb = not (ns.db.settings.doNotDisturb == true)
+                    ns:Emit("SETTINGS_UPDATED")
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
                 end
             end)
-            root:CreateCheckbox(L["Online alerts for Watchlist"], function()
-                return ns.db and ns.db.settings and ns.db.settings.alerts and ns.db.settings.alerts.chat
-            end, function()
-                if ns.db and ns.db.settings and ns.db.settings.alerts then
-                    ns.db.settings.alerts.chat = not ns.db.settings.alerts.chat
-                end
-            end)
+            if chatModOn then
+                root:CreateCheckbox(L["Mute All Chat Sounds"], function()
+                    return ns.db and ns.db.settings and ns.db.settings.chatSound == false
+                end, function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.chatSound = (ns.db.settings.chatSound == false)
+                        ns:Emit("CHAT_UPDATED")
+                    end
+                end)
+            end
+            if watchModOn then
+                root:CreateCheckbox(L["Online alerts for Watchlist"], function()
+                    return ns.db and ns.db.settings and ns.db.settings.alerts and ns.db.settings.alerts.chat
+                end, function()
+                    if ns.db and ns.db.settings and ns.db.settings.alerts then
+                        ns.db.settings.alerts.chat = not ns.db.settings.alerts.chat
+                    end
+                end)
+            end
             root:CreateCheckbox(L["Lock minimap button"], function()
                 return ns.db and ns.db.settings and ns.db.settings.minimap and ns.db.settings.minimap.lock
             end, function()
@@ -312,7 +367,8 @@ end
 
 local function UpdateBadge()
     local unreadDirect = 0
-    if ns.Chat then
+    local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
+    if chatModOn and ns.Chat then
         if ns.Chat.GetUnreadDirectCount then
             unreadDirect = ns.Chat:GetUnreadDirectCount() or 0
         elseif ns.Chat.GetTotalUnread then
@@ -336,7 +392,7 @@ local function UpdateBadge()
     end
 
     if button and button.overlayRing then
-        local spotterEnabled = ns.db and ns.db.settings and ns.db.settings.spotterEnabled == true
+        local spotterEnabled = not (ns.db and ns.db.settings and ns.db.settings.spotterEnabled == false)
         if unreadDirect > 0 then
             button.overlayRing:SetVertexColor(1.0, 0.85, 0.22)
         elseif spotterEnabled and ns.Spotter and select(1, ns.Spotter:GetCounts()) > 0 then
@@ -440,7 +496,8 @@ function MinimapBtn:PerformSmartLeftClick(anchor)
         OpenLeftClickMenu(anchor or button)
         return
     end
-    if clickMode == "smart" and ns.Chat then
+    local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
+    if clickMode == "smart" and chatModOn and ns.Chat then
         local unreadCount = (ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount())
             or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))
             or 0
@@ -464,12 +521,24 @@ local function HandleMinimapClick(anchor, mouseButton)
         if GameTooltip then GameTooltip:Hide() end
         OpenContextMenu(anchor)
     elseif IsAltKeyDown and IsAltKeyDown() then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("radar") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then
             ns.SpotterHUD:Toggle()
         end
     elseif IsControlKeyDown and IsControlKeyDown() then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("chat") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         OpenViaOfficialOrHub("chat")
     elseif IsShiftKeyDown and IsShiftKeyDown() then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("watchlist") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if ns.Watchlist then
             ns.Watchlist:CheckNext()
         end

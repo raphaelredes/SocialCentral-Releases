@@ -327,6 +327,9 @@ end
 function Store:NotifyWatchlistOnline(entry, opts)
     if not entry then return false end
     if opts and opts.suppressAlert then return false end
+    if (ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false) or (Compat.IsFocusSilenced and Compat.IsFocusSilenced()) then
+        return false
+    end
     local alerts = ns.db and ns.db.settings and ns.db.settings.alerts
     if not alerts then return false end
     if self.IsPlayerNotifyMuted and self:IsPlayerNotifyMuted(entry.id or entry.displayName, entry) then
@@ -387,6 +390,7 @@ end
 
 -- Cross-pollinate Watchlist rows whenever live Social or Nearby detects a watched player.
 function Store:SyncWatchlistObservation(rawName, data, opts)
+    if ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false then return end
     local list = self:GetWatchlistTable()
     if next(list) == nil then return end
     local parsed = Compat.ParseCharacterName(rawName)

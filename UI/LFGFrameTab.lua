@@ -462,7 +462,7 @@ local function UpdateSideTabVisual(tab, isSelected)
     end
 end
 
-local function CreateRightSideTab(parent, name, lastNative, tooltipTitle, tooltipDesc, onClickFn)
+local function CreateRightSideTab(parent, name, lastNative, tooltipTitle, tooltipDesc, onClickFn, winSettingKey)
     if not parent then return nil end
 
     local tab = CreateFrame("CheckButton", name, parent)
@@ -542,13 +542,58 @@ local function CreateRightSideTab(parent, name, lastNative, tooltipTitle, toolti
         tab.selectedTex = selectedTex
     end
 
-    tab:SetScript("OnClick", onClickFn)
+    tab:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    tab:SetScript("OnClick", function(selfBtn, mouseBtn)
+        if mouseBtn == "RightButton" and MenuUtil and MenuUtil.CreateContextMenu then
+            MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+                root:CreateTitle("SocialCentral")
+                if winSettingKey then
+                    root:CreateButton(L["Disable in this window"], function()
+                        if ns.db and ns.db.settings then
+                            ns.db.settings[winSettingKey] = false
+                        end
+                        if winSettingKey == "embedLfgWindow" and LFGFrameTab.HideSubPanel then
+                            LFGFrameTab:HideSubPanel(false)
+                            if _G.LFGParentFrameTab1 and _G.LFGParentFrameTab1.Click then
+                                pcall(_G.LFGParentFrameTab1.Click, _G.LFGParentFrameTab1)
+                            end
+                        elseif winSettingKey == "embedSocialWindow" and ns.UI and ns.UI.CloseEmbeddedIfHost then
+                            ns.UI:CloseEmbeddedIfHost(_G.SocialUIFrame or _G.FriendsFrame)
+                            if _G.FriendsFrameTab1 and _G.FriendsFrameTab1.Click then
+                                pcall(_G.FriendsFrameTab1.Click, _G.FriendsFrameTab1)
+                            end
+                        elseif winSettingKey == "embedGuildWindow" and ns.UI and ns.UI.CloseEmbeddedIfHost then
+                            ns.UI:CloseEmbeddedIfHost(_G.CommunitiesFrame or _G.GuildFrame)
+                        elseif winSettingKey == "embedCharacterWindow" and ns.UI and ns.UI.CloseEmbeddedIfHost then
+                            ns.UI:CloseEmbeddedIfHost(_G.CharacterFrame)
+                            if _G.CharacterFrameTab1 and _G.CharacterFrameTab1.Click then
+                                pcall(_G.CharacterFrameTab1.Click, _G.CharacterFrameTab1)
+                            end
+                        end
+                        ns:Emit("SETTINGS_UPDATED")
+                        ns:Emit("CLAN_UPDATED")
+                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                        if ns.UI and ns.UI.QueueRefresh then ns.UI:QueueRefresh(false) end
+                        ns:Print("%s", L["Disabled in this window. Re-enable anytime in Settings (/sc)."])
+                    end)
+                end
+                root:CreateButton(L["Settings"], function()
+                    if ns.Settings and ns.Settings.Open then ns.Settings:Open() end
+                end)
+            end)
+            return
+        end
+        if onClickFn then
+            onClickFn(selfBtn, mouseBtn)
+        end
+    end)
     tab:SetScript("OnEnter", function(selfBtn)
         GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
         GameTooltip:AddLine(tooltipTitle, 0.35, 0.72, 1.0)
         if tooltipDesc and tooltipDesc ~= "" then
             GameTooltip:AddLine(tooltipDesc, 0.85, 0.88, 0.92, true)
         end
+        GameTooltip:AddLine(L["Right-click: quick options"], 0.65, 0.72, 0.80, true)
         GameTooltip:Show()
     end)
     tab:SetScript("OnLeave", function()
@@ -2491,13 +2536,16 @@ function LFGFrameTab:BuildSubPanel()
             if root.CreateTitle then
                 root:CreateTitle(L["Clans & Allies LFG"])
             end
+            local showGuildOpts = (not ns.Compat or not ns.Compat.ShouldShowGuildFeatures) or ns.Compat.ShouldShowGuildFeatures()
             for _, opt in ipairs(SOURCE_FILTERS) do
-                AddDropdownMenuChoice(root, L[opt.dropdownKey], function()
-                    return LFGFrameTab.sourceFilter == opt.id
-                end, function()
-                    LFGFrameTab.sourceFilter = opt.id
-                    LFGFrameTab:RefreshData()
-                end)
+                if (opt.id ~= "CLAN" and opt.id ~= "ALLY") or showGuildOpts then
+                    AddDropdownMenuChoice(root, L[opt.dropdownKey], function()
+                        return LFGFrameTab.sourceFilter == opt.id
+                    end, function()
+                        LFGFrameTab.sourceFilter = opt.id
+                        LFGFrameTab:RefreshData()
+                    end)
+                end
             end
             if root.CreateDivider then root:CreateDivider() end
             if root.CreateCheckbox then
@@ -2772,13 +2820,16 @@ function LFGFrameTab:BuildSubPanel()
             return GetBroadcastLabel(LFGFrameTab.broadcastMode)
         end,
         function(root)
+            local showGuildOpts = (not ns.Compat or not ns.Compat.ShouldShowGuildFeatures) or ns.Compat.ShouldShowGuildFeatures()
             for _, opt in ipairs(BROADCAST_OPTIONS) do
-                AddDropdownMenuChoice(root, L[opt.labelKey], function()
-                    return LFGFrameTab.broadcastMode == opt.id
-                end, function()
-                    LFGFrameTab.broadcastMode = opt.id
-                    LFGFrameTab:RefreshData()
-                end)
+                if (opt.id ~= "CLAN" and opt.id ~= "GCHAT") or showGuildOpts then
+                    AddDropdownMenuChoice(root, L[opt.labelKey], function()
+                        return LFGFrameTab.broadcastMode == opt.id
+                    end, function()
+                        LFGFrameTab.broadcastMode = opt.id
+                        LFGFrameTab:RefreshData()
+                    end)
+                end
             end
         end
     )
@@ -2949,7 +3000,8 @@ function LFGFrameTab:EnsureSideTab()
             L["Same Clan, Allied Guilds, Friends & Watchlist"],
             function()
                 LFGFrameTab:ToggleSubPanel()
-            end
+            end,
+            "embedLfgWindow"
         )
     end
 
@@ -3077,15 +3129,28 @@ function LFGFrameTab:EnsureSocialSideTab()
             L["SocialCentral: Watchlist, Social & Nearby"],
             L["View Watchlist (/who), Social folders, Battle.net/Guild friends, and Nearby players right inside Blizzard's Social window."],
             function()
-                local socialUnread = ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))) or 0
-                local targetTab = (socialUnread > 0) and "chat" or "watchlist"
+                local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
+                local socialUnread = (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false)))) or 0
+                local targetTab
+                if socialUnread > 0 and chatModOn then
+                    targetTab = "chat"
+                else
+                    for _, cand in ipairs({ "watchlist", "social", "nearby", "chat" }) do
+                        if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled(cand) then
+                            targetTab = cand
+                            break
+                        end
+                    end
+                    targetTab = targetTab or "social"
+                end
                 if ns.UI then
                     ns.UI:OpenEmbedded(parent, { "watchlist", "social", "nearby", "chat" }, targetTab)
                 end
                 if targetTab == "watchlist" and ns.Watchlist and ns.Watchlist.AutoCheckNextFromHardwareClick then
                     ns.Watchlist:AutoCheckNextFromHardwareClick()
                 end
-            end
+            end,
+            "embedSocialWindow"
         )
         self.socialTab:SetScript("OnEnter", function(selfBtn)
             GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
@@ -3219,7 +3284,8 @@ function LFGFrameTab:EnsureGuildSideTab()
                 if ns.UI then
                     ns.UI:OpenEmbedded(parent, { "clan" }, "clan")
                 end
-            end
+            end,
+            "embedGuildWindow"
         )
     end
 
@@ -3309,7 +3375,8 @@ function LFGFrameTab:EnsureCharacterSideTab()
                 if ns.UI then
                     ns.UI:OpenEmbedded(parent, { "alts" }, "alts")
                 end
-            end
+            end,
+            "embedCharacterWindow"
         )
     end
 
@@ -4074,6 +4141,35 @@ function LFGFrameTab:AttachWorldMapButton()
     end)
     pill:SetScript("OnClick", function(selfPill, button)
         if button == "RightButton" then
+            if MenuUtil and MenuUtil.CreateContextMenu then
+                MenuUtil.CreateContextMenu(selfPill, function(_, root)
+                    root:CreateTitle(L["World Buffs"])
+                    root:CreateCheckbox(L["Show World Buff pins on World Map (M)"], function()
+                        return AreWorldMapPinsEnabled()
+                    end, function()
+                        if ns.db and ns.db.settings then
+                            ns.db.settings.worldBuffsMapPins = not AreWorldMapPinsEnabled()
+                        end
+                        LFGFrameTab:RefreshWorldMapBuffs()
+                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    end)
+                    root:CreateButton(L["Disable World Buffs Module (M)"], function()
+                        if ns.db and ns.db.settings then
+                            ns.db.settings.embedWorldMap = false
+                        end
+                        LFGFrameTab:RefreshWorldMapBuffs()
+                        ns:Emit("SETTINGS_UPDATED")
+                        ns:Emit("WORLD_BUFFS_UPDATED")
+                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                        if ns.UI and ns.UI.QueueRefresh then ns.UI:QueueRefresh(false) end
+                        ns:Print("%s", L["World Buffs (M) module disabled. Re-enable anytime in Settings (/sc)."])
+                    end)
+                    root:CreateButton(L["Settings"], function()
+                        if ns.Settings and ns.Settings.Open then ns.Settings:Open() end
+                    end)
+                end)
+                return
+            end
             if ns.db and ns.db.settings then
                 ns.db.settings.worldBuffsMapPins = not AreWorldMapPinsEnabled()
             end
@@ -4218,7 +4314,8 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local socialHost = _G.SocialUIFrame or _G.FriendsFrame
         local shown = socialHost and socialHost.IsShown and socialHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(socialHost)
-        local socialUnread = ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))) or 0
+        local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
+        local socialUnread = (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false)))) or 0
         if shown or active then
             UpdateSideTabVisual(self.socialTab, active)
             UpdateSideTabBadge(self.socialTab, socialUnread)
@@ -4263,13 +4360,22 @@ function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
     end
     local mod = (moduleId or ""):lower()
 
-    if (mod == "clan" or mod == "diplomacy") and ns.Compat and ns.Compat.ShouldShowGuildFeatures and not ns.Compat.ShouldShowGuildFeatures() then
-        ns:Print("%s", L["Your character is not currently in a guild."])
+    if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled(mod) then
+        if mod == "clan" or mod == "diplomacy" then
+            if ns.Compat.ShouldShowGuildFeatures and not ns.Compat.ShouldShowGuildFeatures() then
+                ns:Print("%s", L["Your character is not currently in a guild."])
+                return
+            end
+        end
+        ns:Print("%s", L["This module is disabled in Settings."])
         return
     end
     if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled(mod) then
         if mod == "lfg" then
             ns:Print("%s", L["Group Finder (I) integration is disabled in Settings."])
+            return
+        elseif mod == "alts" or mod == "buffs" then
+            ns:Print("%s", L["This module is disabled in Settings."])
             return
         end
         if ns.UI and ns.UI.ShowHub then
@@ -4298,6 +4404,12 @@ function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
     end
 
     if mod == "group" then
+        if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("I") then
+            if ns.UI and ns.UI.ShowHub then
+                ns.UI:ShowHub("group")
+            end
+            return
+        end
         if not (_G.LFGParentFrame and _G.LFGParentFrame:IsShown()) then
             if _G.ToggleLFGParentFrame then
                 pcall(_G.ToggleLFGParentFrame)

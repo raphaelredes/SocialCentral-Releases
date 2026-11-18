@@ -1266,7 +1266,7 @@ local function AppendPlayerTooltipLines(tooltip)
         tooltip:AddDoubleLine(L["Known Alts"], table.concat(linkedAlts, ", "), 0.68, 0.78, 0.90, 0.80, 0.92, 1.0)
     end
 
-    if comp and comp.lastSeen then
+    if comp and comp.lastSeen and (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("group")) then
         local runsSuffix = (comp.runs and comp.runs > 1) and (" (x" .. comp.runs .. ")") or ""
         local compText = L["Recent companion: %s (%s)"]:format(
             comp.zone or L["Unknown"],
@@ -1275,10 +1275,12 @@ local function AppendPlayerTooltipLines(tooltip)
         tooltip:AddLine(compText, 0.55, 0.80, 1.0, true)
     end
 
-    if guildStance == "ENEMY" then
-        tooltip:AddLine("|cffff4d4d[" .. L["ENEMY"] .. "]|r <" .. unitGuild .. ">", 1.0, 0.35, 0.35)
-    elseif guildStance == "ALLY" then
-        tooltip:AddLine("|cff49c6ff[" .. L["ALLY"] .. "]|r <" .. unitGuild .. ">", 0.35, 0.78, 1.0)
+    if not (Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan")) then
+        if guildStance == "ENEMY" then
+            tooltip:AddLine("|cffff4d4d[" .. L["ENEMY"] .. "]|r <" .. unitGuild .. ">", 1.0, 0.35, 0.35)
+        elseif guildStance == "ALLY" then
+            tooltip:AddLine("|cff49c6ff[" .. L["ALLY"] .. "]|r <" .. unitGuild .. ">", 0.35, 0.78, 1.0)
+        end
     end
 
     if isPeer then
@@ -1368,7 +1370,11 @@ local function RegisterUnitContextMenus()
         rootDescription:CreateDivider()
         rootDescription:CreateTitle("SocialCentral (" .. parsed.displayName .. ")")
 
-        if scConfirmed then
+        local chatModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
+        local watchModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("watchlist")
+        local radarModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("radar")
+
+        if scConfirmed and chatModOn then
             rootDescription:CreateButton(L["Message in SocialCentral"], function()
                 if ns.NavigateToModule then
                     ns:NavigateToModule("chat", {
@@ -1379,14 +1385,16 @@ local function RegisterUnitContextMenus()
             end)
         end
 
-        if isWatched and existingEntry then
-            rootDescription:CreateButton(L["Remove from Watchlist"], function()
-                Watchlist:Remove(existingEntry.id)
-            end)
-        else
-            rootDescription:CreateButton("+ " .. L["Add to Watchlist"], function()
-                Watchlist:Add(parsed.displayName)
-            end)
+        if watchModOn then
+            if isWatched and existingEntry then
+                rootDescription:CreateButton(L["Remove from Watchlist"], function()
+                    Watchlist:Remove(existingEntry.id)
+                end)
+            else
+                rootDescription:CreateButton("+ " .. L["Add to Watchlist"], function()
+                    Watchlist:Add(parsed.displayName)
+                end)
+            end
         end
 
         rootDescription:CreateButton(L["Edit Social Card"], function()
@@ -1409,7 +1417,7 @@ local function RegisterUnitContextMenus()
             end
         end)
 
-        if ns.SpotterHUD and ns.SpotterHUD.TrackEntry then
+        if radarModOn and ns.SpotterHUD and ns.SpotterHUD.TrackEntry then
             local isTracked = ns.Spotter and ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(parsed.displayName)
             if isTracked and ns.Spotter and ns.Spotter.UntrackPlayer then
                 rootDescription:CreateButton(L["Untrack from Radar"], function()

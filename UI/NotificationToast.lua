@@ -1082,7 +1082,7 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         pop.subLbl = subLbl
 
         local confirmBtn = Theme:CreateButton(pop, 108, 22, L["Disable"], "primary")
-        confirmBtn:SetPoint("BOTTOMLEFT", 12, 10)
+        confirmBtn:SetPoint("BOTTOMLEFT", 12, 36)
         pop.confirmBtn = confirmBtn
 
         local playerBtn = Theme:CreateButton(pop, 108, 22, "", "default")
@@ -1090,9 +1090,23 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         pop.playerBtn = playerBtn
 
         local cancelBtn = Theme:CreateButton(pop, 84, 22, L["Cancel"], "default")
-        cancelBtn:SetPoint("BOTTOMRIGHT", -12, 10)
+        cancelBtn:SetPoint("BOTTOMRIGHT", -12, 36)
         cancelBtn:SetScript("OnClick", function() pop:Hide() end)
         pop.cancelBtn = cancelBtn
+
+        local dndBtn = Theme:CreateButton(pop, 264, 20, L["Pause All (Do Not Disturb)"], "default")
+        dndBtn:SetPoint("BOTTOMLEFT", 12, 10)
+        dndBtn:SetPoint("BOTTOMRIGHT", -12, 10)
+        dndBtn:SetScript("OnClick", function()
+            pop:Hide()
+            if ns.db and ns.db.settings then
+                ns.db.settings.doNotDisturb = true
+            end
+            ns:Emit("SETTINGS_UPDATED")
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            ns:Print("%s", L["Do Not Disturb active — popups & chimes paused."])
+        end)
+        pop.dndBtn = dndBtn
 
         pop:SetScript("OnHide", function(selfPop)
             selfPop._targetItem = nil
@@ -1121,9 +1135,20 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         Theme:StyleButton(pop.cancelBtn, "default")
     end
 
+    local showDndBtn = not (ns.db and ns.db.settings and ns.db.settings.doNotDisturb == true)
+    if pop.dndBtn then
+        if p then Theme:StyleButton(pop.dndBtn, "default") end
+        pop.dndBtn:SetShown(showDndBtn)
+    end
+    local extraBottom = showDndBtn and 26 or 0
+    pop.confirmBtn:ClearAllPoints()
+    pop.confirmBtn:SetPoint("BOTTOMLEFT", 12, 10 + extraBottom)
+    pop.cancelBtn:ClearAllPoints()
+    pop.cancelBtn:SetPoint("BOTTOMRIGHT", -12, 10 + extraBottom)
+
     pop.subLbl:SetText(("|cffffd24d%s|r\n|cffd2d9e4%s|r"):format(spec.label or "", spec.desc or ""))
     local textH = (pop.subLbl.GetStringHeight and pop.subLbl:GetStringHeight()) or 32
-    pop:SetHeight(math.max(108, math.ceil(36 + textH + 44)))
+    pop:SetHeight(math.max(108 + extraBottom, math.ceil(36 + textH + 44 + extraBottom)))
 
     pop.confirmBtn:SetScript("OnClick", function()
         pop:Hide()
@@ -1211,6 +1236,9 @@ function Toast:PushNotification(item)
     if type(item) ~= "table" then return end
     local s = ns.db and ns.db.settings
     local itemId = type(item.id) == "string" and item.id or ""
+    if item.kind ~= "AVOID_ALERT" and Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced() then
+        return
+    end
     if item.kind == "FRIEND_ONLINE" then
         if s and s.friendOnlineAlertToast == false then
             return
@@ -1224,16 +1252,18 @@ function Toast:PushNotification(item)
             return
         end
     elseif item.kind == "WATCHLIST_ONLINE" then
-        if s and s.alerts and s.alerts.toast == false then
+        if s and (s.moduleWatchlistEnabled == false or (s.alerts and s.alerts.toast == false)) then
             return
         end
     elseif item.kind == "WORLDBUFF" then
+        if s and s.embedWorldMap == false then return end
         if itemId:sub(1, 6) == "wbexp:" then
             if s and s.worldBuffsExpiryAlert == false then return end
         else
             if s and s.worldBuffsAlerts == false then return end
         end
     elseif item.kind == "CLAN_LFG" then
+        if Compat and Compat.IsWindowIntegrationEnabled and not Compat.IsWindowIntegrationEnabled("J") then return end
         if s and s.clanLfgAlertEnabled == false then
             return
         end
@@ -1241,13 +1271,16 @@ function Toast:PushNotification(item)
         if itemId:sub(1, 6) == "evrem:" then
             if s and s.clanEventReminders == false then return end
         else
+            if Compat and Compat.IsWindowIntegrationEnabled and not Compat.IsWindowIntegrationEnabled("J") then return end
             if s and s.clanEventAlertEnabled == false then return end
         end
     elseif item.kind == "CLAN_SIGNUP" then
+        if Compat and Compat.IsWindowIntegrationEnabled and not Compat.IsWindowIntegrationEnabled("J") then return end
         if s and s.clanSignupAlertEnabled == false then
             return
         end
     elseif item.kind == "SCOUT" then
+        if Compat and Compat.IsWindowIntegrationEnabled and not Compat.IsWindowIntegrationEnabled("J") then return end
         if s and s.spotterScoutAlert == false then
             return
         end
@@ -1256,6 +1289,9 @@ function Toast:PushNotification(item)
             return
         end
     else
+        if s and s.moduleChatEnabled == false then
+            return
+        end
         if s and s.addonMsgTaskbarFlash ~= false and (item.priority or 1) >= 2 and FlashClientIcon then
             pcall(FlashClientIcon)
         end
@@ -1505,6 +1541,51 @@ function Toast:Init()
                 Toast:DismissItem(cur)
             end
         end
+    end)
+
+    local function PruneForSettingsOrInstance()
+        local s = ns.db and ns.db.settings
+        if not s then return end
+        local focusSil = Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced()
+        local function ShouldPrune(it)
+            if not it then return false end
+            if focusSil and it.kind ~= "AVOID_ALERT" then return true end
+            if it.kind == "WORLDBUFF" and s.embedWorldMap == false then return true end
+            if it.kind == "WATCHLIST_ONLINE" and s.moduleWatchlistEnabled == false then return true end
+            if (it.kind == "DIRECT" or it.kind == "ROOM" or it.kind == "RMI" or it.kind == "ALLIANCE") and s.moduleChatEnabled == false then return true end
+            if (it.kind == "CLAN_LFG" or it.kind == "CLAN_SIGNUP" or it.kind == "SCOUT" or (it.kind == "CLAN_EVENT" and tostring(it.id or ""):sub(1, 6) ~= "evrem:"))
+                and Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then
+                return true
+            end
+            return false
+        end
+        for i = #Toast.queue, 1, -1 do
+            if ShouldPrune(Toast.queue[i]) then table.remove(Toast.queue, i) end
+        end
+        local changed = false
+        for i = #Toast.activeItems, 1, -1 do
+            if ShouldPrune(Toast.activeItems[i]) then
+                table.remove(Toast.activeItems, i)
+                changed = true
+            end
+        end
+        if changed then
+            while #Toast.queue > 0 and #Toast.activeItems < MAX_VISIBLE_TOASTS do
+                table.insert(Toast.activeItems, table.remove(Toast.queue, 1))
+            end
+            Toast:SortActiveItems()
+            Toast:LayoutStack()
+        end
+    end
+
+    ns:On("SETTINGS_UPDATED", PruneForSettingsOrInstance)
+    ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        PruneForSettingsOrInstance()
+        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+    end)
+    ns.RegisterEvent(self, "ZONE_CHANGED_NEW_AREA", function()
+        PruneForSettingsOrInstance()
+        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
     end)
 
     if Theme and Theme.RegisterListener then

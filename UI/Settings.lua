@@ -21,6 +21,50 @@ local function HelpBtn(parent, anchorTo, title, whatText, howText)
     return h
 end
 
+local function AddDeps(list, ...)
+    for i = 1, select("#", ...) do
+        local w = select(i, ...)
+        if w then
+            list[#list + 1] = w
+        end
+    end
+end
+
+local function SetWidgetEnabled(w, enabled)
+    if not w then return end
+    local on = enabled and true or false
+    if w.SetEnabled then
+        w:SetEnabled(on)
+    end
+    if w.EnableMouse and (w.GetObjectType and w:GetObjectType() == "EditBox") then
+        w:EnableMouse(on)
+        if w.EnableKeyboard then w:EnableKeyboard(on) end
+        if not on and w.HasFocus and w:HasFocus() and w.ClearFocus then
+            w:ClearFocus()
+        end
+        if w._clearBtn and w._clearBtn.SetEnabled then
+            w._clearBtn:SetEnabled(on)
+        end
+    end
+    if w._scMinus and w._scMinus.SetEnabled then
+        w._scMinus:SetEnabled(on)
+        w._scMinus:SetAlpha(on and 1.0 or 0.42)
+    end
+    if w._scPlus and w._scPlus.SetEnabled then
+        w._scPlus:SetEnabled(on)
+        w._scPlus:SetAlpha(on and 1.0 or 0.42)
+    end
+    if w.SetAlpha then
+        w:SetAlpha(on and 1.0 or 0.42)
+    end
+    if w._scLabel and w._scLabel.SetAlpha then
+        w._scLabel:SetAlpha(on and 1.0 or 0.42)
+    end
+    if w.text and w.text.SetAlpha then
+        w.text:SetAlpha(on and 1.0 or 0.42)
+    end
+end
+
 local function AddSectionHeader(parent, text, anchorTo, yOffset, helpTitle, helpWhat, helpHow)
     local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     if anchorTo then
@@ -151,6 +195,10 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
     local plus = ns.Theme:CreateButton(row, 28, 24, "+", "default")
     plus:SetPoint("LEFT", valueText, "RIGHT", 10, 0)
 
+    row._scMinus = minus
+    row._scPlus = plus
+    row._scValue = valueText
+
     local function RefreshValue()
         valueText:SetText(string.format("%d %s", getter(), unit))
         ns.Theme:StyleButton(minus, "default")
@@ -175,6 +223,107 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
     return row
 end
 
+local function CountMutedPlayersAndThreads()
+    local playerCount = 0
+    if ns.db and ns.db.socialMeta and ns.Compat and ns.Compat.ScopeKey then
+        local scope = ns.Compat.ScopeKey()
+        local tbl = ns.db.socialMeta[scope]
+        if type(tbl) == "table" then
+            for _, meta in pairs(tbl) do
+                if type(meta) == "table" and meta.notifyMuted == true then
+                    playerCount = playerCount + 1
+                end
+            end
+        end
+    end
+    local threadCount = 0
+    local mutedMap = ns.db and ns.db.settings and ns.db.settings.chatMutedThreads
+    if type(mutedMap) == "table" then
+        for _, v in pairs(mutedMap) do
+            if v == true then
+                threadCount = threadCount + 1
+            end
+        end
+    end
+    return playerCount, threadCount
+end
+
+local function CollectDisabledNotificationNames()
+    local s = ns.db and ns.db.settings
+    if not s then return {} end
+    local out = {}
+    local focusReason = Compat and Compat.GetFocusSilenceReason and Compat.GetFocusSilenceReason()
+    if focusReason == "dnd" then
+        out[#out + 1] = L["Do Not Disturb (Active)"]
+    elseif focusReason == "instance" then
+        out[#out + 1] = L["Silenced in Instance"]
+    end
+    local wbOn = s.embedWorldMap ~= false
+    local guildOn = (not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled("J")
+    local watchOn = s.moduleWatchlistEnabled ~= false
+    local chatOn = s.moduleChatEnabled ~= false
+
+    if s.friendOnlineAlertToast == false then out[#out + 1] = L["Friend Online Alerts"] end
+    if s.friendOfflineAlertToast == false then out[#out + 1] = L["Friend Offline Alerts"] end
+    if watchOn and s.alerts and s.alerts.toast == false then out[#out + 1] = L["Watchlist Online Alerts"] end
+    if chatOn and s.addonMsgToast == false then out[#out + 1] = L["Floating Message Popups"] end
+    if chatOn and s.chatSound == false then out[#out + 1] = L["Chat Sounds (Master)"] end
+    if wbOn and s.worldBuffsAlerts == false then out[#out + 1] = L["World Buff Drop Alerts"] end
+    if wbOn and s.worldBuffsExpiryAlert == false then out[#out + 1] = L["World Buff Expiry Warning"] end
+    if guildOn and s.clanLfgAlertEnabled == false then out[#out + 1] = L["Clan Dungeon Alerts"] end
+    if guildOn and s.clanSignupAlertEnabled == false then out[#out + 1] = L["Guild Signup Alerts"] end
+    if guildOn and s.clanEventReminders == false then out[#out + 1] = L["Guild Event Reminders"] end
+    if guildOn and s.spotterScoutAlert == false then out[#out + 1] = L["Guild Scout Alerts"] end
+    if s.groupAvoidAlert == false then out[#out + 1] = L["Group Avoid Warnings"] end
+    return out
+end
+
+local function GetActivePresetMode()
+    local s = ns.db and ns.db.settings
+    if not s then return "full" end
+    if s.embedSocialWindow ~= false
+        and s.embedLfgWindow ~= false
+        and s.embedGuildWindow ~= false
+        and s.embedCharacterWindow ~= false
+        and s.embedWorldMap ~= false
+        and s.spotterEnabled ~= false
+        and s.moduleWatchlistEnabled ~= false
+        and s.moduleNearbyEnabled ~= false
+        and s.moduleChatEnabled ~= false
+        and s.moduleGroupEnabled ~= false
+        and s.doNotDisturb ~= true
+    then
+        return "full"
+    elseif s.embedSocialWindow ~= false
+        and s.embedLfgWindow == false
+        and s.embedGuildWindow == false
+        and s.embedCharacterWindow ~= false
+        and s.embedWorldMap == false
+        and s.spotterEnabled == false
+        and s.moduleWatchlistEnabled ~= false
+        and s.moduleNearbyEnabled ~= false
+        and s.moduleChatEnabled ~= false
+        and s.moduleGroupEnabled == false
+        and s.doNotDisturb ~= true
+    then
+        return "social"
+    elseif s.embedSocialWindow == false
+        and s.embedLfgWindow == false
+        and s.embedGuildWindow == false
+        and s.embedCharacterWindow ~= false
+        and s.embedWorldMap == false
+        and s.spotterEnabled == false
+        and s.moduleWatchlistEnabled == false
+        and s.moduleNearbyEnabled == false
+        and s.moduleChatEnabled ~= false
+        and s.moduleGroupEnabled == false
+        and s.doNotDisturb == true
+    then
+        return "ultralight"
+    end
+    return nil
+end
+
 local function EnsurePanelFrame()
     if not panel then
         panel = CreateFrame("Frame", "SocialCentralSettingsPanel", UIParent)
@@ -183,226 +332,233 @@ local function EnsurePanelFrame()
     return panel
 end
 
-local function BuildPanel()
-    if panelBuilt then
-        return
-    end
-    panelBuilt = true
-    EnsurePanelFrame()
-    wipe(syncFns)
-
-    -- Top Fixed Header & Category Navigation Tabs
-    local headerArea = CreateFrame("Frame", nil, panel)
-    headerArea:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -10)
-    headerArea:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -10)
-    headerArea:SetHeight(76)
-
-    local title = headerArea:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", 2, -2)
-    title:SetText("SocialCentral  v" .. (ns.version or "0.0.0"))
-
-    local subtitle = headerArea:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -2)
-    subtitle:SetText(L["Unified social hub for WoW: Forever."])
-
-    local guildBadgeLbl = headerArea:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    guildBadgeLbl:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", -4, -4)
-    guildBadgeLbl:SetJustifyH("RIGHT")
-
-    local tabBar = CreateFrame("Frame", nil, headerArea)
-    tabBar:SetPoint("TOPLEFT", subtitle, "BOTTOMLEFT", 0, -8)
-    tabBar:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", 0, -40)
-    tabBar:SetHeight(26)
-
-    local scrollFrame = CreateFrame("ScrollFrame", "SocialCentralSettingsScroll", panel, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", headerArea, "BOTTOMLEFT", -6, -4)
-    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 6)
-
-    local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(610, 900)
-    scrollFrame:SetScrollChild(content)
-
-    local pages = {}
-    local pageHeights = {
-        overview = 680,
-        notifications = 1600,
-        radar = 740,
-        general = 1260,
-    }
-    local catTabs = {
-        { id = "overview", label = L["Summary & Windows"] },
-        { id = "notifications", label = L["Notifications"] },
-        { id = "radar", label = L["Radar & Map"] },
-        { id = "general", label = L["General & Tools"] },
-    }
-    local catButtons = {}
-
-    for _, spec in ipairs(catTabs) do
-        local pFrame = CreateFrame("Frame", nil, content)
-        pFrame:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
-        pFrame:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, 0)
-        pFrame:SetHeight(pageHeights[spec.id] or 900)
-        pFrame:Hide()
-        pages[spec.id] = pFrame
-    end
-
-    local function SelectCategoryTab(tabId)
-        if not pages[tabId] then tabId = "overview" end
-        activeCategoryTab = tabId
-        for id, pFrame in pairs(pages) do
-            pFrame:SetShown(id == tabId)
-        end
-        content:SetHeight(pageHeights[tabId] or 800)
-        if scrollFrame.SetVerticalScroll then
-            scrollFrame:SetVerticalScroll(0)
-        end
-        for _, item in ipairs(catButtons) do
-            ns.Theme:StyleButton(item.btn, "tab")
-            ns.Theme:SetButtonActive(item.btn, item.id == tabId, "tab")
-        end
-        for _, sync in ipairs(syncFns) do
-            sync()
-        end
-    end
-
-    local prevTabBtn
-    for _, spec in ipairs(catTabs) do
-        local btn = ns.Theme:CreateButton(tabBar, 134, 24, spec.label, "tab")
-        ns.Theme:AutoFitButton(btn, 98, 22, 190)
-        if not prevTabBtn then
-            btn:SetPoint("TOPLEFT", tabBar, "TOPLEFT", 0, 0)
-        else
-            btn:SetPoint("LEFT", prevTabBtn, "RIGHT", 6, 0)
-        end
-        btn:SetScript("OnClick", function()
-            SelectCategoryTab(spec.id)
-        end)
-        catButtons[#catButtons + 1] = { id = spec.id, btn = btn }
-        prevTabBtn = btn
-    end
-
-    local function CloseSettingsBeforeJump()
-        if not ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) then
-            if HideUIPanel then
-                if _G.SettingsPanel and _G.SettingsPanel.IsShown and _G.SettingsPanel:IsShown() then
-                    pcall(HideUIPanel, _G.SettingsPanel)
-                elseif _G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown() then
-                    pcall(HideUIPanel, _G.InterfaceOptionsFrame)
-                end
+local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSettingsBeforeJump)
+    local charProfCb = CreateCheckbox(
+        ov,
+        L["Use separate settings profile for this character"],
+        nil,
+        -6,
+        function() return ns.IsCharProfileEnabled and ns:IsCharProfileEnabled() end,
+        function(checked)
+            if ns.SetCharProfileEnabled then
+                ns:SetCharProfileEnabled(checked)
             end
+        end,
+        L["Help: Per-Character Profile"],
+        L["When checked, module toggles, notification settings, and window integrations are saved separately just for this character instead of sharing account-wide."],
+        L["Ideal for bank alts or leveling characters where you want a lighter setup without changing your main character."]
+    )
+
+    local charProfActions = CreateFrame("Frame", nil, ov)
+    charProfActions:SetPoint("TOPLEFT", charProfCb, "BOTTOMLEFT", 24, -4)
+    charProfActions:SetSize(560, 24)
+
+    local copyAccBtn = ns.Theme:CreateButton(charProfActions, 174, 20, L["Copy from Account Profile"], "default")
+    ns.Theme:AutoFitButton(copyAccBtn, 150, 14, 230)
+    copyAccBtn:SetPoint("LEFT", charProfActions, "LEFT", 0, 0)
+    copyAccBtn:SetScript("OnClick", function()
+        if ns.CopyAccountSettingsToChar and ns:CopyAccountSettingsToChar() then
+            for _, sync in ipairs(syncFns) do sync() end
         end
+    end)
+
+    local resetProfBtn = ns.Theme:CreateButton(charProfActions, 168, 20, L["Reset Profile to Defaults"], "default")
+    ns.Theme:AutoFitButton(resetProfBtn, 146, 14, 220)
+    resetProfBtn:SetPoint("LEFT", copyAccBtn, "RIGHT", 6, 0)
+    resetProfBtn:SetScript("OnClick", function()
+        if ns.ResetCurrentSettingsToDefaults and ns:ResetCurrentSettingsToDefaults() then
+            for _, sync in ipairs(syncFns) do sync() end
+        end
+    end)
+
+    HelpBtn(
+        charProfActions,
+        resetProfBtn,
+        L["Help: Profile Actions"],
+        L["Copy your shared Account settings into this character profile or reset the currently active profile back to SocialCentral defaults."],
+        L["'Copy from Account Profile' is available whenever per-character profile mode is enabled above."]
+    )
+
+    refs.copyAccBtn = copyAccBtn
+    AddDeps(deps.defaultBtns, copyAccBtn, resetProfBtn)
+
+    local presetRow = CreateFrame("Frame", nil, ov)
+    presetRow:SetPoint("TOPLEFT", charProfActions, "BOTTOMLEFT", -20, -6)
+    presetRow:SetSize(600, 28)
+
+    local function ApplyPreset(mode)
+        local s = ns.db and ns.db.settings
+        if not s then return end
+        if mode == "full" then
+            s.embedSocialWindow = true
+            s.embedLfgWindow = true
+            s.embedGuildWindow = true
+            s.embedCharacterWindow = true
+            s.embedWorldMap = true
+            s.spotterEnabled = true
+            s.moduleWatchlistEnabled = true
+            s.moduleNearbyEnabled = true
+            s.moduleChatEnabled = true
+            s.moduleGroupEnabled = true
+            s.doNotDisturb = false
+        elseif mode == "social" then
+            s.embedSocialWindow = true
+            s.embedLfgWindow = false
+            s.embedGuildWindow = false
+            s.embedCharacterWindow = true
+            s.embedWorldMap = false
+            s.spotterEnabled = false
+            s.moduleWatchlistEnabled = true
+            s.moduleNearbyEnabled = true
+            s.moduleChatEnabled = true
+            s.moduleGroupEnabled = false
+            s.doNotDisturb = false
+        elseif mode == "ultralight" then
+            s.embedSocialWindow = false
+            s.embedLfgWindow = false
+            s.embedGuildWindow = false
+            s.embedCharacterWindow = true
+            s.embedWorldMap = false
+            s.spotterEnabled = false
+            s.moduleWatchlistEnabled = false
+            s.moduleNearbyEnabled = false
+            s.moduleChatEnabled = true
+            s.moduleGroupEnabled = false
+            s.doNotDisturb = true
+        end
+        NotifySettingChanged("CLAN_UPDATED")
+        ns:Emit("WORLD_BUFFS_UPDATED")
+        ns:Emit("CHAT_UPDATED")
+        for _, sync in ipairs(syncFns) do sync() end
     end
 
-    local function NotifySettingChanged(extraEmit)
-        ns:Emit("SETTINGS_UPDATED")
-        if extraEmit then
-            ns:Emit(extraEmit)
-        end
-        if ns.UI and ns.UI.QueueRefresh then
-            ns.UI:QueueRefresh(false)
-        end
-    end
+    local presetFullBtn = ns.Theme:CreateButton(presetRow, 138, 22, L["Preset: Full (Default)"], "primary")
+    ns.Theme:AutoFitButton(presetFullBtn, 118, 14, 175)
+    presetFullBtn:SetPoint("LEFT", presetRow, "LEFT", 0, 0)
+    presetFullBtn:SetScript("OnClick", function() ApplyPreset("full") end)
 
-    -- =========================================================================
-    -- TAB 1: SUMMARY & BLIZZARD WINDOWS (O / I / J / C / M + Quick Switches)
-    -- =========================================================================
-    local ov = pages.overview
+    local presetSocialBtn = ns.Theme:CreateButton(presetRow, 152, 22, L["Preset: Friends & Chat"], "default")
+    ns.Theme:AutoFitButton(presetSocialBtn, 132, 14, 195)
+    presetSocialBtn:SetPoint("LEFT", presetFullBtn, "RIGHT", 6, 0)
+    presetSocialBtn:SetScript("OnClick", function() ApplyPreset("social") end)
+
+    local presetLiteBtn = ns.Theme:CreateButton(presetRow, 154, 22, L["Preset: Ultra-Light (Alts)"], "default")
+    ns.Theme:AutoFitButton(presetLiteBtn, 134, 14, 195)
+    presetLiteBtn:SetPoint("LEFT", presetSocialBtn, "RIGHT", 6, 0)
+    presetLiteBtn:SetScript("OnClick", function() ApplyPreset("ultralight") end)
+
+    HelpBtn(
+        presetRow,
+        presetLiteBtn,
+        L["Help: 1-Click Presets"],
+        L["Instantly switch between Full Suite, Friends & Chat Only, or Ultra-Light (Alts & Notes) presets, then fine-tune any checkbox below."],
+        L["Use 'Ultra-Light' on bank or crafting alts to pause all background scanners, popups, and extra Blizzard window tabs."]
+    )
 
     local winToggleHeader = AddSectionHeader(
         ov,
-        L["Game Window Integrations (O / I / J / C / M)"],
-        nil,
-        -6,
+        L["Modules & Blizzard Window Integrations"],
+        presetRow,
+        -10,
         L["Help: Window Integrations"],
-        L["Turn SocialCentral completely on or off inside each Blizzard window without affecting standalone '/sc hub' or other windows."],
-        L["Uncheck any window below (for example Social (O), Group Finder (I), or Guild (J)) to leave that native Blizzard window untouched immediately."]
+        L["Turn entire SocialCentral modules and Blizzard window integrations (O, I, J, C, M) on or off immediately without reload."],
+        L["Unchecking a module disables its tabs, shortcuts, alerts, and background scanners completely."]
     )
 
     local winGrid = CreateFrame("Frame", nil, ov)
     winGrid:SetPoint("TOPLEFT", winToggleHeader, "BOTTOMLEFT", 0, -4)
-    winGrid:SetSize(600, 118)
+    winGrid:SetSize(600, 154)
 
     local winLeft = CreateFrame("Frame", nil, winGrid)
     winLeft:SetPoint("TOPLEFT", winGrid, "TOPLEFT", 0, 0)
-    winLeft:SetSize(294, 116)
+    winLeft:SetSize(294, 152)
 
     local winRight = CreateFrame("Frame", nil, winGrid)
     winRight:SetPoint("TOPLEFT", winLeft, "TOPRIGHT", 10, 0)
-    winRight:SetSize(294, 116)
+    winRight:SetSize(294, 152)
+
+    refs.winGrid, refs.winLeft, refs.winRight = winGrid, winLeft, winRight
 
     local embSocCb = CreateGridCheckbox(
-        winLeft,
-        nil,
-        -2,
-        L["Social & Friends (O)"],
+        winLeft, nil, -2, L["Social & Friends (O)"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.embedSocialWindow ~= false end,
-        function(checked)
-            ns.db.settings.embedSocialWindow = checked
-            NotifySettingChanged()
-        end,
+        function(checked) ns.db.settings.embedSocialWindow = checked; NotifySettingChanged() end,
         L["Help: Integrate Social (O)"],
         L["Attaches the SocialCentral Watchlist, Social, Nearby, and Conversations side-tab to Blizzard's Friends/Social (O) window."],
         L["Uncheck to keep Blizzard's Friends (O) window 100% vanilla while still keeping '/sc hub' available."]
     )
-
     local embLfgCb = CreateGridCheckbox(
-        winLeft,
-        embSocCb,
-        -4,
-        L["Group Finder (I)"],
+        winLeft, embSocCb, -4, L["Group Finder (I)"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.embedLfgWindow ~= false end,
-        function(checked)
-            ns.db.settings.embedLfgWindow = checked
-            NotifySettingChanged()
-        end,
+        function(checked) ns.db.settings.embedLfgWindow = checked; NotifySettingChanged() end,
         L["Help: Integrate Group Finder (I)"],
-        L["Attaches the Clans, Allies & Global Chat LFG side-tab inside Blizzard's Group Finder (I) window."],
-        L["Uncheck to disable all Group Finder (I) integration cleanly without reload."]
+        L["Attaches the Clans, Allies & Global Chat LFG side-tab inside Blizzard's Group Finder (I) window and scans public LFG channels."],
+        L["Uncheck to disable the entire Group Finder (I) module and stop LFG chat scanning immediately."]
     )
-
     local embGuildCb = CreateGridCheckbox(
-        winLeft,
-        embLfgCb,
-        -4,
-        L["Guild & Diplomacy (J)"],
+        winLeft, embLfgCb, -4, L["Guild & Diplomacy (J)"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.embedGuildWindow ~= false end,
-        function(checked)
-            ns.db.settings.embedGuildWindow = checked
-            NotifySettingChanged("CLAN_UPDATED")
-        end,
+        function(checked) ns.db.settings.embedGuildWindow = checked; NotifySettingChanged("CLAN_UPDATED") end,
         L["Help: Integrate Guild (J)"],
         L["Attaches the Guild Hub, Events, Professions, and Diplomacy side-tab inside Blizzard's Guild / Communities (J) window."],
-        L["Uncheck to leave Guild (J) completely vanilla. Also hides automatically on characters without a guild when the auto-hide option is enabled."]
+        L["Uncheck to disable the Guild module completely. Also hides automatically on characters without a guild."]
     )
-
     local embCharCb = CreateGridCheckbox(
-        winRight,
-        nil,
-        -2,
-        L["Character & Alts (C)"],
+        winLeft, embGuildCb, -4, L["Character & Alts (C)"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.embedCharacterWindow ~= false end,
-        function(checked)
-            ns.db.settings.embedCharacterWindow = checked
-            NotifySettingChanged()
-        end,
+        function(checked) ns.db.settings.embedCharacterWindow = checked; NotifySettingChanged() end,
         L["Help: Integrate Character (C)"],
         L["Attaches the My Alts side-tab (gold vault, equipped items, bags, and bank search) inside Blizzard's Character (C) window."],
-        L["Uncheck to leave the Character (C) window 100% vanilla."]
+        L["Uncheck to disable the My Alts module, bag/bank snapshots, and alt item tooltip counts completely."]
+    )
+    CreateGridCheckbox(
+        winLeft, embCharCb, -4, L["World Buffs on Map (M)"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.embedWorldMap ~= false end,
+        function(checked) ns.db.settings.embedWorldMap = checked; NotifySettingChanged("WORLD_BUFFS_UPDATED") end,
+        L["Help: Integrate World Map (M)"],
+        L["Enables the entire World Buffs module: World Map (M) badge & pins, drop alerts, timers, and guild buff sync."],
+        L["Uncheck to turn off the entire World Buffs module and disable all World Buff options in Radar & Map."]
     )
 
-    local embMapCb = CreateGridCheckbox(
-        winRight,
-        embCharCb,
-        -4,
-        L["World Buffs on Map (M)"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.embedWorldMap ~= false end,
-        function(checked)
-            ns.db.settings.embedWorldMap = checked
-            NotifySettingChanged("WORLD_BUFFS_UPDATED")
-        end,
-        L["Help: Integrate World Map (M)"],
-        L["Displays the compact World Buffs corner badge and zone pins on the World Map (M)."],
-        L["Uncheck to disable all SocialCentral additions on the World Map completely."]
+    local modRadarCb = CreateGridCheckbox(
+        winRight, nil, -2, L["Screen Target Radar"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterEnabled ~= false end,
+        function(checked) ns.db.settings.spotterEnabled = checked; NotifySettingChanged() end,
+        L["Help: Screen Spotter Master"],
+        L["Master toggle for detecting Enemy, Ally, Watchlist, and Friend players on your screen."],
+        L["Uncheck to pause screen scanning and disable all Target Radar controls and HUD."]
+    )
+    local modWatchCb = CreateGridCheckbox(
+        winRight, modRadarCb, -4, L["Watchlist (/who)"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.moduleWatchlistEnabled ~= false end,
+        function(checked) ns.db.settings.moduleWatchlistEnabled = checked; NotifySettingChanged("WATCHLIST_UPDATED") end,
+        L["Help: Watchlist Module"],
+        L["Master toggle for the Watchlist tab, online alerts, and right-click Watchlist menu actions."],
+        L["Uncheck to hide the Watchlist tab and mute Watchlist online tracking completely."]
+    )
+    local modNearbyCb = CreateGridCheckbox(
+        winRight, modWatchCb, -4, L["Nearby Players"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.moduleNearbyEnabled ~= false end,
+        function(checked) ns.db.settings.moduleNearbyEnabled = checked; NotifySettingChanged("NEARBY_UPDATED") end,
+        L["Help: Nearby Module"],
+        L["Master toggle for the passive Friendly Nearby players tab and proximity recording."],
+        L["Uncheck to hide the Nearby tab and stop all passive unit/chat proximity recording."]
+    )
+    local modChatCb = CreateGridCheckbox(
+        winRight, modNearbyCb, -4, L["Conversations (Chat)"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.moduleChatEnabled ~= false end,
+        function(checked) ns.db.settings.moduleChatEnabled = checked; NotifySettingChanged("CHAT_UPDATED") end,
+        L["Help: Conversations Module"],
+        L["Master toggle for SocialCentral Conversations, Private Rooms, and addon chat popups/sounds."],
+        L["Uncheck to hide Conversations and disable all addon chat popups and chimes."]
+    )
+    CreateGridCheckbox(
+        winRight, modChatCb, -4, L["Group & Companions"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.moduleGroupEnabled ~= false end,
+        function(checked) ns.db.settings.moduleGroupEnabled = checked; NotifySettingChanged("GROUP_UPDATED") end,
+        L["Help: Group Module"],
+        L["Master toggle for the Group tab and automatic Recent Companions recording."],
+        L["Uncheck to hide the Group tab and stop recording recent party/raid companions."]
     )
 
     local autoHideGuildCb = CreateCheckbox(
@@ -411,20 +567,41 @@ local function BuildPanel()
         winGrid,
         -4,
         function() return not ns.db or not ns.db.settings or ns.db.settings.hideGuildFeaturesWhenNoGuild ~= false end,
-        function(checked)
-            ns.db.settings.hideGuildFeaturesWhenNoGuild = checked
-            NotifySettingChanged("CLAN_UPDATED")
-        end,
+        function(checked) ns.db.settings.hideGuildFeaturesWhenNoGuild = checked; NotifySettingChanged("CLAN_UPDATED") end,
         L["Help: Auto-Hide Without Guild"],
         L["Automatically hides Guild (J) integration, Hub Guild tab, Alliance chat mirrors, and Guild shortcuts whenever you play a character with no guild."],
         L["Keep enabled so guildless characters stay clutter-free without manually turning Guild options off and on."]
     )
 
+    local dndCb = CreateCheckbox(
+        ov,
+        L["Do Not Disturb (pause all popups & chimes without changing your checkboxes)"],
+        autoHideGuildCb,
+        -4,
+        function() return ns.db and ns.db.settings and ns.db.settings.doNotDisturb == true end,
+        function(checked) ns.db.settings.doNotDisturb = checked; NotifySettingChanged() end,
+        L["Help: Do Not Disturb"],
+        L["Temporarily pauses all non-critical floating popups and sound chimes without overwriting any of your saved notification checkboxes."],
+        L["Great for raids, arenas, or quiet focus sessions; uncheck to resume your exact saved preferences."]
+    )
+
+    local autoInstSilCb = CreateCheckbox(
+        ov,
+        L["Auto-silence social popups & chimes inside Dungeons, Raids & BGs"],
+        dndCb,
+        -4,
+        function() return ns.db and ns.db.settings and ns.db.settings.autoSilenceInInstances == true end,
+        function(checked) ns.db.settings.autoSilenceInInstances = checked; NotifySettingChanged() end,
+        L["Help: Auto-Silence in Instances"],
+        L["Automatically pauses social popups and chimes whenever you enter a Dungeon, Raid, or Battleground (Group Avoid safety warnings still show)."],
+        L["Resumes notifications automatically as soon as you step back into the open world."]
+    )
+
     local quickNotifHeader = AddSectionHeader(
         ov,
         L["Quick Notification Switches (1-Click Summary)"],
-        autoHideGuildCb,
-        -14,
+        autoInstSilCb,
+        -12,
         L["Help: Quick Notification Summary"],
         L["Master summary switches to silence or enable SocialCentral popups, sounds, and alerts at a glance without scrolling."],
         L["Each popup notification also has a crossed-bell icon you can click anytime (with a confirmation popup) to silence just that notification."]
@@ -432,15 +609,17 @@ local function BuildPanel()
 
     local qGrid = CreateFrame("Frame", nil, ov)
     qGrid:SetPoint("TOPLEFT", quickNotifHeader, "BOTTOMLEFT", 0, -4)
-    qGrid:SetSize(600, 180)
+    qGrid:SetSize(600, 148)
 
     local qLeft = CreateFrame("Frame", nil, qGrid)
     qLeft:SetPoint("TOPLEFT", qGrid, "TOPLEFT", 0, 0)
-    qLeft:SetSize(294, 178)
+    qLeft:SetSize(294, 146)
 
     local qRight = CreateFrame("Frame", nil, qGrid)
     qRight:SetPoint("TOPLEFT", qLeft, "TOPRIGHT", 10, 0)
-    qRight:SetSize(294, 178)
+    qRight:SetSize(294, 146)
+
+    refs.qGrid, refs.qLeft, refs.qRight = qGrid, qLeft, qRight
 
     local qFrOnCb = CreateGridCheckbox(
         qLeft, nil, -2, L["Friend Online (Toast)"],
@@ -474,17 +653,17 @@ local function BuildPanel()
         L["Displays a compact, draggable 100%-opaque pill near the top of your screen when a peer messages you via the addon or sends a room invite."],
         L["Left-click the pill to jump directly to the conversation (deferred automatically after combat), hover to pause, or right-click to dismiss."]
     )
+
     local qChatSndCb = CreateGridCheckbox(
-        qLeft, qAddonCb, -4, L["Chat Sounds (Master)"],
+        qRight, nil, -2, L["Chat Sounds (Master)"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.chatSound ~= false end,
         function(checked) ns.db.settings.chatSound = checked; NotifySettingChanged("CHAT_UPDATED") end,
         L["Help: Chat Sound Alert"],
         L["Master switch for incoming conversation sound chimes across SocialCentral."],
         L["Uncheck to mute all SocialCentral conversation chimes without affecting muted individual threads."]
     )
-
     local qWbCb = CreateGridCheckbox(
-        qRight, nil, -2, L["World Buff Alerts"],
+        qRight, qChatSndCb, -4, L["World Buff Alerts"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsAlerts ~= false end,
         function(checked) ns.db.settings.worldBuffsAlerts = checked; NotifySettingChanged() end,
         L["Help: World Buff Drop Alerts"],
@@ -499,29 +678,13 @@ local function BuildPanel()
         L["Notifies you in chat (with optional sound and clickable Whisper/Clan links) whenever a guildmate looks for a Dungeon group."],
         L["Uncheck to stop Guild LFG notifications while still seeing listings inside Group Finder (I)."]
     )
-    local qRadarCb = CreateGridCheckbox(
-        qRight, qClanLfgCb, -4, L["Screen Target Radar"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterEnabled ~= false end,
-        function(checked) ns.db.settings.spotterEnabled = checked; NotifySettingChanged() end,
-        L["Help: Screen Spotter Master"],
-        L["Master toggle for detecting Enemy, Ally, and Same-Clan players on your screen."],
-        L["Uncheck to pause screen scanning and hide the Target Radar HUD completely."]
-    )
-    local qAvoidCb = CreateGridCheckbox(
-        qRight, qRadarCb, -4, L["Group Avoid Warnings"],
+    CreateGridCheckbox(
+        qRight, qClanLfgCb, -4, L["Group Avoid Warnings"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.groupAvoidAlert ~= false end,
         function(checked) ns.db.settings.groupAvoidAlert = checked; NotifySettingChanged() end,
         L["Help: Group Avoid Warning"],
         L["Immediately alerts you with a warning toast and chat notice if someone on your Avoid list or linked alts enters your party or raid."],
         L["Allows you to address toxic encounters or leave before dungeons and raids start."]
-    )
-    local qScoutCb = CreateGridCheckbox(
-        qRight, qAvoidCb, -4, L["Guild Scout Alerts"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterScoutAlert ~= false end,
-        function(checked) ns.db.settings.spotterScoutAlert = checked; NotifySettingChanged() end,
-        L["Help: Guild Scout Alerts"],
-        L["Shows chat, sound, and popup alerts when a guildmate shares an Enemy Scout sighting."],
-        L["Uncheck to mute shared Guild Scout alerts without disabling your own Target Radar."]
     )
 
     local bulkActionRow = CreateFrame("Frame", nil, ov)
@@ -553,7 +716,6 @@ local function BuildPanel()
             s.clanSignupAlertEnabled = false
             s.clanEventReminders = false
             s.spotterScoutAlert = false
-            s.groupAvoidAlert = false
             s.spotterAutoShowHUD = false
             if s.alerts then s.alerts.toast = false end
         end
@@ -581,6 +743,7 @@ local function BuildPanel()
             s.spotterScoutAlert = true
             s.groupAvoidAlert = true
             s.spotterAutoShowHUD = true
+            s.doNotDisturb = false
             if s.alerts then s.alerts.toast = true end
         end
         NotifySettingChanged("CLAN_UPDATED")
@@ -591,8 +754,8 @@ local function BuildPanel()
         bulkActionRow,
         enablePopupsBtn,
         L["Help: Quick Popup Controls"],
-        L["Quickly test notification positioning, silence all floating popups at once, or restore default notification popups in 1 click."],
-        L["Click 'Mute All Popups' for quiet raids/focus sessions, then click 'Restore Popups' anytime to turn them back on."]
+        L["Quickly test notification positioning, silence social floating popups (while keeping Group Avoid safety warnings), or restore all notification popups in 1 click."],
+        L["Click 'Mute All Popups' to uncheck popup alerts, or use 'Do Not Disturb' above to pause without overwriting your checkboxes."]
     )
 
     local winHeader = AddSectionHeader(
@@ -602,7 +765,7 @@ local function BuildPanel()
         -12,
         L["Help: Official Game Windows"],
         L["SocialCentral features live directly inside Blizzard's native windows via side-tabs and toolbar buttons. Use this Settings window for configuration and quick shortcuts."],
-        L["Click any shortcut below to jump straight to that official game window with the SocialCentral tab active, or configure Clan Diplomacy and Preferences below."]
+        L["Click any shortcut below to jump straight to that official game window with the SocialCentral tab active, or configure preferences above."]
     )
 
     local jumpGrid = CreateFrame("Frame", nil, ov)
@@ -636,15 +799,18 @@ local function BuildPanel()
                 ns.UI:OpenTab(spec.mod)
             end
         end)
-        jumpButtons[#jumpButtons + 1] = { btn = jb, variant = spec.variant, isGuild = spec.isGuild }
+        jumpButtons[#jumpButtons + 1] = { btn = jb, mod = spec.mod, variant = spec.variant, isGuild = spec.isGuild }
     end
 
-    local function ReflowJumpGrid()
+    refs.jumpButtons = jumpButtons
+    refs.ReflowJumpGrid = function()
         local maxW = math.max(320, (ov:GetWidth() or 590) - 24)
         local x, y, rowH = 0, 0, 24
-        local hideGuild = Compat and Compat.ShouldShowGuildFeatures and not Compat.ShouldShowGuildFeatures()
         for _, item in ipairs(jumpButtons) do
-            if item.isGuild and hideGuild then
+            local modOk = (item.mod == "hub")
+                or (item.mod == "chat" and ((not Compat or not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")))
+                or (item.mod ~= "chat" and ((not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled(item.mod)))
+            if not modOk then
                 item.btn:Hide()
             else
                 item.btn:Show()
@@ -660,18 +826,98 @@ local function BuildPanel()
         end
         jumpGrid:SetSize(maxW, math.abs(y) + rowH + 2)
     end
-    ReflowJumpGrid()
 
-    -- =========================================================================
-    -- TAB 2: NOTIFICATIONS (Detailed Friend, Watchlist, Chat, Toasts & Guild)
-    -- =========================================================================
-    local nf = pages.notifications
+    AddDeps(deps.defaultBtns, testOvBtn, muteAllPopupsBtn)
+    AddDeps(deps.primaryBtns, enablePopupsBtn)
+    refs.presetBtns = {
+        { mode = "full", btn = presetFullBtn },
+        { mode = "social", btn = presetSocialBtn },
+        { mode = "ultralight", btn = presetLiteBtn },
+    }
+    AddDeps(deps.wb, qWbCb)
+    AddDeps(deps.guild, qClanLfgCb)
+    AddDeps(deps.watch, qWlCb)
+    AddDeps(deps.chat, qAddonCb, qChatSndCb)
+end
+
+local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
+    local mutedHeader = AddSectionHeader(
+        nf,
+        L["Muted Items & Players Summary"],
+        nil,
+        -6,
+        L["Help: Muted Items Summary"],
+        L["Shows a live summary of notification categories you silenced and how many individual players or conversations are currently muted."],
+        L["Click 'Re-enable Alerts' or 'Unmute All Players' anytime if you accidentally silenced something via the toast crossed-bell button."]
+    )
+
+    local mutedStatusLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    mutedStatusLbl:SetPoint("TOPLEFT", mutedHeader, "BOTTOMLEFT", 4, -6)
+    mutedStatusLbl:SetPoint("TOPRIGHT", nf, "TOPRIGHT", -16, -30)
+    mutedStatusLbl:SetJustifyH("LEFT")
+    mutedStatusLbl:SetWordWrap(true)
+
+    local mutedBtnRow = CreateFrame("Frame", nil, nf)
+    mutedBtnRow:SetPoint("TOPLEFT", mutedStatusLbl, "BOTTOMLEFT", 0, -6)
+    mutedBtnRow:SetSize(560, 26)
+
+    local unmuteAlertsBtn = ns.Theme:CreateButton(mutedBtnRow, 150, 22, L["Re-enable Alerts"], "default")
+    ns.Theme:AutoFitButton(unmuteAlertsBtn, 128, 16, 200)
+    unmuteAlertsBtn:SetPoint("LEFT", mutedBtnRow, "LEFT", 0, 0)
+    unmuteAlertsBtn:SetScript("OnClick", function()
+        local s = ns.db and ns.db.settings
+        if s then
+            s.doNotDisturb = false
+            s.friendOnlineAlertToast = true
+            s.friendOfflineAlertToast = true
+            s.addonMsgToast = true
+            s.worldBuffsAlerts = true
+            s.worldBuffsExpiryAlert = true
+            s.clanLfgAlertEnabled = true
+            s.clanSignupAlertEnabled = true
+            s.clanEventReminders = true
+            s.spotterScoutAlert = true
+            s.groupAvoidAlert = true
+            s.spotterAutoShowHUD = true
+            s.chatSound = true
+            if s.alerts then s.alerts.toast = true end
+        end
+        NotifySettingChanged("CLAN_UPDATED")
+        for _, sync in ipairs(syncFns) do sync() end
+    end)
+
+    local unmutePlayersBtn = ns.Theme:CreateButton(mutedBtnRow, 174, 22, L["Unmute All Players"], "default")
+    ns.Theme:AutoFitButton(unmutePlayersBtn, 144, 16, 220)
+    unmutePlayersBtn:SetPoint("LEFT", unmuteAlertsBtn, "RIGHT", 8, 0)
+    unmutePlayersBtn:SetScript("OnClick", function()
+        if ns.db and ns.db.socialMeta and ns.Compat and ns.Compat.ScopeKey then
+            local tbl = ns.db.socialMeta[ns.Compat.ScopeKey()]
+            if type(tbl) == "table" then
+                for _, meta in pairs(tbl) do
+                    if type(meta) == "table" and meta.notifyMuted ~= nil then
+                        meta.notifyMuted = nil
+                    end
+                end
+            end
+        end
+        if ns.db and ns.db.settings and type(ns.db.settings.chatMutedThreads) == "table" then
+            wipe(ns.db.settings.chatMutedThreads)
+        end
+        NotifySettingChanged("SOCIAL_UPDATED")
+        ns:Emit("WATCHLIST_UPDATED")
+        ns:Emit("CHAT_UPDATED")
+        for _, sync in ipairs(syncFns) do sync() end
+    end)
+
+    refs.mutedStatusLbl = mutedStatusLbl
+    refs.unmuteAlertsBtn = unmuteAlertsBtn
+    refs.unmutePlayersBtn = unmutePlayersBtn
 
     local wlAlertHeader = AddSectionHeader(
         nf,
         L["Online alerts for Watchlist"],
-        nil,
-        -6,
+        mutedBtnRow,
+        -12,
         L["Help: Watchlist Online Alerts"],
         L["Prints a local chat notification whenever a Watchlist character transitions from offline to online."],
         L["Triggered safely when /who, Friends, Guild, Battle.net, or Nearby spots a watched friend online (120s anti-spam debounce)."]
@@ -709,6 +955,7 @@ local function BuildPanel()
         L["Plays a subtle Blizzard UI chime alongside the local chat online alert."],
         L["Check to hear an audio chime when a watched friend comes online."]
     )
+    AddDeps(deps.watch, alertCb, watchToastCb, soundCb)
 
     local friendAlertHeader = AddSectionHeader(
         nf, L["Friend Online Alerts"], soundCb, -14,
@@ -866,6 +1113,10 @@ local function BuildPanel()
         end
         officialChatTabsRow:SetHeight((yOff < -30) and 68 or 48)
     end
+    AddDeps(deps.chat, tabsRowLbl)
+    for cid = 1, 10 do
+        AddDeps(deps.chat, tabCheckboxes[cid])
+    end
 
     local addonFlashCb = CreateCheckbox(
         nf, L["Pulse taskbar icon when high-priority addon messages arrive"], officialChatTabsRow, -6,
@@ -987,6 +1238,8 @@ local function BuildPanel()
         L["When checked, clicking Send or pressing Enter in Conversations sends Whispers, Battle.net, Guild, and Group messages immediately without needing a second Enter."],
         L["Strictly triggered only by your manual Send click/Enter outside combat or boss chat lockdowns; safely falls back to pre-filling the chat bar when restricted."]
     )
+    AddDeps(deps.defaultBtns, unmuteAlertsBtn, unmutePlayersBtn, resetToastPosBtn, testToastBtn)
+    AddDeps(deps.chat, addonToastCb, resetToastPosBtn, addonEchoCb, addonEchoSentCb, addonFlashCb, chatSoundCb, chatSoundWhispersCb, chatSoundRoomsCb, chatSoundAllianceCb, chatSoundGuildCb, chatSoundGroupCb, chatMirrorCb, chatChannelUnreadCb, addonDirectCb, chatDirectOfficialCb)
 
     local guildAlertsHeader = AddSectionHeader(
         nf, L["Guild, LFG & World Buff Alerts"], chatDirectOfficialCb, -14,
@@ -1108,7 +1361,7 @@ local function BuildPanel()
         L["Shows chat, sound, and popup alerts when a guildmate shares an Enemy Scout sighting."],
         L["Uncheck to mute shared Guild Scout alerts without disabling your own Target Radar."]
     )
-    local groupAvoidAlertCb = CreateCheckbox(
+    CreateCheckbox(
         nf, L["Warn in chat and toast if an Avoided player joins your party/raid"], scoutAlertCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.groupAvoidAlert ~= false end,
         function(checked) ns.db.settings.groupAvoidAlert = checked; NotifySettingChanged() end,
@@ -1117,11 +1370,11 @@ local function BuildPanel()
         L["Allows you to address toxic encounters or leave before dungeons and raids start."]
     )
 
-    -- =========================================================================
-    -- TAB 3: RADAR & WORLD MAP
-    -- =========================================================================
-    local rd = pages.radar
+    AddDeps(deps.wb, buffAlertCb, buffSoundCb, buffExpiryCb)
+    AddDeps(deps.guild, clanLfgAlertCb, clanLfgDngOnlyCb, clanLfgNearLevelCb, clanLfgAlertSoundCb, clanFilterLbl, clanFilterInput, clanEventAlertCb, clanSignupAlertCb, clanEventRemindersCb, scoutAlertCb)
+end
 
+local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBeforeJump)
     local spotterHeader = AddSectionHeader(
         rd, L["Screen Clan Radar & Target Selection"], nil, -6,
         L["Help: Screen Clan Radar"],
@@ -1290,11 +1543,39 @@ local function BuildPanel()
     end)
     HelpBtn(rd, viewRadarTutorialBtn, L["Help: Radar Tutorial"], L["Opens the quick visual guide explaining how Target Radar proximity tracking, range display, and click-to-target work."], L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."])
 
-    -- =========================================================================
-    -- TAB 4: GENERAL & TOOLS (Language, Theme, Minimap, /who, Guild Sync, Tooltips)
-    -- =========================================================================
-    local gn = pages.general
+    local resetRadarTabBtn = ns.Theme:CreateButton(rd, 190, 22, L["Restore Defaults (This Tab)"], "default")
+    ns.Theme:AutoFitButton(resetRadarTabBtn, 160, 16, 250)
+    resetRadarTabBtn:SetPoint("TOPLEFT", viewTutorialBtn, "BOTTOMLEFT", 0, -12)
+    resetRadarTabBtn:SetScript("OnClick", function()
+        local s = ns.db and ns.db.settings
+        if s then
+            s.spotterEnabled = true
+            s.spotterAutoShowHUD = true
+            s.spotterNameplateArrow = true
+            s.spotterNameplateBadges = true
+            s.spotterNotifyEnemy = true
+            s.spotterNotifyAlly = true
+            s.spotterNotifyWatchlist = true
+            s.spotterNotifyFriends = true
+            s.spotterNotifyBlocked = true
+            s.spotterNotifySameClan = false
+            s.spotterIgnoreGroup = true
+            s.spotterSound = true
+            s.spotterLockHUD = false
+            s.embedWorldMap = true
+            s.worldBuffsMapPins = true
+        end
+        NotifySettingChanged("WORLD_BUFFS_UPDATED")
+        for _, sync in ipairs(syncFns) do sync() end
+    end)
 
+    AddDeps(deps.defaultBtns, openBuffsBtn, viewTutorialBtn, viewRadarTutorialBtn, resetRadarTabBtn)
+    AddDeps(deps.primaryBtns, openRadarBtn)
+    AddDeps(deps.wb, buffMapPinsCb, openBuffsBtn)
+    AddDeps(deps.radar, spotterAutoHudCb, spotterPlateArrowCb, spotterBadgesCb, spotterEnemyCb, spotterAllyCb, spotterWatchlistCb, spotterFriendsCb, spotterBlockedCb, spotterSameCb, spotterIgnoreGroupCb, spotterSoundCb, spotterLockCb, openRadarBtn, viewTutorialBtn, viewRadarTutorialBtn)
+end
+
+local function BuildGeneralTab(gn, deps)
     local langHeader = AddSectionHeader(
         gn, L["Language"], nil, -6,
         L["Help: Language"],
@@ -1558,46 +1839,248 @@ local function BuildPanel()
     end)
     HelpBtn(gn, updateLinkBtn, L["Help: Update Check & GitHub"], L["Silently compares versions with other SocialCentral users in your guild or group (just like DBM) and warns you if a newer version is out."], L["Keep enabled for in-game update chat links. Click 'GitHub Releases / Updater' to copy the public GitHub download link or Windows updater command."])
 
+    AddDeps(deps.defaultBtns, langReloadBtn, themePickerBtn, resetPosBtn, updateLinkBtn)
+    AddDeps(deps.guild, clanSyncCb, guildFinderCb, autoStatusCb, clanAutoCloseLfgCb)
+    AddDeps(deps.lfg, globalChatLfgCb, lfgDraftCb, lfgAntiSpamCb)
+    AddDeps(deps.alts, tooltipItemAltsCb)
+    AddDeps(deps.nearby, nearbyRow)
+end
+
+local function BuildPanel()
+    if panelBuilt then
+        return
+    end
+    panelBuilt = true
+    EnsurePanelFrame()
+    wipe(syncFns)
+
+    -- Top Fixed Header & Category Navigation Tabs
+    local headerArea = CreateFrame("Frame", nil, panel)
+    headerArea:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -10)
+    headerArea:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -10)
+    headerArea:SetHeight(76)
+
+    local title = headerArea:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 2, -2)
+    title:SetText("SocialCentral  v" .. (ns.version or "0.0.0"))
+
+    local subtitle = headerArea:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -2)
+    subtitle:SetText(L["Unified social hub for WoW: Forever."])
+
+    local guildBadgeLbl = headerArea:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    guildBadgeLbl:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", -4, -4)
+    guildBadgeLbl:SetJustifyH("RIGHT")
+
+    local tabBar = CreateFrame("Frame", nil, headerArea)
+    tabBar:SetPoint("TOPLEFT", subtitle, "BOTTOMLEFT", 0, -8)
+    tabBar:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", 0, -40)
+    tabBar:SetHeight(26)
+
+    local scrollFrame = CreateFrame("ScrollFrame", "SocialCentralSettingsScroll", panel, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", headerArea, "BOTTOMLEFT", -6, -4)
+    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 6)
+
+    local content = CreateFrame("Frame", nil, scrollFrame)
+    content:SetSize(610, 960)
+    scrollFrame:SetScrollChild(content)
+
+    local pages = {}
+    local pageHeights = {
+        overview = 960,
+        notifications = 1720,
+        radar = 800,
+        general = 1320,
+    }
+    local catTabs = {
+        { id = "overview", label = L["Summary & Windows"] },
+        { id = "notifications", label = L["Notifications"] },
+        { id = "radar", label = L["Radar & Map"] },
+        { id = "general", label = L["General & Tools"] },
+    }
+    local catButtons = {}
+
+    for _, spec in ipairs(catTabs) do
+        local pFrame = CreateFrame("Frame", nil, content)
+        pFrame:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+        pFrame:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, 0)
+        pFrame:SetHeight(pageHeights[spec.id] or 900)
+        pFrame:Hide()
+        pages[spec.id] = pFrame
+    end
+
+    local function SelectCategoryTab(tabId)
+        if not pages[tabId] then tabId = "overview" end
+        activeCategoryTab = tabId
+        for id, pFrame in pairs(pages) do
+            pFrame:SetShown(id == tabId)
+        end
+        content:SetHeight(pageHeights[tabId] or 800)
+        if scrollFrame.SetVerticalScroll then
+            scrollFrame:SetVerticalScroll(0)
+        end
+        for _, item in ipairs(catButtons) do
+            ns.Theme:StyleButton(item.btn, "tab")
+            ns.Theme:SetButtonActive(item.btn, item.id == tabId, "tab")
+        end
+        for _, sync in ipairs(syncFns) do
+            sync()
+        end
+    end
+
+    local prevTabBtn
+    for _, spec in ipairs(catTabs) do
+        local btn = ns.Theme:CreateButton(tabBar, 134, 24, spec.label, "tab")
+        ns.Theme:AutoFitButton(btn, 98, 22, 210)
+        if not prevTabBtn then
+            btn:SetPoint("TOPLEFT", tabBar, "TOPLEFT", 0, 0)
+        else
+            btn:SetPoint("LEFT", prevTabBtn, "RIGHT", 6, 0)
+        end
+        btn:SetScript("OnClick", function()
+            SelectCategoryTab(spec.id)
+        end)
+        catButtons[#catButtons + 1] = { id = spec.id, baseLabel = spec.label, btn = btn }
+        prevTabBtn = btn
+    end
+
+    local function CloseSettingsBeforeJump()
+        if not ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) then
+            if HideUIPanel then
+                if _G.SettingsPanel and _G.SettingsPanel.IsShown and _G.SettingsPanel:IsShown() then
+                    pcall(HideUIPanel, _G.SettingsPanel)
+                elseif _G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown() then
+                    pcall(HideUIPanel, _G.InterfaceOptionsFrame)
+                end
+            end
+        end
+    end
+
+    local function NotifySettingChanged(extraEmit)
+        ns:Emit("SETTINGS_UPDATED")
+        if extraEmit then
+            ns:Emit(extraEmit)
+        end
+        if ns.UI and ns.UI.QueueRefresh then
+            ns.UI:QueueRefresh(false)
+        end
+    end
+
+    local deps = {
+        wb = {}, radar = {}, guild = {}, lfg = {}, watch = {}, chat = {}, alts = {}, nearby = {},
+        defaultBtns = {}, primaryBtns = {},
+    }
+    local refs = {}
+
+    BuildOverviewTab(pages.overview, deps, refs, NotifySettingChanged, CloseSettingsBeforeJump)
+    BuildNotificationsTab(pages.notifications, deps, refs, NotifySettingChanged)
+    BuildRadarTab(pages.radar, deps, NotifySettingChanged, CloseSettingsBeforeJump)
+    BuildGeneralTab(pages.general, deps)
+
     syncFns[#syncFns + 1] = function()
+        local badgeParts = {}
         local inGuild = Compat and Compat.IsInGuild and Compat.IsInGuild()
         if inGuild then
             local gName = GetGuildInfo and ns.Safe and ns.Safe.String(ns.Safe.Call(GetGuildInfo, "player"))
-            guildBadgeLbl:SetText("|cff3fb950" .. ((gName and gName ~= "") and ("<" .. gName .. ">") or L["Guild"]) .. "|r")
+            badgeParts[#badgeParts + 1] = "|cff3fb950" .. ((gName and gName ~= "") and ("<" .. gName .. ">") or L["Guild"]) .. "|r"
         else
-            guildBadgeLbl:SetText("|cff9da7b5" .. L["No guild"] .. "|r")
+            badgeParts[#badgeParts + 1] = "|cff9da7b5" .. L["No guild"] .. "|r"
         end
+        local isCharProf = ns.IsCharProfileEnabled and ns:IsCharProfileEnabled()
+        badgeParts[#badgeParts + 1] = isCharProf and ("|cff58a6ff" .. L["Profile: Character"] .. "|r") or ("|cff9da7b5" .. L["Profile: Account"] .. "|r")
+        local focusReason = Compat and Compat.GetFocusSilenceReason and Compat.GetFocusSilenceReason()
+        if focusReason == "dnd" then
+            badgeParts[#badgeParts + 1] = "|cffff9b3d[" .. L["Do Not Disturb"] .. "]|r"
+        elseif focusReason == "instance" then
+            badgeParts[#badgeParts + 1] = "|cffffd24d[" .. L["Silenced in Instance"] .. "]|r"
+        end
+        guildBadgeLbl:SetText(table.concat(badgeParts, "  ·  "))
 
-        for _, item in ipairs(jumpButtons) do
+        for _, item in ipairs(refs.jumpButtons) do
             ns.Theme:StyleButton(item.btn, item.variant)
             ns.Theme:SetButtonActive(item.btn, false, item.variant)
         end
-        ReflowJumpGrid()
+        refs.ReflowJumpGrid()
+
+        local disabledCats = CollectDisabledNotificationNames()
+        local mutedPlayers, mutedThreads = CountMutedPlayersAndThreads()
+        local offTotal = #disabledCats + (mutedPlayers > 0 and 1 or 0) + (mutedThreads > 0 and 1 or 0)
+
+        if #disabledCats == 0 and mutedPlayers == 0 and mutedThreads == 0 then
+            refs.mutedStatusLbl:SetText("|cff3fb950" .. L["All notification categories are active and no individual players are muted."] .. "|r")
+        else
+            local parts = {}
+            if #disabledCats > 0 then
+                parts[#parts + 1] = "|cffff9b3d" .. L["Disabled:"] .. "|r " .. table.concat(disabledCats, ", ")
+            end
+            if mutedPlayers > 0 or mutedThreads > 0 then
+                parts[#parts + 1] = "|cff8ab4f8" .. string.format(L["Muted players/chats: %d"], mutedPlayers + mutedThreads) .. "|r"
+            end
+            refs.mutedStatusLbl:SetText(table.concat(parts, "\n"))
+        end
+        SetWidgetEnabled(refs.unmuteAlertsBtn, #disabledCats > 0 or (ns.db and ns.db.settings and ns.db.settings.doNotDisturb == true))
+        SetWidgetEnabled(refs.unmutePlayersBtn, (mutedPlayers + mutedThreads) > 0)
 
         for _, item in ipairs(catButtons) do
+            local lbl = item.baseLabel
+            if item.id == "notifications" and offTotal > 0 then
+                lbl = string.format("%s (%d)", item.baseLabel, offTotal)
+            end
+            ns.Theme:SetButtonText(item.btn, lbl)
+            ns.Theme:AutoFitButton(item.btn, 98, 22, 220)
             ns.Theme:StyleButton(item.btn, "tab")
             ns.Theme:SetButtonActive(item.btn, item.id == activeCategoryTab, "tab")
         end
 
-        for _, b in ipairs({ testOvBtn, muteAllPopupsBtn, resetToastPosBtn, testToastBtn, openBuffsBtn, viewTutorialBtn, viewRadarTutorialBtn, langReloadBtn, themePickerBtn, resetPosBtn, updateLinkBtn }) do
+        for _, b in ipairs(deps.defaultBtns) do
             ns.Theme:StyleButton(b, "default")
             ns.Theme:SetButtonActive(b, false, "default")
         end
-        ns.Theme:StyleButton(enablePopupsBtn, "primary")
-        ns.Theme:SetButtonActive(enablePopupsBtn, false, "primary")
-        ns.Theme:StyleButton(openRadarBtn, "primary")
-        ns.Theme:SetButtonActive(openRadarBtn, false, "primary")
+        for _, pb in ipairs(deps.primaryBtns) do
+            ns.Theme:StyleButton(pb, "primary")
+            ns.Theme:SetButtonActive(pb, false, "primary")
+        end
+        local activePreset = GetActivePresetMode()
+        if refs.presetBtns then
+            for _, pItem in ipairs(refs.presetBtns) do
+                local isAct = (activePreset == pItem.mode)
+                local var = isAct and "primary" or "default"
+                ns.Theme:StyleButton(pItem.btn, var)
+                ns.Theme:SetButtonActive(pItem.btn, isAct, var)
+            end
+        end
+        if refs.copyAccBtn then
+            SetWidgetEnabled(refs.copyAccBtn, isCharProf == true)
+        end
+
+        local s = ns.db and ns.db.settings
+        local modStates = {
+            wb = not s or s.embedWorldMap ~= false,
+            radar = not s or s.spotterEnabled ~= false,
+            guild = (not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled("J"),
+            lfg = not s or s.embedLfgWindow ~= false,
+            alts = not s or s.embedCharacterWindow ~= false,
+            watch = not s or s.moduleWatchlistEnabled ~= false,
+            nearby = not s or s.moduleNearbyEnabled ~= false,
+            chat = not s or s.moduleChatEnabled ~= false,
+        }
+        for bucket, enabled in pairs(modStates) do
+            for _, w in ipairs(deps[bucket]) do
+                SetWidgetEnabled(w, enabled)
+            end
+        end
     end
 
     scrollFrame:SetScript("OnSizeChanged", function(self)
         local w = math.max(500, (self:GetWidth() or 600) - 10)
         content:SetWidth(w)
         local colW = math.floor((w - 22) * 0.5)
-        winGrid:SetWidth(w - 8)
-        winLeft:SetWidth(colW)
-        winRight:SetWidth(colW)
-        qGrid:SetWidth(w - 8)
-        qLeft:SetWidth(colW)
-        qRight:SetWidth(colW)
+        refs.winGrid:SetWidth(w - 8)
+        refs.winLeft:SetWidth(colW)
+        refs.winRight:SetWidth(colW)
+        refs.qGrid:SetWidth(w - 8)
+        refs.qLeft:SetWidth(colW)
+        refs.qRight:SetWidth(colW)
         for _, sync in ipairs(syncFns) do
             sync()
         end

@@ -628,11 +628,18 @@ function WorldBuffs:CheckExpiringBuffAlerts()
     return nextDelay
 end
 
+local function IsWorldBuffsModuleEnabled()
+    return not (ns.db and ns.db.settings and ns.db.settings.embedWorldMap == false)
+end
+
 function WorldBuffs:ScheduleNextExpiryCheck()
     if self._expiryTimer and self._expiryTimer.Cancel then
         self._expiryTimer:Cancel()
     end
     self._expiryTimer = nil
+    if not IsWorldBuffsModuleEnabled() then
+        return
+    end
 
     local nextDelay = self:CheckExpiringBuffAlerts()
     if nextDelay and nextDelay > 0 and C_Timer and C_Timer.NewTimer then
@@ -674,6 +681,7 @@ local function ComputeTrickleDelay(syncId)
 end
 
 function WorldBuffs:ReceiveSyncedDrop(syncId, ts, sender, shardName)
+    if not IsWorldBuffsModuleEnabled() then return end
     if type(syncId) ~= "string" or type(ts) ~= "number" then return end
     if type(shardName) == "string" and shardName ~= "" and shardName ~= GetBuffShardScope() then
         return
@@ -817,6 +825,9 @@ local function IsInsideInstance()
 end
 
 local function OnMonsterMessage(_, msg, sender)
+    if not IsWorldBuffsModuleEnabled() then
+        return
+    end
     msg = Safe.String(msg)
     sender = Safe.String(sender)
     if not msg or msg == "" then
@@ -997,6 +1008,9 @@ function WorldBuffs:Init()
         OnMonsterMessage("CHAT_MSG_MONSTER_EMOTE", msg, sender)
     end)
     local function HandlePlayerAura()
+        if not IsWorldBuffsModuleEnabled() then
+            return
+        end
         local nowClock = (GetTime and GetTime()) or 0
         if self._lastAuraAt and (nowClock - self._lastAuraAt) < 2.0 then
             return
@@ -1046,7 +1060,13 @@ function WorldBuffs:Init()
     end)
 
     ns:On("SETTINGS_UPDATED", function()
-        WorldBuffs:ScheduleNextExpiryCheck()
+        if IsWorldBuffsModuleEnabled() then
+            TrackFreshOpenWorldAuras(true)
+            WorldBuffs:ScheduleNextExpiryCheck()
+            ns:Emit("WORLD_BUFFS_UPDATED")
+        else
+            WorldBuffs:ScheduleNextExpiryCheck()
+        end
     end)
 
     self:ScheduleNextExpiryCheck()

@@ -368,6 +368,7 @@ function Clan:SendWorldBuffSync(syncId, ts)
 end
 
 function Clan:RequestWorldBuffCatchup()
+    if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("buffs") then return false end
     if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return false end
     if self.isStoppedThisSession or self:IsMessagingLocked() then return false end
     if not (IsInGuild and IsInGuild()) then return false end
@@ -380,6 +381,9 @@ function Clan:RequestWorldBuffCatchup()
 end
 
 function Clan:CheckAutoCloseFullDungeonLFG()
+    if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then
+        return false
+    end
     if not (ns.db and ns.db.settings and ns.db.settings.clanAutoCloseFullLfg ~= false) then
         return false
     end
@@ -3389,6 +3393,7 @@ function Clan:GetAllLockouts()
 end
 
 function Clan:RefreshGameCalendar(force)
+    if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then return false end
     if not C_Calendar then return false end
     local monoNow = GetTime and GetTime() or time()
     if C_Calendar.OpenCalendar and (force or (monoNow - (self.lastCalendarRefreshAt or 0)) >= 30) then
@@ -5268,6 +5273,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         end
 
     elseif cmd == "WBR" then
+        if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("buffs") then return end
         if not ns.WorldBuffs or not ns.WorldBuffs.GetCatchupSyncEntries then return end
         local entries = ns.WorldBuffs:GetCatchupSyncEntries()
         if not entries or #entries == 0 then return end
@@ -5305,6 +5311,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         end
 
     elseif cmd == "WBC" then
+        if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("buffs") then return end
         Clan._lastHeardWbCatchupAt = GetTime and GetTime() or 0
         local listStr = parts[2]
         local shardName = Compat.CleanPayloadField and Compat.CleanPayloadField(parts[3] or "", 40) or nil
@@ -5596,6 +5603,8 @@ local function ClassifyChatLfgMessage(low)
 end
 
 local function OnExternalChatPassive(_, _, text, sender, ...)
+    local sTop = ns.db and ns.db.settings
+    if sTop and sTop.embedLfgWindow == false then return end
     if Safe.IsSecret(text) or Safe.IsSecret(sender) then return end
     local rawMsg = Safe.String(text)
     local cleanSender = Safe.String(sender)
@@ -5629,7 +5638,7 @@ local function OnExternalChatPassive(_, _, text, sender, ...)
         nil
     )
     local s = ns.db and ns.db.settings
-    local scanGlobal = (not s) or (s.globalChatLfgScan ~= false)
+    local scanGlobal = (not s) or (s.embedLfgWindow ~= false and s.globalChatLfgScan ~= false)
     if (not scanGlobal) and not (isAllied or isFriend or isWatchlist or isClan) then
         return
     end
@@ -5692,6 +5701,7 @@ local function OnExternalChatPassive(_, _, text, sender, ...)
 end
 
 function Clan:ApplyAutoInstanceStatus()
+    if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then return end
     if not (ns.db and ns.db.settings and ns.db.settings.autoStatusInstance) then return end
     if self:IsMessagingLocked() then return end
     local inInst, instType = Safe.Call(IsInInstance)
@@ -5790,6 +5800,7 @@ end
 function Clan:CheckUpcomingEventReminders()
     local s = ns.db and ns.db.settings
     if s and s.clanEventReminders == false then return 600 end
+    if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then return 600 end
     local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
     local hasGuildEvents = (bucket and type(bucket.events) == "table" and next(bucket.events) ~= nil)
     local hasCalEvents = (type(self.calendarEvents) == "table" and #self.calendarEvents > 0)
@@ -6023,17 +6034,21 @@ function Clan:Init()
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
         C_Timer.After(6, function()
             Clan.activeScopeToken = ComputeGuildScopeToken()
-            Clan:AutoDetectMyProfessions(false)
-            Clan:SendVersionHello()
-            Clan:ApplyAutoInstanceStatus()
-            Clan:CheckAutoCloseFullDungeonLFG()
-            Clan:RefreshGameCalendar(false)
-            if ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
-                Clan:RequestIntelSync()
+            if not Compat.IsModuleEnabled or Compat.IsModuleEnabled("clan") then
+                Clan:AutoDetectMyProfessions(false)
+                Clan:SendVersionHello()
+                Clan:ApplyAutoInstanceStatus()
+                Clan:CheckAutoCloseFullDungeonLFG()
+                Clan:RefreshGameCalendar(false)
+                if ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
+                    Clan:RequestIntelSync()
+                end
             end
         end)
         C_Timer.After(12.5, function()
-            if ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
+            if (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("clan"))
+                and (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("buffs"))
+                and ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
                 Clan:RequestWorldBuffCatchup()
             end
         end)
@@ -6132,6 +6147,16 @@ function Clan:Init()
     ns.RegisterEvent(self, "LFG_LIST_SEARCH_RESULTS_RECEIVED", function()
         if Clan.ScanOfficialLfgResults then
             Clan:ScanOfficialLfgResults()
+        end
+    end)
+
+    ns:On("SETTINGS_UPDATED", function()
+        local s = ns.db and ns.db.settings
+        if s and (s.embedLfgWindow == false or s.globalChatLfgScan == false) then
+            if Clan.globalChatLFG and next(Clan.globalChatLFG) ~= nil then
+                wipe(Clan.globalChatLFG)
+                ns:Emit("CLAN_UPDATED")
+            end
         end
     end)
 

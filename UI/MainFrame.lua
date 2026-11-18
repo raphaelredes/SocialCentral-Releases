@@ -171,13 +171,24 @@ local function SafeTextMatches(query, ...)
 end
 
 local function IsTabAllowed(tabId)
-    if tabId == "clan" and Compat and Compat.ShouldShowGuildFeatures and not Compat.ShouldShowGuildFeatures() then
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled(tabId) then
         return false
     end
     if not (embeddedState.active and embeddedState.allowedSet) then
         return true
     end
     return embeddedState.allowedSet[tabId] == true
+end
+
+local HUB_FALLBACK_ORDER = { "watchlist", "social", "clan", "nearby", "alts", "group", "chat", "buffs" }
+
+local function PickFirstAllowedTab()
+    for _, id in ipairs(HUB_FALLBACK_ORDER) do
+        if IsTabAllowed(id) then
+            return id
+        end
+    end
+    return nil
 end
 
 local function IsSingleTabEmbedded()
@@ -6863,14 +6874,17 @@ local function BuildMainFrame()
                 local addRadio = root.CreateRadio or root.CreateCheckbox
                 local addCheck = root.CreateCheckbox or addRadio
                 root:CreateTitle(L["Filters"])
+                local showGuildFilt = (not Compat or not Compat.ShouldShowGuildFeatures) or Compat.ShouldShowGuildFeatures()
                 for _, def in ipairs(filterDefs) do
                     local id = def.id
-                    addRadio(root, def.label, function()
-                        return socialFilter == id
-                    end, function()
-                        socialFilter = id
-                        UI:Refresh(true)
-                    end)
+                    if id ~= "guild" or showGuildFilt then
+                        addRadio(root, def.label, function()
+                            return socialFilter == id
+                        end, function()
+                            socialFilter = id
+                            UI:Refresh(true)
+                        end)
+                    end
                 end
                 root:CreateDivider()
                 addCheck(root, L["Show Offline Friends"], function()
@@ -7539,8 +7553,8 @@ function UI:Refresh(resetScroll)
     if not frame or not frame:IsShown() then
         return
     end
-    if activeTab == "clan" and not IsTabAllowed("clan") then
-        activeTab = "watchlist"
+    if not IsTabAllowed(activeTab) then
+        activeTab = PickFirstAllowedTab() or "social"
         if TriggerTabRefresh then
             TriggerTabRefresh(activeTab)
         end
@@ -8557,8 +8571,10 @@ function UI:ShowHub(defaultTab)
     RestoreStandalonePlacement()
     frame:SetFrameStrata("HIGH")
     frame:SetFrameLevel(600)
-    if defaultTab and tabButtons[defaultTab] then
+    if defaultTab and tabButtons[defaultTab] and IsTabAllowed(defaultTab) then
         activeTab = defaultTab
+    elseif not IsTabAllowed(activeTab) then
+        activeTab = PickFirstAllowedTab() or activeTab
     end
     local wasShown = frame:IsShown()
     TriggerTabRefresh(activeTab)
@@ -8587,6 +8603,10 @@ function UI:Hide()
 end
 
 function UI:OpenTab(tabId)
+    if tabId and Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled(tabId) then
+        ns:Print("%s", L["This module is disabled in Settings."])
+        return
+    end
     if not frame then
         BuildMainFrame()
     end

@@ -157,7 +157,8 @@ function Group:Scan()
                     end
                 end
 
-                if not isMe and Store and Store.RecordCompanion then
+                local groupModOn = not (ns.db and ns.db.settings and ns.db.settings.moduleGroupEnabled == false)
+                if groupModOn and not isMe and Store and Store.RecordCompanion then
                     local compKey = guid or parsed.lookupKey
                     local compSig = tostring(role or "") .. "|" .. tostring(currentZone or "") .. "|" .. tostring(item.level or 0)
                     local nowComp = GetTime and GetTime() or 0

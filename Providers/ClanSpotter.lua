@@ -799,12 +799,13 @@ local function IsStanceAllowed(stance, key)
     end
     local s = ns.db and ns.db.settings
     if not s or s.spotterEnabled == false then return false end
-    if stance == "ENEMY" then return s.spotterNotifyEnemy ~= false end
+    local clanModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("clan")
+    if stance == "ENEMY" then return clanModOn and s.spotterNotifyEnemy ~= false end
     if stance == "BLOCKED" then return s.spotterNotifyBlocked ~= false end
-    if stance == "WATCHLIST" then return s.spotterNotifyWatchlist ~= false end
+    if stance == "WATCHLIST" then return (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("watchlist")) and s.spotterNotifyWatchlist ~= false end
     if stance == "FRIEND" then return s.spotterNotifyFriends ~= false end
-    if stance == "ALLY" then return s.spotterNotifyAlly ~= false end
-    if stance == "SAME" then return s.spotterNotifySameClan == true end
+    if stance == "ALLY" then return clanModOn and s.spotterNotifyAlly ~= false end
+    if stance == "SAME" then return clanModOn and s.spotterNotifySameClan == true end
     return false
 end
 
@@ -1556,12 +1557,13 @@ local function ShouldNotifyStance(stance, key)
     end
     local s = ns.db and ns.db.settings
     if not s or s.spotterEnabled == false then return false end
-    if stance == "ENEMY" then return s.spotterNotifyEnemy ~= false end
+    local clanModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("clan")
+    if stance == "ENEMY" then return clanModOn and s.spotterNotifyEnemy ~= false end
     if stance == "BLOCKED" then return s.spotterNotifyBlocked ~= false end
-    if stance == "WATCHLIST" then return s.spotterNotifyWatchlist ~= false end
+    if stance == "WATCHLIST" then return (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("watchlist")) and s.spotterNotifyWatchlist ~= false end
     if stance == "FRIEND" then return s.spotterNotifyFriends ~= false end
-    if stance == "ALLY" then return s.spotterNotifyAlly ~= false end
-    if stance == "SAME" then return s.spotterNotifySameClan == true end
+    if stance == "ALLY" then return clanModOn and s.spotterNotifyAlly ~= false end
+    if stance == "SAME" then return clanModOn and s.spotterNotifySameClan == true end
     return false
 end
 

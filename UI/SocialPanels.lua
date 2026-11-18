@@ -1208,7 +1208,8 @@ function SocialPanels:CreateGroupPanel(parent)
                 local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and ns.Social:GetBNetLinkInfo(rKey)
                 local isCrossFac = (row._item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
                 local bnetName = row._item.bnetName or (bInfo and bInfo.bnetName)
-                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, row._item.bnetAccountID or (bInfo and bInfo.bnetAccountID))
+                local chatModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
+                local scConfirmed = chatModOn and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, row._item.bnetAccountID or (bInfo and bInfo.bnetAccountID))
                 if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
                     ns.Chat:OpenDirectConversation({
                         targetName = rKey,
@@ -1236,7 +1237,9 @@ function SocialPanels:CreateGroupPanel(parent)
                 local bnetId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
                 MenuUtil.CreateContextMenu(self, function(_, root)
                     root:CreateTitle(item.displayName or "")
-                    if not item.isMe and item.displayName and ns.Spotter and ns.Spotter.TrackPlayer then
+                    local radarModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("radar")
+                    local chatModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
+                    if radarModOn and not item.isMe and item.displayName and ns.Spotter and ns.Spotter.TrackPlayer then
                         local isTracked = ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(item.displayName, item.guid)
                         if isTracked and ns.Spotter.UntrackPlayer then
                             root:CreateButton(L["Untrack from Radar"], function()
@@ -1248,7 +1251,7 @@ function SocialPanels:CreateGroupPanel(parent)
                             end)
                         end
                     end
-                    local scConfirmed = (not item.isMe) and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetId)
+                    local scConfirmed = chatModOn and (not item.isMe) and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetId)
                     if scConfirmed then
                         root:CreateButton(L["Whisper in SocialCentral"], function()
                             if ns.Chat and ns.Chat.OpenDirectConversation then
@@ -1690,7 +1693,8 @@ local function OpenNewDirectChatModal()
                 or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(item.lookupKey or item.displayName, item.guid, item.bnetAccountID))
                 or (ns.Chat and ns.Chat.GetKnownCharacterFaction and ns.Chat:GetKnownCharacterFaction(item.lookupKey or item.displayName, item.guid, item.bnetAccountID))
             local facIco = (Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
-            local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or item.displayName, item.bnetAccountID)
+            local chatModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
+            local scConfirmed = chatModOn and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or item.displayName, item.bnetAccountID)
             local scTag = scConfirmed and " |cff3fb950[SC]|r" or ""
             r.name:SetText(facIco .. hex .. disp .. "|r" .. scTag)
 
@@ -1846,13 +1850,16 @@ function SocialPanels:CreateChatPanel(parent)
         if MenuUtil and MenuUtil.CreateContextMenu then
             MenuUtil.CreateContextMenu(self, function(_, root)
                 root:CreateTitle(L["Filters"])
+                local showGuildChatFilt = (not Compat or not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("clan")
                 for _, def in ipairs(filterDefs) do
-                    root:CreateRadio(def.label, function()
-                        return panel._filter == def.id
-                    end, function()
-                        panel._filter = def.id
-                        panel:Refresh(true)
-                    end)
+                    if (def.id ~= "guild" and def.id ~= "alliance") or showGuildChatFilt then
+                        root:CreateRadio(def.label, function()
+                            return panel._filter == def.id
+                        end, function()
+                            panel._filter = def.id
+                            panel:Refresh(true)
+                        end)
+                    end
                 end
             end)
         else
@@ -3124,6 +3131,7 @@ function SocialPanels:CreateChatPanel(parent)
             for idx, tpl in ipairs(list) do
                 root:CreateButton(tpl, function()
                     if key and ns.Chat:SendOrOpenReply(key, tpl, true) then
+                        replyInput:SetText("")
                         if panel._drafts then
                             panel._drafts[key] = nil
                         end
@@ -3370,7 +3378,8 @@ function SocialPanels:CreateChatPanel(parent)
                 panel._drafts[panel._lastDraftThreadKey] = (prevText ~= "") and prevText or nil
             end
             panel._lastDraftThreadKey = activeKeyNow
-            if not (ns.Chat and ns.Chat.pendingDraftText) then
+            local hasMatchingPending = ns.Chat and ns.Chat.pendingDraftText and ((not ns.Chat.pendingDraftThreadKey) or ns.Chat.pendingDraftThreadKey == activeKeyNow)
+            if not hasMatchingPending then
                 replyInput:SetText((activeKeyNow and panel._drafts[activeKeyNow]) or "")
             end
         end
@@ -3657,13 +3666,13 @@ function SocialPanels:CreateChatPanel(parent)
             officialBar:Hide()
             composer:Show()
             btnQuickReply:SetEnabled(true)
-            if (isNotes or isRoom or pState.verified or isAlliance) and not isBNetRedirectActive and not isAltRedirectActive then
-                if ns.Chat and ns.Chat.focusInputPending then
-                    ns.Chat.focusInputPending = nil
-                    if replyInput and replyInput.SetFocus then
-                        replyInput:SetFocus()
-                    end
+            if ns.Chat and ns.Chat.focusInputPending then
+                ns.Chat.focusInputPending = nil
+                if replyInput and replyInput.SetFocus then
+                    replyInput:SetFocus()
                 end
+            end
+            if (isNotes or isRoom or pState.verified or isAlliance) and not isBNetRedirectActive and not isAltRedirectActive then
                 btnSend:SetEnabled(true)
                 btnSend._isBNetSend = false
                 SyncSendButtonVisual()
@@ -3698,9 +3707,10 @@ function SocialPanels:CreateChatPanel(parent)
             replyInput:ClearAllPoints()
             replyInput:SetPoint("LEFT", 0, 0)
             replyInput:SetPoint("RIGHT", btnQuickReply, "LEFT", -6, 0)
-            if ns.Chat and ns.Chat.pendingDraftText then
+            if ns.Chat and ns.Chat.pendingDraftText and ((not ns.Chat.pendingDraftThreadKey) or ns.Chat.pendingDraftThreadKey == activeKey) then
                 local draft = ns.Chat.pendingDraftText
                 ns.Chat.pendingDraftText = nil
+                ns.Chat.pendingDraftThreadKey = nil
                 replyInput:SetText(draft)
                 if replyInput.SetCursorPosition then
                     replyInput:SetCursorPosition(#draft)

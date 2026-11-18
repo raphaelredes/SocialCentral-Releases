@@ -625,6 +625,7 @@ end
 
 --- Lightweight O(1) update for currency, XP, level, and zone without scanning containers or skills.
 function Alts:UpdateScalars()
+    if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then return end
     if not (ns.db and ns.db.alts) then return end
     local key = CurrentAltKey()
     local rec = key and ns.db.alts[key]
@@ -666,6 +667,9 @@ end
 
 --- Debounced full alt snapshot so rapid bag/equipment/skill events coalesce cleanly.
 function Alts:QueueSnapshot(includeBank, delay)
+    if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then
+        return
+    end
     if includeBank then
         self._pendingIncludeBank = true
     end
@@ -990,7 +994,7 @@ local itemTooltipRegistered = false
 local function AppendAltItemTooltip(tooltip, data)
     if not tooltip or (tooltip ~= GameTooltip and tooltip ~= ItemRefTooltip) then return end
     if tooltip.IsForbidden and tooltip:IsForbidden() then return end
-    if ns.db and ns.db.settings and ns.db.settings.tooltipItemAlts == false then return end
+    if ns.db and ns.db.settings and (ns.db.settings.embedCharacterWindow == false or ns.db.settings.tooltipItemAlts == false) then return end
 
     local itemID = (type(data) == "table" and tonumber(data.id)) or nil
     if (not itemID or itemID <= 0) and tooltip.GetItem then
@@ -1101,6 +1105,9 @@ end
 function Alts:Init()
     RegisterItemTooltipIntegration()
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then
+            return
+        end
         local curKey = CurrentAltKey()
         if ns.db and ns.db.alts and curKey and not ns.db.alts[curKey] then
             self:Snapshot(false)
@@ -1190,6 +1197,9 @@ function Alts:Init()
     end
 
     ns.RegisterEvent(self, "BAG_UPDATE", function(_, _, bagId)
+        if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then
+            return
+        end
         self._sawBagUpdateEvent = true
         local b = tonumber(bagId)
         if b and b >= 0 and b <= 4 then
@@ -1201,6 +1211,9 @@ function Alts:Init()
     end)
 
     ns.RegisterEvent(self, "BAG_UPDATE_DELAYED", function()
+        if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then
+            return
+        end
         if not self._sawBagUpdateEvent then
             self._dirtyBagsAll = true
         end

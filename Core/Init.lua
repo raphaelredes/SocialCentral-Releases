@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.15"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.15" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.16"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.16" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -153,6 +153,12 @@ local DEFAULTS = {
         embedCharacterWindow = true, -- integrate My Alts side-tab inside Character window (C)
         embedWorldMap = true,       -- integrate World Buffs badge & pins inside World Map (M)
         hideGuildFeaturesWhenNoGuild = true, -- automatically hide guild tabs/options when current character has no guild
+        moduleWatchlistEnabled = true, -- master toggle for Watchlist module
+        moduleNearbyEnabled = true,    -- master toggle for Friendly Nearby passive module
+        moduleChatEnabled = true,      -- master toggle for Conversations & Addon Chat module
+        moduleGroupEnabled = true,     -- master toggle for Group & Recent Companions module
+        doNotDisturb = false,          -- non-destructive master pause for all popups & alert chimes
+        autoSilenceInInstances = false, -- automatically pause social popups/chimes inside dungeons, raids & BGs
         spotterScoutAlert = true,   -- notify on shared Scout sighting alerts from guildmates
         tooltipItemAlts = true,     -- show alt bag/bank/equipped item counts inside item tooltips
         tooltipPlayerNotes = true,  -- show Social Card notes, red flags & companion context inside player tooltips
@@ -185,6 +191,17 @@ local DEFAULTS = {
     worldBuffsPersonal = {},       -- [charKey] = { saygeAt = ts, saygePlayed = playedSec }
 }
 
+local function DeepCopyValue(val)
+    if type(val) ~= "table" then
+        return val
+    end
+    local copy = {}
+    for k, v in pairs(val) do
+        copy[k] = DeepCopyValue(v)
+    end
+    return copy
+end
+
 local function ApplyDefaults(target, defaults)
     for k, v in pairs(defaults) do
         if type(v) == "table" then
@@ -196,6 +213,24 @@ local function ApplyDefaults(target, defaults)
     end
 end
 
+local function SyncRuntimeProfileVisuals()
+    for _, ev in ipairs({ "SETTINGS_UPDATED", "CLAN_UPDATED", "CHAT_UPDATED", "WATCHLIST_UPDATED", "NEARBY_UPDATED", "WORLD_BUFFS_UPDATED", "SOCIAL_UPDATED" }) do
+        ns:Emit(ev)
+    end
+    if ns.Theme and ns.Theme.NotifyChanged then
+        pcall(ns.Theme.NotifyChanged, ns.Theme)
+    end
+    if ns.Minimap and ns.Minimap.Update then
+        pcall(ns.Minimap.Update, ns.Minimap)
+    end
+    if ns.Settings and ns.Settings.Refresh then
+        pcall(ns.Settings.Refresh, ns.Settings)
+    end
+    if ns.UI and ns.UI.QueueRefresh then
+        ns.UI:QueueRefresh(false)
+    end
+end
+
 local boot = {}
 
 local function HandleSlash(raw)
@@ -204,14 +239,26 @@ local function HandleSlash(raw)
     cmd = (cmd or ""):lower()
 
     if cmd == "add" and rest ~= "" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("watchlist") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if ns.Watchlist and ns.Watchlist.Add then
             ns.Watchlist:Add(rest)
         end
     elseif (cmd == "check" or cmd == "who") and rest ~= "" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("watchlist") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if ns.Watchlist and ns.Watchlist.AddAndCheck then
             ns.Watchlist:AddAndCheck(rest)
         end
     elseif cmd == "check" or cmd == "who" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("watchlist") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if ns.Watchlist and ns.Watchlist.CheckNext then
             ns.Watchlist:CheckNext()
         end
@@ -238,6 +285,10 @@ local function HandleSlash(raw)
             ns.UI:OpenTab(cmd)
         end
     elseif cmd == "buffs" or cmd == "buff" or cmd == "wbuffs" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("buffs") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if rest == "report" or rest == "share" or rest == "chat" then
             if ns.WorldBuffs and ns.WorldBuffs.OpenChatAnnouncement then
                 ns.WorldBuffs:OpenChatAnnouncement()
@@ -253,6 +304,10 @@ local function HandleSlash(raw)
             end
         end
     elseif cmd == "al" or cmd == "alliance" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and (not ns.Compat.IsModuleEnabled("clan") or not ns.Compat.IsModuleEnabled("chat")) then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if rest and rest ~= "" then
             if ns.Chat and ns.Chat.SendAllianceMessage then
                 ns.Chat:SendAllianceMessage(rest)
@@ -280,11 +335,19 @@ local function HandleSlash(raw)
             ns.UI:Toggle()
         end
     elseif cmd == "radar" or cmd == "spotter" or cmd == "targets" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("radar") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then
             ns.SpotterHUD:Toggle()
         end
     elseif cmd == "toast" or cmd == "test" or cmd == "notify" then
         if rest == "radar" or rest == "hud" or rest == "spotter" then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("radar") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
             if ns.SpotterHUD and ns.SpotterHUD.Toggle then
                 ns.SpotterHUD:Toggle()
             end
@@ -302,19 +365,24 @@ local function HandleSlash(raw)
             ns.Settings:Open()
         end
     elseif cmd == "help" or cmd == "?" then
+        local function ModOn(m)
+            return not (ns.Compat and ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled(m)
+        end
         ns:Print("|cff58a6ffSocialCentral|r v%s", ns.version or "0.0.0")
         ns:Print("  |cffffd200/sc|r — %s", L["Settings"])
-        ns:Print("  |cffffd200/sc lfg|r — %s", L["Looking for Group (I)"])
-        ns:Print("  |cffffd200/sc chat|r — %s", L["Open Conversations"])
-        ns:Print("  |cffffd200/al <msg>|r — %s", L["Alliance / Clan Chat"])
-        ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"])
-        ns:Print("  |cffffd200/sc buffs|r — %s", L["World Buffs"])
-        ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"])
+        if ModOn("lfg") then ns:Print("  |cffffd200/sc lfg|r — %s", L["Looking for Group (I)"]) end
+        if ModOn("chat") then ns:Print("  |cffffd200/sc chat|r — %s", L["Open Conversations"]) end
+        if ModOn("clan") then ns:Print("  |cffffd200/al <msg>|r — %s", L["Alliance / Clan Chat"]) end
+        if ModOn("group") then ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"]) end
+        if ModOn("buffs") then ns:Print("  |cffffd200/sc buffs|r — %s", L["World Buffs"]) end
+        if ModOn("clan") then ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"]) end
         ns:Print("  |cffffd200/sc hub|r — %s", L["Unified Hub (/sc hub)"])
-        ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"])
+        if ModOn("radar") then ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"]) end
         ns:Print("  |cffffd200/sc toast [invite|friend|watchlist|buff|queue|clear]|r — %s", L["Test Notification Toast"])
-        ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
-        ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Watchlist character"])
+        if ModOn("watchlist") then
+            ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
+            ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Watchlist character"])
+        end
         ns:Print("  |cffffd200/sc resetpos|r — %s", L["Reset Window Positions"])
     else
         if ns.Settings and ns.Settings.Toggle then
@@ -352,9 +420,85 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.friendAlertAllMigrated = true
     end
+    ns._accountSettings = SocialCentralDB.settings
+    if SocialCentralCharDB.useCharProfile == true then
+        if type(SocialCentralCharDB.settings) ~= "table" then
+            SocialCentralCharDB.settings = DeepCopyValue(ns._accountSettings or DEFAULTS.settings)
+        else
+            ApplyDefaults(SocialCentralCharDB.settings, ns._accountSettings or DEFAULTS.settings)
+        end
+        SocialCentralDB.settings = SocialCentralCharDB.settings
+    end
     ns.db = SocialCentralDB
     ns.charDb = SocialCentralCharDB
     ns.UnregisterEvent(boot, "ADDON_LOADED")
+end)
+
+function ns:IsCharProfileEnabled()
+    return (SocialCentralCharDB and SocialCentralCharDB.useCharProfile == true) or false
+end
+
+function ns:SetCharProfileEnabled(enabled)
+    SocialCentralCharDB = SocialCentralCharDB or {}
+    local useChar = enabled and true or false
+    SocialCentralCharDB.useCharProfile = useChar
+    if useChar then
+        if type(SocialCentralCharDB.settings) ~= "table" or next(SocialCentralCharDB.settings) == nil then
+            SocialCentralCharDB.settings = DeepCopyValue(ns._accountSettings or DEFAULTS.settings)
+        else
+            ApplyDefaults(SocialCentralCharDB.settings, ns._accountSettings or DEFAULTS.settings)
+        end
+        if ns.db then
+            ns.db.settings = SocialCentralCharDB.settings
+        end
+    else
+        if ns.db and ns._accountSettings then
+            ns.db.settings = ns._accountSettings
+        end
+    end
+    SyncRuntimeProfileVisuals()
+end
+
+function ns:CopyAccountSettingsToChar()
+    if not ns:IsCharProfileEnabled() then
+        return false
+    end
+    SocialCentralCharDB = SocialCentralCharDB or {}
+    local src = ns._accountSettings or DEFAULTS.settings
+    SocialCentralCharDB.settings = DeepCopyValue(src)
+    ApplyDefaults(SocialCentralCharDB.settings, DEFAULTS.settings)
+    if ns.db then
+        ns.db.settings = SocialCentralCharDB.settings
+    end
+    SyncRuntimeProfileVisuals()
+    return true
+end
+
+function ns:ResetCurrentSettingsToDefaults()
+    local fresh = DeepCopyValue(DEFAULTS.settings)
+    if ns:IsCharProfileEnabled() then
+        SocialCentralCharDB = SocialCentralCharDB or {}
+        SocialCentralCharDB.settings = fresh
+        if ns.db then
+            ns.db.settings = SocialCentralCharDB.settings
+        end
+    else
+        if SocialCentralDB then
+            SocialCentralDB.settings = fresh
+        end
+        ns._accountSettings = fresh
+        if ns.db then
+            ns.db.settings = fresh
+        end
+    end
+    SyncRuntimeProfileVisuals()
+    return true
+end
+
+ns.RegisterEvent(boot, "PLAYER_LOGOUT", function()
+    if ns._accountSettings and SocialCentralDB then
+        SocialCentralDB.settings = ns._accountSettings
+    end
 end)
 
 ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
@@ -638,19 +782,43 @@ if EventRegistry and EventRegistry.RegisterCallback then
                 ns.UI:OpenUpdateModal()
             end
         elseif link:find("addon:SCentral:clanlfg", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("lfg") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
             ns:NavigateToModule("lfg", { clanRightView = "lfg" })
         elseif link:find("addon:SCentral:clanevt:", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("clan") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
             local eventId = link:match("addon:SCentral:clanevt:([^|]+)")
             ns:NavigateToModule("clan", { clanRightView = "events", eventId = eventId })
         elseif link:find("addon:SCentral:diplomacy", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("clan") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
             ns:NavigateToModule("diplomacy", { clanRightView = "diplomacy" })
         elseif link:find("addon:SCentral:buffs", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("buffs") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
             ns:NavigateToModule("buffs")
         elseif link:find("addon:SCentral:spotter", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("radar") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
             if ns.SpotterHUD and ns.SpotterHUD.Show then
                 ns.SpotterHUD:Show(true)
             end
         elseif link:find("addon:SCentral:target:", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("radar") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
             local targetKey = link:match("addon:SCentral:target:([^|]+)")
             if targetKey and targetKey ~= "" and ns.Spotter and ns.Spotter.FocusTarget then
                 ns.Spotter:FocusTarget(targetKey)

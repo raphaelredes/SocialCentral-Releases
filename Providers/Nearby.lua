@@ -238,6 +238,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
 end
 
 local function InspectUnit(unit, source, fromTicker)
+    if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then return end
     if not unit then return end
     local exists = Safe.Value(Safe.Call(UnitExists, unit))
     if exists ~= true then return end
@@ -342,6 +343,7 @@ local function InspectUnit(unit, source, fromTicker)
 end
 
 local function ScanGroup(fromTicker)
+    if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then return end
     if not Compat.IsInGroup() then return end
     local inCombat = (InCombatLockdown and InCombatLockdown()) or false
     if fromTicker and inCombat then return end
@@ -385,6 +387,7 @@ local LOCAL_PROXIMITY_CHAT_EVENTS = {
 local plateScanCursor = 0
 
 local function ScanActiveEnvironment(fromTicker)
+    if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then return end
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     local uiOpen = IsMainWindowOpen()
     local inInst, instType = Safe.Call(IsInInstance)
@@ -477,6 +480,7 @@ local function IsOpposingFactionChatSpeaker(cleanGuid, cleanSender)
 end
 
 local function OnChat(_, eventName, text, sender, ...)
+    if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then return end
     local cleanSender = Safe.String(sender)
     if not cleanSender then return end
     local guid = select(10, ...)
@@ -710,4 +714,9 @@ function Nearby:Init()
     }) do
         ns.RegisterEvent(self, chatEvent, OnChat)
     end
+    ns:On("SETTINGS_UPDATED", function()
+        if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false and Nearby.Clear then
+            Nearby:Clear()
+        end
+    end)
 end

@@ -742,7 +742,8 @@ local function CheckFriendOnlineTransitions(dirMap)
                     local didToast = false
                     local didChat = false
                     local didSound = false
-                    if settings.friendOnlineAlertToast ~= false then
+                    local focusSilenced = Compat.IsFocusSilenced and Compat.IsFocusSilenced()
+                    if (not focusSilenced) and settings.friendOnlineAlertToast ~= false then
                         ns:Emit("ADDON_MESSAGE_NOTIFY", {
                             id = "friend:" .. aKey .. ":" .. tostring(now),
                             kind = "FRIEND_ONLINE",
@@ -758,7 +759,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                         })
                         didToast = true
                     end
-                    if settings.friendOnlineAlertChat == true then
+                    if (not focusSilenced) and settings.friendOnlineAlertChat == true then
                         local hex = Compat.ClassHex(nextInfo.classFile)
                         local link = "|Haddon:SCentral:social:" .. shownName .. "|h|cff59c7ff[" .. L["Social"] .. "]|r|h"
                         local lineText = (nextInfo.area and nextInfo.area ~= "")
@@ -767,7 +768,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                         ns:Print("%s", lineText)
                         didChat = true
                     end
-                    if (didToast or didChat) and settings.friendOnlineAlertSound ~= false and PlaySound and SOUNDKIT then
+                    if (not focusSilenced) and (didToast or didChat) and settings.friendOnlineAlertSound ~= false and PlaySound and SOUNDKIT then
                         local sid = SOUNDKIT.MAP_PING or 3175
                         if sid then
                             pcall(PlaySound, sid, "Master")
@@ -812,7 +813,8 @@ local function CheckFriendOnlineTransitions(dirMap)
                         or (sources and sources.bnet and not (sources and sources.friend) and L["Battle.net"])
                         or L["Friend Offline"]
 
-                    if settings.friendOfflineAlertToast ~= false then
+                    local focusSilenced = Compat.IsFocusSilenced and Compat.IsFocusSilenced()
+                    if (not focusSilenced) and settings.friendOfflineAlertToast ~= false then
                         ns:Emit("ADDON_MESSAGE_NOTIFY", {
                             id = "friend:off:" .. oldKey .. ":" .. tostring(now),
                             kind = "FRIEND_OFFLINE",

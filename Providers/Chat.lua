@@ -70,7 +70,19 @@ local PEER_TTL_SECONDS = 60 * 86400
 local MAX_SAVED_PEERS = 500
 local DISCOVERY_PING_INTERVAL = 2.5
 local BNET_CACHE_TTL = 4.0
-local ERR_NOT_FOUND_PATTERN = _G.ERR_CHAT_PLAYER_NOT_FOUND_S and ("^" .. _G.ERR_CHAT_PLAYER_NOT_FOUND_S:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1"):gsub("%%%%s", ".*"))
+local function BuildNotFoundPattern(tmpl)
+    if type(tmpl) ~= "string" or tmpl == "" or not tmpl:find("%", 1, true) then
+        return nil
+    end
+    local escaped = tmpl:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1")
+    local pat = escaped:gsub("%%%%%d*%$?[sd]", ".*")
+    if pat == "" or pat == ".*" then
+        return nil
+    end
+    return "^" .. pat
+end
+
+local ERR_NOT_FOUND_PATTERN = BuildNotFoundPattern(_G.ERR_CHAT_PLAYER_NOT_FOUND_S)
 
 local STATIC_NONE_STATE = { state = "none", verified = false }
 local STATIC_ROOM_STATE = { state = "room", verified = true }
@@ -634,6 +646,9 @@ local function ShouldPlaySoundForThread(kind, threadKey)
 end
 
 local function PlayIncomingChime(kind, threadKey, viaAddon)
+    if (ns.db and ns.db.settings and ns.db.settings.moduleChatEnabled == false) or (Compat.IsFocusSilenced and Compat.IsFocusSilenced()) then
+        return
+    end
     if not ShouldPlaySoundForThread(kind, threadKey) then
         return
     end
@@ -3168,7 +3183,30 @@ end
 
 function Chat:IsDirectChatEnabled()
     local s = ns.db and ns.db.settings
-    return not (s and s.addonDirectChat == false)
+    return not (s and (s.moduleChatEnabled == false or s.addonDirectChat == false))
+end
+
+function Chat:ClearTemporaryOffline(threadKey)
+    local t = threadKey and self.threads and self.threads[threadKey]
+    if not t then return false end
+    local cleared = false
+    if self.sessionOfflineChars then
+        local targets = { t.targetName, t.title }
+        for _, raw in ipairs(targets) do
+            if type(raw) == "string" and raw ~= "" then
+                local lk = Compat.ParseCharacterFields(raw)
+                if lk and self.sessionOfflineChars[lk] then
+                    self.sessionOfflineChars[lk] = nil
+                    cleared = true
+                end
+            end
+        end
+    end
+    if cleared then
+        self:BumpPeerStateGen()
+        ns:Emit("CHAT_UPDATED")
+    end
+    return cleared
 end
 
 local function NextMsgId()
@@ -4680,6 +4718,7 @@ function Chat:SendDirectMessage(threadKey, rawText)
                 Chat:BumpPeerStateGen()
                 if not Chat.pendingDraftText or Chat.pendingDraftText == "" then
                     Chat.pendingDraftText = rawText
+                    Chat.pendingDraftThreadKey = t.key
                 end
                 Chat.focusInputPending = true
                 AppendMessage(t, L["System"], string.format(L["No addon reply from %s — switched to standard WoW whisper for your next send."], peerDisp), false, nil, true, true, {
@@ -4954,6 +4993,7 @@ local function EnsureIncomingDirectThread(senderRaw, bnGameAccId)
 end
 
 local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
+    if ns.db and ns.db.settings and ns.db.settings.moduleChatEnabled == false then return end
     local payload = Safe.String(payloadRaw)
     if not payload or payload == "" then return end
 
@@ -5301,6 +5341,9 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             map[parsed.lookupKey] = nowSeen
         end
         local monoNow = GetTime and GetTime() or 0
+        if Chat.sessionOfflineChars then
+            Chat.sessionOfflineChars[parsed.lookupKey] = nil
+        end
         local manualRec
         if (not incoming) and Chat.lastManualWhisperSend and (monoNow - (Chat.lastManualWhisperSend.sentAt or 0)) <= 8.0 then
             local r = Chat.lastManualWhisperSend
@@ -5309,6 +5352,8 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
                 or ((not parsed.surname) and rFirst and parsed.firstName and rFirst:lower() == parsed.firstName:lower())
             then
                 manualRec = r
+                manualRec.delivered = true
+                Chat.lastManualWhisperSend = nil
             end
         end
 
@@ -5327,6 +5372,9 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
         local peerDispResolved = (manualRec and manualRec.targetDisplay)
             or ResolveChatSenderDisplay(parsed.displayName, guid, linked and linked.targetName or nil)
         local peerParsed = Compat.ParseCharacterName(peerDispResolved) or parsed
+        if Chat.sessionOfflineChars and peerParsed and peerParsed.lookupKey then
+            Chat.sessionOfflineChars[peerParsed.lookupKey] = nil
+        end
         local key = (linked and linked.key) or ("w:" .. peerParsed.lookupKey)
         local kind = (linked and linked.kind) or "WHISPER"
         local title = (linked and linked.title and linked.title ~= "" and linked.title) or peerParsed.displayName
@@ -5384,6 +5432,8 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             local r = Chat.lastManualBNetSend
             if (r.bnetAccountID and r.bnetAccountID == resolvedBNetId) or (r.threadKey and Chat.threads[r.threadKey]) then
                 manualBnRec = r
+                manualBnRec.delivered = true
+                Chat.lastManualBNetSend = nil
             end
         end
         local linked = (manualBnRec and manualBnRec.threadKey and Chat.threads[manualBnRec.threadKey])
@@ -5555,11 +5605,31 @@ function Chat:Init()
         end)
     end
 
+    local function ClearOfflineForLiveSocial()
+        if not (Chat.sessionOfflineChars and next(Chat.sessionOfflineChars) ~= nil) then
+            return
+        end
+        local changed = false
+        local byLk = ns.Store and ns.Store.socialByLookup
+        for lk in pairs(Chat.sessionOfflineChars) do
+            local socRow = byLk and byLk[lk]
+            if (socRow and socRow.online == true) or select(1, FindBNetWoWGameAccountByChar({ lookupKey = lk })) == true then
+                Chat.sessionOfflineChars[lk] = nil
+                changed = true
+            end
+        end
+        if changed then
+            Chat:BumpPeerStateGen()
+            QueueChatEmit(0.1)
+        end
+    end
+
     for _, ev in ipairs({
         "FRIENDLIST_UPDATE",
         "GUILD_ROSTER_UPDATE",
     }) do
         ns.RegisterEvent(self, ev, function()
+            ClearOfflineForLiveSocial()
             local nowClock = GetTime and GetTime() or 0
             if not self._lastThreadReconcileAt or (nowClock - self._lastThreadReconcileAt) >= 8 then
                 self._lastThreadReconcileAt = nowClock
@@ -5571,6 +5641,7 @@ function Chat:Init()
 
     if ns.On then
         ns:On("SOCIAL_UPDATED", function()
+            ClearOfflineForLiveSocial()
             local nowClock = GetTime and GetTime() or 0
             if not self._lastSocialConsolidateAt or (nowClock - self._lastSocialConsolidateAt) >= 5 then
                 self._lastSocialConsolidateAt = nowClock
@@ -5580,22 +5651,37 @@ function Chat:Init()
     end
 
     if not ERR_NOT_FOUND_PATTERN and _G.ERR_CHAT_PLAYER_NOT_FOUND_S then
-        ERR_NOT_FOUND_PATTERN = "^" .. _G.ERR_CHAT_PLAYER_NOT_FOUND_S:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1"):gsub("%%%%s", ".*")
+        ERR_NOT_FOUND_PATTERN = BuildNotFoundPattern(_G.ERR_CHAT_PLAYER_NOT_FOUND_S)
+    end
+
+    local function CancelPendingDeliveryForThread(threadKey)
+        if not (threadKey and Chat.deliveryIndex) then return end
+        for msgId, dRec in pairs(Chat.deliveryIndex) do
+            if type(dRec) == "table" and dRec.threadKey == threadKey then
+                Chat.deliveryIndex[msgId] = nil
+            end
+        end
     end
 
     local function RecoverManualWhisperSend(reasonTag)
         local rec = Chat.lastManualWhisperSend
         if type(rec) ~= "table" then return false end
+        if rec.delivered == true then
+            Chat.lastManualWhisperSend = nil
+            return false
+        end
         local monoNow = GetTime and GetTime() or 0
         if (monoNow - (rec.sentAt or 0)) > 4.0 then
             Chat.lastManualWhisperSend = nil
             return false
         end
         Chat.lastManualWhisperSend = nil
+        CancelPendingDeliveryForThread(rec.threadKey)
         local t = rec.threadKey and Chat.threads[rec.threadKey]
         if not t then return false end
 
         Chat.pendingDraftText = rec.text
+        Chat.pendingDraftThreadKey = rec.threadKey
         Chat.focusInputPending = true
         local notice
         if reasonTag == "ignored" then
@@ -5610,6 +5696,34 @@ function Chat:Init()
         return true
     end
 
+    local function RecoverManualBNetSend(reasonTag)
+        local rec = Chat.lastManualBNetSend
+        if type(rec) ~= "table" then return false end
+        if rec.delivered == true then
+            Chat.lastManualBNetSend = nil
+            return false
+        end
+        local monoNow = GetTime and GetTime() or 0
+        if (monoNow - (rec.sentAt or 0)) > 4.0 then
+            Chat.lastManualBNetSend = nil
+            return false
+        end
+        Chat.lastManualBNetSend = nil
+        local t = rec.threadKey and Chat.threads[rec.threadKey]
+        if not t then return false end
+
+        Chat.pendingDraftText = rec.text
+        Chat.pendingDraftThreadKey = rec.threadKey
+        Chat.focusInputPending = true
+        local label = t.title or rec.targetDisplay or "?"
+        local notice = (reasonTag == "ignored")
+            and string.format(L["Not delivered — %s appears to be ignoring your whispers. Draft restored."], label)
+            or string.format(L["Not delivered — %s appears offline or unreachable. Draft restored."], label)
+        AppendMessage(t, L["System"], notice, false, nil, true, true, { isStatusNotice = true })
+        ns:Emit("CHAT_UPDATED")
+        return true
+    end
+
     ns.RegisterEvent(self, "CHAT_MSG_IGNORED", function()
         RecoverManualWhisperSend("ignored")
     end)
@@ -5618,12 +5732,26 @@ function Chat:Init()
     ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, msgRaw)
         if Safe.IsSecret(msgRaw) then return end
         local monoNow = GetTime and GetTime() or 0
-        local hasManual = type(Chat.lastManualWhisperSend) == "table" and (monoNow - (Chat.lastManualWhisperSend.sentAt or 0)) <= 4.0
-        if not hasManual and (monoNow - (Chat._lastCandidateTrackAt or 0)) > 10 then return end
+        local hasManual = type(Chat.lastManualWhisperSend) == "table"
+            and Chat.lastManualWhisperSend.delivered ~= true
+            and (monoNow - (Chat.lastManualWhisperSend.sentAt or 0)) <= 4.0
+        local hasManualBNet = type(Chat.lastManualBNetSend) == "table"
+            and Chat.lastManualBNetSend.delivered ~= true
+            and (monoNow - (Chat.lastManualBNetSend.sentAt or 0)) <= 4.0
+        if not hasManual and not hasManualBNet and (monoNow - (Chat._lastCandidateTrackAt or 0)) > 10 then return end
 
         local msg = Safe.String(msgRaw)
         if not msg or msg == "" then return end
         local lowerMsg = msg:lower()
+        -- Never misclassify content/profanity moderation notices as offline/player-not-found errors.
+        if lowerMsg:find("inappropriat", 1, true)
+            or lowerMsg:find("inapropriad", 1, true)
+            or lowerMsg:find("inapropiad", 1, true)
+            or lowerMsg:find("profan", 1, true)
+            or lowerMsg:find("censur", 1, true)
+        then
+            return
+        end
         local looksIgnored = lowerMsg:find("is ignoring you", 1, true)
             or lowerMsg:find("está ignorando", 1, true)
             or lowerMsg:find("te está ignorando", 1, true)
@@ -5639,13 +5767,33 @@ function Chat:Init()
             local rec = Chat.lastManualWhisperSend
             local cand = rec.targetStr
             local candLow = cand and cand:lower()
-            if candLow and (lowerMsg:find(candLow, 1, true) or (candLow:find("-", 1, true) and lowerMsg:find((candLow:gsub("%-", " ")), 1, true)) or (monoNow - (rec.sentAt or 0)) <= 2.5) then
+            local matchedTarget = false
+            if candLow and candLow ~= "" then
+                if lowerMsg:find(candLow, 1, true) then
+                    matchedTarget = true
+                elseif candLow:find("-", 1, true) and lowerMsg:find((candLow:gsub("%-", " ")), 1, true) then
+                    matchedTarget = true
+                end
+            end
+            if matchedTarget then
                 if looksNotFound and rec.lookupKey then
                     Chat.sessionOfflineChars = Chat.sessionOfflineChars or {}
                     Chat.sessionOfflineChars[rec.lookupKey] = monoNow + 60
                     Chat:BumpPeerStateGen()
                 end
                 RecoverManualWhisperSend(looksIgnored and "ignored" or "offline")
+            end
+        end
+
+        if hasManualBNet then
+            local brec = Chat.lastManualBNetSend
+            local bDisp = brec.targetDisplay and brec.targetDisplay:lower()
+            local bThread = brec.threadKey and Chat.threads[brec.threadKey]
+            local bNameLow = bThread and bThread.bnetName and bThread.bnetName:lower()
+            if (bDisp and bDisp ~= "" and lowerMsg:find(bDisp, 1, true))
+                or (bNameLow and bNameLow ~= "" and lowerMsg:find(bNameLow, 1, true))
+            then
+                RecoverManualBNetSend(looksIgnored and "ignored" or "offline")
             end
         end
 

@@ -1886,7 +1886,7 @@ end
 
 function Compat.IsWindowIntegrationEnabled(winKey)
     local s = ns.db and ns.db.settings
-    if winKey == "O" or winKey == "social" or winKey == "watchlist" or winKey == "nearby" or winKey == "chat" then
+    if winKey == "O" or winKey == "social" then
         return not s or s.embedSocialWindow ~= false
     elseif winKey == "I" or winKey == "lfg" then
         return not s or s.embedLfgWindow ~= false
@@ -1901,4 +1901,56 @@ function Compat.IsWindowIntegrationEnabled(winKey)
         return not s or s.embedWorldMap ~= false
     end
     return true
+end
+
+function Compat.IsModuleEnabled(modKey)
+    local s = ns.db and ns.db.settings
+    local m = type(modKey) == "string" and modKey:lower() or ""
+    if m == "watchlist" then
+        return not s or s.moduleWatchlistEnabled ~= false
+    elseif m == "nearby" then
+        return not s or s.moduleNearbyEnabled ~= false
+    elseif m == "chat" or m == "rooms" then
+        return not s or s.moduleChatEnabled ~= false
+    elseif m == "group" then
+        return not s or s.moduleGroupEnabled ~= false
+    elseif m == "radar" or m == "spotter" or m == "targets" then
+        return not s or s.spotterEnabled ~= false
+    elseif m == "alts" or m == "c" then
+        return not s or s.embedCharacterWindow ~= false
+    elseif m == "buffs" or m == "m" then
+        return not s or s.embedWorldMap ~= false
+    elseif m == "lfg" or m == "i" then
+        return not s or s.embedLfgWindow ~= false
+    elseif m == "clan" or m == "guild" or m == "diplomacy" or m == "j" then
+        if s and s.embedGuildWindow == false then
+            return false
+        end
+        return Compat.ShouldShowGuildFeatures()
+    elseif m == "social" or m == "o" then
+        return not s or s.embedSocialWindow ~= false
+    end
+    return true
+end
+
+function Compat.GetFocusSilenceReason()
+    local s = ns.db and ns.db.settings
+    if not s then return nil end
+    if s.doNotDisturb == true then
+        return "dnd"
+    end
+    if s.autoSilenceInInstances == true and IsInInstance then
+        local ok, inInst, instType = pcall(IsInInstance)
+        if ok and Safe and Safe.Value(inInst) == true then
+            local t = Safe.String(instType)
+            if t and t ~= "none" then
+                return "instance"
+            end
+        end
+    end
+    return nil
+end
+
+function Compat.IsFocusSilenced()
+    return Compat.GetFocusSilenceReason() ~= nil
 end
