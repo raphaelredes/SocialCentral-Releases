@@ -5,6 +5,21 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-11-19
+### Fixed
+- **Standalone Blizzard Chrome Header/Portrait, 1:1 Resize Anchor & Side-Tab Recovery (`UI/MainFrame.lua`, `UI/LFGFrameTab.lua`, `scripts/verify-compliance.py`):**
+  - Elevated `SocialCentralBlizzChrome` (`baseLevel + 1`), `Inset` (`+2`), `NineSlice` (`+5`), `TitleContainer` (`+10`), `PortraitContainer` (`+12`), and `PortraitOverlay` (`+13`) strictly above `frame._solidOpaqueBg` (inset `(5, -24, -5, 5)` in Blizzard standalone theme) so the portrait icon, title bar, and top frame border are never occluded by the opaque window backdrop.
+  - Pinned the opposite window corner (`TOPLEFT` for `BOTTOMRIGHT`/`RIGHT`/`BOTTOM`, `TOPRIGHT` for `BOTTOMLEFT`) before calling `StartSizing` and restored saved `CENTER` placement on release, eliminating 2x symmetric cursor drift and edge jumping when resizing the standalone window.
+  - Moved `IsSafeUiObj` ahead of `DiscoverRightSideTabs` in `UI/LFGFrameTab.lua` (fixing missing SocialCentral side tabs across `O`, `I`, `J`, `C`) and added an automated top-level `local function` forward-call detector across all Lua files in `scripts/verify-compliance.py`.
+- **Cross-Window & All-Tab UI Layering (`Z-Order`) Fix (`UI/Theme.lua`, `UI/MainFrame.lua`, `UI/SocialPanels.lua`):**
+  - Added unified `Theme:SyncButtonLayers` (synchronizing `_blizzTabFrame`/`_blizzBtn` and `_textLayer` frame levels across `ApplyButtonColors`, `OnShow`, `SetButtonText`, and `SetButtonActive`), `SyncScrollListLayers` inside `Theme:CreateScrollList`, and depth-12 `UI:SyncFrameSectionLayers` across `ApplyTheme`, `UI:Refresh`, `UI:ShowHub`, `UI:OpenTab`, `UI:OpenEmbedded`, and `ApplySingleEmbedTheme`.
+  - Eliminated occluded/missing button/tab text labels (`Social`, `Conversas`, `Guilda`, `Grupo`, `Por Perto`, `Configurações`) and missing conversation rows/controls inside `Conversas` (routing `chatPanel` through `SyncFramePanelAttachment`), while preserving search box/scroll/close-button relative layers via explicit `_scLevelOffset` and `_scSkipLayerSync`/`_scIsInternalBtnLayer`/`_scIsInputBackdrop` guards.
+- **Primary Native Tab (`Tab 1`) 1st-Click Return Across `C` (`CharacterFrame`), `O`, `I`, and `J` (`UI/LFGFrameTab.lua`, `UI/MainFrame.lua`):**
+  - Upgraded `DiscoverRightSideTabs` to merge all tab pools, global tab arrays, and depth-3 right-edge children; kept Blizzard-disabled active native tabs clickable via `SetEnabled(true)` while dimmed (without ever calling `SetChecked(false)`); added unified `HookNativeHostTab` (`OnMouseDown` + `OnClick` + `OnMouseUp` + child buttons) across all four hosts; and released alpha-hidden `CharacterFrame` subframes (`ReleaseAlphaHiddenCharacterSubframesForTabClick`) immediately on `OnMouseDown` so clicking the 1st official tab switches back immediately on the very first click while preserving 2nd-press shortcut close.
+- **Social (`O`) & Unified 4-Host (`O`, `I`, `J`, `C`) 2nd-Press Shortcut Close Fix (`UI/LFGFrameTab.lua`, `scripts/verify-compliance.py`):**
+  - Replaced destructive logical `nt:SetChecked(false)` mutations across embedded native host tabs (`SocialUIFrame`/`FriendsFrame`, `LFGParentFrame`, `CommunitiesFrame`, `CharacterFrame`) with visual-only selection-texture dimming (`DimNativeTabSelectionVisual` + `EnsureClickedNativeTabRemainsChecked` click guard), so pressing `O` (and `I`, `J`, `C`) a second time while SocialCentral's tab is active immediately closes Blizzard's window instead of switching back to Blizzard's default tab and requiring a third keypress.
+  - Added automated static checks in `scripts/verify-compliance.py` enforcing native-tab toggle preservation and host subframe state across all four integrated shortcut windows (`O`, `I`, `J`, `C`).
+
 ## [0.2.19] - 2026-11-19
 ### Added & Improved
 - **First-Time Official Shortcut Auto-Open Choice & Settings (`Core/Init.lua`, `UI/LFGFrameTab.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**

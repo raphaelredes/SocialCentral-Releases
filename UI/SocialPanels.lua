@@ -3529,6 +3529,7 @@ function SocialPanels:CreateChatPanel(parent)
         title = L["Jump to latest messages"],
     })
     btnScrollBottom:SetPoint("BOTTOMRIGHT", msgFrame, "BOTTOMRIGHT", -4, 4)
+    btnScrollBottom._scLevelOffset = 5
     btnScrollBottom:SetFrameLevel((msgFrame:GetFrameLevel() or 2) + 4)
     btnScrollBottom:Hide()
     btnScrollBottom:SetScript("OnClick", function()
@@ -4767,6 +4768,7 @@ function SocialPanels:CreateBuffsPanel(parent)
             Theme:StyleButton(row.btnReport, "default")
         end
     end)
+    scroll.container._scLevelOffset = 2
     scroll.container:SetFrameLevel((listCard:GetFrameLevel() or 1) + 2)
     scroll.container:ClearAllPoints()
     scroll.container:SetPoint("TOPLEFT", listCard, "TOPLEFT", 6, -6)

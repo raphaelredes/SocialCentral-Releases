@@ -1213,74 +1213,130 @@ local function CreateRightSideTab(parent, name, lastNative, tooltipTitle, toolti
     return tab
 end
 
+local function IsSafeUiObj(obj)
+    if not obj then return false end
+    if obj.IsForbidden then
+        local okF, forb = pcall(obj.IsForbidden, obj)
+        if not okF or forb then return false end
+    end
+    if obj.IsProtected then
+        local okP, prot = pcall(obj.IsProtected, obj)
+        if not okP or prot then return false end
+    end
+    return true
+end
+
 local function DiscoverRightSideTabs(parentFrame, excludeTab, namedKeys)
     local found = {}
     if not parentFrame then return found end
+    local seen = {}
+    local pRight = parentFrame.GetRight and parentFrame:GetRight()
+
+    local function IsExcludedChromeOrAddon(tab)
+        if not tab or tab == excludeTab or tab == LFGFrameTab.subPanel then
+            return true
+        end
+        local name = tab.GetName and tab:GetName() or ""
+        if name ~= "" and (name:find("SocialCentral", 1, true) or name:find("Close", 1, true)) then
+            return true
+        end
+        return false
+    end
+
+    local function IsOnRightEdge(tab)
+        if not pRight then
+            return true
+        end
+        local tLeft = tab.GetLeft and tab:GetLeft()
+        local tW = (tab.GetWidth and tab:GetWidth()) or 0
+        return tLeft ~= nil and tLeft >= (pRight - 38) and tW >= 20 and tW <= 84
+    end
+
+    local function AddFound(tab, requireRightEdge)
+        if not tab or seen[tab] or not IsSafeUiObj(tab) or IsExcludedChromeOrAddon(tab) then
+            return
+        end
+        if not (tab.IsShown and tab:IsShown()) then
+            return
+        end
+        if requireRightEdge and not IsOnRightEdge(tab) then
+            return
+        end
+        seen[tab] = true
+        found[#found + 1] = tab
+    end
 
     if namedKeys then
-        local pRight = parentFrame.GetRight and parentFrame:GetRight()
         for _, key in ipairs(namedKeys) do
-            local tab = parentFrame[key]
-            if tab and tab ~= excludeTab and tab.IsShown and tab:IsShown() then
-                local tLeft = tab.GetLeft and tab:GetLeft()
-                local tW = (tab.GetWidth and tab:GetWidth()) or 0
-                if not pRight or (tLeft and tLeft >= (pRight - 14) and tW <= 80) then
-                    found[#found + 1] = tab
-                end
-            end
-        end
-        if #found > 0 then
-            table.sort(found, function(a, b)
-                return ((a.GetTop and a:GetTop()) or 0) > ((b.GetTop and b:GetTop()) or 0)
-            end)
-            return found
+            AddFound(parentFrame[key], true)
         end
     end
 
-    if parentFrame.socialTabPool and parentFrame.socialTabPool.EnumerateActive then
-        for tab in parentFrame.socialTabPool:EnumerateActive() do
-            if tab and tab ~= excludeTab and tab.IsShown and tab:IsShown() then
-                found[#found + 1] = tab
+    for _, poolKey in ipairs({ "TabPool", "tabPool", "socialTabPool" }) do
+        local pool = parentFrame[poolKey]
+        if pool and pool.EnumerateActive then
+            for tab in pool:EnumerateActive() do
+                AddFound(tab, false)
             end
-        end
-        if #found > 0 then
-            table.sort(found, function(a, b)
-                return ((a.GetTop and a:GetTop()) or 0) > ((b.GetTop and b:GetTop()) or 0)
-            end)
-            return found
         end
     end
 
-    if parentFrame.ModeTabs and parentFrame.ModeTabs.Tabs then
+    for _, listKey in ipairs({ "SideTabs", "Tabs" }) do
+        local tbl = parentFrame[listKey]
+        if type(tbl) == "table" then
+            for _, tab in ipairs(tbl) do
+                AddFound(tab, listKey == "Tabs")
+            end
+        end
+    end
+
+    if parentFrame.ModeTabs and type(parentFrame.ModeTabs.Tabs) == "table" then
         for _, tab in ipairs(parentFrame.ModeTabs.Tabs) do
-            if tab and tab ~= excludeTab and tab.IsShown and tab:IsShown() then
-                found[#found + 1] = tab
-            end
-        end
-        if #found > 0 then
-            table.sort(found, function(a, b)
-                return ((a.GetTop and a:GetTop()) or 0) > ((b.GetTop and b:GetTop()) or 0)
-            end)
-            return found
+            AddFound(tab, false)
         end
     end
 
-    local pRight = parentFrame.GetRight and parentFrame:GetRight()
-    if parentFrame.GetChildren then
-        for _, child in ipairs({ parentFrame:GetChildren() }) do
-            if child ~= excludeTab and child ~= LFGFrameTab.subPanel and child.IsShown and child:IsShown() then
-                local w = (child.GetWidth and child:GetWidth()) or 0
-                local cLeft = child.GetLeft and child:GetLeft()
-                local looksLikeTab = (child.Icon or child.NormalTexture or (pRight and cLeft and cLeft >= (pRight - 14) and w >= 24 and w <= 72))
-                if looksLikeTab and (child.HasScript and (child:HasScript("OnClick") or child:HasScript("OnMouseUp"))) then
-                    found[#found + 1] = child
+    local pName = parentFrame.GetName and parentFrame:GetName() or ""
+    local globalPrefixes = { pName .. "Tab", pName .. "SideTab" }
+    if parentFrame == _G.CharacterFrame then
+        globalPrefixes[#globalPrefixes + 1] = "CharacterFrameTab"
+        globalPrefixes[#globalPrefixes + 1] = "CharacterFrameSideTab"
+    elseif parentFrame == _G.SocialUIFrame or parentFrame == _G.FriendsFrame then
+        globalPrefixes[#globalPrefixes + 1] = "FriendsFrameTab"
+        globalPrefixes[#globalPrefixes + 1] = "FriendsTabHeaderTab"
+    elseif parentFrame == _G.LFGParentFrame then
+        globalPrefixes[#globalPrefixes + 1] = "LFGParentFrameTab"
+    end
+    for _, prefix in ipairs(globalPrefixes) do
+        if prefix ~= "Tab" and prefix ~= "SideTab" then
+            for idx = 1, 8 do
+                local gTab = _G[prefix .. idx]
+                if gTab then
+                    AddFound(gTab, true)
                 end
             end
         end
-        table.sort(found, function(a, b)
-            return ((a.GetTop and a:GetTop()) or 0) > ((b.GetTop and b:GetTop()) or 0)
-        end)
     end
+
+    local function ScanRightEdgeChildren(node, depth)
+        if not node or depth <= 0 or not IsSafeUiObj(node) or not node.GetChildren then
+            return
+        end
+        for _, child in ipairs({ node:GetChildren() }) do
+            if IsSafeUiObj(child) and not IsExcludedChromeOrAddon(child) and (not child.IsShown or child:IsShown()) then
+                local hasScript = child.HasScript and (child:HasScript("OnClick") or child:HasScript("OnMouseUp") or child:HasScript("OnMouseDown"))
+                if hasScript and IsOnRightEdge(child) then
+                    AddFound(child, false)
+                end
+                ScanRightEdgeChildren(child, depth - 1)
+            end
+        end
+    end
+    ScanRightEdgeChildren(parentFrame, 3)
+
+    table.sort(found, function(a, b)
+        return ((a.GetTop and a:GetTop()) or 0) > ((b.GetTop and b:GetTop()) or 0)
+    end)
     return found
 end
 
@@ -1311,14 +1367,294 @@ local function IsAnyNativeSubFrameShown()
     return false
 end
 
+local NATIVE_TAB_SELECTED_FIELDS = {
+    "CheckedTexture",
+    "SelectedTexture",
+    "ActiveTexture",
+    "SelectionTexture",
+    "SelectedOverlay",
+    "ActiveOverlay",
+    "Selected",
+    "TabSelected",
+    "BorderSelected",
+    "SelectedGlow",
+    "HighlightSelected",
+    "Check",
+}
+
+-- Dim only selection/checked textures visually (never logical SetChecked(false)) so 2nd-press shortcut toggles close Blizzard windows cleanly.
+local function DimNativeTabSelectionVisual(nt, shouldDim)
+    if not nt or not IsSafeUiObj(nt) then return end
+    if not shouldDim then
+        if type(nt._scDimmedTexAlphas) == "table" then
+            for tex, origAlpha in pairs(nt._scDimmedTexAlphas) do
+                if tex and IsSafeUiObj(tex) and tex.SetAlpha then
+                    pcall(tex.SetAlpha, tex, origAlpha or 1)
+                end
+                nt._scDimmedTexAlphas[tex] = nil
+            end
+        end
+        nt._scWasDisabledByBlizz = nil
+        if nt.GetChildren then
+            for _, sub in ipairs({ nt:GetChildren() }) do
+                if sub and IsSafeUiObj(sub) then
+                    sub._scWasDisabledByBlizz = nil
+                end
+            end
+        end
+        nt._scSelectionDimmed = nil
+        return
+    end
+
+    if nt.IsEnabled and nt.SetEnabled then
+        local okE, isEnabled = pcall(nt.IsEnabled, nt)
+        if okE and not isEnabled then
+            nt._scWasDisabledByBlizz = true
+            pcall(nt.SetEnabled, nt, true)
+        end
+    end
+    if nt.GetChildren then
+        for _, sub in ipairs({ nt:GetChildren() }) do
+            if sub and IsSafeUiObj(sub) and sub.IsEnabled and sub.SetEnabled then
+                local okSE, subEn = pcall(sub.IsEnabled, sub)
+                if okSE and not subEn then
+                    sub._scWasDisabledByBlizz = true
+                    pcall(sub.SetEnabled, sub, true)
+                end
+            end
+        end
+    end
+
+    local neverDim = {
+        [nt.Icon or false] = true,
+        [nt.icon or false] = true,
+        [nt.IconTexture or false] = true,
+        [nt.Portrait or false] = true,
+        [nt.NormalTexture or false] = true,
+        [nt.PushedTexture or false] = true,
+        [nt.HighlightTexture or false] = true,
+        [nt.DisabledTexture or false] = true,
+        [nt.Background or false] = true,
+        [nt.Bg or false] = true,
+        [nt.bgTex or false] = true,
+    }
+    for _, getterName in ipairs({ "GetNormalTexture", "GetPushedTexture", "GetHighlightTexture", "GetDisabledTexture" }) do
+        if nt[getterName] then
+            local okG, tex = pcall(nt[getterName], nt)
+            if okG and tex then
+                neverDim[tex] = true
+            end
+        end
+    end
+
+    nt._scDimmedTexAlphas = nt._scDimmedTexAlphas or {}
+    local saved = nt._scDimmedTexAlphas
+
+    local function DimTex(tex, allowNeverDimBypass)
+        if not tex or not IsSafeUiObj(tex) or not tex.SetAlpha then return end
+        if not allowNeverDimBypass and neverDim[tex] then return end
+        if tex.GetObjectType and tex:GetObjectType() ~= "Texture" then return end
+        if not allowNeverDimBypass and tex.IsShown then
+            local okS, shown = pcall(tex.IsShown, tex)
+            if okS and not shown then return end
+        end
+        if saved[tex] == nil then
+            local curA = 1
+            if tex.GetAlpha then
+                local okA, a = pcall(tex.GetAlpha, tex)
+                if okA and type(a) == "number" then
+                    curA = a
+                end
+            end
+            if curA <= 0.01 then
+                return
+            end
+            saved[tex] = curA
+        end
+        pcall(tex.SetAlpha, tex, 0)
+    end
+
+    if nt.GetCheckedTexture then
+        local okC, checkedTex = pcall(nt.GetCheckedTexture, nt)
+        if okC and checkedTex then
+            DimTex(checkedTex, true)
+        end
+    end
+    for _, field in ipairs(NATIVE_TAB_SELECTED_FIELDS) do
+        if nt[field] then
+            DimTex(nt[field], false)
+        end
+    end
+    if nt.GetRegions then
+        for _, reg in ipairs({ nt:GetRegions() }) do
+            if reg and not neverDim[reg] and reg.GetObjectType and reg:GetObjectType() == "Texture" then
+                local matched = false
+                if reg.GetAtlas then
+                    local okAt, atlas = pcall(reg.GetAtlas, reg)
+                    if okAt and type(atlas) == "string" and atlas ~= "" then
+                        local low = atlas:lower()
+                        if not low:find("hover", 1, true)
+                            and not low:find("mask", 1, true)
+                            and not low:find("inactive", 1, true)
+                            and not low:find("deselect", 1, true)
+                            and (low:find("selected", 1, true) or low:find("checked", 1, true) or low:find("active", 1, true))
+                        then
+                            matched = true
+                        end
+                    end
+                end
+                if not matched and reg.GetTexture then
+                    local okTx, texPath = pcall(reg.GetTexture, reg)
+                    if okTx and type(texPath) == "string" and texPath ~= "" then
+                        local low = texPath:lower()
+                        if not low:find("hover", 1, true)
+                            and not low:find("mask", 1, true)
+                            and not low:find("inactive", 1, true)
+                            and (low:find("checkbuttonhilight", 1, true) or low:find("selected", 1, true) or low:find("active", 1, true))
+                        then
+                            matched = true
+                        end
+                    end
+                end
+                if matched then
+                    DimTex(reg, false)
+                end
+            end
+        end
+    end
+    nt._scSelectionDimmed = true
+end
+
+local function SyncHostNativeTabs(parentFrame, scTab, isEmbeddedActive, namedKeys)
+    if not parentFrame then return end
+    local nativeTabs = DiscoverRightSideTabs(parentFrame, scTab, namedKeys)
+    if isEmbeddedActive then
+        parentFrame._scDimmedNativeTabs = parentFrame._scDimmedNativeTabs or {}
+        for _, nt in ipairs(nativeTabs) do
+            if IsSafeUiObj(nt) then
+                DimNativeTabSelectionVisual(nt, true)
+                parentFrame._scDimmedNativeTabs[nt] = true
+            end
+        end
+    else
+        for _, nt in ipairs(nativeTabs) do
+            if IsSafeUiObj(nt) then
+                DimNativeTabSelectionVisual(nt, false)
+            end
+        end
+        if type(parentFrame._scDimmedNativeTabs) == "table" then
+            for nt in pairs(parentFrame._scDimmedNativeTabs) do
+                DimNativeTabSelectionVisual(nt, false)
+                parentFrame._scDimmedNativeTabs[nt] = nil
+            end
+        end
+    end
+end
+
+local function EnsureClickedNativeTabRemainsChecked(parentFrame, clickedTab, excludeScTab, namedKeys)
+    if not (clickedTab and IsSafeUiObj(clickedTab) and clickedTab.GetChecked and clickedTab.SetChecked) then
+        return
+    end
+    local okC, isChecked = pcall(clickedTab.GetChecked, clickedTab)
+    if not okC or isChecked then
+        return
+    end
+    local anyOtherChecked = false
+    for _, nt in ipairs(DiscoverRightSideTabs(parentFrame, excludeScTab, namedKeys)) do
+        if nt ~= clickedTab and IsSafeUiObj(nt) and nt.GetChecked then
+            local okO, otherChecked = pcall(nt.GetChecked, nt)
+            if okO and otherChecked then
+                anyOtherChecked = true
+                break
+            end
+        end
+    end
+    if not anyOtherChecked then
+        pcall(clickedTab.SetChecked, clickedTab, true)
+    end
+end
+
+local function HookNativeHostTab(parentFrame, nt, excludeScTab, namedKeys, isLfgHost)
+    if not parentFrame or not nt then
+        return
+    end
+    local function HookOne(ctrl)
+        if not ctrl or ctrl == excludeScTab or not IsSafeUiObj(ctrl) or ctrl._scNativeHostHooked then
+            return
+        end
+        ctrl._scNativeHostHooked = true
+        if ctrl.HasScript and ctrl:HasScript("OnMouseDown") then
+            ctrl:HookScript("OnMouseDown", function(_, mouseBtn)
+                if mouseBtn and mouseBtn ~= "LeftButton" then
+                    return
+                end
+                parentFrame._scLastNativeTab = nt
+                if parentFrame == _G.CharacterFrame and ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
+                    ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
+                end
+                if isLfgHost and LFGFrameTab.active then
+                    LFGFrameTab:HideSubPanel(false)
+                end
+                if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                    ns.UI:CloseEmbeddedIfHost(parentFrame)
+                end
+                SyncHostNativeTabs(parentFrame, excludeScTab, false, namedKeys)
+            end)
+        end
+        if ctrl.HasScript and ctrl:HasScript("OnClick") then
+            ctrl:HookScript("OnClick", function(clickedTab)
+                parentFrame._scLastNativeTab = nt
+                if isLfgHost and LFGFrameTab.active then
+                    LFGFrameTab:HideSubPanel(false)
+                    local seq = LFGFrameTab._transitionSeq
+                    if C_Timer and C_Timer.After then
+                        C_Timer.After(0, function()
+                            if LFGFrameTab._transitionSeq == seq and not LFGFrameTab.active and _G.LFGParentFrame and _G.LFGParentFrame:IsShown() and not IsAnyNativeSubFrameShown() then
+                                LFGFrameTab:HideSubPanel(true)
+                            end
+                        end)
+                    end
+                end
+                if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                    ns.UI:CloseEmbeddedIfHost(parentFrame)
+                end
+                if not (isLfgHost and LFGFrameTab.active) and not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parentFrame)) then
+                    EnsureClickedNativeTabRemainsChecked(parentFrame, clickedTab, excludeScTab, namedKeys)
+                end
+            end)
+        end
+        if ctrl.HasScript and ctrl:HasScript("OnMouseUp") then
+            ctrl:HookScript("OnMouseUp", function(clickedTab, mouseBtn)
+                if mouseBtn and mouseBtn ~= "LeftButton" then
+                    return
+                end
+                if isLfgHost and LFGFrameTab.active and IsAnyNativeSubFrameShown() then
+                    LFGFrameTab:HideSubPanel(false)
+                end
+                if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                    ns.UI:CloseEmbeddedIfHost(parentFrame)
+                end
+                if not (isLfgHost and LFGFrameTab.active) and not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parentFrame)) then
+                    EnsureClickedNativeTabRemainsChecked(parentFrame, clickedTab, excludeScTab, namedKeys)
+                end
+            end)
+        end
+    end
+
+    HookOne(nt)
+    if nt.GetChildren then
+        for _, sub in ipairs({ nt:GetChildren() }) do
+            if sub ~= excludeScTab and sub.HasScript and (sub:HasScript("OnClick") or sub:HasScript("OnMouseDown") or sub:HasScript("OnMouseUp")) then
+                HookOne(sub)
+            end
+        end
+    end
+end
+
 local function SetNativeTabsCheckedFalse()
     local parentFrame = _G.LFGParentFrame
     if not parentFrame then return end
-    for _, tab in ipairs(DiscoverNativeSideTabs(parentFrame)) do
-        if tab.SetChecked then
-            pcall(tab.SetChecked, tab, false)
-        end
-    end
+    SyncHostNativeTabs(parentFrame, LFGFrameTab.sideTab, true, { "ListingTab", "BrowsingTab", "WhoListingTab" })
 end
 
 local function ElevateTree(root, targetLevel, depth)
@@ -2668,19 +3004,6 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     end
 end
 
-local function IsSafeUiObj(obj)
-    if not obj then return false end
-    if obj.IsForbidden then
-        local okF, forb = pcall(obj.IsForbidden, obj)
-        if not okF or forb then return false end
-    end
-    if obj.IsProtected then
-        local okP, prot = pcall(obj.IsProtected, obj)
-        if not okP or prot then return false end
-    end
-    return true
-end
-
 local function EnsureStandaloneLfgHost()
     if LFGFrameTab.standaloneHost then
         return LFGFrameTab.standaloneHost
@@ -3045,6 +3368,7 @@ function LFGFrameTab:SwitchToOfficialListingTab(preferredSyncMode)
         if self.standaloneHost and self.standaloneHost:IsShown() then
             self.standaloneHost:Hide()
         end
+        SyncHostNativeTabs(lfgHost, self.sideTab, false, { "ListingTab", "BrowsingTab", "WhoListingTab" })
         local listingTab = lfgHost.ListingTab or _G.LFGParentFrameTab1
         if listingTab and listingTab.Click then
             pcall(listingTab.Click, listingTab)
@@ -6441,46 +6765,15 @@ function LFGFrameTab:EnsureSideTab()
     self:UpdateTabSelectionVisual()
     self:SyncAllEmbeddedTabStates()
 
-    local function HookTabControl(ctrl)
-        if not ctrl or ctrl._scHookedClick then return end
-        ctrl._scHookedClick = true
-        if ctrl.HasScript and ctrl:HasScript("OnClick") then
-            ctrl:HookScript("OnClick", function()
-                if LFGFrameTab.active then
-                    LFGFrameTab:HideSubPanel(false)
-                    local seq = LFGFrameTab._transitionSeq
-                    if C_Timer and C_Timer.After then
-                        C_Timer.After(0, function()
-                            if LFGFrameTab._transitionSeq == seq and not LFGFrameTab.active and _G.LFGParentFrame and _G.LFGParentFrame:IsShown() and not IsAnyNativeSubFrameShown() then
-                                LFGFrameTab:HideSubPanel(true)
-                            end
-                        end)
-                    end
-                end
-                if ns.UI and ns.UI.CloseEmbeddedIfHost and _G.LFGParentFrame then
-                    ns.UI:CloseEmbeddedIfHost(_G.LFGParentFrame)
-                end
-            end)
-        end
-        if ctrl.HasScript and ctrl:HasScript("OnMouseUp") then
-            ctrl:HookScript("OnMouseUp", function(_, btn)
-                if btn == "LeftButton" then
-                    if LFGFrameTab.active and IsAnyNativeSubFrameShown() then
-                        LFGFrameTab:HideSubPanel(false)
-                    end
-                    if ns.UI and ns.UI.CloseEmbeddedIfHost and _G.LFGParentFrame then
-                        ns.UI:CloseEmbeddedIfHost(_G.LFGParentFrame)
-                    end
-                end
-            end)
-        end
-    end
-
     for _, nTab in ipairs(nativeTabs) do
-        HookTabControl(nTab)
+        nTab._scHookedClick = true
+        HookNativeHostTab(parent, nTab, self.sideTab, { "ListingTab", "BrowsingTab", "WhoListingTab" }, true)
     end
     for _, key in ipairs({ "ListingTab", "BrowsingTab", "WhoListingTab", "Tab1", "Tab2", "Tab3" }) do
-        HookTabControl(parent[key])
+        if parent[key] then
+            parent[key]._scHookedClick = true
+            HookNativeHostTab(parent, parent[key], self.sideTab, { "ListingTab", "BrowsingTab", "WhoListingTab" }, true)
+        end
     end
 end
 
@@ -6694,12 +6987,8 @@ function LFGFrameTab:EnsureSocialSideTab()
         local gapY = MeasureTabGap(nativeTabs, -2)
         self.socialTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
         for _, nt in ipairs(nativeTabs) do
-            if not nt._scSocialCloseHooked and nt.HasScript and nt:HasScript("OnClick") then
-                nt._scSocialCloseHooked = true
-                nt:HookScript("OnClick", function()
-                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                end)
-            end
+            nt._scSocialCloseHooked = true
+            HookNativeHostTab(parent, nt, self.socialTab, nil, false)
         end
     else
         self.socialTab:SetPoint("TOPLEFT", parent, "TOPRIGHT", -2, -240)
@@ -6714,11 +7003,9 @@ function LFGFrameTab:EnsureSocialSideTab()
         "FriendsTabHeaderTab3",
     }) do
         local nTab = _G[tabName]
-        if nTab and not nTab._scSocialCloseHooked and nTab.HasScript and nTab:HasScript("OnClick") then
+        if nTab then
             nTab._scSocialCloseHooked = true
-            nTab:HookScript("OnClick", function()
-                if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-            end)
+            HookNativeHostTab(parent, nTab, self.socialTab, nil, false)
         end
     end
     self.socialTab:Show()
@@ -6750,10 +7037,12 @@ function LFGFrameTab:AttachSocialUI()
     end)
 
     if hooksecurefunc then
-        if type(parent.SelectTab) == "function" then
-            hooksecurefunc(parent, "SelectTab", function()
-                if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-            end)
+        for _, methodName in ipairs({ "SelectTab", "SetTab", "OnTabSelected" }) do
+            if type(parent[methodName]) == "function" then
+                hooksecurefunc(parent, methodName, function()
+                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                end)
+            end
         end
         if type(parent.ResetTabs) == "function" then
             hooksecurefunc(parent, "ResetTabs", function()
@@ -6830,16 +7119,18 @@ function LFGFrameTab:EnsureGuildSideTab()
         self.guildTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
         -- Hook every native tab individually as guild-only tabs can appear dynamically when switching clubs.
         for _, nt in ipairs(nativeTabs) do
-            if nt.HasScript and nt:HasScript("OnClick") and not nt._scGuildCloseHooked then
-                nt._scGuildCloseHooked = true
-                nt:HookScript("OnClick", function(clickedTab)
-                    parent._scLastNativeTab = clickedTab
-                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                end)
-            end
+            nt._scGuildCloseHooked = true
+            HookNativeHostTab(parent, nt, self.guildTab, COMMUNITIES_NATIVE_TABS, false)
         end
     else
         self.guildTab:SetPoint("TOPLEFT", parent, "TOPRIGHT", 0, -240)
+    end
+    for _, key in ipairs(COMMUNITIES_NATIVE_TABS) do
+        local nt = parent[key]
+        if nt then
+            nt._scGuildCloseHooked = true
+            HookNativeHostTab(parent, nt, self.guildTab, COMMUNITIES_NATIVE_TABS, false)
+        end
     end
     self.guildTab:Show()
     self:SyncAllEmbeddedTabStates()
@@ -6877,19 +7168,21 @@ function LFGFrameTab:AttachCommunitiesUI()
     end)
 
     if hooksecurefunc then
-        if type(parent.SetDisplayMode) == "function" then
-            hooksecurefunc(parent, "SetDisplayMode", function()
-                if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent) and ns.UI.CloseEmbeddedIfHost then
-                    ns.UI:CloseEmbeddedIfHost(parent)
-                end
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0, function()
-                        if parent and parent:IsShown() then
-                            LFGFrameTab:EnsureGuildSideTab()
-                        end
-                    end)
-                end
-            end)
+        for _, methodName in ipairs({ "SetDisplayMode", "SelectTab", "SetTab", "OnTabSelected" }) do
+            if type(parent[methodName]) == "function" then
+                hooksecurefunc(parent, methodName, function()
+                    if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent) and ns.UI.CloseEmbeddedIfHost then
+                        ns.UI:CloseEmbeddedIfHost(parent)
+                    end
+                    if methodName == "SetDisplayMode" and C_Timer and C_Timer.After then
+                        C_Timer.After(0, function()
+                            if parent and parent:IsShown() then
+                                LFGFrameTab:EnsureGuildSideTab()
+                            end
+                        end)
+                    end
+                end)
+            end
         end
         if type(parent.OnClubSelected) == "function" then
             hooksecurefunc(parent, "OnClubSelected", function()
@@ -6945,15 +7238,20 @@ function LFGFrameTab:EnsureCharacterSideTab()
         local gapY = MeasureTabGap(nativeTabs, -2)
         self.charTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
         for _, nt in ipairs(nativeTabs) do
-            if not nt._scCharCloseHooked and nt.HasScript and nt:HasScript("OnClick") then
-                nt._scCharCloseHooked = true
-                nt:HookScript("OnClick", function()
-                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                end)
-            end
+            nt._scCharCloseHooked = true
+            HookNativeHostTab(parent, nt, self.charTab, { "Tab1", "Tab2", "Tab3", "Tab4" }, false)
         end
     else
         self.charTab:SetPoint("TOPLEFT", parent, "TOPRIGHT", -2, -260)
+    end
+    for _, prefix in ipairs({ "CharacterFrameTab", "CharacterFrameSideTab" }) do
+        for idx = 1, 8 do
+            local extraTab = _G[prefix .. idx]
+            if extraTab then
+                extraTab._scCharCloseHooked = true
+                HookNativeHostTab(parent, extraTab, self.charTab, { "Tab1", "Tab2", "Tab3", "Tab4" }, false)
+            end
+        end
     end
     self.charTab:Show()
     self:SyncAllEmbeddedTabStates()
@@ -7003,10 +7301,15 @@ function LFGFrameTab:AttachCharacterUI()
     end)
 
     if hooksecurefunc then
-        if type(parent.ShowSubFrame) == "function" then
-            hooksecurefunc(parent, "ShowSubFrame", function()
-                if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-            end)
+        for _, methodName in ipairs({ "ShowSubFrame", "SelectTab", "SetTab", "OnTabSelected" }) do
+            if type(parent[methodName]) == "function" then
+                hooksecurefunc(parent, methodName, function()
+                    if ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
+                        ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
+                    end
+                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                end)
+            end
         end
         if type(parent.UpdateTabLayout) == "function" then
             hooksecurefunc(parent, "UpdateTabLayout", function()
@@ -7021,7 +7324,20 @@ function LFGFrameTab:AttachCharacterUI()
         end
         if type(_G.CharacterFrameTab_OnClick) == "function" then
             hooksecurefunc("CharacterFrameTab_OnClick", function()
+                if ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
+                    ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
+                end
                 if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+            end)
+        end
+        if type(_G.PanelTemplates_SetTab) == "function" then
+            hooksecurefunc("PanelTemplates_SetTab", function(targetFrame)
+                if targetFrame == parent then
+                    if ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
+                        ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
+                    end
+                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                end
             end)
         end
     end
@@ -7851,41 +8167,6 @@ function LFGFrameTab:AttachWorldMapButton()
     self:RefreshWorldMapBuffs()
 end
 
-local function SyncHostNativeTabs(parentFrame, scTab, isEmbeddedActive, namedKeys)
-    if not parentFrame then return end
-    local nativeTabs = DiscoverRightSideTabs(parentFrame, scTab, namedKeys)
-    if isEmbeddedActive then
-        for _, nt in ipairs(nativeTabs) do
-            if IsSafeUiObj(nt) then
-                if nt.GetChecked then
-                    local ok, checked = pcall(nt.GetChecked, nt)
-                    if ok and checked then
-                        parentFrame._scLastNativeTab = nt
-                    end
-                end
-                if nt.SetChecked then
-                    pcall(nt.SetChecked, nt, false)
-                end
-            end
-        end
-    elseif parentFrame._scLastNativeTab and IsSafeUiObj(parentFrame._scLastNativeTab) then
-        local anyChecked = false
-        for _, nt in ipairs(nativeTabs) do
-            if IsSafeUiObj(nt) and nt.GetChecked then
-                local ok, checked = pcall(nt.GetChecked, nt)
-                if ok and checked then
-                    anyChecked = true
-                    break
-                end
-            end
-        end
-        if not anyChecked and parentFrame._scLastNativeTab.SetChecked then
-            pcall(parentFrame._scLastNativeTab.SetChecked, parentFrame._scLastNativeTab, true)
-        end
-        parentFrame._scLastNativeTab = nil
-    end
-end
-
 local function OpenSocialUIModule(targetTab, fallbackToChatFrame, forceKeepOpen)
     local sf = _G.SocialUIFrame or _G.FriendsFrame
     if sf and sf.IsShown and sf:IsShown() then
@@ -7906,6 +8187,8 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local lfgHost = _G.LFGParentFrame
         local shown = lfgHost and lfgHost.IsShown and lfgHost:IsShown()
         local active = self.active == true
+        local groupEmbedActive = (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(lfgHost)) == true
+        local anyLfgEmbed = active or groupEmbedActive
         if shown or active then
             local bd = (ns.Clan and ns.Clan.GetTrustedLFGBreakdown and ns.Clan:GetTrustedLFGBreakdown()) or nil
             local lfgCount = (bd and bd.total) or 0
@@ -7913,6 +8196,9 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
             if shown then
                 self:UpdateNativeBridgeBar()
             end
+        end
+        if shown or not anyLfgEmbed then
+            SyncHostNativeTabs(lfgHost, self.sideTab, anyLfgEmbed, { "ListingTab", "BrowsingTab", "WhoListingTab" })
         end
     end
     if self.socialTab then

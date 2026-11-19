@@ -569,6 +569,7 @@ local function EnsureBlizzButtonVisual(btn, isTab)
             tab._bottomBridge:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -1, 0)
             tab._bottomBridge:SetHeight(2)
 
+            tab._scIsInternalBtnLayer = true
             btn._blizzTabFrame = tab
         end
         return btn._blizzTabFrame, "tab"
@@ -583,6 +584,7 @@ local function EnsureBlizzButtonVisual(btn, isTab)
             vis:EnableMouse(false)
             vis:SetText("")
             if vis.Text then vis.Text:SetText("") end
+            vis._scIsInternalBtnLayer = true
             btn._blizzBtn = vis
         else
             btn._blizzBtnFailed = true
@@ -612,6 +614,23 @@ local function TintBlizzButtonTextures(vis, desat, r, g, b)
     end
 end
 
+--- Keep internal button plate and text layers cleanly ordered above parent card backgrounds.
+function Theme:SyncButtonLayers(btn)
+    if not btn or not btn.GetFrameLevel then
+        return
+    end
+    local bLvl = math.max(1, btn:GetFrameLevel() or 1)
+    if btn._blizzTabFrame and btn._blizzTabFrame.SetFrameLevel then
+        btn._blizzTabFrame:SetFrameLevel(bLvl + 1)
+    end
+    if btn._blizzBtn and btn._blizzBtn.SetFrameLevel then
+        btn._blizzBtn:SetFrameLevel(bLvl + 1)
+    end
+    if btn._textLayer and btn._textLayer.SetFrameLevel then
+        btn._textLayer:SetFrameLevel(bLvl + 4)
+    end
+end
+
 local function ApplyButtonColors(btn, hovered)
     local p = Theme:GetPalette()
     if not btn.SetBackdrop then
@@ -626,9 +645,7 @@ local function ApplyButtonColors(btn, hovered)
     local w = btn:GetWidth() or 0
     btn._scThemeKey = p.key
 
-    if btn._textLayer then
-        btn._textLayer:SetFrameLevel(math.max(1, btn:GetFrameLevel() + 4))
-    end
+    Theme:SyncButtonLayers(btn)
     SyncBlizzTextOffset(btn, 0, 0)
 
     local useBlizzPlate = isBlizz and (variant == "tab" or ((variant == "primary" or variant == "danger") and w >= 26))
@@ -912,6 +929,7 @@ function Theme:StyleButton(btn, variant)
             ApplyButtonColors(self, false)
         end)
         btn:HookScript("OnShow", function(self)
+            Theme:SyncButtonLayers(self)
             if self._scThemeKey ~= Theme:GetPalette().key then
                 if self._scAutoFit then
                     Theme:AutoFitButton(self)
@@ -945,6 +963,7 @@ function Theme:CreateButton(parent, width, height, text, variant)
     if btn.SetClipsChildren then btn:SetClipsChildren(true) end
     btn._textLayer = CreateFrame("Frame", nil, btn)
     btn._textLayer:SetAllPoints()
+    btn._textLayer._scIsInternalBtnLayer = true
     if btn._textLayer.SetClipsChildren then btn._textLayer:SetClipsChildren(true) end
     btn._textLayer:SetFrameLevel(math.max(1, btn:GetFrameLevel() + 4))
     btn.label = btn._textLayer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -956,6 +975,7 @@ end
 --- Update button text while preserving padding/variant.
 function Theme:SetButtonText(btn, text)
     if btn and btn.label then
+        self:SyncButtonLayers(btn)
         local cleanText = text or ""
         local p = self:GetPalette()
         if btn._scLastBtnText == cleanText and btn._scThemeKey == p.key and btn.label:GetText() == cleanText then
@@ -977,6 +997,7 @@ function Theme:SetButtonActive(btn, active, variant)
     if not btn then
         return
     end
+    self:SyncButtonLayers(btn)
     local nextActive = active and true or false
     local nextVariant = variant or btn._scVariant
     local p = self:GetPalette()
@@ -1131,6 +1152,7 @@ function Theme:CreateEditBox(parent, opts)
         local clearBtn = CreateFrame("Button", nil, box)
         clearBtn:SetSize(16, 16)
         clearBtn:SetPoint("RIGHT", box, "RIGHT", -4, 0)
+        clearBtn._scLevelOffset = 4
         clearBtn:SetFrameLevel((box:GetFrameLevel() or 1) + 4)
         local xText = clearBtn:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
         xText:SetPoint("CENTER", 0, 0)
@@ -1223,12 +1245,14 @@ function Theme:StyleSearchBox(searchBox)
         end
     end
 
+    searchBox._scLevelOffset = 2
     if not searchBox._scBg then
         local bg = CreateFrame("Frame", nil, searchBox:GetParent(), "BackdropTemplate")
         bg:SetPoint("TOPLEFT", searchBox, "TOPLEFT", 0, 0)
         bg:SetPoint("BOTTOMRIGHT", searchBox, "BOTTOMRIGHT", 0, 0)
         bg:SetFrameLevel(math.max(0, (searchBox:GetFrameLevel() or 1) - 1))
         bg:EnableMouse(false)
+        bg._scIsInputBackdrop = true
         searchBox._scBg = bg
 
         searchBox:HookScript("OnEditFocusGained", function(self)
@@ -2327,11 +2351,13 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     viewport:SetPoint("BOTTOMRIGHT", -14, 2)
     viewport:SetClipsChildren(true)
     viewport:EnableMouseWheel(true)
+    viewport._scLevelOffset = 1
 
     local track = CreateFrame("Frame", nil, container, "BackdropTemplate")
     track:SetWidth(10)
     track:SetPoint("TOPRIGHT", -3, -4)
     track:SetPoint("BOTTOMRIGHT", -3, 4)
+    track._scLevelOffset = 2
 
     local upOk, scrollUpBtn = pcall(CreateFrame, "Button", nil, container, "UIPanelScrollUpButtonTemplate")
     if upOk and scrollUpBtn then
@@ -2355,6 +2381,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     thumb:SetWidth(6)
     thumb:SetHeight(32)
     thumb:SetPoint("TOP", 0, 0)
+    thumb._scLevelOffset = 1
     thumb.tex = thumb:CreateTexture(nil, "ARTWORK")
     thumb.tex:SetAllPoints()
 
@@ -2443,8 +2470,23 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
         end
     end
 
+    local function SyncScrollListLayers()
+        local cLvl = math.max(1, (container.GetFrameLevel and container:GetFrameLevel()) or 1)
+        if viewport.SetFrameLevel and (viewport:GetFrameLevel() or 0) ~= (cLvl + 1) then
+            viewport:SetFrameLevel(cLvl + 1)
+        end
+        if track.SetFrameLevel and (track:GetFrameLevel() or 0) ~= (cLvl + 2) then
+            track:SetFrameLevel(cLvl + 2)
+        end
+        if thumb.SetFrameLevel and (thumb:GetFrameLevel() or 0) ~= (cLvl + 3) then
+            thumb:SetFrameLevel(cLvl + 3)
+        end
+        return cLvl
+    end
+
     function list:RefreshTheme()
         Theme:ApplyBackdrop(container, "inset")
+        SyncScrollListLayers()
         UpdateTrackColors(false)
         for _, row in ipairs(self.rows) do
             if row.RefreshTheme then
@@ -2454,6 +2496,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     end
 
     function list:Render()
+        local cLvl = SyncScrollListLayers()
         EnsureRowPool()
         local p = Theme:GetPalette()
         local vpH = viewport:GetHeight() or 0
@@ -2480,6 +2523,9 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
             local dataIdx = firstIndex + poolIdx - 1
             local item = self.items[dataIdx]
             if item then
+                if row.SetFrameLevel and (row:GetFrameLevel() or 0) ~= (cLvl + 2) then
+                    row:SetFrameLevel(cLvl + 2)
+                end
                 local y = -((poolIdx - 1) * self.rowHeight) + subOffset
                 if row._scRenderedY ~= y then
                     row._scRenderedY = y

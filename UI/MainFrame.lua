@@ -4934,11 +4934,16 @@ local function SyncSubtreeChildren(visitFn, baseLvl, depth, ...)
     local n = select("#", ...)
     for i = 1, n do
         local child = select(i, ...)
-        if child then
+        if child
+            and not (child.IsForbidden and child:IsForbidden())
+            and not child._scSkipLayerSync
+            and not child._scIsInternalBtnLayer
+            and not child._scIsInputBackdrop
+        then
             if child.SetFrameLevel then
-                local cLvl = child:GetFrameLevel() or 0
-                if cLvl <= baseLvl then
-                    child:SetFrameLevel(baseLvl + 1)
+                local desired = baseLvl + (child._scLevelOffset or 1)
+                if (child:GetFrameLevel() or 0) ~= desired then
+                    child:SetFrameLevel(desired)
                 end
             end
             visitFn(child, depth)
@@ -4947,18 +4952,57 @@ local function SyncSubtreeChildren(visitFn, baseLvl, depth, ...)
 end
 
 local function SyncSubtreeButtonLayers(root, depth)
-    if not root or (depth or 0) <= 0 then
+    depth = depth or 12
+    if not root or depth <= 0
+        or (root.IsForbidden and root:IsForbidden())
+        or root._scSkipLayerSync
+        or root._scIsInternalBtnLayer
+        or root._scIsInputBackdrop
+    then
         return
     end
-    local baseLvl = (root.GetFrameLevel and root:GetFrameLevel()) or 1
-    if root._textLayer and root._textLayer.SetFrameLevel then
-        root._textLayer:SetFrameLevel(baseLvl + 4)
+    local baseLvl = math.max(1, (root.GetFrameLevel and root:GetFrameLevel()) or 1)
+    if (root._textLayer or root._blizzTabFrame or root._blizzBtn) and Theme and Theme.SyncButtonLayers then
+        Theme:SyncButtonLayers(root)
     end
     if root.clearBtn and root.clearBtn.SetFrameLevel then
+        root.clearBtn._scLevelOffset = 4
         root.clearBtn:SetFrameLevel(baseLvl + 4)
+    end
+    if root._scClearBtn and root._scClearBtn.SetFrameLevel then
+        root._scClearBtn._scLevelOffset = 4
+        root._scClearBtn:SetFrameLevel(baseLvl + 4)
+    end
+    if root._scBg and root._scBg.SetFrameLevel then
+        root._scBg:SetFrameLevel(math.max(0, baseLvl - 1))
     end
     if depth > 1 and root.GetChildren then
         SyncSubtreeChildren(SyncSubtreeButtonLayers, baseLvl, depth - 1, root:GetChildren())
+    end
+end
+
+function UI:SyncFrameSectionLayers(targetContainer)
+    if targetContainer then
+        if targetContainer.header then
+            SyncSubtreeButtonLayers(targetContainer.header, 12)
+        end
+        if targetContainer.content then
+            SyncSubtreeButtonLayers(targetContainer.content, 12)
+        end
+        if not targetContainer.header and not targetContainer.content then
+            SyncSubtreeButtonLayers(targetContainer, 12)
+        end
+        return
+    end
+    if not frame then
+        return
+    end
+    local sections = { frame.header, frame.tabBar, frame.filterBar, frame.watchBar, frame.content }
+    for i = 1, #sections do
+        local sec = sections[i]
+        if sec and (not sec.IsShown or sec:IsShown()) then
+            SyncSubtreeButtonLayers(sec, 12)
+        end
     end
 end
 
@@ -4967,17 +5011,19 @@ local function SyncClanCtxToolbarLayout(mainCard, guildHeroBar, ctxBar, activeBa
         return
     end
     local cardLvl = (mainCard.GetFrameLevel and mainCard:GetFrameLevel()) or 2
+    ctxBar._scLevelOffset = 4
     ctxBar:ClearAllPoints()
     ctxBar:SetPoint("TOPLEFT", guildHeroBar, "BOTTOMLEFT", 2, -6)
     ctxBar:SetPoint("TOPRIGHT", guildHeroBar, "BOTTOMRIGHT", -2, -6)
     ctxBar:Show()
     ctxBar:SetFrameLevel(cardLvl + 4)
     if activeBar then
+        activeBar._scLevelOffset = 2
         activeBar:ClearAllPoints()
         activeBar:SetAllPoints(ctxBar)
         activeBar:SetFrameLevel(cardLvl + 6)
         activeBar:Show()
-        SyncSubtreeButtonLayers(activeBar, 3)
+        SyncSubtreeButtonLayers(activeBar, 6)
     end
 end
 
@@ -6633,6 +6679,7 @@ local function ApplySingleEmbedTheme(tabKey)
             panel:RefreshTheme()
         end
     end
+    UI:SyncFrameSectionLayers(f)
 end
 
 local function BuildSingleEmbedContainer(tabKey)
@@ -6825,26 +6872,54 @@ local function ApplyTheme()
     local fw = frame:GetWidth() or 760
     local isCompact = isEmbedded and fw < 540
 
+    local showBlizzChrome = isBlizz and not isEmbedded and frame.blizzChrome ~= nil
     if frame._solidOpaqueBg then
         local wBg = p.windowBg or { 0.075, 0.07, 0.065, 1.0 }
         frame._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
+        frame._solidOpaqueBg:ClearAllPoints()
+        if showBlizzChrome then
+            -- Keep opaque interior backing strictly inside ButtonFrameTemplate chrome so Portrait, TitleBar, and top NineSlice border are never covered.
+            frame._solidOpaqueBg:SetPoint("TOPLEFT", frame, "TOPLEFT", 5, -24)
+            frame._solidOpaqueBg:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -5, 5)
+        else
+            frame._solidOpaqueBg:SetAllPoints(frame)
+        end
         frame._solidOpaqueBg:Show()
     end
 
     if frame.blizzChrome then
-        frame.blizzChrome:SetFrameLevel(baseLevel)
-        frame.blizzChrome:SetShown(isBlizz and not isEmbedded)
-        if isBlizz and not isEmbedded then
+        frame.blizzChrome:SetFrameLevel(baseLevel + 1)
+        frame.blizzChrome:SetShown(showBlizzChrome)
+        if showBlizzChrome then
             DisableChromeMouseRecursive(frame.blizzChrome, frame.blizzChrome.CloseButton, 4)
             if frame.blizzChrome.Inset then
+                frame.blizzChrome.Inset:SetFrameLevel(baseLevel + 2)
                 frame.blizzChrome.Inset:ClearAllPoints()
                 frame.blizzChrome.Inset:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -85)
                 frame.blizzChrome.Inset:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -8, 12)
             end
+            if frame.blizzChrome.NineSlice and frame.blizzChrome.NineSlice.SetFrameLevel then
+                frame.blizzChrome.NineSlice:SetFrameLevel(baseLevel + 5)
+            end
+            if frame.blizzChrome.TitleContainer then
+                if frame.blizzChrome.TitleContainer.SetFrameLevel then
+                    frame.blizzChrome.TitleContainer:SetFrameLevel(baseLevel + 10)
+                end
+                frame.blizzChrome.TitleContainer:Show()
+            end
+            if frame.blizzChrome.PortraitContainer then
+                if frame.blizzChrome.PortraitContainer.SetFrameLevel then
+                    frame.blizzChrome.PortraitContainer:SetFrameLevel(baseLevel + 12)
+                end
+                frame.blizzChrome.PortraitContainer:Show()
+            end
+            if frame.blizzChrome.PortraitOverlay and frame.blizzChrome.PortraitOverlay.SetFrameLevel then
+                frame.blizzChrome.PortraitOverlay:SetFrameLevel(baseLevel + 13)
+            end
         end
     end
 
-    local chromeTop = (isBlizz and not isEmbedded and frame.blizzChrome) and MaxHierarchyFrameLevel(frame.blizzChrome, 3) or baseLevel
+    local chromeTop = showBlizzChrome and MaxHierarchyFrameLevel(frame.blizzChrome, 3) or baseLevel
     local interactiveBase = (not isEmbedded) and math.max(baseLevel, chromeTop) or baseLevel
 
     local singleEmbedded = IsSingleTabEmbedded()
@@ -7150,7 +7225,16 @@ local function ApplyTheme()
             ApplySingleEmbedTheme(tabKey)
         end
     end
+    UI:SyncFrameSectionLayers()
     UI:Refresh()
+    for _, shownModal in ipairs({ modalFrame, eventModalFrame, clanInfoModalFrame, diplomacyModalFrame }) do
+        if shownModal and shownModal:IsShown() then
+            if shownModal.topCloseBtn then shownModal.topCloseBtn._scLevelOffset = 12 end
+            if shownModal.topClose then shownModal.topClose._scLevelOffset = 12 end
+            SyncSubtreeButtonLayers(shownModal, 8)
+        end
+    end
+    UI:SyncFrameSectionLayers()
 end
 
 local function SetupMainFrameResizeHandles(targetFrame)
@@ -7174,12 +7258,16 @@ local function SetupMainFrameResizeHandles(targetFrame)
             if targetFrame._scSavePosition then
                 targetFrame._scSavePosition()
             end
+            if Theme and Theme.RestoreWindowPosition then
+                Theme:RestoreWindowPosition(targetFrame, "main", false)
+            end
             SaveGeometry()
         end
         ReflowTabStrip()
         if targetFrame._scReflowResize then
             targetFrame._scReflowResize()
         end
+        UI:SyncFrameSectionLayers()
     end
 
     local function BeginResize(point)
@@ -7194,6 +7282,20 @@ local function SetupMainFrameResizeHandles(targetFrame)
         end
         targetFrame:SetResizable(true)
         ApplyStandaloneResizeBounds(targetFrame)
+        -- Anchor opposite corner before StartSizing so CENTER anchoring never causes 2x symmetric expansion or edge drift.
+        if point == "BOTTOMLEFT" then
+            local right, top = targetFrame:GetRight(), targetFrame:GetTop()
+            if right and top then
+                targetFrame:ClearAllPoints()
+                targetFrame:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", right, top)
+            end
+        else
+            local left, top = targetFrame:GetLeft(), targetFrame:GetTop()
+            if left and top then
+                targetFrame:ClearAllPoints()
+                targetFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+            end
+        end
         if targetFrame.Raise then
             pcall(targetFrame.Raise, targetFrame)
         end
@@ -7299,6 +7401,39 @@ local function SetupMainFrameResizeHandles(targetFrame)
     targetFrame._scStopResize = StopActiveResize
 end
 
+local function RestoreStandalonePlacement()
+    if not frame then return end
+    frame._scLocked = false
+    if frame:GetParent() ~= UIParent then
+        frame:SetParent(UIParent)
+    end
+    frame:SetMovable(true)
+    frame:SetResizable(true)
+    frame:SetClampedToScreen(true)
+    local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
+    local w = ns.db and ns.db.window or { width = 790, height = 520 }
+    local targetW = math.max(minW, math.min(maxW, w.width or 790))
+    local targetH = math.max(minH, math.min(maxH, w.height or 520))
+    frame:SetSize(targetW, targetH)
+    local restored = Theme and Theme.RestoreWindowPosition and Theme:RestoreWindowPosition(frame, "main", false)
+    if not restored then
+        frame:ClearAllPoints()
+        if w.point and w.x and w.y then
+            frame:SetPoint(w.point, UIParent, w.relativePoint or w.point, w.x, w.y)
+            if frame._scSavePosition then
+                frame._scSavePosition()
+            end
+            if Theme and Theme.RestoreWindowPosition then
+                Theme:RestoreWindowPosition(frame, "main", false)
+            end
+        else
+            frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        end
+    end
+    frame:SetFrameStrata("HIGH")
+    frame:SetFrameLevel(600)
+end
+
 local function BuildMainFrame()
     frame = CreateFrame("Frame", "SocialCentralFrame", UIParent, "BackdropTemplate")
     local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
@@ -7373,8 +7508,9 @@ local function BuildMainFrame()
 
     local blizzOk, blizzChrome = pcall(CreateFrame, "Frame", "SocialCentralBlizzChrome", frame, "ButtonFrameTemplate")
     if blizzOk and blizzChrome then
+        blizzChrome._scSkipLayerSync = true
         blizzChrome:SetAllPoints(frame)
-        blizzChrome:SetFrameLevel(math.max(0, frame:GetFrameLevel()))
+        blizzChrome:SetFrameLevel(math.max(1, (frame:GetFrameLevel() or 600) + 1))
         DisableChromeMouseRecursive(blizzChrome, blizzChrome.CloseButton, 4)
         local pTex = (blizzChrome.PortraitContainer and blizzChrome.PortraitContainer.portrait) or blizzChrome.portrait
         if pTex and SetPortraitToTexture then
@@ -8896,7 +9032,7 @@ function UI:Refresh(resetScroll)
             panel:SetParent(frame.content)
             panel:ClearAllPoints()
             panel:SetAllPoints(frame.content)
-            SyncSubtreeButtonLayers(panel, 6)
+            SyncSubtreeButtonLayers(panel, 12)
         end
         if tabKey == "clan" and activeTab == "clan" then
             panel._dirty = nil
@@ -8907,7 +9043,7 @@ function UI:Refresh(resetScroll)
 
     local showClan = SyncFramePanelAttachment(clanPanel, "clan")
     local showGroup = SyncFramePanelAttachment(groupPanel, "group")
-    if chatPanel then chatPanel:SetShown(activeTab == "chat") end
+    local showChat = SyncFramePanelAttachment(chatPanel, "chat")
     local showBuffs = SyncFramePanelAttachment(buffsPanel, "buffs")
     local showAlts = SyncFramePanelAttachment(altsPanel, "alts")
 
@@ -8943,7 +9079,9 @@ function UI:Refresh(resetScroll)
             groupPanel:Refresh(resetScroll)
         end
     elseif activeTab == "chat" and chatPanel then
-        chatPanel:Refresh(resetScroll)
+        if showChat then
+            chatPanel:Refresh(resetScroll)
+        end
     elseif activeTab == "buffs" and buffsPanel then
         if showBuffs then
             buffsPanel:Refresh(resetScroll)
@@ -8958,6 +9096,9 @@ function UI:Refresh(resetScroll)
     end
 
     UpdateWhoButtons()
+    if frame and frame:IsShown() then
+        UI:SyncFrameSectionLayers()
+    end
 end
 
 local function MaybePromptThemePicker()
@@ -8967,39 +9108,6 @@ local function MaybePromptThemePicker()
             Theme:ShowThemeWelcomePicker()
         end
     end
-end
-
-local function RestoreStandalonePlacement()
-    if not frame then return end
-    frame._scLocked = false
-    if frame:GetParent() ~= UIParent then
-        frame:SetParent(UIParent)
-    end
-    frame:SetMovable(true)
-    frame:SetResizable(true)
-    frame:SetClampedToScreen(true)
-    local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
-    local w = ns.db and ns.db.window or { width = 790, height = 520 }
-    local targetW = math.max(minW, math.min(maxW, w.width or 790))
-    local targetH = math.max(minH, math.min(maxH, w.height or 520))
-    frame:SetSize(targetW, targetH)
-    local restored = Theme and Theme.RestoreWindowPosition and Theme:RestoreWindowPosition(frame, "main", false)
-    if not restored then
-        frame:ClearAllPoints()
-        if w.point and w.x and w.y then
-            frame:SetPoint(w.point, UIParent, w.relativePoint or w.point, w.x, w.y)
-            if frame._scSavePosition then
-                frame._scSavePosition()
-            end
-            if Theme and Theme.RestoreWindowPosition then
-                Theme:RestoreWindowPosition(frame, "main", false)
-            end
-        else
-            frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-        end
-    end
-    frame:SetFrameStrata("HIGH")
-    frame:SetFrameLevel(600)
 end
 
 local function IsSafeHostObj(obj)
@@ -9098,6 +9206,11 @@ local function ElevateEmbeddedHostChrome(hostFrame, minControlLevel)
                 local cName = child.GetName and child:GetName() or ""
                 if hRight and cLeft and cLeft >= (hRight - 14) and cW >= 24 and cW <= 76 then
                     SetMinFrameLevel(child, minControlLevel + 8)
+                    if child.GetChildren then
+                        for _, subTab in ipairs({ child:GetChildren() }) do
+                            SetMinFrameLevel(subTab, minControlLevel + 9)
+                        end
+                    end
                 elseif cName:find("Portrait") or (hLeft and hTop and cLeft and cTop and cLeft <= (hLeft + 34) and cTop >= (hTop - 34) and cW > 0 and cW <= 115 and cH > 0 and cH <= 115) then
                     SetMinFrameLevel(child, minControlLevel + 8)
                 end
@@ -9331,6 +9444,26 @@ local function HideCharacterHostSubframes(hostFrame, _)
     end
 end
 
+function UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
+    if type(embeddedState.alphaHiddenCharFrames) == "table" then
+        for sub, origAlpha in pairs(embeddedState.alphaHiddenCharFrames) do
+            if sub and IsSafeHostObj(sub) and sub.SetAlpha then
+                pcall(sub.SetAlpha, sub, origAlpha or 1)
+            end
+        end
+        wipe(embeddedState.alphaHiddenCharFrames)
+    end
+    if type(embeddedState.hiddenCharModels) == "table" then
+        for i = #embeddedState.hiddenCharModels, 1, -1 do
+            local m = embeddedState.hiddenCharModels[i]
+            if m and IsSafeHostObj(m) and m.Show then
+                pcall(m.Show, m)
+            end
+            embeddedState.hiddenCharModels[i] = nil
+        end
+    end
+end
+
 function UI:RestoreEmbeddedHostUI(hostFrame)
     if not hostFrame then return end
     if hostFrame == _G.CharacterFrame then
@@ -9371,7 +9504,7 @@ function UI:RestoreEmbeddedHostUI(hostFrame)
         local otherNativeOpen = false
         for _, checkName in ipairs({ "ReputationFrame", "TokenFrame", "PetPaperDollFrame", "SkillFrame", "PVPFrame", "HonorFrame", "StatisticsFrame", "CharacterStatisticsFrame" }) do
             local f = _G[checkName]
-            if f and f.IsShown and f:IsShown() and not hiddenCharSubframes[checkName] and not wasAlphaHidden[f] then
+            if f and f.IsShown and f:IsShown() and not hiddenCharSubframes[checkName] then
                 otherNativeOpen = true
                 break
             end
@@ -9522,6 +9655,9 @@ local function CloseSingleContainer(container, hostFrame)
             panel:ClearAllPoints()
             panel:SetAllPoints(frame.content)
             panel:SetShown(frame:IsShown() and activeTab == tabKey)
+            if frame:IsShown() and activeTab == tabKey then
+                SyncSubtreeButtonLayers(panel, 12)
+            end
         end
         UI:RestoreEmbeddedHostUI(activeHost or hostFrame)
         local inCombatNow = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
@@ -9544,6 +9680,9 @@ local function CloseSingleContainer(container, hostFrame)
             panel:ClearAllPoints()
             panel:SetAllPoints(frame.content)
             panel:SetShown(frame:IsShown() and activeTab == tabKey)
+            if frame:IsShown() and activeTab == tabKey then
+                SyncSubtreeButtonLayers(panel, 12)
+            end
         end
         if hostFrame then
             UI:RestoreEmbeddedHostUI(hostFrame)
@@ -9680,15 +9819,13 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
                 panel._dirty = nil
             end
             panel:Show()
-            SyncSubtreeButtonLayers(panel, 6)
+            UI:SyncFrameSectionLayers(container)
         end
 
         TriggerTabRefresh(singleKey)
         ApplySingleEmbedTheme(singleKey)
         container:Show()
-        if panel then
-            SyncSubtreeButtonLayers(panel, 6)
-        end
+        UI:SyncFrameSectionLayers(container)
         if spec.updatePanel then
             spec.updatePanel()
         end
@@ -9702,9 +9839,7 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
                     HideCharacterHostSubframes(hostFrame, true)
                     ApplySingleEmbedTheme(singleKey)
                     ElevateEmbeddedHostChrome(hostFrame, embedLvl + 45)
-                    if panel then
-                        SyncSubtreeButtonLayers(panel, 6)
-                    end
+                    UI:SyncFrameSectionLayers(container)
                     if spec.updatePanel then
                         spec.updatePanel()
                     end
@@ -9811,7 +9946,7 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
     end
     TriggerTabRefresh(activeTab)
     frame:Show()
-    SyncSubtreeButtonLayers(frame, 6)
+    UI:SyncFrameSectionLayers()
     if wasShown then
         ApplyTheme()
         UI:Refresh(true)
@@ -9831,7 +9966,7 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
                     HideCharacterHostSubframes(hostFrame, true)
                     ApplyTheme()
                     ElevateEmbeddedHostChrome(hostFrame, embedLvl + 45)
-                    SyncSubtreeButtonLayers(frame, 6)
+                    UI:SyncFrameSectionLayers()
                     ReflowTabStrip()
                     if ReflowFilterBar then ReflowFilterBar() end
                     if ReflowWatchBar then ReflowWatchBar() end
@@ -9888,6 +10023,8 @@ function UI:ShowHub(defaultTab)
     if wasShown then
         ApplyTheme()
         UI:Refresh(true)
+    else
+        UI:SyncFrameSectionLayers()
     end
     MaybePromptThemePicker()
     if ns.LFGFrameTab and ns.LFGFrameTab.SyncAllEmbeddedTabStates then
@@ -9977,6 +10114,8 @@ function UI:OpenTab(tabId)
     if wasShown then
         ApplyTheme()
         UI:Refresh(true)
+    else
+        UI:SyncFrameSectionLayers()
     end
     if activeTab == "chat" and chatPanel then
         chatPanel._filter = "all"
