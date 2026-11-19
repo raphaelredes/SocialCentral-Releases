@@ -1093,8 +1093,9 @@ function Compat.IsMe(rawName, guid)
         return guid == cachedMyGuid
     end
     local parsed = ParseCharInternal(rawName)
-    if not cachedMyName or cachedMyName == "Unknown" then
-        local liveName = Safe.String(Safe.Call(UnitName, "player"))
+    if not cachedMyName or cachedMyName == "Unknown" or not (cachedMyParsed and cachedMyParsed.surname) then
+        local resolved = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+        local liveName = (resolved and resolved.fullName) or Safe.String(Safe.Call(UnitName, "player"))
         if liveName and liveName ~= "" and liveName ~= "Unknown" then
             cachedMyName = liveName
             cachedMyParsed = ParseCharInternal(liveName)

@@ -143,7 +143,7 @@ local function ResolveSelfIdentity()
     local cleanName = Compat.CleanInput and Compat.CleanInput(fullName) or fullName
     local lookupKey
     if Compat.ParseCharacterFields then
-        local _, _, lKey = Compat.ParseCharacterFields(cleanName)
+        local lKey = Compat.ParseCharacterFields(cleanName)
         lookupKey = lKey
     elseif Compat.ParseCharacterName then
         local p = Compat.ParseCharacterName(cleanName)
@@ -3751,6 +3751,110 @@ function Clan:MaybeNotifyClanLFG(lookupKey, displayName, classFile, summaryText,
     return true
 end
 
+local function ClassifyOfficialActivityKind(categoryId, catName, aInfo)
+    if categoryId == 2 then return "DUNGEONS" end
+    if categoryId == 114 or categoryId == 3 then return "RAIDS" end
+    if categoryId == 116 or categoryId == 1 then return "QUESTS" end
+    if categoryId == 118 or categoryId == 7 or categoryId == 8 or categoryId == 9 then return "PVP" end
+    if categoryId == 120 or categoryId == 6 then return "CUSTOM" end
+    local hay = ((catName or "") .. " " .. (aInfo and (aInfo.fullName or aInfo.shortName or "") or "")):lower()
+    if aInfo then
+        if aInfo.isCurrentRaidActivity or hay:find("raid") or hay:find("raide") or hay:find("banda") then
+            return "RAIDS"
+        end
+        if aInfo.isRatedPvpActivity or aInfo.isPvpActivity or hay:find("pvp") or hay:find("jcj") or hay:find("arena") or hay:find("battleground") or hay:find("campo de batalha") then
+            return "PVP"
+        end
+        if (tonumber(aInfo.maxNumPlayers) or 0) >= 10 then
+            return "RAIDS"
+        end
+        if hay:find("quest") or hay:find("miss") or hay:find("misi") or hay:find("zona") or hay:find("zone") then
+            return "QUESTS"
+        end
+        if hay:find("custom") or hay:find("personaliz") then
+            return "CUSTOM"
+        end
+        if (tonumber(aInfo.maxNumPlayers) or 0) == 5 or hay:find("dungeon") or hay:find("masmorra") or hay:find("mazmorra") then
+            return "DUNGEONS"
+        end
+    end
+    if hay:find("raid") or hay:find("raide") or hay:find("banda") then
+        return "RAIDS"
+    elseif hay:find("pvp") or hay:find("jcj") or hay:find("arena") or hay:find("battle") or hay:find("batalha") or hay:find("batalla") then
+        return "PVP"
+    elseif hay:find("quest") or hay:find("miss") or hay:find("misi") or hay:find("zona") or hay:find("zone") then
+        return "QUESTS"
+    elseif hay:find("custom") or hay:find("personaliz") then
+        return "CUSTOM"
+    elseif hay:find("dungeon") or hay:find("masmorra") or hay:find("mazmorra") then
+        return "DUNGEONS"
+    end
+    return "DUNGEONS"
+end
+
+local function ExtractActiveOfficialEntryMeta(info)
+    local actIdsList = {}
+    local seenAid = {}
+    local maxCap = (Constants and Constants.LFGConstsExposed and Constants.LFGConstsExposed.GROUP_FINDER_MAX_ACTIVITY_CAPACITY) or 16
+    if type(info) == "table" then
+        if type(info.activityIDs) == "table" then
+            for j = 1, #info.activityIDs do
+                local aid = Safe.Number(info.activityIDs[j])
+                if aid and aid > 0 and not seenAid[aid] then
+                    seenAid[aid] = true
+                    actIdsList[#actIdsList + 1] = aid
+                    if #actIdsList >= maxCap then
+                        break
+                    end
+                end
+            end
+        end
+        local scalarAid = Safe.Number(info.activityID)
+        if #actIdsList == 0 and scalarAid and scalarAid > 0 then
+            actIdsList[1] = scalarAid
+        end
+    end
+
+    local actNames = {}
+    local catKind = "DUNGEONS"
+    local hasKind = false
+    if C_LFGList and C_LFGList.GetActivityInfoTable then
+        for i = 1, #actIdsList do
+            local aInfo = Safe.Call(C_LFGList.GetActivityInfoTable, actIdsList[i])
+            if type(aInfo) == "table" then
+                local nm = Safe.String(aInfo.fullName) or Safe.String(aInfo.shortName)
+                if nm and nm ~= "" then
+                    actNames[#actNames + 1] = nm
+                end
+                if not hasKind then
+                    catKind = ClassifyOfficialActivityKind(Safe.Number(aInfo.categoryID), nil, aInfo)
+                    hasKind = true
+                end
+            end
+        end
+    end
+
+    local actDisplay = Safe.String(info and info.name)
+    if #actNames == 1 then
+        actDisplay = actNames[1]
+    elseif #actNames >= 2 then
+        actDisplay = actNames[1] .. " (+" .. tostring(#actNames - 1) .. ")"
+    end
+    if not actDisplay or actDisplay == "" then
+        actDisplay = L["Group"]
+    end
+
+    return {
+        activityIds = actIdsList,
+        actNames = actNames,
+        actDisplay = actDisplay,
+        activityAllNames = (#actNames > 0) and table.concat(actNames, ", ") or actDisplay,
+        categoryKind = catKind,
+        newPlayerFriendly = (type(info) == "table" and info.newPlayerFriendly == true) or false,
+        comment = (type(info) == "table" and Safe.String(info.comment)) or "",
+    }
+end
+
 function Clan:GetPlayerGameSummary()
     local role, specName = self:GetMySpecAndRole()
     local level = Safe.Number(Safe.Call(UnitLevel, "player")) or 0
@@ -3780,6 +3884,9 @@ function Clan:GetPlayerGameSummary()
         local info = C_LFGList.GetActiveEntryInfo and Safe.Call(C_LFGList.GetActiveEntryInfo)
         if type(info) == "table" then
             premadeTitle = Safe.String(info.name)
+            if not premadeTitle or premadeTitle == "" then
+                premadeTitle = ExtractActiveOfficialEntryMeta(info).actDisplay
+            end
         end
         if C_LFGList.GetApplicants then
             local apps = Safe.Call(C_LFGList.GetApplicants)
@@ -4508,10 +4615,10 @@ function Clan:PostSmartGroupFormation(optionalActivity)
             local aEntry = Safe.Call(C_LFGList.GetActiveEntryInfo)
             if type(aEntry) == "table" then
                 activity = Safe.String(aEntry.name)
-                if (not activity or activity == "") and aEntry.activityID and C_LFGList.GetActivityInfoTable then
-                    local aTbl = Safe.Call(C_LFGList.GetActivityInfoTable, aEntry.activityID)
-                    if type(aTbl) == "table" then
-                        activity = Safe.String(aTbl.fullName) or Safe.String(aTbl.shortName)
+                if not activity or activity == "" then
+                    local meta = ExtractActiveOfficialEntryMeta(aEntry)
+                    if meta and meta.actDisplay and meta.actDisplay ~= "" and meta.actDisplay ~= L["Group"] then
+                        activity = meta.actDisplay
                     end
                 end
             end
@@ -4545,6 +4652,7 @@ function Clan:GetActiveLfgForPlayer(rawNameOrKey)
         return {
             mode = rec.mode or "LFG",
             role = rec.role or "ANY",
+            soloRoles = rec.soloRoles,
             activity = rec.activity or L["Dungeon"],
             note = rec.note or "",
             sourceType = "LFG",
@@ -4621,7 +4729,7 @@ function Clan:GetActiveLfgForPlayer(rawNameOrKey)
     return nil
 end
 
-function Clan:ClearMyLFG()
+function Clan:ClearMyLFG(isHardwareEvent)
     local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
     local myName = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player"))
     local myParsed = myName and Compat.ParseCharacterName(myName)
@@ -4635,11 +4743,59 @@ function Clan:ClearMyLFG()
             end
         end
     end
+    if bucket.peers then
+        for k, peer in pairs(bucket.peers) do
+            if type(peer) == "table" and (k == myParsed.lookupKey or Compat.IsMe(peer.displayName or k)) then
+                if peer.tag == "LFG" or peer.tag == "MPLUS" then
+                    peer.tag = "NONE"
+                    peer.note = ""
+                end
+            end
+        end
+    end
     if self.externalLFG then
         self.externalLFG[myParsed.lookupKey] = nil
+        for k, ext in pairs(self.externalLFG) do
+            if Compat.IsMe(ext and ext.displayName or k) then
+                self.externalLFG[k] = nil
+            end
+        end
+    end
+    if self.officialLfgCache then
+        self.officialLfgCache[myParsed.lookupKey] = nil
+        for k, off in pairs(self.officialLfgCache) do
+            if Compat.IsMe(off and off.displayName or k) then
+                self.officialLfgCache[k] = nil
+            end
+        end
+    end
+    if self.globalChatLFG then
+        self.globalChatLFG[myParsed.lookupKey] = nil
+        for k, pub in pairs(self.globalChatLFG) do
+            if Compat.IsMe(pub and pub.displayName or k, pub and pub.guid) then
+                self.globalChatLFG[k] = nil
+            end
+        end
+    end
+    if type(self.guildChatLFG) == "table" then
+        for i = #self.guildChatLFG, 1, -1 do
+            local row = self.guildChatLFG[i]
+            if type(row) == "table" and Compat.IsMe(row.displayName or row.lookupKey) then
+                table.remove(self.guildChatLFG, i)
+            end
+        end
     end
     if bucket.myTag == "LFG" or bucket.myTag == "MPLUS" then
         bucket.myTag = "NONE"
+        bucket.myNote = ""
+    end
+    if isHardwareEvent == true and not ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) then
+        if C_LFGList and C_LFGList.HasActiveEntryInfo and C_LFGList.RemoveListing then
+            if Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true then
+                self._officialLfgActive = false
+                pcall(C_LFGList.RemoveListing)
+            end
+        end
     end
     self:SendGuildSync("LFX")
     BroadcastExternalLFG(self, ("ALFX~%s"):format(Compat.CleanPayloadField(myParsed.displayName, 28)))
@@ -4659,19 +4815,71 @@ function Clan:SyncOfficialActiveLfg()
     if hasActive then
         local info = Safe.Call(C_LFGList.GetActiveEntryInfo)
         if type(info) == "table" then
-            local actName = Safe.String(info.name)
-            local actId = Safe.Number(info.activityID)
-            if (not actName or actName == "") and actId and C_LFGList.GetActivityInfoTable then
-                local aInfo = Safe.Call(C_LFGList.GetActivityInfoTable, actId)
-                if type(aInfo) == "table" then
-                    actName = Safe.String(aInfo.fullName) or Safe.String(aInfo.shortName)
+            local meta = ExtractActiveOfficialEntryMeta(info)
+            local officialRole = self:GetMySpecAndRole()
+            local officialSoloRoles = nil
+            if not (Compat.IsInGroup and Compat.IsInGroup()) and C_LFGListRoles and C_LFGListRoles.GetRoles then
+                local r = Safe.Call(C_LFGListRoles.GetRoles)
+                if type(r) == "table" then
+                    officialSoloRoles = {
+                        TANK = (Safe.Value(r.tank) == true),
+                        HEALER = (Safe.Value(r.healer) == true),
+                        DPS = (Safe.Value(r.dps) == true),
+                    }
+                    local cnt = (r.tank and 1 or 0) + (r.healer and 1 or 0) + (r.dps and 1 or 0)
+                    if cnt == 1 then
+                        if r.tank then
+                            officialRole = "TANK"
+                        elseif r.healer then
+                            officialRole = "HEALER"
+                        elseif r.dps then
+                            officialRole = "DPS"
+                        end
+                    elseif cnt > 1 then
+                        officialRole = "ANY"
+                    end
                 end
             end
-            local comment = Safe.String(info.comment) or ""
+
+            local nowClock = GetTime and GetTime() or 0
+            if myParsed and (nowClock - (self._lastAddonOfficialPublishAt or 0)) <= 4.0 then
+                local bucket = Store:GetClanScopeData()
+                local existing = bucket and bucket.lfg and bucket.lfg[myParsed.lookupKey]
+                if type(existing) == "table" then
+                    existing.isOfficial = true
+                    existing.activityIds = meta.activityIds
+                    if not existing.activityAllNames or existing.activityAllNames == "" then
+                        existing.activityAllNames = meta.activityAllNames
+                    end
+                    existing.categoryKind = existing.categoryKind or meta.categoryKind
+                    existing.newPlayerFriendly = meta.newPlayerFriendly
+                    existing.soloRoles = officialSoloRoles
+                    self._officialLfgActive = true
+                    QueueClanEmit(0.15)
+                    return
+                end
+            end
+
             self._syncingFromOfficial = true
             self._officialLfgActive = true
-            local _, row = self:PostLFG("LFM", self:GetMySpecAndRole(), actName or L["Group"], 0, comment)
-            if row then row.isOfficial = true end
+            local officialMode = (Compat.IsInGroup and Compat.IsInGroup()) and "LFM" or "LFG"
+            local _, row = self:PostLFG(
+                officialMode,
+                officialRole,
+                meta.actDisplay or L["Group"],
+                0,
+                meta.comment or "",
+                false,
+                meta.categoryKind == "DUNGEONS"
+            )
+            if type(row) == "table" then
+                row.isOfficial = true
+                row.activityIds = meta.activityIds
+                row.activityAllNames = meta.activityAllNames
+                row.categoryKind = meta.categoryKind
+                row.newPlayerFriendly = meta.newPlayerFriendly
+                row.soloRoles = officialSoloRoles
+            end
             self._syncingFromOfficial = false
         end
     elseif self._officialLfgActive then
@@ -4683,47 +4891,6 @@ function Clan:SyncOfficialActiveLfg()
             end
         end
     end
-end
-
-local function ClassifyOfficialActivityKind(categoryId, catName, aInfo)
-    local hay = ((catName or "") .. " " .. (aInfo and (aInfo.fullName or aInfo.shortName or "") or "")):lower()
-    if aInfo then
-        if aInfo.isCurrentRaidActivity or hay:find("raid") or hay:find("raide") or hay:find("banda") then
-            return "RAIDS"
-        end
-        if aInfo.isRatedPvpActivity or aInfo.isPvpActivity or hay:find("pvp") or hay:find("jcj") or hay:find("arena") or hay:find("battleground") or hay:find("campo de batalha") then
-            return "PVP"
-        end
-        if (tonumber(aInfo.maxNumPlayers) or 0) >= 10 then
-            return "RAIDS"
-        end
-        if hay:find("quest") or hay:find("miss") or hay:find("misi") then
-            return "QUESTS"
-        end
-        if hay:find("custom") or hay:find("personaliz") then
-            return "CUSTOM"
-        end
-        if (tonumber(aInfo.maxNumPlayers) or 0) == 5 or hay:find("dungeon") or hay:find("masmorra") or hay:find("mazmorra") then
-            return "DUNGEONS"
-        end
-    end
-    if hay:find("raid") or hay:find("raide") or hay:find("banda") then
-        return "RAIDS"
-    elseif hay:find("pvp") or hay:find("jcj") or hay:find("arena") or hay:find("battle") or hay:find("batalha") or hay:find("batalla") then
-        return "PVP"
-    elseif hay:find("quest") or hay:find("miss") or hay:find("misi") then
-        return "QUESTS"
-    elseif hay:find("custom") or hay:find("personaliz") then
-        return "CUSTOM"
-    elseif hay:find("dungeon") or hay:find("masmorra") or hay:find("mazmorra") then
-        return "DUNGEONS"
-    end
-    if categoryId == 2 then return "DUNGEONS" end
-    if categoryId == 3 then return "RAIDS" end
-    if categoryId == 114 or categoryId == 118 or categoryId == 7 or categoryId == 8 or categoryId == 9 then return "PVP" end
-    if categoryId == 1 or categoryId == 116 then return "QUESTS" end
-    if categoryId == 6 or categoryId == 120 then return "CUSTOM" end
-    return "DUNGEONS"
 end
 
 function Clan:GetOfficialCategoryMap()
@@ -4955,48 +5122,187 @@ function Clan:GetOfficialActivitiesForKind(catKind)
     return out
 end
 
-function Clan:SearchOfficialLfg(catKind, specificActivityIds)
+function Clan:ResolveOfficialActivityIds(catKind, selectedItems)
+    local out = {}
+    local seen = {}
+    local maxCap = (Constants and Constants.LFGConstsExposed and Constants.LFGConstsExposed.GROUP_FINDER_MAX_ACTIVITY_CAPACITY) or 16
+    local function AddId(rawId)
+        local nid = Safe.Number(rawId)
+        if nid and nid > 0 and not seen[nid] and #out < maxCap then
+            seen[nid] = true
+            out[#out + 1] = nid
+            return true
+        end
+        return false
+    end
+
+    local items = (type(selectedItems) == "table") and selectedItems or {}
+    for i = 1, #items do
+        local it = items[i]
+        if type(it) == "table" and it.officialId then
+            AddId(it.officialId)
+        end
+    end
+
+    local offList = self:GetOfficialActivitiesForKind(catKind or "DUNGEONS")
+    if #offList > 0 then
+        local function CleanNorm(text)
+            local norm = NormalizeActivityLookupText(text)
+            local stripped = norm:match("^([^(]+)")
+            return (stripped or norm):match("^%s*(.-)%s*$")
+        end
+        for i = 1, #items do
+            local it = items[i]
+            if type(it) == "table" and not it.officialId and #out < maxCap then
+                local probes = {
+                    CleanNorm(it.summaryLabel),
+                    CleanNorm(it.label),
+                    CleanNorm(it.engLabel),
+                    CleanNorm(it.zone),
+                }
+                local matchedId = nil
+                for pIdx = 1, #probes do
+                    local probe = probes[pIdx]
+                    if probe and #probe >= 3 then
+                        for oIdx = 1, #offList do
+                            local o = offList[oIdx]
+                            local nFull = CleanNorm(o.label)
+                            local nShort = CleanNorm(o.shortLabel)
+                            if probe == nFull or probe == nShort
+                                or (nFull ~= "" and (nFull:find(probe, 1, true) or probe:find(nFull, 1, true)))
+                                or (nShort ~= "" and (nShort:find(probe, 1, true) or probe:find(nShort, 1, true)))
+                            then
+                                matchedId = o.officialId
+                                break
+                            end
+                        end
+                    end
+                    if matchedId then break end
+                end
+                if matchedId then
+                    AddId(matchedId)
+                end
+            end
+        end
+        if #out == 0 and (catKind == "QUESTS" or catKind == "CUSTOM") then
+            AddId(offList[1] and offList[1].officialId)
+        end
+    end
+    return out
+end
+
+function Clan:SearchOfficialLfg(catKind, specificActivityIds, forceIgnoreCooldown)
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     if inCombat then return false end
     if not (C_LFGList and C_LFGList.Search) then return false end
     local now = GetTime()
-    if (now - (self._lastOfficialSearchAt or 0)) < 2.0 then
+    local minWait = forceIgnoreCooldown and 0.6 or 1.2
+    if (now - (self._lastOfficialSearchAt or 0)) < minWait then
         return false
     end
 
-    local targetKind = (catKind and catKind ~= "ALL") and catKind or "DUNGEONS"
+    local actIds = {}
+    local seenIds = {}
+    if type(specificActivityIds) == "table" then
+        for i = 1, #specificActivityIds do
+            local nid = Safe.Number(specificActivityIds[i])
+            if nid and nid > 0 and not seenIds[nid] then
+                seenIds[nid] = true
+                actIds[#actIds + 1] = nid
+            end
+        end
+    end
+
+    local targetKind = (catKind and catKind ~= "ALL") and catKind or nil
+    if not targetKind and #actIds == 0 and C_LFGList.HasActiveEntryInfo and Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true and C_LFGList.GetActiveEntryInfo then
+        local aInfo = Safe.Call(C_LFGList.GetActiveEntryInfo)
+        if type(aInfo) == "table" then
+            local meta = ExtractActiveOfficialEntryMeta(aInfo)
+            if meta and type(meta.activityIds) == "table" and #meta.activityIds > 0 then
+                for i = 1, #meta.activityIds do
+                    local nid = Safe.Number(meta.activityIds[i])
+                    if nid and nid > 0 and not seenIds[nid] then
+                        seenIds[nid] = true
+                        actIds[#actIds + 1] = nid
+                    end
+                end
+                targetKind = meta.categoryKind
+            end
+        end
+    end
+
     local catMap = self:GetOfficialCategoryMap()
-    if (not catKind or catKind == "ALL") then
+    if not targetKind then
+        targetKind = "DUNGEONS"
         local myLvl = (Safe and Safe.Number(UnitLevel and UnitLevel("player"))) or 60
         if myLvl > 0 and myLvl < 13 and catMap and catMap.QUESTS then
             targetKind = "QUESTS"
         end
     end
-    local catId = (catMap and catMap[targetKind]) or (catMap and catMap.DUNGEONS)
+
+    local catId = nil
+    if #actIds > 0 and C_LFGList.GetActivityInfoTable then
+        local firstInfo = Safe.Call(C_LFGList.GetActivityInfoTable, actIds[1])
+        if type(firstInfo) == "table" then
+            catId = Safe.Number(firstInfo.categoryID)
+            if catId then
+                targetKind = ClassifyOfficialActivityKind(catId, nil, firstInfo)
+            end
+        end
+    end
+    if not catId then
+        catId = (catMap and catMap[targetKind]) or (catMap and catMap.DUNGEONS)
+    end
     if not catId then
         local r1 = C_LFGList.GetAvailableCategories and Safe.Call(C_LFGList.GetAvailableCategories)
         catId = (type(r1) == "table" and Safe.Number(r1[1])) or 2
     end
     if not catId then return false end
 
+    local hasExplicitIds = (#actIds > 0)
+    if #actIds == 0 then
+        if C_LFGList.GetAvailableActivities then
+            local allActs = Safe.Call(C_LFGList.GetAvailableActivities, catId)
+            if type(allActs) == "table" then
+                for i = 1, #allActs do
+                    local nid = Safe.Number(allActs[i])
+                    if nid and nid > 0 and not seenIds[nid] then
+                        seenIds[nid] = true
+                        actIds[#actIds + 1] = nid
+                    end
+                end
+            end
+        end
+        if #actIds == 0 and type(_G.LFGUtil_GetFilteredActivities) == "function" then
+            local okF, filtered = pcall(_G.LFGUtil_GetFilteredActivities, catId)
+            if okF and type(filtered) == "table" and #filtered > 0 then
+                for i = 1, #filtered do
+                    local nid = Safe.Number(filtered[i])
+                    if nid and nid > 0 and not seenIds[nid] then
+                        seenIds[nid] = true
+                        actIds[#actIds + 1] = nid
+                    end
+                end
+            end
+        end
+    end
+
     self._lastOfficialSearchAt = now
     self._lastOfficialSearchKind = targetKind
+    self._lastOfficialSearchActivityIds = actIds
+    self._lastOfficialSearchScoped = hasExplicitIds
+    self._lastOfficialSearchActivitySet = hasExplicitIds and seenIds or nil
     self._officialSearchPendingUntil = now + 4.0
 
     local ok = false
-    if type(specificActivityIds) == "table" and #specificActivityIds > 0 then
-        ok = pcall(C_LFGList.Search, catId, specificActivityIds)
-        if not ok then
-            ok = pcall(C_LFGList.Search, catId)
-        end
-    else
+    if #actIds > 0 then
+        ok = pcall(C_LFGList.Search, catId, 0, 0, nil, false, nil, actIds)
+    end
+    if not ok then
+        ok = pcall(C_LFGList.Search, catId, 0, 0, nil, false)
+    end
+    if not ok then
         ok = pcall(C_LFGList.Search, catId)
-        if not ok and C_LFGList.GetAvailableActivities then
-            local allActs = Safe.Call(C_LFGList.GetAvailableActivities, catId)
-            if type(allActs) == "table" then
-                ok = pcall(C_LFGList.Search, catId, allActs)
-            end
-        end
     end
     if ok and self.ScanOfficialLfgResults then
         -- Also harvest any immediately cached results while async update arrives
@@ -5005,30 +5311,280 @@ function Clan:SearchOfficialLfg(catKind, specificActivityIds)
     return ok
 end
 
+local function PushUniqueText(list, seenSet, text)
+    if type(text) == "string" and text ~= "" and not seenSet[text] then
+        seenSet[text] = true
+        list[#list + 1] = text
+    end
+end
+
+local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDisp)
+    local out = {
+        leaderLvl = Safe.Number(info and info.leaderLevel) or 0,
+        leaderClass = nil,
+        soloRoles = nil,
+        numGuildMates = Safe.Number(info and info.numGuildMates) or 0,
+        numBNetFriends = Safe.Number(info and info.numBNetFriends) or 0,
+        numCharFriends = Safe.Number(info and info.numCharFriends) or 0,
+        hasGuildMember = false,
+        hasAlliedMember = false,
+        hasFriendMember = false,
+        hasWatchlistMember = false,
+        hasGoodPartnerMember = false,
+        hasAvoidMember = false,
+        hasEnemyGuildMember = false,
+        hasAddonMember = false,
+        guildMemberNames = "",
+        alliedMemberNames = "",
+        friendMemberNames = "",
+        watchlistMemberNames = "",
+        goodPartnerNames = "",
+        avoidSignupNames = "",
+        enemyGuildNames = "",
+        members = {},
+        memberSearchText = "",
+    }
+    local gNames, aNames, fNames, wNames, gpNames, avNames, egNames = {}, {}, {}, {}, {}, {}, {}
+    local gSeen, aSeen, fSeen, wSeen, gpSeen, avSeen, egSeen = {}, {}, {}, {}, {}, {}, {}
+    local mSeen, searchParts = {}, {}
+    local totalMembers = math.min(math.max(1, Safe.Number(info and info.numMembers) or 1), 40)
+    local leaderAdded = false
+
+    local leaderInfo = (C_LFGList and C_LFGList.GetSearchResultLeaderInfo) and Safe.Call(C_LFGList.GetSearchResultLeaderInfo, resId) or nil
+    if type(leaderInfo) == "table" then
+        local lLvl = Safe.Number(leaderInfo.level) or 0
+        if lLvl > 0 and out.leaderLvl == 0 then
+            out.leaderLvl = lLvl
+        end
+        local lCls = Safe.String(leaderInfo.classFilename)
+        if lCls and lCls ~= "" and not out.leaderClass then
+            out.leaderClass = lCls
+        end
+        if totalMembers == 1 and type(leaderInfo.lfgRoles) == "table" and not out.soloRoles then
+            out.soloRoles = {
+                TANK = (Safe.Value(leaderInfo.lfgRoles.tank) == true),
+                HEALER = (Safe.Value(leaderInfo.lfgRoles.healer) == true),
+                DPS = (Safe.Value(leaderInfo.lfgRoles.dps) == true),
+            }
+        end
+    end
+
+    local function RecordMember(mName, mLvl, mClass, mRole, mIsLeader, lfgRoles, slotIdx)
+        if (type(mName) ~= "string" or mName == "") and (mIsLeader or (totalMembers == 1 and slotIdx == 1)) then
+            mName = leaderDisp
+        end
+        if mIsLeader or slotIdx == 1 then
+            if (mLvl or 0) > 0 and out.leaderLvl == 0 then
+                out.leaderLvl = mLvl
+            end
+            if mClass and mClass ~= "" and not out.leaderClass then
+                out.leaderClass = mClass
+            end
+        end
+        if type(lfgRoles) == "table" and not out.soloRoles and totalMembers == 1 then
+            out.soloRoles = {
+                TANK = (Safe.Value(lfgRoles.tank) == true),
+                HEALER = (Safe.Value(lfgRoles.healer) == true),
+                DPS = (Safe.Value(lfgRoles.dps) == true),
+            }
+        end
+        if type(mName) == "string" and mName ~= "" then
+            local mLk, _, mDisp = Compat.ParseCharacterFields and Compat.ParseCharacterFields(mName)
+            local uniq = mLk or mName
+            if mSeen[uniq] then return end
+            mSeen[uniq] = true
+            local disp = mDisp or mName
+            searchParts[#searchParts + 1] = disp:lower()
+            if mIsLeader or (leaderLk and mLk == leaderLk) or (leaderDisp and disp == leaderDisp) then
+                leaderAdded = true
+            end
+
+            local isMe = Compat.IsMe and Compat.IsMe(disp)
+            local mClan, mAllied, mFriend, mWatch, mGuild = false, false, false, false, nil
+            local mGood, mAvoid, mEnemy, mAddon = false, false, false, false
+            if mLk and not isMe then
+                mClan, mAllied, mFriend, mWatch, mGuild = self:GetPlayerRelationshipFlags(mLk, disp)
+                local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(mLk) or (Store.GetSocialMeta and Store:GetSocialMeta(mLk)))
+                local comp = Store and Store.GetRecentCompanion and Store:GetRecentCompanion(mLk)
+                if (sMeta and sMeta.flag == "GOOD") or comp ~= nil then
+                    mGood = true
+                elseif sMeta and sMeta.flag == "AVOID" then
+                    mAvoid = true
+                end
+                mAddon = ((self.peerVersions and self.peerVersions[mLk] ~= nil)
+                    or (ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(mLk))) == true
+                mEnemy = (not mClan and not mAllied and mGuild and mGuild ~= "" and ns.Spotter and ns.Spotter.ClassifyGuild and ns.Spotter:ClassifyGuild(mGuild) == "ENEMY") == true
+
+                if mClan then
+                    out.hasGuildMember = true
+                    PushUniqueText(gNames, gSeen, disp)
+                elseif mAllied then
+                    out.hasAlliedMember = true
+                    PushUniqueText(aNames, aSeen, (mGuild and mGuild ~= "") and (disp .. " <" .. mGuild .. ">") or disp)
+                elseif mEnemy then
+                    out.hasEnemyGuildMember = true
+                    PushUniqueText(egNames, egSeen, (mGuild and mGuild ~= "") and (disp .. " <" .. mGuild .. ">") or disp)
+                end
+                if mFriend then
+                    out.hasFriendMember = true
+                    PushUniqueText(fNames, fSeen, disp)
+                end
+                if mWatch then
+                    out.hasWatchlistMember = true
+                    PushUniqueText(wNames, wSeen, disp)
+                end
+                if mGood then
+                    out.hasGoodPartnerMember = true
+                    PushUniqueText(gpNames, gpSeen, disp)
+                end
+                if mAvoid then
+                    out.hasAvoidMember = true
+                    PushUniqueText(avNames, avSeen, disp)
+                end
+                if mAddon then
+                    out.hasAddonMember = true
+                end
+            end
+
+            if #out.members < 15 then
+                local tags = {}
+                if mClan then tags[#tags + 1] = L["Guild"] end
+                if mAllied then tags[#tags + 1] = L["ALLY"] end
+                if mFriend then tags[#tags + 1] = L["FRIEND"] end
+                if mWatch then tags[#tags + 1] = L["WATCHLIST"] end
+                if mGood then tags[#tags + 1] = "+" end
+                if mAvoid then tags[#tags + 1] = L["AVOID"] end
+                if mEnemy then tags[#tags + 1] = L["Enemy Guild"] end
+                if mAddon then tags[#tags + 1] = "SC" end
+                out.members[#out.members + 1] = {
+                    name = disp,
+                    classFile = mClass,
+                    level = (mLvl and mLvl > 0) and mLvl or nil,
+                    role = mRole,
+                    isLeader = mIsLeader == true,
+                    tag = (#tags > 0) and table.concat(tags, ", ") or nil,
+                }
+            end
+        elseif (mClass and mClass ~= "") or (mLvl and mLvl > 0) then
+            if #out.members < 15 then
+                local fallbackCls = (mClass and LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[mClass]) or mClass or L["Player"]
+                out.members[#out.members + 1] = {
+                    name = fallbackCls,
+                    classFile = mClass,
+                    level = (mLvl and mLvl > 0) and mLvl or nil,
+                    role = mRole,
+                    isLeader = mIsLeader == true,
+                    tag = nil,
+                }
+            end
+        end
+    end
+
+    if C_LFGList and C_LFGList.GetSearchResultPlayerInfo then
+        for mIdx = 1, totalMembers do
+            local mi = Safe.Call(C_LFGList.GetSearchResultPlayerInfo, resId, mIdx)
+            if type(mi) == "table" then
+                RecordMember(
+                    Safe.String(mi.name),
+                    Safe.Number(mi.level) or 0,
+                    Safe.String(mi.classFilename),
+                    Safe.String(mi.assignedRole),
+                    Safe.Value(mi.isLeader) == true,
+                    mi.lfgRoles,
+                    mIdx
+                )
+            end
+        end
+    end
+    if not leaderAdded and type(leaderInfo) == "table" then
+        RecordMember(
+            Safe.String(leaderInfo.name) or leaderDisp,
+            Safe.Number(leaderInfo.level) or 0,
+            Safe.String(leaderInfo.classFilename),
+            Safe.String(leaderInfo.assignedRole),
+            true,
+            leaderInfo.lfgRoles,
+            1
+        )
+    end
+    if not leaderAdded and leaderDisp then
+        RecordMember(leaderDisp, out.leaderLvl, out.leaderClass, nil, true, nil, 1)
+    end
+
+    if out.numGuildMates > 0 then out.hasGuildMember = true end
+    if (out.numBNetFriends + out.numCharFriends) > 0 then out.hasFriendMember = true end
+    out.guildMemberNames = (#gNames > 0) and table.concat(gNames, ", ") or ""
+    out.alliedMemberNames = (#aNames > 0) and table.concat(aNames, ", ") or ""
+    out.friendMemberNames = (#fNames > 0) and table.concat(fNames, ", ") or ""
+    out.watchlistMemberNames = (#wNames > 0) and table.concat(wNames, ", ") or ""
+    out.goodPartnerNames = (#gpNames > 0) and table.concat(gpNames, ", ") or ""
+    out.avoidSignupNames = (#avNames > 0) and table.concat(avNames, ", ") or ""
+    out.enemyGuildNames = (#egNames > 0) and table.concat(egNames, ", ") or ""
+    out.memberSearchText = (#searchParts > 0) and table.concat(searchParts, " ") or ""
+    return out
+end
+
 function Clan:ScanOfficialLfgResults(skipPruningEmpty)
     if not IsGlobalLfgListenerActive() then
         return
     end
-    if not (C_LFGList and C_LFGList.GetSearchResults and C_LFGList.GetSearchResultInfo) then
+    if not (C_LFGList and (C_LFGList.GetFilteredSearchResults or C_LFGList.GetSearchResults) and C_LFGList.GetSearchResultInfo) then
         return
     end
-    local r1, r2 = Safe.Call(C_LFGList.GetSearchResults)
+    local r1, r2
+    if C_LFGList.GetFilteredSearchResults then
+        r1, r2 = Safe.Call(C_LFGList.GetFilteredSearchResults)
+    end
     local results = (type(r2) == "table" and r2) or (type(r1) == "table" and r1)
+    if (type(results) ~= "table" or #results == 0) and C_LFGList.GetSearchResults then
+        r1, r2 = Safe.Call(C_LFGList.GetSearchResults)
+        results = (type(r2) == "table" and r2) or (type(r1) == "table" and r1)
+    end
     if type(results) ~= "table" then return end
 
     self.officialLfgCache = self.officialLfgCache or {}
-    self._officialSearchPendingUntil = 0
+    if not skipPruningEmpty then
+        self._officialSearchPendingUntil = 0
+    end
     local now = time()
     local freshKeys = {}
     local scannedKind = self._lastOfficialSearchKind
-    local limit = math.min(#results, 80)
+    local limit = math.min(#results, 120)
     for i = 1, limit do
         local resId = results[i]
         local info = resId and Safe.Call(C_LFGList.GetSearchResultInfo, resId)
         if type(info) == "table" and not info.isDelisted then
             local leaderRaw = Safe.String(info.leaderName)
+            if (not leaderRaw or leaderRaw == "") and C_LFGList.GetSearchResultLeaderInfo then
+                local li = Safe.Call(C_LFGList.GetSearchResultLeaderInfo, resId)
+                if type(li) == "table" then
+                    leaderRaw = Safe.String(li.name)
+                end
+            end
+            if (not leaderRaw or leaderRaw == "") and C_LFGList.GetSearchResultPlayerInfo then
+                local mi = Safe.Call(C_LFGList.GetSearchResultPlayerInfo, resId, 1)
+                if type(mi) == "table" then
+                    leaderRaw = Safe.String(mi.name)
+                end
+            end
             local leaderLk, _, leaderDisp = leaderRaw and Compat.ParseCharacterFields and Compat.ParseCharacterFields(leaderRaw)
-            if leaderLk and leaderDisp and not Compat.IsMe(leaderDisp) then
+            local isSelfLeader = (Safe.Value(info.hasSelf) == true) or (leaderDisp and Compat.IsMe and Compat.IsMe(leaderDisp)) == true
+            local skipEntry = false
+            if isSelfLeader then
+                local hasActiveNow = C_LFGList.HasActiveEntryInfo and (Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true)
+                if not hasActiveNow then
+                    skipEntry = true
+                else
+                    local myDisp, myKey = ResolveSelfIdentity()
+                    if myDisp and myDisp ~= "" then
+                        leaderDisp = myDisp
+                    end
+                    if myKey and myKey ~= "" then
+                        leaderLk = myKey
+                    end
+                end
+            end
+            if not skipEntry and leaderLk and leaderDisp then
                 local actIdsList = {}
                 local rawScalar = Safe.Number(info.activityID)
                 if rawScalar then
@@ -5089,42 +5645,78 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
                 local numMembers = Safe.Number(info.numMembers) or 0
                 local filledT, filledH, filledD, filledNoRole = 0, 0, 0, 0
                 local needT, needH, needD
-                if C_LFGList.GetSearchResultMemberCounts then
-                    local mc = Safe.Call(C_LFGList.GetSearchResultMemberCounts, resId)
-                    if type(mc) == "table" then
-                        filledT = Safe.Number(mc.TANK) or 0
-                        filledH = Safe.Number(mc.HEALER) or 0
-                        filledD = Safe.Number(mc.DAMAGER) or 0
-                        filledNoRole = Safe.Number(mc.NOROLE) or 0
-                        if maxMembers <= 5 then
-                            if (filledT + filledH + filledD) > 0 or filledNoRole == 0 then
-                                needT = math.max(0, 1 - filledT)
-                                needH = math.max(0, 1 - filledH)
-                                needD = math.max(0, 3 - filledD)
-                                if maxMembers > 0 and numMembers >= maxMembers then
-                                    needT, needH, needD = 0, 0, 0
-                                end
-                            elseif filledNoRole > 0 then
-                                needT = 1
-                                needH = 1
-                                needD = math.max(0, 3 - filledNoRole)
-                                if maxMembers > 0 and numMembers >= maxMembers then
-                                    needT, needH, needD = 0, 0, 0
-                                end
+                local mc = (C_LFGList.GetSearchResultMemberCounts) and Safe.Call(C_LFGList.GetSearchResultMemberCounts, resId) or nil
+                if type(mc) == "table" then
+                    filledT = Safe.Number(mc.TANK) or 0
+                    filledH = Safe.Number(mc.HEALER) or 0
+                    filledD = Safe.Number(mc.DAMAGER) or 0
+                    filledNoRole = Safe.Number(mc.NOROLE) or 0
+                    if maxMembers <= 5 then
+                        if (filledT + filledH + filledD) > 0 or filledNoRole == 0 then
+                            needT = math.max(0, 1 - filledT)
+                            needH = math.max(0, 1 - filledH)
+                            needD = math.max(0, 3 - filledD)
+                            if maxMembers > 0 and numMembers >= maxMembers then
+                                needT, needH, needD = 0, 0, 0
+                            end
+                        elseif filledNoRole > 0 then
+                            needT = 1
+                            needH = 1
+                            needD = math.max(0, 3 - filledNoRole)
+                            if maxMembers > 0 and numMembers >= maxMembers then
+                                needT, needH, needD = 0, 0, 0
                             end
                         end
                     end
                 end
 
-                local leaderLvl = Safe.Number(info.leaderLevel) or 0
-                local isClan, isAllied, isFriend, isWatchlist, resolvedGuild = self:GetPlayerRelationshipFlags(leaderLk, leaderDisp)
+                local mbrMeta = InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDisp)
+                local leaderLvl = (mbrMeta.leaderLvl and mbrMeta.leaderLvl > 0) and mbrMeta.leaderLvl or (Safe.Number(info.leaderLevel) or 0)
+                local isClan, isAllied, isFriend, isWatchlist, resolvedGuild
+                if isSelfLeader then
+                    isClan, isAllied, isFriend, isWatchlist = false, false, false, false
+                    resolvedGuild = Store and Store.guildInfo and Store.guildInfo.name
+                else
+                    isClan, isAllied, isFriend, isWatchlist, resolvedGuild = self:GetPlayerRelationshipFlags(leaderLk, leaderDisp)
+                end
+
+                local entryMode = (numMembers == 1) and "LFG" or "LFM"
+                if entryMode == "LFG" then
+                    needT, needH, needD = nil, nil, nil
+                    if not mbrMeta.soloRoles and type(mc) == "table" then
+                        local lt = Safe.Value(mc.LEADER_ROLE_TANK) == true
+                        local lh = Safe.Value(mc.LEADER_ROLE_HEALER) == true
+                        local ld = Safe.Value(mc.LEADER_ROLE_DAMAGER) == true
+                        if lt or lh or ld then
+                            mbrMeta.soloRoles = {
+                                TANK = lt,
+                                HEALER = lh,
+                                DPS = ld,
+                            }
+                        end
+                    end
+                end
+                local entryRole = "ANY"
+                if entryMode == "LFG" and mbrMeta.soloRoles then
+                    local sr = mbrMeta.soloRoles
+                    local srCount = (sr.TANK and 1 or 0) + (sr.HEALER and 1 or 0) + (sr.DPS and 1 or 0)
+                    if srCount == 1 then
+                        if sr.TANK then entryRole = "TANK"
+                        elseif sr.HEALER then entryRole = "HEALER"
+                        elseif sr.DPS then entryRole = "DPS" end
+                    end
+                end
+
                 local rec = {
                     lookupKey = leaderLk,
                     displayName = leaderDisp,
                     guild = resolvedGuild,
+                    classFile = mbrMeta.leaderClass,
                     level = leaderLvl > 0 and leaderLvl or nil,
-                    mode = "LFM",
-                    role = "ANY",
+                    mode = entryMode,
+                    role = entryRole,
+                    soloRoles = mbrMeta.soloRoles,
+                    newPlayerFriendly = (info.newPlayerFriendly == true),
                     filledT = filledT,
                     filledH = filledH,
                     filledD = filledD,
@@ -5144,11 +5736,32 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
                     ilvl = Safe.Number(info.requiredItemLevel) or 0,
                     isDungeon = (catKind == "DUNGEONS"),
                     isOfficial = true,
+                    searchOrder = i,
+                    numGuildMates = mbrMeta.numGuildMates,
+                    numBNetFriends = mbrMeta.numBNetFriends,
+                    numCharFriends = mbrMeta.numCharFriends,
+                    hasGuildMember = isClan or mbrMeta.hasGuildMember,
+                    hasAlliedMember = isAllied or mbrMeta.hasAlliedMember,
+                    hasFriendMember = isFriend or mbrMeta.hasFriendMember,
+                    hasWatchlistMember = isWatchlist or mbrMeta.hasWatchlistMember,
+                    hasGoodPartnerMember = mbrMeta.hasGoodPartnerMember,
+                    hasAvoidMember = mbrMeta.hasAvoidMember,
+                    hasEnemyGuildMember = mbrMeta.hasEnemyGuildMember,
+                    hasAddonMember = mbrMeta.hasAddonMember,
+                    guildMemberNames = mbrMeta.guildMemberNames,
+                    alliedMemberNames = mbrMeta.alliedMemberNames,
+                    friendMemberNames = mbrMeta.friendMemberNames,
+                    watchlistMemberNames = mbrMeta.watchlistMemberNames,
+                    goodPartnerNames = mbrMeta.goodPartnerNames,
+                    avoidSignupNames = mbrMeta.avoidSignupNames,
+                    enemyGuildNames = mbrMeta.enemyGuildNames,
+                    members = mbrMeta.members,
+                    memberSearchText = mbrMeta.memberSearchText,
                     updatedAt = now,
                 }
                 self.officialLfgCache[leaderLk] = rec
                 freshKeys[leaderLk] = true
-                if isClan or isAllied or isFriend or isWatchlist then
+                if (not isSelfLeader) and (rec.hasGuildMember or rec.hasAlliedMember or rec.hasFriendMember or rec.hasWatchlistMember) then
                     local summary = ("%s%s"):format(rec.activity, (comment ~= "" and (" - " .. comment) or ""))
                     self:MaybeNotifyClanLFG(leaderLk, leaderDisp, nil, summary, rec.activity, rec.isDungeon, "OFFICIAL_LFG", leaderLvl)
                 end
@@ -5157,15 +5770,152 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
     end
 
     if not skipPruningEmpty then
+        local scopedSet = (self._lastOfficialSearchScoped and type(self._lastOfficialSearchActivitySet) == "table") and self._lastOfficialSearchActivitySet or nil
         for k, oldRec in pairs(self.officialLfgCache) do
             if not freshKeys[k] then
-                if (scannedKind and oldRec and oldRec.categoryKind == scannedKind) or (not scannedKind) then
+                if (now - (oldRec and oldRec.updatedAt or 0)) > 180 then
+                    self.officialLfgCache[k] = nil
+                elseif scopedSet then
+                    local overlaps = false
+                    if type(oldRec and oldRec.activityIds) == "table" then
+                        for _, aid in ipairs(oldRec.activityIds) do
+                            if scopedSet[aid] then
+                                overlaps = true
+                                break
+                            end
+                        end
+                    end
+                    if overlaps then
+                        self.officialLfgCache[k] = nil
+                    end
+                elseif (scannedKind and oldRec and oldRec.categoryKind == scannedKind) or (not scannedKind) then
                     self.officialLfgCache[k] = nil
                 end
             end
         end
     end
     QueueClanEmit(0.2)
+end
+
+local function MapPlaystyleToOfficialEnums(styleId)
+    if not styleId or styleId == "NONE" then
+        return nil, nil
+    end
+    local gpEnum = _G.Enum and _G.Enum.LFGEntryGeneralPlaystyle
+    local pEnum = _G.Enum and _G.Enum.LFGEntryPlaystyle
+    local genVal, pVal = nil, nil
+    if gpEnum then
+        if styleId == "NORMAL" then
+            genVal = gpEnum.FunRelaxed
+        elseif styleId == "FAST" then
+            genVal = gpEnum.Expert
+        elseif styleId == "FULL" then
+            genVal = gpEnum.FunSerious
+        end
+    end
+    if pEnum then
+        if styleId == "NORMAL" then
+            pVal = pEnum.Standard
+        elseif styleId == "FAST" then
+            pVal = pEnum.Hardcore
+        elseif styleId == "FULL" then
+            pVal = pEnum.Casual
+        end
+    end
+    return genVal, pVal
+end
+
+function Clan:PublishOfficialLfgListing(opts)
+    if type(opts) ~= "table" or opts.isHardwareEvent ~= true then
+        return false, "no_hardware_event"
+    end
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+    if inCombat then
+        return false, "combat"
+    end
+    if Compat.IsInGroup and Compat.IsInGroup() and Compat.CanManageGroupListing and not Compat.CanManageGroupListing() then
+        return false, "not_leader"
+    end
+    if not (C_LFGList and C_LFGList.CreateListing) then
+        return false, "no_api"
+    end
+
+    local resolvedIds = {}
+    if type(opts.activityIds) == "table" and #opts.activityIds > 0 then
+        local seen = {}
+        local maxCap = (Constants and Constants.LFGConstsExposed and Constants.LFGConstsExposed.GROUP_FINDER_MAX_ACTIVITY_CAPACITY) or 16
+        for i = 1, #opts.activityIds do
+            local nid = Safe.Number(opts.activityIds[i])
+            if nid and nid > 0 and not seen[nid] and #resolvedIds < maxCap then
+                seen[nid] = true
+                resolvedIds[#resolvedIds + 1] = nid
+            end
+        end
+    end
+    if #resolvedIds == 0 and self.ResolveOfficialActivityIds then
+        resolvedIds = self:ResolveOfficialActivityIds(opts.catKind, opts.selectedItems)
+    end
+    if #resolvedIds == 0 then
+        return false, "no_activity_ids"
+    end
+
+    if not (Compat.IsInGroup and Compat.IsInGroup()) and C_LFGListRoles and C_LFGListRoles.SetRoles and type(opts.roles) == "table" then
+        pcall(C_LFGListRoles.SetRoles, {
+            tank = opts.roles.TANK == true,
+            healer = opts.roles.HEALER == true,
+            dps = opts.roles.DPS == true,
+        })
+    end
+
+    local newPlayerFriendly = (opts.newPlayerFriendly == true)
+    local createData = {
+        activityIDs = resolvedIds,
+        newPlayerFriendly = newPlayerFriendly,
+    }
+    local genPlaystyle, legacyPlaystyle = MapPlaystyleToOfficialEnums(opts.playstyle)
+    if genPlaystyle ~= nil then
+        createData.generalPlaystyle = genPlaystyle
+    end
+    if legacyPlaystyle ~= nil then
+        createData.playstyle = legacyPlaystyle
+    end
+
+    local hasActive = C_LFGList.HasActiveEntryInfo and (Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true)
+    local apiFn = (hasActive and C_LFGList.UpdateListing) or C_LFGList.CreateListing
+    if not apiFn then
+        return false, "no_api"
+    end
+
+    self._lastAddonOfficialPublishAt = GetTime and GetTime() or 0
+    self._lastAddonOfficialActivityIds = resolvedIds
+
+    local ok, res = pcall(apiFn, createData)
+    if (not ok or res == false) and (genPlaystyle ~= nil or legacyPlaystyle ~= nil) then
+        ok, res = pcall(apiFn, {
+            activityIDs = resolvedIds,
+            newPlayerFriendly = newPlayerFriendly,
+        })
+    end
+
+    local activeNow = C_LFGList.HasActiveEntryInfo and (Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true)
+    if (ok and res ~= false) or activeNow then
+        self._officialLfgActive = true
+        local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+        local myName = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player"))
+        local myParsed = myName and Compat.ParseCharacterName and Compat.ParseCharacterName(myName)
+        if myParsed then
+            local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+            local existing = bucket and bucket.lfg and bucket.lfg[myParsed.lookupKey]
+            if type(existing) == "table" then
+                existing.isOfficial = true
+                existing.activityIds = resolvedIds
+                existing.newPlayerFriendly = newPlayerFriendly
+            end
+        end
+        QueueClanEmit(0.2)
+        return true, hasActive and "updated" or "created", resolvedIds
+    end
+    return false, "rejected"
 end
 
 function Clan:OpenOfficialLfgForGuild(activity, note, mode)
@@ -5175,10 +5925,6 @@ function Clan:OpenOfficialLfgForGuild(activity, note, mode)
         ns:Print("%s", L["Only the party leader can list the group in Blizzard's Group Finder; your Guild & Allies broadcast was sent."])
         return false
     end
-    local guildName = (Store.guildInfo and Store.guildInfo.inGuild and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player"))
-    local gTag = (guildName and guildName ~= "") and ("[" .. guildName .. "] ") or ""
-    local bodyText = (note and note ~= "") and note or (activity or "")
-    local fullComment = Compat.CleanPayloadField(gTag .. bodyText, 90)
     if ns.LFGFrameTab and ns.LFGFrameTab.HideSubPanel then
         ns.LFGFrameTab:HideSubPanel(false)
     end
@@ -5187,11 +5933,6 @@ function Clan:OpenOfficialLfgForGuild(activity, note, mode)
         pcall(listingTab.Click, listingTab)
     elseif _G.LFGListingFrame and _G.LFGListingFrame.Show then
         pcall(_G.LFGListingFrame.Show, _G.LFGListingFrame)
-    end
-    local lf = _G.LFGListingFrame
-    local cBox = lf and (lf.Comment or lf.CommentBox or (lf.Description and lf.Description.EditBox))
-    if cBox and cBox.SetText and fullComment ~= "" then
-        pcall(cBox.SetText, cBox, fullComment)
     end
     ns:Print(L["Official LFG opened with your guild tag pre-filled; click List to publish."])
     return true
@@ -5321,6 +6062,47 @@ function Clan:GetPlayerRelationshipFlags(lookupKey, rawName, guid, rawGuild)
     return isClan, isAllied, isFriend, isWatchlist, resolvedGuild
 end
 
+local function MergeOfficialCacheFields(item, off)
+    if type(item) ~= "table" or type(off) ~= "table" then return end
+    item.isOfficial = true
+    item.filledT = item.filledT or off.filledT
+    item.filledH = item.filledH or off.filledH
+    item.filledD = item.filledD or off.filledD
+    item.filledNoRole = item.filledNoRole or off.filledNoRole
+    item.needT = item.needT or off.needT
+    item.needH = item.needH or off.needH
+    item.needD = item.needD or off.needD
+    item.numMembers = item.numMembers or off.numMembers
+    item.maxMembers = item.maxMembers or off.maxMembers
+    item.activityIds = item.activityIds or off.activityIds
+    item.categoryKind = item.categoryKind or off.categoryKind
+    item.newPlayerFriendly = item.newPlayerFriendly or (off.newPlayerFriendly == true)
+    item.soloRoles = item.soloRoles or off.soloRoles
+    item.classFile = item.classFile or off.classFile
+    item.level = item.level or off.level
+    item.searchOrder = item.searchOrder or off.searchOrder
+    item.numGuildMates = math.max(item.numGuildMates or 0, off.numGuildMates or 0)
+    item.numBNetFriends = math.max(item.numBNetFriends or 0, off.numBNetFriends or 0)
+    item.numCharFriends = math.max(item.numCharFriends or 0, off.numCharFriends or 0)
+    item.hasGuildMember = (item.hasGuildMember == true) or (off.hasGuildMember == true)
+    item.hasAlliedMember = (item.hasAlliedMember == true) or (off.hasAlliedMember == true)
+    item.hasFriendMember = (item.hasFriendMember == true) or (off.hasFriendMember == true)
+    item.hasWatchlistMember = (item.hasWatchlistMember == true) or (off.hasWatchlistMember == true)
+    item.hasGoodPartnerMember = (item.hasGoodPartnerMember == true) or (off.hasGoodPartnerMember == true)
+    item.hasAvoidMember = (item.hasAvoidMember == true) or (off.hasAvoidMember == true)
+    item.hasEnemyGuildMember = (item.hasEnemyGuildMember == true) or (off.hasEnemyGuildMember == true)
+    item.hasAddonMember = (item.hasAddonMember == true) or (off.hasAddonMember == true)
+    item.guildMemberNames = (item.guildMemberNames and item.guildMemberNames ~= "") and item.guildMemberNames or off.guildMemberNames
+    item.alliedMemberNames = (item.alliedMemberNames and item.alliedMemberNames ~= "") and item.alliedMemberNames or off.alliedMemberNames
+    item.friendMemberNames = (item.friendMemberNames and item.friendMemberNames ~= "") and item.friendMemberNames or off.friendMemberNames
+    item.watchlistMemberNames = (item.watchlistMemberNames and item.watchlistMemberNames ~= "") and item.watchlistMemberNames or off.watchlistMemberNames
+    item.goodPartnerNames = (item.goodPartnerNames and item.goodPartnerNames ~= "") and item.goodPartnerNames or off.goodPartnerNames
+    item.avoidSignupNames = (item.avoidSignupNames and item.avoidSignupNames ~= "") and item.avoidSignupNames or off.avoidSignupNames
+    item.enemyGuildNames = (item.enemyGuildNames and item.enemyGuildNames ~= "") and item.enemyGuildNames or off.enemyGuildNames
+    item.members = (item.members and #item.members > 0) and item.members or off.members
+    item.memberSearchText = (item.memberSearchText and item.memberSearchText ~= "") and item.memberSearchText or off.memberSearchText
+end
+
 function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
     local bucket = Store:GetClanScopeData()
     local liveByLookup = Store.socialByLookup
@@ -5353,6 +6135,17 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
     local now = time()
 
     local function PushItem(item)
+        if item.sourceType ~= "OFFICIAL_LFG" and item.lookupKey and self.officialLfgCache then
+            local offMatch = self.officialLfgCache[item.lookupKey]
+            if type(offMatch) == "table" and (now - (offMatch.updatedAt or 0)) <= 900 then
+                MergeOfficialCacheFields(item, offMatch)
+            end
+        end
+        if item.isSelf == nil and Compat.IsMe then
+            item.isSelf = Compat.IsMe(item.displayName or item.lookupKey, item.guid) == true
+        else
+            item.isSelf = item.isSelf == true
+        end
         local isClan, isAllied, isFriend, isWatchlist, resolvedGuild = self:GetPlayerRelationshipFlags(
             item.lookupKey,
             item.displayName,
@@ -5361,15 +6154,23 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
         )
         if item._forceClan then isClan = true end
         if item._forceAllied then isAllied = true end
+        isClan = isClan or (item.hasGuildMember == true) or ((item.numGuildMates or 0) > 0)
+        isAllied = isAllied or (item.hasAlliedMember == true)
+        isFriend = isFriend or (item.hasFriendMember == true) or ((item.numBNetFriends or 0) > 0) or ((item.numCharFriends or 0) > 0)
+        isWatchlist = isWatchlist or (item.hasWatchlistMember == true)
         item.isClan = isClan
         item.isAllied = isAllied
         item.isFriend = isFriend or item.isFriend == true
         item.isWatchlist = isWatchlist or item.isWatchlist == true
+        if item.hasWatchlistMember then item.hasFriendOrWatchlistSignup = true end
+        if item.hasGoodPartnerMember then item.hasGoodPartnerSignup = true end
+        if item.hasAvoidMember then item.hasAvoidSignup = true end
         if resolvedGuild and resolvedGuild ~= "" then
             item.guild = resolvedGuild
         end
 
         local hasAddon = (item.isSelf == true)
+            or (item.hasAddonMember == true)
             or (item.sourceType == "LFG" or item.sourceType == "EVENT" or item.sourceType == "TAG" or item.sourceType == "ALLY_LFG")
             or (item.lookupKey and self.peerVersions and self.peerVersions[item.lookupKey] ~= nil)
             or (item.lookupKey and bucket.peers and bucket.peers[item.lookupKey] ~= nil)
@@ -5382,25 +6183,27 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
             item.companionRuns = tonumber(compRec.runs) or 1
         end
 
-        local isTrusted = item.isClan or item.isAllied or item.isFriend or item.isWatchlist or item.hasFriendOrWatchlistSignup or item.isCompanion
+        local isTrusted = item.isClan or item.isAllied or item.isFriend or item.isWatchlist or item.hasFriendOrWatchlistSignup or item.hasGoodPartnerSignup or item.isCompanion
         local gStr = item.guild or resolvedGuild
         local isEnemyGuild = (not isClan and not isAllied and gStr and gStr ~= "" and ns.Spotter and ns.Spotter.ClassifyGuild and ns.Spotter:ClassifyGuild(gStr) == "ENEMY") == true
-        item.isEnemyGuild = isEnemyGuild
-        if filterMode == "CLAN" and not item.isClan then
-            return
-        elseif filterMode == "ALLY" and not item.isAllied then
-            return
-        elseif filterMode == "FRIENDS" and not (item.isFriend or item.isWatchlist or item.hasFriendOrWatchlistSignup) then
-            return
-        elseif filterMode == "PUBLIC_CHAT" and item.sourceType ~= "PUBLIC_CHAT" then
-            return
-        elseif filterMode == "TRUSTED" and not isTrusted then
-            return
-        elseif filterMode == "SC_USERS" and not item.hasAddon then
-            return
+        item.isEnemyGuild = isEnemyGuild or (item.hasEnemyGuildMember == true)
+        if not item.isSelf then
+            if filterMode == "CLAN" and not item.isClan then
+                return
+            elseif filterMode == "ALLY" and not item.isAllied then
+                return
+            elseif filterMode == "FRIENDS" and not (item.isFriend or item.isWatchlist or item.hasFriendOrWatchlistSignup) then
+                return
+            elseif filterMode == "PUBLIC_CHAT" and item.sourceType ~= "PUBLIC_CHAT" then
+                return
+            elseif filterMode == "TRUSTED" and not isTrusted then
+                return
+            elseif filterMode == "SC_USERS" and not item.hasAddon then
+                return
+            end
         end
 
-        if cleanRoleFilter ~= "ALL" then
+        if cleanRoleFilter ~= "ALL" and not item.isSelf then
             local function MatchesSingleRole(targetRole)
                 if item.sourceType == "EVENT" then
                     if targetRole == "TANK" then return (item.needT or 0) > 0 end
@@ -5424,6 +6227,9 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
                         if targetRole == "DPS" then return (item.needD or 0) > 0 end
                     end
                     return true
+                end
+                if item.mode == "LFG" and type(item.soloRoles) == "table" and (item.soloRoles.TANK or item.soloRoles.HEALER or item.soloRoles.DPS) then
+                    return item.soloRoles[targetRole] == true
                 end
                 if item.role == targetRole or item.role == "ANY" or not item.role or item.role == "" then
                     return true
@@ -5464,7 +6270,8 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
                 (item.note or "") .. " " ..
                 (item.role or "") .. " " ..
                 (item.mode or "") .. " " ..
-                (item.friendOrWatchlistNames or "")
+                (item.friendOrWatchlistNames or "") .. " " ..
+                (item.memberSearchText or "")
             ):lower()
             if not hay:find(q, 1, true) then
                 return
@@ -5487,11 +6294,17 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
             online = (live ~= nil) or Compat.IsMe(rec.displayName or key),
             mode = rec.mode or "LFG",
             role = rec.role or "ANY",
+            soloRoles = rec.soloRoles,
             activity = rec.activity or L["Dungeon"],
             keyLvl = tonumber(rec.keyLvl) or 0,
             ilvl = tonumber(rec.ilvl) or 0,
             note = rec.note or "",
             isDungeon = rec.isDungeon ~= false or IsDungeonLFGText(rec.activity or "", nil),
+            isOfficial = rec.isOfficial == true,
+            activityIds = rec.activityIds,
+            activityAllNames = rec.activityAllNames,
+            categoryKind = rec.categoryKind,
+            newPlayerFriendly = rec.newPlayerFriendly == true,
             updatedAt = rec.updatedAt or 0,
             isSelf = Compat.IsMe(rec.displayName or key),
             _forceClan = true,
@@ -5655,18 +6468,15 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
             if seen[key] then
                 for _, existing in ipairs(out) do
                     if existing.lookupKey == key then
-                        existing.isOfficial = true
-                        existing.filledT = existing.filledT or off.filledT
-                        existing.filledH = existing.filledH or off.filledH
-                        existing.filledD = existing.filledD or off.filledD
-                        existing.filledNoRole = existing.filledNoRole or off.filledNoRole
-                        existing.needT = existing.needT or off.needT
-                        existing.needH = existing.needH or off.needH
-                        existing.needD = existing.needD or off.needD
-                        existing.numMembers = existing.numMembers or off.numMembers
-                        existing.maxMembers = existing.maxMembers or off.maxMembers
-                        existing.activityIds = existing.activityIds or off.activityIds
-                        existing.categoryKind = existing.categoryKind or off.categoryKind
+                        MergeOfficialCacheFields(existing, off)
+                        if off.hasGuildMember or (off.numGuildMates or 0) > 0 then existing.isClan = true end
+                        if off.hasAlliedMember then existing.isAllied = true end
+                        if off.hasFriendMember or (off.numBNetFriends or 0) > 0 or (off.numCharFriends or 0) > 0 then existing.isFriend = true end
+                        if off.hasWatchlistMember then existing.isWatchlist = true; existing.hasFriendOrWatchlistSignup = true end
+                        if off.hasGoodPartnerMember then existing.hasGoodPartnerSignup = true end
+                        if off.hasAvoidMember then existing.hasAvoidSignup = true end
+                        if off.hasEnemyGuildMember then existing.isEnemyGuild = true end
+                        if off.hasAddonMember then existing.hasAddon = true end
                         break
                     end
                 end
@@ -5685,6 +6495,8 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
                     online = true,
                     mode = off.mode or "LFM",
                     role = off.role or "ANY",
+                    soloRoles = off.soloRoles,
+                    newPlayerFriendly = off.newPlayerFriendly == true,
                     filledT = off.filledT,
                     filledH = off.filledH,
                     filledD = off.filledD,
@@ -5705,6 +6517,27 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
                     note = off.note or "",
                     isDungeon = off.isDungeon ~= false,
                     isOfficial = true,
+                    searchOrder = off.searchOrder,
+                    numGuildMates = off.numGuildMates,
+                    numBNetFriends = off.numBNetFriends,
+                    numCharFriends = off.numCharFriends,
+                    hasGuildMember = off.hasGuildMember,
+                    hasAlliedMember = off.hasAlliedMember,
+                    hasFriendMember = off.hasFriendMember,
+                    hasWatchlistMember = off.hasWatchlistMember,
+                    hasGoodPartnerMember = off.hasGoodPartnerMember,
+                    hasAvoidMember = off.hasAvoidMember,
+                    hasEnemyGuildMember = off.hasEnemyGuildMember,
+                    hasAddonMember = off.hasAddonMember,
+                    guildMemberNames = off.guildMemberNames,
+                    alliedMemberNames = off.alliedMemberNames,
+                    friendMemberNames = off.friendMemberNames,
+                    watchlistMemberNames = off.watchlistMemberNames,
+                    goodPartnerNames = off.goodPartnerNames,
+                    avoidSignupNames = off.avoidSignupNames,
+                    enemyGuildNames = off.enemyGuildNames,
+                    members = off.members,
+                    memberSearchText = off.memberSearchText,
                     updatedAt = off.updatedAt or 0,
                     isSelf = Compat.IsMe(off.displayName or key),
                 })
@@ -5753,16 +6586,38 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
     table.sort(out, function(a, b)
         if a.isSelf ~= b.isSelf then return a.isSelf end
         if a.online ~= b.online then return a.online end
-        local aTrusted = (a.isClan or a.isAllied or a.isFriend or a.isWatchlist or a.hasFriendOrWatchlistSignup) and 1 or 0
-        local bTrusted = (b.isClan or b.isAllied or b.isFriend or b.isWatchlist or b.hasFriendOrWatchlistSignup) and 1 or 0
+        local aWarn = (not a.isSelf) and ((a.hasAvoidSignup == true) or (a.isEnemyGuild == true))
+        local bWarn = (not b.isSelf) and ((b.hasAvoidSignup == true) or (b.isEnemyGuild == true))
+        if aWarn ~= bWarn then return not aWarn end
+        local aTrusted = (a.isClan or a.isAllied or a.isFriend or a.isWatchlist or a.hasFriendOrWatchlistSignup or a.hasGoodPartnerSignup or a.isCompanion) and 1 or 0
+        local bTrusted = (b.isClan or b.isAllied or b.isFriend or b.isWatchlist or b.hasFriendOrWatchlistSignup or b.hasGoodPartnerSignup or b.isCompanion) and 1 or 0
         if aTrusted ~= bTrusted then return aTrusted > bTrusted end
         local aRel = (a.isFriend or a.isWatchlist or a.hasFriendOrWatchlistSignup) and 1 or 0
         local bRel = (b.isFriend or b.isWatchlist or b.hasFriendOrWatchlistSignup) and 1 or 0
         if aRel ~= bRel then return aRel > bRel end
         if a.isClan ~= b.isClan then return a.isClan end
-        local aBonus = (a.hasAddon and 2 or 0) + (a.isCompanion and 1 or 0)
-        local bBonus = (b.hasAddon and 2 or 0) + (b.isCompanion and 1 or 0)
+        if a.isAllied ~= b.isAllied then return a.isAllied end
+        local aBonus = (a.hasGoodPartnerSignup and 3 or 0) + (a.isCompanion and 2 or 0) + (a.hasAddon and 1 or 0)
+        local bBonus = (b.hasGoodPartnerSignup and 3 or 0) + (b.isCompanion and 2 or 0) + (b.hasAddon and 1 or 0)
         if aBonus ~= bBonus then return aBonus > bBonus end
+        local inGrp = (Compat.IsInGroup and Compat.IsInGroup()) == true
+        local aSolo = (a.mode == "LFG")
+        local bSolo = (b.mode == "LFG")
+        if aSolo ~= bSolo then
+            if inGrp then
+                return aSolo
+            else
+                return not aSolo
+            end
+        end
+        if not aSolo then
+            local aM = a.numMembers or 0
+            local bM = b.numMembers or 0
+            if aM ~= bM then return aM > bM end
+        end
+        if a.searchOrder and b.searchOrder and a.searchOrder ~= b.searchOrder then
+            return a.searchOrder < b.searchOrder
+        end
         return (a.updatedAt or 0) > (b.updatedAt or 0)
     end)
     return out
@@ -7953,6 +8808,9 @@ function Clan:Init()
                 Clan:SendVersionHello()
                 Clan:ApplyAutoInstanceStatus()
                 Clan:CheckAutoCloseFullDungeonLFG()
+                if Clan.SyncOfficialActiveLfg then
+                    Clan:SyncOfficialActiveLfg()
+                end
                 Clan:RefreshGameCalendar(false)
                 if ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
                     Clan:RequestIntelSync()
@@ -8061,6 +8919,24 @@ function Clan:Init()
     ns.RegisterEvent(self, "LFG_LIST_SEARCH_RESULTS_RECEIVED", function()
         if Clan.ScanOfficialLfgResults then
             Clan:ScanOfficialLfgResults()
+        end
+    end)
+
+    ns.RegisterEvent(self, "LFG_LIST_SEARCH_RESULT_UPDATED", function()
+        if Clan._searchResultUpdatePending then return end
+        Clan._searchResultUpdatePending = true
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.25, function()
+                Clan._searchResultUpdatePending = false
+                if Clan.ScanOfficialLfgResults then
+                    Clan:ScanOfficialLfgResults(true)
+                end
+            end)
+        else
+            Clan._searchResultUpdatePending = false
+            if Clan.ScanOfficialLfgResults then
+                Clan:ScanOfficialLfgResults(true)
+            end
         end
     end)
 

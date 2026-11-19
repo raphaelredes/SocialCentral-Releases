@@ -1273,7 +1273,8 @@ local movableRegistry = {}
 
 local function CanDragWindow(win, opts)
     if not win then return false end
-    if win._scLocked then return false end
+    if win._scLocked or win._scSizing then return false end
+    if UIParent and win.GetParent and win:GetParent() ~= UIParent then return false end
     if opts and type(opts.locked) == "function" and opts.locked() then return false end
     if opts and opts.combatLock and InCombatLockdown and InCombatLockdown() then
         return false
@@ -1283,6 +1284,7 @@ end
 
 local function SaveWindowCenterOffset(win, posKey, opts)
     if not (win and posKey and ns.db) then return end
+    if UIParent and win.GetParent and win:GetParent() ~= UIParent then return end
     if type(ns.db.windowPositions) ~= "table" then
         ns.db.windowPositions = {}
     end
@@ -1295,7 +1297,7 @@ local function SaveWindowCenterOffset(win, posKey, opts)
     if anchor == "TOP" then
         local top = win:GetTop()
         local utop = UIParent and UIParent:GetTop()
-        if cx and top and ux and utop then
+        if cx and top and ux and utop and cx == cx and top == top then
             ns.db.windowPositions[posKey] = {
                 anchor = "TOP",
                 dx = math.floor((cx * scale - ux) + 0.5),
@@ -1303,7 +1305,7 @@ local function SaveWindowCenterOffset(win, posKey, opts)
             }
         end
     else
-        if cx and cy and ux and uy then
+        if cx and cy and ux and uy and cx == cx and cy == cy then
             ns.db.windowPositions[posKey] = {
                 anchor = "CENTER",
                 dx = math.floor((cx * scale - ux) + 0.5),
@@ -1315,6 +1317,9 @@ end
 
 function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
     if not win or win._scLocked then
+        return false
+    end
+    if UIParent and win.GetParent and win:GetParent() ~= UIParent then
         return false
     end
     if not (posKey and ns.db and type(ns.db.windowPositions) == "table") then
@@ -1331,8 +1336,11 @@ function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
     local ww, wh = win:GetSize()
     local scale = win:GetScale() or 1
     if scale <= 0 then scale = 1 end
-    local dx = tonumber(saved.dx) or 0
-    local dy = tonumber(saved.dy) or 0
+    local dx = tonumber(saved.dx)
+    local dy = tonumber(saved.dy)
+    if not (dx and dy and dx == dx and dy == dy) then
+        return false
+    end
     local anchor = saved.anchor or (opts and opts.anchor) or "CENTER"
 
     if anchor == "TOP" then
@@ -1379,6 +1387,11 @@ function Theme:AttachDragHandle(handle, win)
         end)
         handle:HookScript("OnDragStart", function() win._scBeginDrag() end)
         handle:HookScript("OnDragStop", function() win._scEndDrag() end)
+        handle:HookScript("OnHide", function()
+            if win._scDragging then
+                win._scEndDrag()
+            end
+        end)
     end
 end
 
@@ -1401,22 +1414,41 @@ function Theme:MakeMovable(win, opts)
             return
         end
         if win._scDragging then
-            win:StopMovingOrSizing()
+            pcall(win.StopMovingOrSizing, win)
             win._scDragging = false
+        end
+        win:SetMovable(true)
+        win:SetClampedToScreen(true)
+        if win:GetParent() == UIParent and win.GetNumPoints and win:GetNumPoints() > 1 then
+            local cx, cy = win:GetCenter()
+            local ux, uy = UIParent and UIParent:GetCenter()
+            if cx and cy and ux and uy then
+                local scale = win:GetScale() or 1
+                if scale <= 0 then scale = 1 end
+                win:ClearAllPoints()
+                win:SetPoint("CENTER", UIParent, "CENTER", (cx * scale - ux) / scale, (cy * scale - uy) / scale)
+            end
         end
         win._scDragging = true
         if not (opts.combatLock and InCombatLockdown and InCombatLockdown()) and win.Raise then
             pcall(win.Raise, win)
         end
-        win:StartMoving()
+        local ok = pcall(win.StartMoving, win)
+        if not ok then
+            win._scDragging = false
+        end
     end
 
     local function EndDrag()
         if not win._scDragging then
+            if win._scSizing then
+                win._scSizing = false
+                pcall(win.StopMovingOrSizing, win)
+            end
             return
         end
         win._scDragging = false
-        win:StopMovingOrSizing()
+        pcall(win.StopMovingOrSizing, win)
         SaveWindowCenterOffset(win, opts.key, opts)
         if type(opts.onStop) == "function" then
             pcall(opts.onStop, win)

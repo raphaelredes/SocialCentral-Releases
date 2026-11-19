@@ -208,6 +208,29 @@ local function IsSingleTabEmbedded()
     return count == 1
 end
 
+local function GetStandaloneResizeBounds()
+    local minW, minH = 760, 460
+    local uw = (UIParent and UIParent.GetWidth and UIParent:GetWidth()) or 1400
+    local uh = (UIParent and UIParent.GetHeight and UIParent:GetHeight()) or 1000
+    local maxW = math.max(minW, math.min(1400, math.floor(uw - 24)))
+    local maxH = math.max(minH, math.min(1000, math.floor(uh - 24)))
+    return minW, minH, maxW, maxH
+end
+
+local function ApplyStandaloneResizeBounds(targetFrame)
+    if not targetFrame then
+        return 760, 460, 1400, 1000
+    end
+    local minW, minH, maxW, maxH = GetStandaloneResizeBounds()
+    if targetFrame.SetResizeBounds then
+        targetFrame:SetResizeBounds(minW, minH, maxW, maxH)
+    elseif targetFrame.SetMinResize then
+        targetFrame:SetMinResize(minW, minH)
+        targetFrame:SetMaxResize(maxW, maxH)
+    end
+    return minW, minH, maxW, maxH
+end
+
 local function SaveGeometry()
     if embeddedState.active or not frame or frame:GetParent() ~= UIParent then
         return
@@ -215,15 +238,26 @@ local function SaveGeometry()
     if not (ns.db and ns.db.window) then
         return
     end
-    local point, _, relPoint, x, y = frame:GetPoint(1)
-    if point then
-        ns.db.window.point = point
-        ns.db.window.relativePoint = relPoint
-        ns.db.window.x = math.floor((x or 0) + 0.5)
-        ns.db.window.y = math.floor((y or 0) + 0.5)
+    local savedCenter = ns.db.windowPositions and ns.db.windowPositions.main
+    if type(savedCenter) == "table" and savedCenter.dx ~= nil and savedCenter.dy ~= nil then
+        ns.db.window.point = "CENTER"
+        ns.db.window.relativePoint = "CENTER"
+        ns.db.window.x = math.floor((tonumber(savedCenter.dx) or 0) + 0.5)
+        ns.db.window.y = math.floor((tonumber(savedCenter.dy) or 0) + 0.5)
+    else
+        local point, _, relPoint, x, y = frame:GetPoint(1)
+        if point then
+            ns.db.window.point = point
+            ns.db.window.relativePoint = relPoint
+            ns.db.window.x = math.floor((x or 0) + 0.5)
+            ns.db.window.y = math.floor((y or 0) + 0.5)
+        end
     end
-    ns.db.window.width = math.floor((frame:GetWidth() or 760) + 0.5)
-    ns.db.window.height = math.floor((frame:GetHeight() or 500) + 0.5)
+    local minW, minH, maxW, maxH = GetStandaloneResizeBounds()
+    local curW = math.floor((frame:GetWidth() or 790) + 0.5)
+    local curH = math.floor((frame:GetHeight() or 520) + 0.5)
+    ns.db.window.width = math.max(minW, math.min(maxW, curW))
+    ns.db.window.height = math.max(minH, math.min(maxH, curH))
 end
 
 local function ClearSearchFilter()
@@ -6085,6 +6119,29 @@ local function ReflowTabStrip()
     end
 end
 
+local function DisableChromeMouseRecursive(root, skipObj, depth)
+    if not root or (depth or 0) <= 0 or root == skipObj then
+        return
+    end
+    if root.IsForbidden then
+        local okF, forb = pcall(root.IsForbidden, root)
+        if not okF or forb then return end
+    end
+    if root.IsProtected then
+        local okP, prot = pcall(root.IsProtected, root)
+        if not okP or prot then return end
+    end
+    if root.EnableMouse then
+        pcall(root.EnableMouse, root, false)
+    end
+    if root.GetChildren then
+        local children = { root:GetChildren() }
+        for i = 1, #children do
+            DisableChromeMouseRecursive(children[i], skipObj, (depth or 1) - 1)
+        end
+    end
+end
+
 local function MaxHierarchyFrameLevel(root, depth)
     local maxLevel = 0
     if not root or (depth or 0) <= 0 then
@@ -6122,6 +6179,7 @@ local function RaiseWindowCloseButton(btn)
         (frame:GetFrameLevel() or 1) + 60,
         frame.header and (frame.header:GetFrameLevel() or 0) or 0,
         frame.blizzTitleDrag and (frame.blizzTitleDrag:GetFrameLevel() or 0) or 0,
+        frame.grip and (frame.grip:GetFrameLevel() or 0) + 10 or 0,
         MaxHierarchyFrameLevel(frame.blizzChrome, 3) + 50
     )
     btn:SetFrameLevel(topLevel)
@@ -6484,7 +6542,7 @@ local function ApplyTheme()
     local isEmbedded = embeddedState.active == true
     local p = Theme:GetPalette()
     local isBlizz = Theme:IsBlizzard(p)
-    local baseLevel = frame:GetFrameLevel()
+    local baseLevel = frame:GetFrameLevel() or 1
     local fw = frame:GetWidth() or 760
     local isCompact = isEmbedded and fw < 540
 
@@ -6497,12 +6555,18 @@ local function ApplyTheme()
     if frame.blizzChrome then
         frame.blizzChrome:SetFrameLevel(baseLevel)
         frame.blizzChrome:SetShown(isBlizz and not isEmbedded)
-        if isBlizz and not isEmbedded and frame.blizzChrome.Inset then
-            frame.blizzChrome.Inset:ClearAllPoints()
-            frame.blizzChrome.Inset:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -85)
-            frame.blizzChrome.Inset:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -8, 12)
+        if isBlizz and not isEmbedded then
+            DisableChromeMouseRecursive(frame.blizzChrome, frame.blizzChrome.CloseButton, 4)
+            if frame.blizzChrome.Inset then
+                frame.blizzChrome.Inset:ClearAllPoints()
+                frame.blizzChrome.Inset:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -85)
+                frame.blizzChrome.Inset:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -8, 12)
+            end
         end
     end
+
+    local chromeTop = (isBlizz and not isEmbedded and frame.blizzChrome) and MaxHierarchyFrameLevel(frame.blizzChrome, 3) or baseLevel
+    local interactiveBase = (not isEmbedded) and math.max(baseLevel, chromeTop) or baseLevel
 
     local singleEmbedded = IsSingleTabEmbedded()
     local showEmbeddedArt = isEmbedded and isBlizz
@@ -6534,10 +6598,19 @@ local function ApplyTheme()
         end
     end
 
+    local showBlizzDrag = (not isEmbedded) and isBlizz and frame.blizzChrome and true or false
+    local frameStrata = frame:GetFrameStrata()
     if frame.blizzTitleDrag then
-        frame.blizzTitleDrag:SetFrameStrata(frame:GetFrameStrata())
-        frame.blizzTitleDrag:SetFrameLevel(baseLevel + 24)
-        frame.blizzTitleDrag:SetShown((not isEmbedded) and isBlizz and frame.blizzChrome and true or false)
+        frame.blizzTitleDrag:SetFrameStrata(frameStrata)
+        frame.blizzTitleDrag:SetFrameLevel(interactiveBase + 24)
+        frame.blizzTitleDrag:EnableMouse(showBlizzDrag)
+        frame.blizzTitleDrag:SetShown(showBlizzDrag)
+    end
+    if frame.blizzPortraitDrag then
+        frame.blizzPortraitDrag:SetFrameStrata(frameStrata)
+        frame.blizzPortraitDrag:SetFrameLevel(interactiveBase + 24)
+        frame.blizzPortraitDrag:EnableMouse(showBlizzDrag)
+        frame.blizzPortraitDrag:SetShown(showBlizzDrag)
     end
 
     if isEmbedded then
@@ -6551,10 +6624,20 @@ local function ApplyTheme()
         if frame.grip then
             frame.grip:Hide()
         end
+        if frame._resizeEdges then
+            for _, edge in ipairs(frame._resizeEdges) do
+                edge:Hide()
+            end
+        end
     else
         frame._scLocked = false
         if frame.grip then
             frame.grip:Show()
+        end
+        if frame._resizeEdges then
+            for _, edge in ipairs(frame._resizeEdges) do
+                edge:Show()
+            end
         end
         local blizzClose = (isBlizz and frame.blizzChrome and frame.blizzChrome.CloseButton) or nil
         if blizzClose then
@@ -6608,7 +6691,7 @@ local function ApplyTheme()
     end
 
     if frame.header then
-        frame.header:SetFrameLevel(baseLevel + 10)
+        frame.header:SetFrameLevel(interactiveBase + 10)
         frame.header:EnableMouse(not isEmbedded)
         frame.header:ClearAllPoints()
         if isEmbedded then
@@ -6663,7 +6746,7 @@ local function ApplyTheme()
     if frame.tabBar then
         local singleEmbedded = IsSingleTabEmbedded()
         frame.tabBar:SetShown(not singleEmbedded)
-        frame.tabBar:SetFrameLevel(baseLevel + 11)
+        frame.tabBar:SetFrameLevel(interactiveBase + 11)
         if isEmbedded then
             AnchorEmbeddedTabBar(isCompact)
         else
@@ -6684,7 +6767,7 @@ local function ApplyTheme()
     end
 
     if frame.filterBar then
-        frame.filterBar:SetFrameLevel(baseLevel + 8)
+        frame.filterBar:SetFrameLevel(interactiveBase + 8)
         frame.filterBar:ClearAllPoints()
         if isEmbedded then
             if IsSingleTabEmbedded() then
@@ -6702,9 +6785,14 @@ local function ApplyTheme()
             frame.filterBar:SetPoint("TOPRIGHT", frame.tabBar, "BOTTOMRIGHT", 0, -8)
         end
     end
-    if frame.watchBar then frame.watchBar:SetFrameLevel(baseLevel + 8) end
-    if frame.content then frame.content:SetFrameLevel(baseLevel + 8) end
-    if frame.grip then frame.grip:SetFrameLevel(baseLevel + 14) end
+    if frame.watchBar then frame.watchBar:SetFrameLevel(interactiveBase + 8) end
+    if frame.content then frame.content:SetFrameLevel(interactiveBase + 8) end
+    if frame.grip then frame.grip:SetFrameLevel(interactiveBase + 35) end
+    if frame._resizeEdges then
+        for _, edge in ipairs(frame._resizeEdges) do
+            edge:SetFrameLevel(interactiveBase + 34)
+        end
+    end
 
     for _, item in ipairs(themeTargets) do
         Theme:StyleButton(item.btn, item.variant)
@@ -6786,29 +6874,166 @@ local function ApplyTheme()
     UI:Refresh()
 end
 
-local function BuildMainFrame()
-    frame = CreateFrame("Frame", "SocialCentralFrame", UIParent, "BackdropTemplate")
-    local w = ns.db and ns.db.window or { width = 820, height = 520 }
-    local initW = math.max(760, w.width or 820)
-    local initH = math.max(460, w.height or 520)
-    frame:SetSize(initW, initH)
-    if frame.SetResizeBounds then
-        frame:SetResizeBounds(760, 460, 1140, 840)
-    elseif frame.SetMinResize then
-        frame:SetMinResize(760, 460)
-        frame:SetMaxResize(1140, 840)
+local function SetupMainFrameResizeHandles(targetFrame)
+    if not targetFrame then return end
+
+    local function StopActiveResize(saveResult)
+        if not targetFrame._scSizing then
+            return
+        end
+        targetFrame._scSizing = false
+        pcall(targetFrame.StopMovingOrSizing, targetFrame)
+        local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(targetFrame)
+        local curW = math.floor((targetFrame:GetWidth() or 790) + 0.5)
+        local curH = math.floor((targetFrame:GetHeight() or 520) + 0.5)
+        local clampedW = math.max(minW, math.min(maxW, curW))
+        local clampedH = math.max(minH, math.min(maxH, curH))
+        if clampedW ~= curW or clampedH ~= curH then
+            targetFrame:SetSize(clampedW, clampedH)
+        end
+        if saveResult then
+            if targetFrame._scSavePosition then
+                targetFrame._scSavePosition()
+            end
+            SaveGeometry()
+        end
+        ReflowTabStrip()
+        if targetFrame._scReflowResize then
+            targetFrame._scReflowResize()
+        end
     end
 
-    if w.point and w.x and w.y then
-        frame:SetPoint(w.point, UIParent, w.relativePoint or w.point, w.x, w.y)
-    else
-        frame:SetPoint("CENTER")
+    local function BeginResize(point)
+        if embeddedState.active or targetFrame._scLocked or targetFrame._scDragging then
+            return
+        end
+        if UIParent and targetFrame:GetParent() ~= UIParent then
+            return
+        end
+        if targetFrame._scSizing then
+            StopActiveResize(false)
+        end
+        targetFrame:SetResizable(true)
+        ApplyStandaloneResizeBounds(targetFrame)
+        if targetFrame.Raise then
+            pcall(targetFrame.Raise, targetFrame)
+        end
+        targetFrame._scSizing = true
+        local ok = pcall(targetFrame.StartSizing, targetFrame, point)
+        if not ok then
+            targetFrame._scSizing = false
+        end
     end
+
+    local grip = CreateFrame("Button", nil, targetFrame)
+    grip:SetSize(18, 18)
+    grip:SetPoint("BOTTOMRIGHT", -4, 4)
+    grip:SetHitRectInsets(-6, -4, -6, -4)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetScript("OnMouseDown", function(_, btn)
+        if btn == "LeftButton" then
+            BeginResize("BOTTOMRIGHT")
+        end
+    end)
+    grip:SetScript("OnMouseUp", function(_, btn)
+        if btn == "LeftButton" then
+            StopActiveResize(true)
+        elseif btn == "RightButton" and not embeddedState.active and not targetFrame._scLocked then
+            local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(targetFrame)
+            targetFrame:SetSize(math.max(minW, math.min(maxW, 790)), math.max(minH, math.min(maxH, 520)))
+            if targetFrame._scSavePosition then
+                targetFrame._scSavePosition()
+            end
+            if Theme and Theme.RestoreWindowPosition then
+                Theme:RestoreWindowPosition(targetFrame, "main", false)
+            end
+            SaveGeometry()
+            ReflowTabStrip()
+            if targetFrame._scReflowResize then
+                targetFrame._scReflowResize()
+            end
+            ns:Print("%s", L["Window size reset to default."])
+        end
+    end)
+    grip:SetScript("OnHide", function()
+        StopActiveResize(false)
+    end)
+    grip:SetScript("OnEnter", function(selfBtn)
+        if GameTooltip then
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOPLEFT")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(L["Resize Window"], 1, 0.85, 0.25)
+            GameTooltip:AddLine(L["Drag corner or border to resize.\nRight-click corner to reset size."], 0.9, 0.9, 0.9, true)
+            GameTooltip:Show()
+        end
+    end)
+    grip:SetScript("OnLeave", function()
+        if GameTooltip then
+            GameTooltip:Hide()
+        end
+    end)
+    targetFrame.grip = grip
+
+    local edges = {}
+    local function MakeEdgeHandle(resizePoint, setupFn)
+        local edge = CreateFrame("Button", nil, targetFrame)
+        edge:EnableMouse(true)
+        setupFn(edge)
+        local hl = edge:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetColorTexture(0.95, 0.78, 0.28, 0.32)
+        edge:SetScript("OnMouseDown", function(_, btn)
+            if btn == "LeftButton" then
+                BeginResize(resizePoint)
+            end
+        end)
+        edge:SetScript("OnMouseUp", function(_, btn)
+            if btn == "LeftButton" then
+                StopActiveResize(true)
+            end
+        end)
+        edge:SetScript("OnHide", function()
+            StopActiveResize(false)
+        end)
+        edges[#edges + 1] = edge
+    end
+
+    MakeEdgeHandle("RIGHT", function(e)
+        e:SetWidth(7)
+        e:SetPoint("TOPRIGHT", targetFrame, "TOPRIGHT", 0, -56)
+        e:SetPoint("BOTTOMRIGHT", targetFrame, "BOTTOMRIGHT", 0, 22)
+    end)
+    MakeEdgeHandle("BOTTOM", function(e)
+        e:SetHeight(7)
+        e:SetPoint("BOTTOMLEFT", targetFrame, "BOTTOMLEFT", 20, 0)
+        e:SetPoint("BOTTOMRIGHT", targetFrame, "BOTTOMRIGHT", -22, 0)
+    end)
+    MakeEdgeHandle("BOTTOMLEFT", function(e)
+        e:SetSize(16, 16)
+        e:SetPoint("BOTTOMLEFT", targetFrame, "BOTTOMLEFT", 2, 2)
+        e:SetHitRectInsets(-4, -6, -6, -4)
+    end)
+
+    targetFrame._resizeEdges = edges
+    targetFrame._scStopResize = StopActiveResize
+end
+
+local function BuildMainFrame()
+    frame = CreateFrame("Frame", "SocialCentralFrame", UIParent, "BackdropTemplate")
+    local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
+    local w = ns.db and ns.db.window or { width = 790, height = 520 }
+    local initW = math.max(minW, math.min(maxW, w.width or 790))
+    local initH = math.max(minH, math.min(maxH, w.height or 520))
+    frame:SetSize(initW, initH)
+    frame:SetPoint("CENTER")
 
     frame:SetResizable(true)
     frame:SetClampedToScreen(true)
     frame:EnableMouse(true)
-    frame:SetFrameStrata("MEDIUM")
+    frame:SetFrameStrata("HIGH")
+    frame:SetFrameLevel(600)
     frame:Hide()
     table.insert(UISpecialFrames, "SocialCentralFrame")
 
@@ -6871,7 +7096,7 @@ local function BuildMainFrame()
     if blizzOk and blizzChrome then
         blizzChrome:SetAllPoints(frame)
         blizzChrome:SetFrameLevel(math.max(0, frame:GetFrameLevel()))
-        blizzChrome:EnableMouse(false)
+        DisableChromeMouseRecursive(blizzChrome, blizzChrome.CloseButton, 4)
         local pTex = (blizzChrome.PortraitContainer and blizzChrome.PortraitContainer.portrait) or blizzChrome.portrait
         if pTex and SetPortraitToTexture then
             pcall(SetPortraitToTexture, pTex, "Interface\\AddOns\\SocialCentral\\Media\\icon")
@@ -6937,14 +7162,21 @@ local function BuildMainFrame()
     frame._blizzHeaderShelf = blizzHeaderShelf
 
     local blizzTitleDrag = CreateFrame("Frame", nil, frame)
-    blizzTitleDrag:SetPoint("TOPLEFT", frame, "TOPLEFT", 58, -2)
-    blizzTitleDrag:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -2)
-    blizzTitleDrag:SetHeight(22)
+    blizzTitleDrag:SetPoint("TOPLEFT", frame, "TOPLEFT", 4, -2)
+    blizzTitleDrag:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -30, -2)
+    blizzTitleDrag:SetHeight(24)
     blizzTitleDrag:EnableMouse(true)
     blizzTitleDrag:Hide()
     frame.blizzTitleDrag = blizzTitleDrag
 
-    local dragHandles = { header, blizzTitleDrag }
+    local blizzPortraitDrag = CreateFrame("Frame", nil, frame)
+    blizzPortraitDrag:SetPoint("TOPLEFT", frame, "TOPLEFT", 4, -24)
+    blizzPortraitDrag:SetSize(62, 34)
+    blizzPortraitDrag:EnableMouse(true)
+    blizzPortraitDrag:Hide()
+    frame.blizzPortraitDrag = blizzPortraitDrag
+
+    local dragHandles = { header, blizzTitleDrag, blizzPortraitDrag }
     Theme:MakeMovable(frame, {
         key = "main",
         handles = dragHandles,
@@ -7933,22 +8165,13 @@ local function BuildMainFrame()
     scrollList = Theme:CreateScrollList(content, 40, CreateListRow, UpdateListRow)
     scrollList.container:SetAllPoints()
 
-    -- Resize Grip
-    local grip = CreateFrame("Button", nil, frame)
-    grip:SetSize(16, 16)
-    grip:SetPoint("BOTTOMRIGHT", -4, 4)
-    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
-    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
-    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
-    grip:SetScript("OnMouseDown", function() frame:StartSizing("BOTTOMRIGHT") end)
-    grip:SetScript("OnMouseUp", function()
-        frame:StopMovingOrSizing()
-        if frame._scSavePosition then
-            frame._scSavePosition()
-        end
-        SaveGeometry()
-    end)
-    frame.grip = grip
+    -- Resize Handles (corner grip + outer edges)
+    frame._scReflowResize = function()
+        if ReflowFilterBar then ReflowFilterBar() end
+        if ReflowWatchBar then ReflowWatchBar() end
+        if ReflowClanPanel then ReflowClanPanel() end
+    end
+    SetupMainFrameResizeHandles(frame)
 
     -- Use HookScript so Theme:MakeMovable OnShow/OnHide drag & position hooks stay intact.
     frame:HookScript("OnShow", function()
@@ -8016,6 +8239,9 @@ local function BuildMainFrame()
             if allianceModalFrame then
                 allianceModalFrame:Hide()
             end
+        end
+        if frame._scStopResize then
+            frame._scStopResize(true)
         end
         SaveGeometry()
         ClearSearchFilter()
@@ -8466,22 +8692,31 @@ local function RestoreStandalonePlacement()
     if frame:GetParent() ~= UIParent then
         frame:SetParent(UIParent)
     end
-    if frame.SetResizeBounds then
-        frame:SetResizeBounds(760, 460, 1140, 840)
-    elseif frame.SetMinResize then
-        frame:SetMinResize(760, 460)
-        frame:SetMaxResize(1140, 840)
+    frame:SetMovable(true)
+    frame:SetResizable(true)
+    frame:SetClampedToScreen(true)
+    local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
+    local w = ns.db and ns.db.window or { width = 790, height = 520 }
+    local targetW = math.max(minW, math.min(maxW, w.width or 790))
+    local targetH = math.max(minH, math.min(maxH, w.height or 520))
+    frame:SetSize(targetW, targetH)
+    local restored = Theme and Theme.RestoreWindowPosition and Theme:RestoreWindowPosition(frame, "main", false)
+    if not restored then
+        frame:ClearAllPoints()
+        if w.point and w.x and w.y then
+            frame:SetPoint(w.point, UIParent, w.relativePoint or w.point, w.x, w.y)
+            if frame._scSavePosition then
+                frame._scSavePosition()
+            end
+            if Theme and Theme.RestoreWindowPosition then
+                Theme:RestoreWindowPosition(frame, "main", false)
+            end
+        else
+            frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        end
     end
-    local w = ns.db and ns.db.window or { width = 820, height = 520 }
-    frame:SetSize(math.max(760, w.width or 820), math.max(460, w.height or 520))
-    frame:ClearAllPoints()
-    if w.point and w.x and w.y then
-        frame:SetPoint(w.point, UIParent, w.relativePoint or w.point, w.x, w.y)
-    else
-        frame:SetPoint("CENTER")
-    end
-    frame:SetFrameStrata("MEDIUM")
-    frame:SetFrameLevel(120)
+    frame:SetFrameStrata("HIGH")
+    frame:SetFrameLevel(600)
 end
 
 local function IsSafeHostObj(obj)
@@ -9213,6 +9448,7 @@ function UI:ShowHub(defaultTab)
     if not frame then
         BuildMainFrame()
     end
+    local wasEmbedded = embeddedState.active == true
     if embeddedState.active and embeddedState.host then
         self:CloseEmbeddedIfHost(embeddedState.host)
     end
@@ -9222,9 +9458,14 @@ function UI:ShowHub(defaultTab)
     embeddedState.active = false
     embeddedState.host = nil
     embeddedState.allowedSet = nil
-    RestoreStandalonePlacement()
-    frame:SetFrameStrata("HIGH")
-    frame:SetFrameLevel(600)
+    if wasEmbedded or not frame:IsShown() or frame:GetParent() ~= UIParent or frame._scLocked then
+        RestoreStandalonePlacement()
+    else
+        frame:SetFrameStrata("HIGH")
+        if (frame:GetFrameLevel() or 0) < 600 then
+            frame:SetFrameLevel(600)
+        end
+    end
     if defaultTab and tabButtons[defaultTab] and IsTabAllowed(defaultTab) then
         activeTab = defaultTab
     elseif not IsTabAllowed(activeTab) then
@@ -9307,7 +9548,17 @@ function UI:OpenTab(tabId)
             frame:Raise()
         end
     elseif not embeddedState.active then
-        RestoreStandalonePlacement()
+        if not frame:IsShown() or frame:GetParent() ~= UIParent or frame._scLocked then
+            RestoreStandalonePlacement()
+        else
+            frame:SetFrameStrata("HIGH")
+            if (frame:GetFrameLevel() or 0) < 600 then
+                frame:SetFrameLevel(600)
+            end
+            if frame.Raise then
+                frame:Raise()
+            end
+        end
     end
     if tabId and tabButtons[tabId] then
         activeTab = tabId
@@ -9365,3 +9616,27 @@ ns.RegisterEvent(UI, "PLAYER_GUILD_UPDATE", function(_, _, unit)
         UI:QueueRefresh(false)
     end
 end)
+
+local function OnViewportGeometryChanged()
+    if not frame or embeddedState.active or frame._scLocked then
+        return
+    end
+    if UIParent and frame:GetParent() ~= UIParent then
+        return
+    end
+    local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
+    local curW = math.floor((frame:GetWidth() or 790) + 0.5)
+    local curH = math.floor((frame:GetHeight() or 520) + 0.5)
+    local clampedW = math.max(minW, math.min(maxW, curW))
+    local clampedH = math.max(minH, math.min(maxH, curH))
+    if clampedW ~= curW or clampedH ~= curH then
+        frame:SetSize(clampedW, clampedH)
+    end
+    if Theme and Theme.RestoreWindowPosition then
+        Theme:RestoreWindowPosition(frame, "main", false)
+    end
+    SaveGeometry()
+end
+
+ns.RegisterEvent(UI, "DISPLAY_SIZE_CHANGED", OnViewportGeometryChanged)
+ns.RegisterEvent(UI, "UI_SCALE_CHANGED", OnViewportGeometryChanged)
