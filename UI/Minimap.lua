@@ -168,6 +168,19 @@ local function PopulateTooltip(tt)
         tt:AddDoubleLine(L["Group"], tostring(grpCount), 0.78, 0.84, 0.92, 0.45, 0.80, 1.0)
     end
 
+    local lfgOnMod = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("lfg")
+    if lfgOnMod and ns.Clan and ns.Clan.GetTrustedLFGBreakdown then
+        local bd = ns.Clan:GetTrustedLFGBreakdown()
+        if bd and (bd.total or 0) > 0 then
+            tt:AddDoubleLine(L["Clans & Allies LFG"], tostring(bd.total), 0.78, 0.84, 0.92, 0.25, 0.92, 0.55)
+        end
+    end
+    if groupOnMod and ns.Group and ns.Group.GetHourlyInstanceStatus then
+        local st = ns.Group:GetHourlyInstanceStatus()
+        local usedH, maxH = st and st.used or 0, st and st.max or 5
+        tt:AddDoubleLine(L["Instances (1h)"], string.format("%d/%d", usedH, maxH), 0.78, 0.84, 0.92, usedH >= maxH and 1.0 or 0.72, usedH >= maxH and 0.35 or 0.88, usedH >= maxH and 0.35 or 0.96)
+    end
+
     if watchOnMod and ns.Watchlist and watchOn > 0 then
         tt:AddLine(" ")
         local shown = 0
@@ -250,6 +263,25 @@ local function OpenContextMenu(anchor)
             if not ns.Compat or not ns.Compat.IsWindowIntegrationEnabled or ns.Compat.IsWindowIntegrationEnabled("I") then
                 root:CreateButton(L["Looking for Group (I)"], function()
                     OpenViaOfficialOrHub("lfg")
+                end)
+                root:CreateButton(L["Broadcast Current Group"], function()
+                    if ns.Clan and ns.Clan.PostSmartGroupFormation then
+                        local okPost, reason = ns.Clan:PostSmartGroupFormation()
+                        if not okPost and reason == "needs_activity" then
+                            if ns.LFGFrameTab then
+                                ns.LFGFrameTab.viewMode = "categories"
+                            end
+                            OpenViaOfficialOrHub("lfg")
+                            ns:Print("%s", L["Select the dungeon or activity you want to broadcast to Guild & Allies."])
+                        end
+                    end
+                end)
+                root:CreateButton(L["Reset Dungeon Instances"], function()
+                    if ns.UI and ns.UI.ConfirmResetInstances then
+                        ns.UI:ConfirmResetInstances()
+                    elseif ns.Group and ns.Group.ResetDungeonInstances then
+                        ns.Group:ResetDungeonInstances()
+                    end
                 end)
             end
             if not ns.Compat or not ns.Compat.IsWindowIntegrationEnabled or ns.Compat.IsWindowIntegrationEnabled("O") then
@@ -357,7 +389,19 @@ local function OpenContextMenu(anchor)
                 end
             end)
             root:CreateButton(L["Reset Window Positions"], function()
-                if ns.Theme and ns.Theme.ResetAllWindowPositions then ns.Theme:ResetAllWindowPositions() end
+                if ns.UI and ns.UI.OpenConfirmModal then
+                    ns.UI:OpenConfirmModal({
+                        title = L["Reset All Window Positions"],
+                        message = L["Are you sure you want to reset all SocialCentral window positions to defaults?"],
+                        confirmText = L["Reset"],
+                        confirmVariant = "danger",
+                        onConfirm = function()
+                            if ns.Theme and ns.Theme.ResetAllWindowPositions then ns.Theme:ResetAllWindowPositions() end
+                        end,
+                    })
+                elseif ns.Theme and ns.Theme.ResetAllWindowPositions then
+                    ns.Theme:ResetAllWindowPositions()
+                end
             end)
         end)
     elseif ns.Settings then

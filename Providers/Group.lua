@@ -11,6 +11,7 @@ local Group = {
     members = {},
     readyStates = {},
     readyCheckActive = false,
+    memberInstanceCaps = {},
 }
 
 ns.Group = Group
@@ -87,8 +88,33 @@ function Group:Scan()
         end
     end
 
+    local raidMetaByLookup = {}
+    if inRaid and GetRaidRosterInfo then
+        for rIdx = 1, numMembers do
+            local okR, rName, _, rSub, _, _, _, _, _, rDead, rCombatRole, rIsML = pcall(GetRaidRosterInfo, rIdx)
+            if okR and rName then
+                local cleanRName = Safe.String(rName)
+                local rParsed = cleanRName and Compat.ParseCharacterName(cleanRName)
+                if rParsed and rParsed.lookupKey then
+                    local cleanRole = Safe.String(rCombatRole)
+                    if cleanRole ~= "MAINTANK" and cleanRole ~= "MAINASSIST" then
+                        cleanRole = nil
+                    end
+                    raidMetaByLookup[rParsed.lookupKey] = {
+                        subgroup = Safe.Number(rSub) or 1,
+                        isDead = (rDead == true),
+                        combatRole = cleanRole,
+                        isML = (rIsML == true),
+                    }
+                end
+            end
+        end
+    end
+
+    local myInst = self:GetHourlyInstanceStatus()
+    local nowCaps = time()
     local seen = {}
-    for _, unit in ipairs(unitTokens) do
+    for idx, unit in ipairs(unitTokens) do
         if UnitExists and Safe.Value(UnitExists(unit)) == true then
             local guid = Safe.String(Safe.Call(UnitGUID, unit))
             local existingName = guid and prevByGuid[guid] or nil
@@ -107,9 +133,19 @@ function Group:Scan()
                 local level = Safe.Number(Safe.Call(UnitLevel, unit))
                 local role = NormalizeRole(Safe.String(Safe.Call(UnitGroupRolesAssigned, unit)))
                 local online = not UnitIsConnected or Safe.Value(UnitIsConnected(unit)) ~= false
+                local unitDead = (UnitIsDeadOrGhost and Safe.Value(Safe.Call(UnitIsDeadOrGhost, unit)) == true) or false
+                local rMeta = raidMetaByLookup[parsed.lookupKey]
+                local subgroup = (rMeta and rMeta.subgroup) or 1
+                local isDead = (rMeta and rMeta.isDead) or unitDead
+                local raidRole = rMeta and rMeta.combatRole or nil
+                local isML = (rMeta and rMeta.isML == true) or false
                 local isLeader = Compat.IsGroupLeader(unit)
                 local isAssistant = (not isLeader) and (Compat.IsGroupAssistant and Compat.IsGroupAssistant(unit)) or false
                 local isMe = Compat.IsMe(rawName, guid)
+                local capRec = (not isMe) and self.memberInstanceCaps and self.memberInstanceCaps[parsed.lookupKey]
+                local instUsed = isMe and (myInst and myInst.used or 0)
+                    or ((capRec and (nowCaps - (capRec.updatedAt or 0)) <= 3600) and capRec.used or nil)
+                local instMax = (capRec and capRec.max) or (myInst and myInst.max) or 5
 
                 local item = {
                     unit = unit,
@@ -120,11 +156,17 @@ function Group:Scan()
                     level = (level and level > 0) and level or nil,
                     role = role,
                     online = online,
+                    isDead = isDead,
+                    subgroup = subgroup,
+                    raidRole = raidRole,
+                    isML = isML,
                     isLeader = isLeader,
                     isAssistant = isAssistant,
                     isMe = isMe,
                     ready = self.readyStates[parsed.lookupKey],
                     zone = currentZone,
+                    instanceUsed = instUsed,
+                    instanceMax = instMax,
                 }
                 table.insert(nextList, item)
 
@@ -193,12 +235,39 @@ function Group:Scan()
     local roleRank = { TANK = 1, HEALER = 2, DAMAGER = 3, NONE = 4 }
     table.sort(nextList, function(a, b)
         if a.isLeader ~= b.isLeader then return a.isLeader end
+        if (a.subgroup or 1) ~= (b.subgroup or 1) then return (a.subgroup or 1) < (b.subgroup or 1) end
         local ra, rb = roleRank[a.role] or 4, roleRank[b.role] or 4
         if ra ~= rb then return ra < rb end
         return (a.displayName or "") < (b.displayName or "")
     end)
 
     self.members = nextList
+    self._compCache = nil
+    if Compat.IsInGroup() and ns.Clan and ns.Clan.BroadcastGroupInstanceCap then
+        ns.Clan:BroadcastGroupInstanceCap(myInst and myInst.used or 0, myInst and myInst.max or 5)
+    end
+    ns:Emit("GROUP_UPDATED")
+end
+
+function Group:ReceiveMemberInstanceCap(lookupKey, used, max)
+    if type(lookupKey) ~= "string" or lookupKey == "" then return end
+    self.memberInstanceCaps = self.memberInstanceCaps or {}
+    local cleanUsed = math.max(0, math.min(30, tonumber(used) or 0))
+    local cleanMax = math.max(1, math.min(30, tonumber(max) or 5))
+    self.memberInstanceCaps[lookupKey] = {
+        used = cleanUsed,
+        max = cleanMax,
+        updatedAt = time(),
+    }
+    if type(self.members) == "table" then
+        for i = 1, #self.members do
+            local m = self.members[i]
+            if m and m.lookupKey == lookupKey then
+                m.instanceUsed = cleanUsed
+                m.instanceMax = cleanMax
+            end
+        end
+    end
     ns:Emit("GROUP_UPDATED")
 end
 
@@ -207,13 +276,133 @@ function Group:GetMembers()
 end
 
 function Group:GetSummaryCounts()
-    local counts = { total = 0, TANK = 0, HEALER = 0, DAMAGER = 0, NONE = 0, online = 0 }
+    local counts = { total = 0, TANK = 0, HEALER = 0, DAMAGER = 0, NONE = 0, online = 0, dead = 0 }
     for _, m in ipairs(self.members or {}) do
         counts.total = counts.total + 1
-        if m.online then counts.online = counts.online + 1 end
+        if m.online ~= false then counts.online = counts.online + 1 end
+        if m.isDead then counts.dead = counts.dead + 1 end
         counts[m.role or "NONE"] = (counts[m.role or "NONE"] or 0) + 1
     end
     return counts
+end
+
+local ALL_CLASSIC_CLASSES = {
+    "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID",
+}
+
+function Group:GetCompositionAnalysis()
+    if self._compCache then
+        return self._compCache
+    end
+    local counts = self:GetSummaryCounts()
+    local classCounts = {}
+    for _, cf in ipairs(ALL_CLASSIC_CLASSES) do
+        classCounts[cf] = 0
+    end
+    local subgroups = {}
+    for g = 1, 8 do
+        subgroups[g] = {
+            index = g,
+            members = {},
+            TANK = 0,
+            HEALER = 0,
+            DAMAGER = 0,
+            NONE = 0,
+            hasShaman = false,
+            hasPaladin = false,
+            hasWarrior = false,
+            hasDruid = false,
+            hasPriest = false,
+        }
+    end
+    local scUsers, avoidCount, goodCount, maxSubgroup = 0, 0, 0, 1
+    for _, m in ipairs(self.members or {}) do
+        local cf = m.classFile
+        if cf and classCounts[cf] ~= nil then
+            classCounts[cf] = classCounts[cf] + 1
+        end
+        local sgIdx = math.max(1, math.min(8, tonumber(m.subgroup) or 1))
+        if sgIdx > maxSubgroup then maxSubgroup = sgIdx end
+        local sg = subgroups[sgIdx]
+        sg.members[#sg.members + 1] = m
+        local rKey = m.role or "NONE"
+        sg[rKey] = (sg[rKey] or 0) + 1
+        if cf == "SHAMAN" then sg.hasShaman = true
+        elseif cf == "PALADIN" then sg.hasPaladin = true
+        elseif cf == "WARRIOR" then sg.hasWarrior = true
+        elseif cf == "DRUID" then sg.hasDruid = true
+        elseif cf == "PRIEST" then sg.hasPriest = true end
+
+        if not m.isMe then
+            if ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(m.lookupKey or m.displayName) then
+                scUsers = scUsers + 1
+            end
+            local meta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(m.lookupKey or m.displayName) or Store:GetSocialMeta(m.lookupKey or m.displayName))
+            if meta and meta.flag == "AVOID" then
+                avoidCount = avoidCount + 1
+            elseif meta and meta.flag == "GOOD" then
+                goodCount = goodCount + 1
+            end
+        end
+    end
+
+    local resCount = (classCounts.PRIEST or 0) + (classCounts.PALADIN or 0) + (classCounts.SHAMAN or 0) + (classCounts.DRUID or 0)
+    local bresCount = (classCounts.DRUID or 0) + (classCounts.WARLOCK or 0)
+    local utilities = {
+        resurrection = resCount,
+        battleRes = bresCount,
+        fortitude = classCounts.PRIEST or 0,
+        intellect = classCounts.MAGE or 0,
+        mark = classCounts.DRUID or 0,
+        shout = classCounts.WARRIOR or 0,
+        blessings = classCounts.PALADIN or 0,
+        totems = classCounts.SHAMAN or 0,
+        warlock = classCounts.WARLOCK or 0,
+        hunter = classCounts.HUNTER or 0,
+        rogue = classCounts.ROGUE or 0,
+        dispelMagic = (classCounts.PRIEST or 0) + (classCounts.PALADIN or 0),
+        dispelCurse = (classCounts.MAGE or 0) + (classCounts.DRUID or 0),
+        dispelPoison = (classCounts.DRUID or 0) + (classCounts.PALADIN or 0) + (classCounts.SHAMAN or 0),
+        dispelDisease = (classCounts.PRIEST or 0) + (classCounts.PALADIN or 0) + (classCounts.SHAMAN or 0),
+    }
+
+    local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    local missingClasses = {}
+    for _, cf in ipairs(ALL_CLASSIC_CLASSES) do
+        local skipOpp = (myFac == "Alliance" and cf == "SHAMAN") or (myFac == "Horde" and cf == "PALADIN")
+        if not skipOpp and (classCounts[cf] or 0) == 0 then
+            missingClasses[#missingClasses + 1] = cf
+        end
+    end
+
+    local missingRolesText = ""
+    if counts.total > 0 and counts.total < 5 and not (Compat.IsInRaid and Compat.IsInRaid()) then
+        local needT = math.max(0, 1 - (counts.TANK or 0))
+        local needH = math.max(0, 1 - (counts.HEALER or 0))
+        local needD = math.max(0, 3 - (counts.DAMAGER or 0))
+        local parts = {}
+        if needT > 0 then parts[#parts + 1] = needT .. "T" end
+        if needH > 0 then parts[#parts + 1] = needH .. "H" end
+        if needD > 0 then parts[#parts + 1] = needD .. "D" end
+        if #parts > 0 then
+            missingRolesText = table.concat(parts, " ")
+        end
+    end
+
+    self._compCache = {
+        counts = counts,
+        classCounts = classCounts,
+        subgroups = subgroups,
+        maxSubgroup = maxSubgroup,
+        utilities = utilities,
+        missingClasses = missingClasses,
+        missingRolesText = missingRolesText,
+        scUsers = scUsers,
+        avoidCount = avoidCount,
+        goodCount = goodCount,
+        inRaid = (Compat.IsInRaid and Compat.IsInRaid()) == true,
+    }
+    return self._compCache
 end
 
 function Group:GetRecentCompanions(query)
@@ -322,22 +511,216 @@ function Group:LeaveGroup()
     return Compat.LeaveGroup()
 end
 
+local function PruneInstanceRuns(runs, now)
+    local kept = {}
+    if type(runs) ~= "table" then return kept end
+    for i = 1, #runs do
+        local r = runs[i]
+        if type(r) == "table" and r.enteredAt and (now - r.enteredAt) < 86400 then
+            kept[#kept + 1] = r
+            if #kept >= 30 then
+                break
+            end
+        end
+    end
+    return kept
+end
+
+function Group:RecordCurrentInstanceEntry()
+    if not ns.db then return end
+    if type(ns.db.instanceRuns) ~= "table" then
+        ns.db.instanceRuns = {}
+    end
+    local inInst, instType = Safe.Call(IsInInstance)
+    instType = Safe.String(instType)
+    if inInst ~= true or (instType ~= "party" and instType ~= "raid") then
+        self._activeInstanceSig = nil
+        ns.db._lastInstanceActiveSig = nil
+        return
+    end
+
+    local instName, mapIdNum
+    if GetInstanceInfo then
+        local okInfo, rawName, _, _, _, _, _, _, rawMapId = pcall(GetInstanceInfo)
+        if okInfo then
+            instName = Safe.String(rawName)
+            mapIdNum = Safe.Number(rawMapId)
+        end
+    end
+    instName = (instName and instName ~= "") and instName or Compat.CurrentZoneName() or L["Instance"]
+    local sig = tostring(instType) .. ":" .. tostring(mapIdNum or instName)
+    if self._activeInstanceSig == sig then
+        return
+    end
+
+    local now = time()
+    local runs = PruneInstanceRuns(ns.db.instanceRuns, now)
+    ns.db.instanceRuns = runs
+
+    local latest = runs[1]
+    if ns.db._lastInstanceActiveSig == sig and latest and latest.sig == sig and (now - (latest.enteredAt or 0)) <= 900 then
+        self._activeInstanceSig = sig
+        return
+    end
+
+    self._activeInstanceSig = sig
+    ns.db._lastInstanceActiveSig = sig
+
+    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local myName = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player")) or "Player"
+    local _, myClass = Safe.Call(UnitClass, "player")
+    myClass = Safe.String(myClass)
+
+    table.insert(runs, 1, {
+        sig = sig,
+        name = instName,
+        instType = instType,
+        enteredAt = now,
+        charName = myName,
+        classFile = myClass,
+    })
+    while #runs > 30 do
+        table.remove(runs)
+    end
+
+    if Compat.IsInGroup() and ns.Clan and ns.Clan.BroadcastGroupInstanceCap then
+        local st = self:GetHourlyInstanceStatus()
+        ns.Clan:BroadcastGroupInstanceCap(st and st.used or 0, st and st.max or 5)
+    end
+
+    ns:Emit("GROUP_UPDATED")
+    ns:Emit("CLAN_UPDATED")
+end
+
+function Group:GetHourlyInstanceStatus()
+    local now = time()
+    local runs = PruneInstanceRuns(ns.db and ns.db.instanceRuns, now)
+    if ns.db then
+        ns.db.instanceRuns = runs
+    end
+    local hourlyEntries = {}
+    for i = 1, #runs do
+        local r = runs[i]
+        if (now - (r.enteredAt or 0)) < 3600 then
+            hourlyEntries[#hourlyEntries + 1] = r
+        end
+    end
+    local usedHourly = #hourlyEntries
+    local maxHourly = 5
+    local nextSlotSecs = 0
+    if usedHourly >= maxHourly then
+        local refEntry = hourlyEntries[maxHourly]
+        nextSlotSecs = math.max(0, 3600 - (now - (refEntry.enteredAt or now)))
+    elseif usedHourly > 0 then
+        local oldestEntry = hourlyEntries[usedHourly]
+        nextSlotSecs = math.max(0, 3600 - (now - (oldestEntry.enteredAt or now)))
+    end
+    return {
+        used = usedHourly,
+        max = maxHourly,
+        nextSlotSecs = nextSlotSecs,
+        recent24h = #runs,
+        lastRun = runs[1],
+        runs = runs,
+    }
+end
+
+function Group:AppendInstanceHistoryTooltip(tt)
+    if not tt then return end
+    local st = self:GetHourlyInstanceStatus()
+    local usedH = st and st.used or 0
+    local maxH = st and st.max or 5
+    if tt.NumLines and tt:NumLines() > 0 then
+        tt:AddLine(" ")
+    end
+    local r = (usedH >= maxH) and 1.0 or ((usedH == maxH - 1) and 1.0 or 0.35)
+    local g = (usedH >= maxH) and 0.35 or ((usedH == maxH - 1) and 0.72 or 0.92)
+    local b = (usedH >= maxH) and 0.35 or ((usedH == maxH - 1) and 0.25 or 0.55)
+    tt:AddDoubleLine(L["Instance Limit (1h)"], string.format("%d/%d", usedH, maxH), 1.0, 0.82, 0.0, r, g, b)
+    if usedH > 0 and (st.nextSlotSecs or 0) > 0 and ns.Clan and ns.Clan.FormatResetDuration then
+        tt:AddLine(L["Next slot frees in %s"]:format(ns.Clan:FormatResetDuration(st.nextSlotSecs)), 1.0, 0.68, 0.28, true)
+    end
+    local runs = st and st.runs
+    if type(runs) == "table" and #runs > 0 then
+        local now = time()
+        tt:AddLine(L["Recent Instances (24h): %d"]:format(#runs), 0.72, 0.80, 0.90)
+        local limit = math.min(6, #runs)
+        for i = 1, limit do
+            local entry = runs[i]
+            if type(entry) == "table" then
+                local hex = (Compat.ClassHex and Compat.ClassHex(entry.classFile)) or "|cffffffff"
+                local leftTxt = hex .. (entry.charName or "?") .. "|r · " .. (entry.name or "?")
+                local rel = (Compat.FormatRelativeTime and Compat.FormatRelativeTime(entry.enteredAt, L)) or ""
+                if (now - (entry.enteredAt or 0)) < 3600 and ns.Clan and ns.Clan.FormatResetDuration then
+                    local freesIn = ns.Clan:FormatResetDuration(3600 - (now - (entry.enteredAt or 0)))
+                    rel = (rel ~= "" and (rel .. " ") or "") .. "(" .. freesIn .. ")"
+                end
+                tt:AddDoubleLine(leftTxt, rel, 0.92, 0.94, 0.96, 0.72, 0.78, 0.86)
+            end
+        end
+    end
+end
+
+function Group:ResetDungeonInstances()
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        ns:Print(L["In Combat"])
+        return false
+    end
+    local inInst = Safe.Value(Safe.Call(IsInInstance)) == true
+    if inInst then
+        ns:Print(L["You must be outside the instance to reset dungeons."])
+        return false
+    end
+    if Compat.IsInGroup() and not Compat.IsGroupLeader("player") then
+        ns:Print(L["Only the group leader can reset instances."])
+        return false
+    end
+    for _, m in ipairs(self.members or {}) do
+        if not m.isMe then
+            if (m.instanceUsed or 0) >= 5 then
+                ns:Print(L["Warning: %s is at %d/%d hourly instances!"]:format(m.displayName or "?", m.instanceUsed or 5, m.instanceMax or 5))
+            end
+            if m.online == false then
+                ns:Print(L["Note: %s is currently offline while resetting instances."]:format(m.displayName or "?"))
+            end
+        end
+    end
+    if ResetInstances then
+        pcall(ResetInstances)
+    end
+    if ns.db then
+        ns.db._lastInstanceActiveSig = nil
+    end
+    self._activeInstanceSig = nil
+    ns:Print(L["Dungeon instances have been reset."])
+    ns:Emit("GROUP_UPDATED")
+    ns:Emit("CLAN_UPDATED")
+    return true
+end
+
 function Group:OpenGroupChatAnnouncement()
     local slash = self:GetChannelSlash()
     if not slash then
         ns:Print(L["You are not in a group."])
         return false
     end
-    local counts = self:GetSummaryCounts()
+    local comp = self:GetCompositionAnalysis()
+    local counts = comp and comp.counts or self:GetSummaryCounts()
     local zone = Compat.CurrentZoneName()
+    local cap = (Compat.IsInRaid and Compat.IsInRaid()) and 40 or 5
+    local missPart = (comp and comp.missingRolesText and comp.missingRolesText ~= "")
+        and (" (" .. L["Need"] .. ": " .. comp.missingRolesText .. ")")
+        or ""
     local draft = string.format(
-        "%s%s: %d (%dT / %dH / %dD)%s",
+        "%s%s [%d/%d]: %dT / %dH / %dD%s%s",
         slash,
         L["Group"],
         counts.total,
+        cap,
         counts.TANK,
         counts.HEALER,
         counts.DAMAGER,
+        missPart,
         (zone and zone ~= "") and (" - " .. zone) or ""
     )
     if ChatFrameUtil and ChatFrameUtil.OpenChat then
@@ -359,9 +742,18 @@ local function QueueScan()
     end)
 end
 
+local instanceCheckQueued = false
+local function QueueInstanceEntryCheck()
+    if instanceCheckQueued then return end
+    instanceCheckQueued = true
+    C_Timer.After(1.5, function()
+        instanceCheckQueued = false
+        Group:RecordCurrentInstanceEntry()
+    end)
+end
+
 function Group:Init()
     for _, ev in ipairs({
-        "PLAYER_ENTERING_WORLD",
         "GROUP_ROSTER_UPDATE",
         "PARTY_MEMBERS_CHANGED",
         "RAID_ROSTER_UPDATE",
@@ -371,6 +763,13 @@ function Group:Init()
     }) do
         ns.RegisterEvent(self, ev, QueueScan)
     end
+
+    ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        QueueScan()
+        QueueInstanceEntryCheck()
+    end)
+
+    ns.RegisterEvent(self, "ZONE_CHANGED_NEW_AREA", QueueInstanceEntryCheck)
 
     ns.RegisterEvent(self, "READY_CHECK", function()
         Group.readyCheckActive = true

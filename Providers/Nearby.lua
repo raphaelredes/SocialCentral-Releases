@@ -17,14 +17,35 @@ local groupScanQueued = false
 local nearbyCount = 0
 local nearbyCountSynced = false
 local nearbyCooldownCount = 0
-local MAX_NEARBY_ENTRIES = 400
+local MAX_NEARBY_ENTRIES = 120
 local NEARBY_PROBE_UNITS = { "target", "targettarget", "focus", "mouseover", "softfriend", "softinteract", "softtarget" }
 local nearbyByGuid = {}
 local nearbyInspectCooldown = {}
+local cachedAreaZone, cachedAreaSubZone, cachedAreaFull
 
 local function IsMainWindowOpen()
     local f = _G.SocialCentralFrame
-    return f ~= nil and f.IsShown ~= nil and f:IsShown() == true
+    if f ~= nil and f.IsShown ~= nil and f:IsShown() == true then return true end
+    local fr = _G.SocialUIFrame or _G.FriendsFrame
+    if fr ~= nil and fr.IsShown ~= nil and fr:IsShown() == true then return true end
+    return false
+end
+
+local function ResolveCachedAreaLabel()
+    local area = Compat.CurrentZoneName() or ""
+    local subZone = Safe.String(Safe.Call(GetSubZoneText)) or ""
+    if area ~= cachedAreaZone or subZone ~= cachedAreaSubZone or not cachedAreaFull then
+        cachedAreaZone = area
+        cachedAreaSubZone = subZone
+        if subZone ~= "" and area ~= "" and subZone ~= area then
+            cachedAreaFull = area .. " — " .. subZone
+        elseif subZone ~= "" then
+            cachedAreaFull = subZone
+        else
+            cachedAreaFull = area
+        end
+    end
+    return cachedAreaFull
 end
 
 local function SyncNearbyCount()
@@ -245,6 +266,47 @@ local function InspectUnit(unit, source, fromTicker)
     local isPlayer = Safe.Value(Safe.Call(UnitIsPlayer, unit))
     if isPlayer ~= true then return end
 
+    if UnitIsConnected then
+        local isConn = Safe.Value(Safe.Call(UnitIsConnected, unit))
+        if isConn == false or (source == "group" and isConn ~= true) then
+            if source == "group" then
+                local offGuid = Safe.String(Safe.Call(UnitGUID, unit))
+                local offName = Safe.String(Safe.Call(UnitName, unit))
+                local parsedOff = offName and Compat.ParseCharacterName and Compat.ParseCharacterName(offName) or nil
+                if Store and Store.nearby then
+                    local oldRow = (offGuid and nearbyByGuid[offGuid])
+                        or (parsedOff and parsedOff.lookupKey and Store.nearby[parsedOff.lookupKey])
+                    if oldRow then
+                        if oldRow.guid and nearbyByGuid[oldRow.guid] == oldRow then
+                            nearbyByGuid[oldRow.guid] = nil
+                        end
+                        if oldRow.key and Store.nearby[oldRow.key] == oldRow then
+                            Store.nearby[oldRow.key] = nil
+                            if nearbyCountSynced then
+                                nearbyCount = math.max(0, nearbyCount - 1)
+                            end
+                            QueueEmit()
+                        end
+                    end
+                end
+                if offName and Store and Store.SyncWatchlistObservation and ns.Watchlist and ns.Watchlist.GetEntry then
+                    local resolvedOff = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, offGuid, nil, true)
+                    local wlName = (resolvedOff and resolvedOff.fullName) or (parsedOff and parsedOff.displayName) or offName
+                    local wlParsed = Compat.ParseCharacterName and Compat.ParseCharacterName(wlName)
+                    local wlEntry = wlParsed and wlParsed.lookupKey and ns.Watchlist:GetEntry(wlParsed.lookupKey)
+                    if wlEntry and wlEntry.status == "online" and wlEntry.source == "group" then
+                        Store:SyncWatchlistObservation(wlEntry.displayName or wlName, {
+                            online = false,
+                            guid = offGuid,
+                            source = "group",
+                        })
+                    end
+                end
+            end
+            return
+        end
+    end
+
     -- Fail closed against hostile PvP units and secret values (12.x / 16001).
     if source ~= "group" then
         local isEnemy = Safe.Value(Safe.Call(UnitIsEnemy, "player", unit))
@@ -257,7 +319,8 @@ local function InspectUnit(unit, source, fromTicker)
     local guid = Safe.String(Safe.Call(UnitGUID, unit))
     local nowClock = (GetTime and GetTime()) or time()
     local isDirectFocus = (unit == "target" or unit == "focus")
-    local minCooldown = fromTicker and 3.5 or (isDirectFocus and 0.75 or 2.0)
+    local uiOpen = IsMainWindowOpen()
+    local minCooldown = (not uiOpen and not isDirectFocus) and 12.0 or (fromTicker and 3.5 or (isDirectFocus and 0.75 or 2.0))
     if guid and nearbyInspectCooldown[guid] and nowClock < nearbyInspectCooldown[guid] then
         -- Allow first-time explicit target/focus selection immediately while throttling repeats.
         if not (isDirectFocus and not nearbyByGuid[guid]) then
@@ -292,22 +355,16 @@ local function InspectUnit(unit, source, fromTicker)
     local _, classFile = Safe.Call(UnitClass, unit)
     classFile = Safe.String(classFile)
     local level = Safe.Number(Safe.Call(UnitLevel, unit))
-    local area = Compat.CurrentZoneName()
-    local subZone = Safe.String(Safe.Call(GetSubZoneText))
-    if subZone and subZone ~= "" and area and area ~= "" and subZone ~= area then
-        area = area .. " — " .. subZone
-    elseif subZone and subZone ~= "" and (not area or area == "") then
-        area = subZone
-    end
+    local area = ResolveCachedAreaLabel()
     local isPhysicalGroupNear = true
     if source == "group" then
         local isVis = UnitIsVisible and Safe.Value(Safe.Call(UnitIsVisible, unit)) == true
-        if not isVis and C_Map and C_Map.GetBestMapForUnit then
-            local myMap = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
-            local uMap = Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, unit))
-            if myMap and uMap and uMap ~= myMap then
+        if not isVis then
+            local myMap = C_Map and C_Map.GetBestMapForUnit and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
+            local uMap = C_Map and C_Map.GetBestMapForUnit and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, unit))
+            if not uMap or (myMap and uMap ~= myMap) then
                 isPhysicalGroupNear = false
-                if C_Map.GetMapInfo then
+                if uMap and C_Map and C_Map.GetMapInfo then
                     local info = Safe.Call(C_Map.GetMapInfo, uMap)
                     area = (type(info) == "table" and Safe.String(info.name)) or nil
                 else
@@ -318,7 +375,7 @@ local function InspectUnit(unit, source, fromTicker)
     end
 
     local guild = Safe.String(Safe.Call(GetGuildInfo, unit))
-    if (not guild or guild == "") and Compat.ReadUnitTooltipGuild then
+    if (not guild or guild == "") and Compat.ReadUnitTooltipGuild and (uiOpen or isDirectFocus) then
         local cacheOnly = not (unit == "target" or unit == "focus" or unit == "mouseover")
         guild = Compat.ReadUnitTooltipGuild(unit, guid, cacheOnly)
     end
@@ -361,17 +418,19 @@ local function ScanGroup(fromTicker)
         lastRaidGroupScan = nowClock
         local includeTargets = uiOpen and not fromTicker
         for i = 1, 40 do
-            InspectUnit("raid" .. i, "group", fromTicker)
-            if includeTargets then
-                InspectUnit("raid" .. i .. "target", "nearby", fromTicker)
+            local rUnit = "raid" .. i
+            InspectUnit(rUnit, "group", fromTicker)
+            if includeTargets and (not UnitIsConnected or Safe.Value(Safe.Call(UnitIsConnected, rUnit)) == true) then
+                InspectUnit(rUnit .. "target", "nearby", fromTicker)
             end
         end
     else
         local includeTargets = not fromTicker
         for i = 1, 4 do
-            InspectUnit("party" .. i, "group", fromTicker)
-            if includeTargets then
-                InspectUnit("party" .. i .. "target", "nearby", fromTicker)
+            local pUnit = "party" .. i
+            InspectUnit(pUnit, "group", fromTicker)
+            if includeTargets and (not UnitIsConnected or Safe.Value(Safe.Call(UnitIsConnected, pUnit)) == true) then
+                InspectUnit(pUnit .. "target", "nearby", fromTicker)
             end
         end
     end
@@ -635,7 +694,7 @@ function Nearby:Init()
         InspectUnit(unit, "nearby")
     end)
     ns.RegisterEvent(self, "FORBIDDEN_NAME_PLATE_UNIT_ADDED", function(_, _, unit)
-        if (InCombatLockdown and InCombatLockdown()) or (Compat.IsInRaid() and not IsMainWindowOpen()) then
+        if not IsMainWindowOpen() or (InCombatLockdown and InCombatLockdown()) or Compat.IsInRaid() then
             return
         end
         InspectUnit(unit, "nearby")

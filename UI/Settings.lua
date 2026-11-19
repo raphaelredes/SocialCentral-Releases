@@ -357,8 +357,21 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
     ns.Theme:AutoFitButton(copyAccBtn, 150, 14, 230)
     copyAccBtn:SetPoint("LEFT", charProfActions, "LEFT", 0, 0)
     copyAccBtn:SetScript("OnClick", function()
-        if ns.CopyAccountSettingsToChar and ns:CopyAccountSettingsToChar() then
-            for _, sync in ipairs(syncFns) do sync() end
+        local function DoCopy()
+            if ns.CopyAccountSettingsToChar and ns:CopyAccountSettingsToChar() then
+                for _, sync in ipairs(syncFns) do sync() end
+            end
+        end
+        if ns.UI and ns.UI.OpenConfirmModal then
+            ns.UI:OpenConfirmModal({
+                title = L["Copy from Account Profile"],
+                message = L["Are you sure you want to overwrite this character's settings with the shared Account Profile?"],
+                confirmText = L["Confirm"],
+                confirmVariant = "primary",
+                onConfirm = DoCopy,
+            })
+        else
+            DoCopy()
         end
     end)
 
@@ -366,8 +379,21 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
     ns.Theme:AutoFitButton(resetProfBtn, 146, 14, 220)
     resetProfBtn:SetPoint("LEFT", copyAccBtn, "RIGHT", 6, 0)
     resetProfBtn:SetScript("OnClick", function()
-        if ns.ResetCurrentSettingsToDefaults and ns:ResetCurrentSettingsToDefaults() then
-            for _, sync in ipairs(syncFns) do sync() end
+        local function DoReset()
+            if ns.ResetCurrentSettingsToDefaults and ns:ResetCurrentSettingsToDefaults() then
+                for _, sync in ipairs(syncFns) do sync() end
+            end
+        end
+        if ns.UI and ns.UI.OpenConfirmModal then
+            ns.UI:OpenConfirmModal({
+                title = L["Reset Profile to Defaults"],
+                message = L["Are you sure you want to reset the active SocialCentral profile back to default settings?"],
+                confirmText = L["Reset"],
+                confirmVariant = "danger",
+                onConfirm = DoReset,
+            })
+        else
+            DoReset()
         end
     end)
 
@@ -1413,8 +1439,16 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         L["Adds a lightweight non-forbidden [ENEMY]/[ALLY]/[CLAN] indicator tag above player nameplates when readable."],
         L["Disable if you already use heavy custom nameplate addons and prefer HUD-only alerts."]
     )
+    local spotterTargetHighlightCb = CreateCheckbox(
+        rd, L["Highlight selected target name & info above head (eye-catching banner)"], spotterBadgesCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNameplateTargetHighlight ~= false end,
+        function(checked) ns.db.settings.spotterNameplateTargetHighlight = checked; NotifySettingChanged() end,
+        L["Help: Target Nameplate Highlight"],
+        L["Displays a high-contrast, thick-outlined banner with your selected target's name, level, guild, and stance right above their head whenever their nameplate is shown."],
+        L["Keep enabled so clicking any player or target makes their overhead name unmistakable; press Shift+V / V if nameplates are hidden."]
+    )
     local spotterEnemyCb = CreateCheckbox(
-        rd, L["Notify when an Enemy Clan player appears on screen"], spotterBadgesCb, -6,
+        rd, L["Notify when an Enemy Clan player appears on screen"], spotterTargetHighlightCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifyEnemy ~= false end,
         function(checked) ns.db.settings.spotterNotifyEnemy = checked; NotifySettingChanged() end,
         L["Help: Spotter Enemy Alerts"],
@@ -1547,32 +1581,46 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
     ns.Theme:AutoFitButton(resetRadarTabBtn, 160, 16, 250)
     resetRadarTabBtn:SetPoint("TOPLEFT", viewTutorialBtn, "BOTTOMLEFT", 0, -12)
     resetRadarTabBtn:SetScript("OnClick", function()
-        local s = ns.db and ns.db.settings
-        if s then
-            s.spotterEnabled = true
-            s.spotterAutoShowHUD = true
-            s.spotterNameplateArrow = true
-            s.spotterNameplateBadges = true
-            s.spotterNotifyEnemy = true
-            s.spotterNotifyAlly = true
-            s.spotterNotifyWatchlist = true
-            s.spotterNotifyFriends = true
-            s.spotterNotifyBlocked = true
-            s.spotterNotifySameClan = false
-            s.spotterIgnoreGroup = true
-            s.spotterSound = true
-            s.spotterLockHUD = false
-            s.embedWorldMap = true
-            s.worldBuffsMapPins = true
+        local function DoReset()
+            local s = ns.db and ns.db.settings
+            if s then
+                s.spotterEnabled = true
+                s.spotterAutoShowHUD = true
+                s.spotterNameplateArrow = true
+                s.spotterNameplateBadges = true
+                s.spotterNameplateTargetHighlight = true
+                s.spotterNotifyEnemy = true
+                s.spotterNotifyAlly = true
+                s.spotterNotifyWatchlist = true
+                s.spotterNotifyFriends = true
+                s.spotterNotifyBlocked = true
+                s.spotterNotifySameClan = false
+                s.spotterIgnoreGroup = true
+                s.spotterSound = true
+                s.spotterLockHUD = false
+                s.embedWorldMap = true
+                s.worldBuffsMapPins = true
+            end
+            NotifySettingChanged("WORLD_BUFFS_UPDATED")
+            for _, sync in ipairs(syncFns) do sync() end
         end
-        NotifySettingChanged("WORLD_BUFFS_UPDATED")
-        for _, sync in ipairs(syncFns) do sync() end
+        if ns.UI and ns.UI.OpenConfirmModal then
+            ns.UI:OpenConfirmModal({
+                title = L["Restore Defaults (This Tab)"],
+                message = L["Are you sure you want to restore all Target Radar & World Buff settings on this tab to defaults?"],
+                confirmText = L["Reset"],
+                confirmVariant = "danger",
+                onConfirm = DoReset,
+            })
+        else
+            DoReset()
+        end
     end)
 
     AddDeps(deps.defaultBtns, openBuffsBtn, viewTutorialBtn, viewRadarTutorialBtn, resetRadarTabBtn)
     AddDeps(deps.primaryBtns, openRadarBtn)
     AddDeps(deps.wb, buffMapPinsCb, openBuffsBtn)
-    AddDeps(deps.radar, spotterAutoHudCb, spotterPlateArrowCb, spotterBadgesCb, spotterEnemyCb, spotterAllyCb, spotterWatchlistCb, spotterFriendsCb, spotterBlockedCb, spotterSameCb, spotterIgnoreGroupCb, spotterSoundCb, spotterLockCb, openRadarBtn, viewTutorialBtn, viewRadarTutorialBtn)
+    AddDeps(deps.radar, spotterAutoHudCb, spotterPlateArrowCb, spotterBadgesCb, spotterTargetHighlightCb, spotterEnemyCb, spotterAllyCb, spotterWatchlistCb, spotterFriendsCb, spotterBlockedCb, spotterSameCb, spotterIgnoreGroupCb, spotterSoundCb, spotterLockCb, openRadarBtn, viewTutorialBtn, viewRadarTutorialBtn)
 end
 
 local function BuildGeneralTab(gn, deps)
@@ -1640,7 +1688,19 @@ local function BuildGeneralTab(gn, deps)
     ns.Theme:AutoFitButton(resetPosBtn, 170, 18, 270)
     resetPosBtn:SetPoint("LEFT", themePickerBtn, "RIGHT", 12, 0)
     resetPosBtn:SetScript("OnClick", function()
-        if ns.Theme and ns.Theme.ResetAllWindowPositions then ns.Theme:ResetAllWindowPositions() end
+        if ns.UI and ns.UI.OpenConfirmModal then
+            ns.UI:OpenConfirmModal({
+                title = L["Reset All Window Positions"],
+                message = L["Are you sure you want to reset all SocialCentral window positions to defaults?"],
+                confirmText = L["Reset"],
+                confirmVariant = "danger",
+                onConfirm = function()
+                    if ns.Theme and ns.Theme.ResetAllWindowPositions then ns.Theme:ResetAllWindowPositions() end
+                end,
+            })
+        elseif ns.Theme and ns.Theme.ResetAllWindowPositions then
+            ns.Theme:ResetAllWindowPositions()
+        end
     end)
     HelpBtn(gn, resetPosBtn, L["Help: Reset Window Positions"], L["Restores the default screen positions of the Main Window, Target Radar HUD, and all popup dialogs."], L["Use this if any window was moved off-screen or after changing screen resolution."])
 
@@ -1944,15 +2004,25 @@ local function BuildPanel()
         prevTabBtn = btn
     end
 
+    local function SafeHideSettingsFrame(sp)
+        if not sp then return end
+        if sp.IsForbidden then
+            local okF, forb = pcall(sp.IsForbidden, sp)
+            if not okF or forb then return end
+        end
+        if sp.IsProtected then
+            local okP, prot = pcall(sp.IsProtected, sp)
+            if not okP or prot then return end
+        end
+        if sp.IsShown and sp:IsShown() and sp.Hide then
+            pcall(sp.Hide, sp)
+        end
+    end
+
     local function CloseSettingsBeforeJump()
         if not ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) then
-            if HideUIPanel then
-                if _G.SettingsPanel and _G.SettingsPanel.IsShown and _G.SettingsPanel:IsShown() then
-                    pcall(HideUIPanel, _G.SettingsPanel)
-                elseif _G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown() then
-                    pcall(HideUIPanel, _G.InterfaceOptionsFrame)
-                end
-            end
+            SafeHideSettingsFrame(_G.SettingsPanel)
+            SafeHideSettingsFrame(_G.InterfaceOptionsFrame)
         end
     end
 
@@ -2166,14 +2236,14 @@ function SettingsMod:Toggle()
         or (_G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown())
     local panelVisible = panel and panel.IsVisible and panel:IsVisible()
     if isShown and panelVisible then
-        if HideUIPanel then
-            if _G.SettingsPanel and _G.SettingsPanel:IsShown() then
-                pcall(HideUIPanel, _G.SettingsPanel)
-            elseif _G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame:IsShown() then
-                pcall(HideUIPanel, _G.InterfaceOptionsFrame)
+        for _, sp in ipairs({ _G.SettingsPanel, _G.InterfaceOptionsFrame }) do
+            if sp and sp.IsShown and sp:IsShown() then
+                local forb = sp.IsForbidden and select(2, pcall(sp.IsForbidden, sp))
+                local prot = sp.IsProtected and select(2, pcall(sp.IsProtected, sp))
+                if not forb and not prot and sp.Hide then
+                    pcall(sp.Hide, sp)
+                end
             end
-        elseif _G.SettingsPanel and _G.SettingsPanel.Close then
-            pcall(_G.SettingsPanel.Close, _G.SettingsPanel)
         end
         return
     end

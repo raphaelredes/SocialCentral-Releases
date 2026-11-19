@@ -24,8 +24,11 @@ local SpotterHUD = {
 }
 
 local HUD_WIDTH = 312
+local NAV_H = 21
 local PILL_H = 44
 local ACTION_H = 44
+local MAX_NAV_NUMS = 7
+local PAGE_SIZE = 5
 local ARROW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\arrow"
 
 local STANCE_RGB = {
@@ -404,6 +407,378 @@ local function CreateTargetCrestBox(parentFrame, leftOffset)
     return badgeBox
 end
 
+local function ApplySpotterFocusEntry(entry, idx)
+    if not entry then return end
+    SpotterHUD.cycleIndex = idx
+    SpotterHUD.focusedKey = entry.key
+    if SpotterHUD.interactionOpen then
+        SpotterHUD.interactionKey = entry.key
+    end
+    SpotterHUD:Refresh()
+    if ns.Spotter and ns.Spotter.UpdateFocusedPlateMarker then
+        ns.Spotter:UpdateFocusedPlateMarker()
+    end
+end
+
+local function CycleRadarTarget(delta)
+    if InCombatLockdown and InCombatLockdown() then return end
+    local all = ns.Spotter and ns.Spotter:GetActiveTargets("ALL") or {}
+    if #all > 1 then
+        local cur = SpotterHUD.cycleIndex or 1
+        local nextIdx = ((cur - 1 + (delta or 1)) % #all) + 1
+        ApplySpotterFocusEntry(all[nextIdx], nextIdx)
+    end
+end
+
+local function SelectRadarTargetIndex(targetIdx)
+    if InCombatLockdown and InCombatLockdown() then return end
+    local all = ns.Spotter and ns.Spotter:GetActiveTargets("ALL") or {}
+    local idx = tonumber(targetIdx)
+    if not idx or idx < 1 or idx > #all then return end
+    ApplySpotterFocusEntry(all[idx], idx)
+end
+
+local function CycleRadarPage(pageDelta)
+    if InCombatLockdown and InCombatLockdown() then return end
+    local all = ns.Spotter and ns.Spotter:GetActiveTargets("ALL") or {}
+    local total = #all
+    if total <= MAX_NAV_NUMS then
+        CycleRadarTarget(pageDelta)
+        return
+    end
+    local totalPages = math.ceil(total / PAGE_SIZE)
+    local cur = SpotterHUD.cycleIndex or 1
+    local curPage = math.floor((cur - 1) / PAGE_SIZE) + 1
+    local nextPage = ((curPage - 1 + (pageDelta or 1)) % totalPages) + 1
+    local nextIdx = (nextPage - 1) * PAGE_SIZE + 1
+    if nextIdx > total then nextIdx = total end
+    ApplySpotterFocusEntry(all[nextIdx], nextIdx)
+end
+
+local function ApplySpotterFrameLayout(f, showNav, actionOpen)
+    if not f then return end
+    local isNav = (showNav == true)
+    local isAction = (actionOpen == true)
+    local topOffset = isNav and (NAV_H + 1) or 0
+    local wantH = topOffset + PILL_H + (isAction and (2 + ACTION_H + 3) or 0)
+
+    local changed = (f._lastLayoutNav ~= isNav)
+        or (f._lastActionOpen ~= isAction)
+        or (f._lastFrameH ~= wantH)
+    if not changed then
+        return
+    end
+
+    f._lastLayoutNav = isNav
+    f._lastActionOpen = isAction
+    f._lastFrameH = wantH
+
+    if f.navBar then
+        if isNav then
+            f.navBar:Show()
+        else
+            f.navBar:Hide()
+        end
+    end
+
+    if f.selWash then
+        f.selWash:ClearAllPoints()
+        f.selWash:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -(3 + topOffset))
+        f.selWash:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -(3 + topOffset))
+    end
+
+    if f.compassBar then
+        f.compassBar:ClearAllPoints()
+        f.compassBar:SetPoint("TOPLEFT", f, "TOPLEFT", 5, -(3 + topOffset))
+        -- Reserve space for [X] only when navBar is hidden and compassBar shares the top row.
+        f.compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", isNav and -6 or -28, -(3 + topOffset))
+        if f.compassBar.nameFs and f.compassBar.arrowBox then
+            f.compassBar.nameFs:ClearAllPoints()
+            f.compassBar.nameFs:SetPoint("TOPLEFT", f.compassBar.arrowBox, "TOPRIGHT", 8, 1)
+            f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -4, 1)
+        end
+    end
+
+    if f.actionPanel then
+        f.actionPanel:ClearAllPoints()
+        f.actionPanel:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -(topOffset + PILL_H - 1))
+        f.actionPanel:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -(topOffset + PILL_H - 1))
+        if isAction then
+            f.actionPanel:Show()
+        else
+            f.actionPanel:Hide()
+        end
+    end
+
+    f:SetHeight(wantH)
+    if ns.NotificationToast and ns.NotificationToast.LayoutStack then
+        ns.NotificationToast:LayoutStack()
+    end
+end
+
+local function ApplyNavBarTheme(navBar, p)
+    if not navBar or not p then return end
+    if navBar.bg then
+        local bg = p.bgPanel or p.bg or { 0.08, 0.09, 0.12 }
+        navBar.bg:SetColorTexture(bg[1], bg[2], bg[3], 0.72)
+    end
+    if navBar.div then
+        local bd = p.border or { 0.35, 0.30, 0.22 }
+        navBar.div:SetColorTexture(bd[1], bd[2], bd[3], 0.45)
+    end
+    if navBar.countFs then
+        local muted = p.textMuted or { 0.65, 0.70, 0.78 }
+        navBar.countFs:SetTextColor(muted[1], muted[2], muted[3])
+    end
+    if navBar.prevPageBtn then Theme:StyleButton(navBar.prevPageBtn, "default") end
+    if navBar.prevBtn then Theme:StyleButton(navBar.prevBtn, "default") end
+    if navBar.nextBtn then Theme:StyleButton(navBar.nextBtn, "default") end
+    if navBar.nextPageBtn then Theme:StyleButton(navBar.nextPageBtn, "default") end
+    if navBar.numBtns then
+        for _, btn in ipairs(navBar.numBtns) do
+            Theme:StyleButton(btn, btn._isActive and "primary" or "default")
+            Theme:SetButtonActive(btn, btn._isActive == true, btn._isActive and "primary" or "default")
+        end
+    end
+    navBar._dirtyTheme = nil
+end
+
+local function BuildSpotterNavBar(f)
+    local navBar = CreateFrame("Frame", nil, f)
+    navBar:SetHeight(NAV_H)
+    navBar:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -3)
+    navBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -28, -3)
+    navBar:SetFrameLevel(math.max((f:GetFrameLevel() or 40) + 10, 50))
+    if navBar.SetClipsChildren then
+        navBar:SetClipsChildren(true)
+    end
+
+    local bg = navBar:CreateTexture(nil, "BACKGROUND", nil, 1)
+    bg:SetAllPoints()
+    navBar.bg = bg
+
+    local div = navBar:CreateTexture(nil, "BORDER", nil, 1)
+    div:SetHeight(1)
+    div:SetPoint("BOTTOMLEFT", navBar, "BOTTOMLEFT", 0, 0)
+    div:SetPoint("BOTTOMRIGHT", navBar, "BOTTOMRIGHT", 0, 0)
+    navBar.div = div
+
+    navBar:EnableMouse(true)
+    navBar:EnableMouseWheel(true)
+    navBar:SetScript("OnMouseWheel", function(_, delta)
+        CycleRadarTarget(delta > 0 and -1 or 1)
+    end)
+    navBar:SetScript("OnEnter", function(selfBar)
+        if selfBar._totalCount and selfBar._totalCount > 1 then
+            ShowHUDTooltip(
+                selfBar,
+                string.format(L["Target %d of %d"], selfBar._activeIdx or 1, selfBar._totalCount),
+                nil,
+                L["Left-click: Target player  |  Right-click: Actions  |  Wheel: Cycle"]
+            )
+        end
+    end)
+    navBar:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+
+    local function makeNavArrowBtn(w, text, tipText, onClickFn)
+        local b = Theme:CreateButton(navBar, w, 17, text, "default")
+        b:RegisterForClicks("AnyUp")
+        b:SetScript("OnClick", onClickFn)
+        b:SetScript("OnEnter", function(selfBtn)
+            ShowHUDTooltip(selfBtn, tipText)
+        end)
+        b:SetScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
+        return b
+    end
+
+    navBar.prevPageBtn = makeNavArrowBtn(22, "<<", L["Previous targets page"], function()
+        CycleRadarPage(-1)
+    end)
+    navBar.prevBtn = makeNavArrowBtn(20, "<", L["Previous target"], function()
+        CycleRadarTarget(-1)
+    end)
+
+    local numBtns = {}
+    for i = 1, MAX_NAV_NUMS do
+        local b = Theme:CreateButton(navBar, 23, 17, tostring(i), "default")
+        b:RegisterForClicks("AnyUp")
+        local pip = b:CreateTexture(nil, "OVERLAY", nil, 4)
+        pip:SetHeight(2)
+        pip:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 2, 1)
+        pip:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -2, 1)
+        pip:SetColorTexture(0.98, 0.80, 0.24, 0.95)
+        b._stancePip = pip
+        b:SetScript("OnClick", function(selfBtn)
+            if selfBtn._targetIdx then
+                SelectRadarTargetIndex(selfBtn._targetIdx)
+            end
+        end)
+        b:SetScript("OnEnter", function(selfBtn)
+            local idx = selfBtn._targetIdx
+            if not idx then return end
+            local disp = selfBtn._entryName or "?"
+            local title = string.format("#%d · %s", idx, disp)
+            if selfBtn._entryLevel and selfBtn._entryLevel > 0 then
+                title = title .. string.format(" (%d)", selfBtn._entryLevel)
+            end
+            local l1 = (selfBtn._entryGuild and selfBtn._entryGuild ~= "") and ("<" .. selfBtn._entryGuild .. ">") or ""
+            if selfBtn._entryLoc and selfBtn._entryLoc ~= "" then
+                l1 = (l1 ~= "") and (l1 .. " · " .. selfBtn._entryLoc) or selfBtn._entryLoc
+            end
+            ShowHUDTooltip(selfBtn, title, l1, string.format(L["Click to focus target #%d"], idx))
+        end)
+        b:SetScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
+        b:Hide()
+        numBtns[i] = b
+    end
+    navBar.numBtns = numBtns
+
+    navBar.nextBtn = makeNavArrowBtn(20, ">", L["Next target"], function()
+        CycleRadarTarget(1)
+    end)
+    navBar.nextPageBtn = makeNavArrowBtn(22, ">>", L["Next targets page"], function()
+        CycleRadarPage(1)
+    end)
+
+    local countFs = navBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    countFs:SetPoint("RIGHT", navBar, "RIGHT", -4, 0)
+    countFs:SetJustifyH("RIGHT")
+    navBar.countFs = countFs
+
+    navBar:Hide()
+    return navBar
+end
+
+local function UpdateSpotterNavBar(f, allTargets, activeIdx, totalCount, p)
+    local navBar = f and f.navBar
+    if not navBar or not totalCount or totalCount <= 1 then
+        if navBar then
+            navBar._activeIdx = nil
+            navBar._totalCount = nil
+        end
+        return false
+    end
+
+    local idx = math.max(1, math.min(activeIdx or 1, totalCount))
+    navBar._activeIdx = idx
+    navBar._totalCount = totalCount
+
+    if navBar._lastCountActive ~= idx or navBar._lastCountTotal ~= totalCount then
+        navBar._lastCountActive = idx
+        navBar._lastCountTotal = totalCount
+        navBar.countFs:SetText(string.format("%d/%d", idx, totalCount))
+    end
+
+    local paged = (totalCount > MAX_NAV_NUMS)
+    local curPage = paged and (math.floor((idx - 1) / PAGE_SIZE) + 1) or 1
+    local startIdx = paged and ((curPage - 1) * PAGE_SIZE + 1) or 1
+    local maxSlots = paged and PAGE_SIZE or MAX_NAV_NUMS
+    local visibleCount = math.min(maxSlots, totalCount - startIdx + 1)
+    if visibleCount < 1 then visibleCount = 1 end
+
+    local prevAnchor
+    local layoutDirty = (navBar._lastPaged ~= paged) or (navBar._lastVisCount ~= visibleCount)
+    if layoutDirty then
+        navBar._lastPaged = paged
+        navBar._lastVisCount = visibleCount
+
+        navBar.prevPageBtn:ClearAllPoints()
+        if paged then
+            navBar.prevPageBtn:SetPoint("LEFT", navBar, "LEFT", 3, 1)
+            navBar.prevPageBtn:Show()
+            prevAnchor = navBar.prevPageBtn
+        else
+            navBar.prevPageBtn:Hide()
+        end
+
+        navBar.prevBtn:ClearAllPoints()
+        if prevAnchor then
+            navBar.prevBtn:SetPoint("LEFT", prevAnchor, "RIGHT", 2, 0)
+        else
+            navBar.prevBtn:SetPoint("LEFT", navBar, "LEFT", 3, 1)
+        end
+        prevAnchor = navBar.prevBtn
+    else
+        prevAnchor = navBar.prevBtn
+    end
+
+    for i = 1, MAX_NAV_NUMS do
+        local btn = navBar.numBtns[i]
+        if i <= visibleCount then
+            local tIdx = startIdx + i - 1
+            local cand = allTargets and allTargets[tIdx] or nil
+            local wantW = (tIdx >= 100) and 25 or 23
+            local isActive = (tIdx == idx)
+            local stance = (cand and cand.stance) or "SAME"
+
+            if layoutDirty or btn._lastLeftAnchor ~= prevAnchor then
+                btn._lastLeftAnchor = prevAnchor
+                btn:ClearAllPoints()
+                btn:SetPoint("LEFT", prevAnchor, "RIGHT", 2, 0)
+            end
+            if btn._lastWidth ~= wantW then
+                btn._lastWidth = wantW
+                btn:SetWidth(wantW)
+            end
+            if btn._targetIdx ~= tIdx then
+                btn._targetIdx = tIdx
+                Theme:SetButtonText(btn, tostring(tIdx))
+            end
+            if btn._isActive ~= isActive or btn._activePalKey ~= (p and p.key or "dark") then
+                btn._isActive = isActive
+                btn._activePalKey = p and p.key or "dark"
+                Theme:StyleButton(btn, isActive and "primary" or "default")
+                Theme:SetButtonActive(btn, isActive, isActive and "primary" or "default")
+            end
+            if btn._stance ~= stance or btn._pipActive ~= isActive then
+                btn._stance = stance
+                btn._pipActive = isActive
+                local sRgb = STANCE_RGB[stance] or STANCE_RGB.SAME
+                btn._stancePip:SetColorTexture(sRgb[1], sRgb[2], sRgb[3], isActive and 1.0 or 0.72)
+            end
+            btn._entryName = cand and cand.displayName or "?"
+            btn._entryLevel = cand and cand.level or 0
+            btn._entryGuild = cand and cand.guild or nil
+            btn._entryLoc = cand and (cand.fullLocationText or cand.locationText) or nil
+            if not btn:IsShown() then
+                btn:Show()
+            end
+            prevAnchor = btn
+        else
+            btn._targetIdx = nil
+            btn._entryName = nil
+            btn._entryLevel = nil
+            btn._entryGuild = nil
+            btn._entryLoc = nil
+            if btn:IsShown() then
+                btn:Hide()
+            end
+        end
+    end
+
+    if layoutDirty or navBar._lastNextAnchor ~= prevAnchor then
+        navBar._lastNextAnchor = prevAnchor
+        navBar.nextBtn:ClearAllPoints()
+        navBar.nextBtn:SetPoint("LEFT", prevAnchor, "RIGHT", 2, 0)
+
+        navBar.nextPageBtn:ClearAllPoints()
+        if paged then
+            navBar.nextPageBtn:SetPoint("LEFT", navBar.nextBtn, "RIGHT", 2, 0)
+            navBar.nextPageBtn:Show()
+        else
+            navBar.nextPageBtn:Hide()
+        end
+    end
+
+    return true
+end
+
 function SpotterHUD:BuildFrame()
     if self.frame then return self.frame end
     if InCombatLockdown and InCombatLockdown() then
@@ -444,11 +819,14 @@ function SpotterHUD:BuildFrame()
     topBevel:SetColorTexture(1, 0.90, 0.65, 0.16)
     f._topBevel = topBevel
 
+    local navBar = BuildSpotterNavBar(f)
+    f.navBar = navBar
+
     -- Main clickable Pill (SecureActionButtonTemplate: selects target on screen & opens Interaction Drawer)
     local compassBar = CreateFrame("Button", "SocialCentralSpotterCompass", f, "SecureActionButtonTemplate,BackdropTemplate")
     compassBar:SetHeight(PILL_H - 6)
     compassBar:SetPoint("TOPLEFT", f, "TOPLEFT", 5, -3)
-    compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -58, -3)
+    compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -28, -3)
     if compassBar.SetClipsChildren then
         compassBar:SetClipsChildren(true)
     end
@@ -464,7 +842,7 @@ function SpotterHUD:BuildFrame()
 
     local compassNameFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     compassNameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 8, 1)
-    compassNameFs:SetPoint("TOPRIGHT", compassBar, "TOPRIGHT", -34, 1)
+    compassNameFs:SetPoint("TOPRIGHT", compassBar, "TOPRIGHT", -4, 1)
     compassNameFs:SetJustifyH("LEFT")
     compassNameFs:SetWordWrap(false)
     compassBar.nameFs = compassNameFs
@@ -479,27 +857,6 @@ function SpotterHUD:BuildFrame()
     local compassSubFs = compassBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     compassSubFs:Hide()
     compassBar.subFs = compassSubFs
-
-    local function CycleRadarTarget(delta)
-        if InCombatLockdown and InCombatLockdown() then return end
-        local all = ns.Spotter and ns.Spotter:GetActiveTargets("ALL") or {}
-        if #all > 1 then
-            local cur = SpotterHUD.cycleIndex or 1
-            local nextIdx = ((cur - 1 + (delta or 1)) % #all) + 1
-            SpotterHUD.cycleIndex = nextIdx
-            local nextEntry = all[nextIdx]
-            if nextEntry then
-                SpotterHUD.focusedKey = nextEntry.key
-                if SpotterHUD.interactionOpen then
-                    SpotterHUD.interactionKey = nextEntry.key
-                end
-            end
-            SpotterHUD:Refresh()
-            if ns.Spotter and ns.Spotter.UpdateFocusedPlateMarker then
-                ns.Spotter:UpdateFocusedPlateMarker()
-            end
-        end
-    end
 
     compassBar:EnableMouseWheel(true)
     compassBar:SetScript("OnMouseWheel", function(_, delta)
@@ -542,10 +899,10 @@ function SpotterHUD:BuildFrame()
     end)
     f.compassBar = compassBar
 
-    -- Top-right micro buttons ([X] vector obsidian matching Notification Toast, plus [1/2] cycle pill)
+    -- Top-right [X] button kept strictly above compassBar and navBar
     local closeBtn = Theme:CreateButton(f, 20, 20, "X", "danger")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
-    closeBtn:SetFrameLevel(math.max((f:GetFrameLevel() or 40) + 50, compassBar:GetFrameLevel() + 50))
+    closeBtn:SetFrameLevel(math.max((f:GetFrameLevel() or 40) + 50, compassBar:GetFrameLevel() + 50, navBar:GetFrameLevel() + 50))
     closeBtn:SetHitRectInsets(-4, -4, -4, -4)
     closeBtn:RegisterForClicks("AnyUp")
     closeBtn:SetScript("OnClick", function()
@@ -556,16 +913,6 @@ function SpotterHUD:BuildFrame()
         SpotterHUD:Hide()
     end)
     f.closeBtn = closeBtn
-
-    local cycleBtn = Theme:CreateButton(f, 28, 20, "1/1", "default")
-    cycleBtn:SetPoint("RIGHT", closeBtn, "LEFT", -4, 0)
-    cycleBtn:SetFrameLevel(math.max((f:GetFrameLevel() or 40) + 50, compassBar:GetFrameLevel() + 50))
-    cycleBtn:SetHitRectInsets(-2, -2, -2, -2)
-    cycleBtn:SetScript("OnClick", function()
-        CycleRadarTarget(1)
-    end)
-    cycleBtn:Hide()
-    f.cycleBtn = cycleBtn
 
     -- Expandable On-Click Interaction Drawer anchored cleanly across FULL frame width (zero right seam/clipping!)
     local actionPanel = CreateFrame("Frame", nil, f, "BackdropTemplate")
@@ -695,7 +1042,7 @@ function SpotterHUD:BuildFrame()
         locked = function()
             return ns.db and ns.db.settings and ns.db.settings.spotterLockHUD == true
         end,
-        handles = { f, actionPanel },
+        handles = { f, navBar, actionPanel },
         onStop = function()
             if ns.NotificationToast and ns.NotificationToast.LayoutStack then
                 ns.NotificationToast:LayoutStack()
@@ -1024,8 +1371,23 @@ function SpotterHUD:UpdateAppearance()
         end
     end
 
+    if f.navBar then
+        if not f.navBar._scOnShowHooked then
+            f.navBar._scOnShowHooked = true
+            f.navBar:HookScript("OnShow", function(selfBar)
+                if selfBar._dirtyTheme then
+                    ApplyNavBarTheme(selfBar, Theme:GetPalette())
+                end
+            end)
+        end
+        if f.navBar:IsShown() then
+            ApplyNavBarTheme(f.navBar, p)
+        else
+            f.navBar._dirtyTheme = true
+        end
+    end
+
     Theme:StyleButton(f.closeBtn, "default")
-    Theme:StyleButton(f.cycleBtn, "default")
     self:Refresh()
 end
 
@@ -1335,25 +1697,7 @@ function SpotterHUD:Refresh()
     self.cycleIndex = activeIdx
     self._compassEntry = compassEntry
 
-    local showCycle = (totalCount > 1 and f.cycleBtn ~= nil)
-    if showCycle then
-        if f._lastCycleIdx ~= activeIdx or f._lastCycleTotal ~= totalCount then
-            f._lastCycleIdx = activeIdx
-            f._lastCycleTotal = totalCount
-            Theme:SetButtonText(f.cycleBtn, string.format("%d/%d", activeIdx, totalCount))
-        end
-        if f._lastCycleShown ~= true then
-            f._lastCycleShown = true
-            f.cycleBtn:Show()
-            f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -34, 1)
-        end
-    else
-        if f._lastCycleShown ~= false then
-            f._lastCycleShown = false
-            if f.cycleBtn then f.cycleBtn:Hide() end
-            f.compassBar.nameFs:SetPoint("TOPRIGHT", f.compassBar, "TOPRIGHT", -4, 1)
-        end
-    end
+    local showNav = UpdateSpotterNavBar(f, allTargets, activeIdx, totalCount, p)
 
     if not compassEntry then
         -- Empty state when opened manually via /sc radar
@@ -1384,14 +1728,8 @@ function SpotterHUD:Refresh()
         f._lastNameClass = nil
         f._lastNameLvl = nil
         f.compassBar.distFs:SetText("|cff8b949e" .. L["No targets currently detected."] .. "|r")
-        local heightChanged = (f._lastActionOpen ~= false)
-        f._lastActionOpen = false
-        f.actionPanel:Hide()
-        f:SetHeight(PILL_H)
+        ApplySpotterFrameLayout(f, false, false)
         self:SyncTickerState(nil)
-        if heightChanged and ns.NotificationToast and ns.NotificationToast.LayoutStack then
-            ns.NotificationToast:LayoutStack()
-        end
         if ns.Spotter and ns.Spotter.UpdateFocusedPlateMarker then
             ns.Spotter:UpdateFocusedPlateMarker()
         end
@@ -1503,23 +1841,9 @@ function SpotterHUD:Refresh()
             f.actionPanel._lastInviteEnabled = wantInviteEnabled
             f.actionPanel.inviteBtn:SetEnabled(wantInviteEnabled)
         end
-        if f._lastActionOpen ~= true then
-            f._lastActionOpen = true
-            f.actionPanel:Show()
-            f:SetHeight(PILL_H + 2 + ACTION_H + 3)
-            if ns.NotificationToast and ns.NotificationToast.LayoutStack then
-                ns.NotificationToast:LayoutStack()
-            end
-        end
+        ApplySpotterFrameLayout(f, showNav, true)
     else
-        if f._lastActionOpen ~= false then
-            f._lastActionOpen = false
-            f.actionPanel:Hide()
-            f:SetHeight(PILL_H)
-            if ns.NotificationToast and ns.NotificationToast.LayoutStack then
-                ns.NotificationToast:LayoutStack()
-            end
-        end
+        ApplySpotterFrameLayout(f, showNav, false)
     end
     if ns.Spotter and ns.Spotter.UpdateFocusedPlateMarker then
         ns.Spotter:UpdateFocusedPlateMarker()
@@ -1838,6 +2162,7 @@ function SpotterHUD:Hide()
     self.interactionOpen = false
     self.interactionKey = nil
     self.frame._lastActionOpen = false
+    self.frame._lastFrameH = nil
     if InCombatLockdown and InCombatLockdown() then
         self.pendingAction = "hide"
         self:SyncTickerState(nil)

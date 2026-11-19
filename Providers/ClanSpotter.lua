@@ -1278,6 +1278,22 @@ local function EnsurePlateBadge(plate)
     lbl:SetWordWrap(false)
     b.lbl = lbl
 
+    local subLbl = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    subLbl:SetPoint("TOP", lbl, "BOTTOM", 0, -1)
+    subLbl:SetJustifyH("CENTER")
+    subLbl:SetWordWrap(false)
+    subLbl:Hide()
+    b.subLbl = subLbl
+
+    local targetHalo = b:CreateTexture(nil, "BACKGROUND", nil, -1)
+    targetHalo:SetPoint("TOPLEFT", b, "TOPLEFT", -10, 6)
+    targetHalo:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 10, -6)
+    targetHalo:SetTexture(TARGET_GLOW_TEX)
+    targetHalo:SetBlendMode("ADD")
+    targetHalo:SetVertexColor(1.0, 0.72, 0.18, 0.42)
+    targetHalo:Hide()
+    b.targetHalo = targetHalo
+
     -- Target downward arrow (pulsing/animated, pointing directly down at the plate/badge)
     local arrowFrame = CreateFrame("Frame", nil, b)
     arrowFrame:SetSize(40, 40)
@@ -1352,6 +1368,77 @@ local function EnsurePlateBadge(plate)
     return b
 end
 
+local function ApplyBadgeFontMode(b, isTargetBanner)
+    local wantMode = isTargetBanner and "target" or "normal"
+    if b._fontMode == wantMode then
+        return
+    end
+    b._fontMode = wantMode
+    local fontPath = (STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF")
+    if isTargetBanner then
+        pcall(b.lbl.SetFont, b.lbl, fontPath, 13, "THICKOUTLINE")
+        pcall(b.lbl.SetShadowColor, b.lbl, 0, 0, 0, 1)
+        pcall(b.lbl.SetShadowOffset, b.lbl, 1.5, -1.5)
+        if b.subLbl then
+            pcall(b.subLbl.SetFont, b.subLbl, fontPath, 10, "OUTLINE")
+            pcall(b.subLbl.SetShadowColor, b.subLbl, 0, 0, 0, 1)
+            pcall(b.subLbl.SetShadowOffset, b.subLbl, 1, -1)
+        end
+    else
+        pcall(b.lbl.SetFont, b.lbl, fontPath, 10, "OUTLINE")
+        pcall(b.lbl.SetShadowColor, b.lbl, 0, 0, 0, 0.95)
+        pcall(b.lbl.SetShadowOffset, b.lbl, 1, -1)
+    end
+end
+
+local function ResolveTargetHeaderInfo(unit, entry)
+    local dispName = entry and entry.displayName
+    local isPlayer = unit and Safe.Value(Safe.Call(UnitIsPlayer, unit)) == true
+    local uToken = (unit and Safe.Value(Safe.Call(UnitExists, unit)) == true) and unit or "target"
+    if (not dispName or dispName == "") and uToken and Safe.Value(Safe.Call(UnitExists, uToken)) == true then
+        if isPlayer and Compat.ResolveUnitFullName then
+            local guid = Safe.String(Safe.Call(UnitGUID, uToken))
+            local res = Compat.ResolveUnitFullName(uToken, guid, nil, true)
+            dispName = res and res.fullName or nil
+        end
+        if not dispName or dispName == "" then
+            dispName = Safe.String(Safe.Call(UnitName, uToken))
+        end
+    end
+    if not dispName or dispName == "" or dispName == "Unknown" then
+        return nil, nil, 1.0, 0.84, 0.25
+    end
+
+    local tr, tg, tb = 1.0, 0.84, 0.25
+    local cls = entry and entry.classFile
+    if not cls and isPlayer and uToken then
+        local _, rawCls = Safe.Call(UnitClass, uToken)
+        cls = Safe.String(rawCls)
+    end
+    if cls and RAID_CLASS_COLORS and RAID_CLASS_COLORS[cls] then
+        local rc = RAID_CLASS_COLORS[cls]
+        tr, tg, tb = rc.r, rc.g, rc.b
+    elseif entry and entry.stance and STANCE_COLORS[entry.stance] then
+        local sc = STANCE_COLORS[entry.stance]
+        tr, tg, tb = sc.r, sc.g, sc.b
+    elseif uToken and Safe.Value(Safe.Call(UnitIsEnemy, "player", uToken)) == true then
+        tr, tg, tb = 1.0, 0.30, 0.28
+    elseif uToken and Safe.Value(Safe.Call(UnitIsFriend, "player", uToken)) == true then
+        tr, tg, tb = 0.32, 0.94, 0.48
+    end
+
+    local lvl = (entry and tonumber(entry.level)) or (uToken and Safe.Number(Safe.Call(UnitLevel, uToken))) or 0
+    local mainText = (lvl and lvl > 0)
+        and ("» " .. dispName .. " · " .. (L["Lv %d"]:format(lvl)) .. " «")
+        or ("» " .. dispName .. " «")
+
+    local guildName = entry and entry.guild
+    if (not guildName or guildName == "") and uToken then
+        guildName = Safe.String(Safe.Call(GetGuildInfo, uToken))
+    end
+    return mainText, guildName, tr, tg, tb
+end
+
 function Spotter:UpdatePlateBadge(plate, unit, entry)
     if not IsPlateAnchorSafe(plate) then
         if IsPlateAccessible(plate) and Spotter.plateBadges[plate] then
@@ -1367,10 +1454,11 @@ function Spotter:UpdatePlateBadge(plate, unit, entry)
 
     local badgesEnabled = not s or s.spotterNameplateBadges ~= false
     local arrowEnabled = not s or s.spotterNameplateArrow ~= false
+    local highlightEnabled = not s or s.spotterNameplateTargetHighlight ~= false
 
     -- Target detection: either live target token, GUID match, or Radar focused target
     local isTarget = false
-    if arrowEnabled then
+    if arrowEnabled or highlightEnabled then
         if unit and Safe.Value(Safe.Call(UnitExists, unit)) == true and Safe.Value(Safe.Call(UnitIsUnit, unit, "target")) == true then
             isTarget = true
         elseif entry and entry.guid and Safe.String(Safe.Call(UnitGUID, "target")) == entry.guid then
@@ -1384,7 +1472,9 @@ function Spotter:UpdatePlateBadge(plate, unit, entry)
     end
 
     local showBadge = badgesEnabled and (entry ~= nil)
-    if not showBadge and not isTarget then
+    local showTargetBanner = isTarget and highlightEnabled
+    local showTargetArrow = isTarget and arrowEnabled
+    if not showBadge and not showTargetBanner and not showTargetArrow then
         HidePlateBadge(unit, plate)
         return
     end
@@ -1401,18 +1491,105 @@ function Spotter:UpdatePlateBadge(plate, unit, entry)
         end
     end
 
+    if showTargetBanner then
+        ApplyBadgeFontMode(b, true)
+        local mainText, guildName, tr, tg, tb = ResolveTargetHeaderInfo(unit, entry)
+        local stance = entry and entry.stance
+        local c = (stance and STANCE_COLORS[stance]) or { r = tr, g = tg, b = tb }
+        local subParts = nil
+        if showBadge and stance then
+            local labelKey = PLATE_STANCE_LABEL_KEYS[stance] or "CLAN"
+            local rawLabel = L[labelKey] or labelKey
+            subParts = type(rawLabel) == "string" and rawLabel:upper() or rawLabel
+        end
+        if guildName and guildName ~= "" then
+            subParts = subParts and ("<" .. guildName .. "> · " .. subParts) or ("<" .. guildName .. ">")
+        elseif not subParts and not entry then
+            subParts = L["TARGET"]
+        end
+
+        if mainText then
+            if b._lastLabel ~= mainText then
+                b._lastLabel = mainText
+                b.lbl:SetText(mainText)
+            end
+            b.lbl:SetTextColor(tr, tg, tb, 1.0)
+            b.lbl:ClearAllPoints()
+            if subParts and subParts ~= "" and b.subLbl then
+                b.lbl:SetPoint("TOP", b, "TOP", 2, -4)
+                if b._lastSub ~= subParts then
+                    b._lastSub = subParts
+                    b.subLbl:SetText(subParts)
+                end
+                b.subLbl:SetTextColor(c.r, c.g, c.b, 0.98)
+                b.subLbl:ClearAllPoints()
+                b.subLbl:SetPoint("TOP", b.lbl, "BOTTOM", 0, -2)
+                b.subLbl:Show()
+            else
+                b.lbl:SetPoint("CENTER", b, "CENTER", 2, 0)
+                if b.subLbl then b.subLbl:Hide() end
+            end
+
+            local mainW = b.lbl:GetStringWidth() or 80
+            local subW = (subParts and subParts ~= "" and b.subLbl and b.subLbl:GetStringWidth()) or 0
+            local wantW = math.max(124, math.ceil(math.max(mainW, subW) + 26))
+            local wantH = (subParts and subParts ~= "") and 36 or 24
+            b:SetWidth(wantW)
+            b:SetHeight(wantH)
+            b.accent:SetWidth(4)
+            b.accent:SetHeight(wantH)
+            b.bg:SetColorTexture(0.03, 0.04, 0.06, 0.95)
+            b.accent:SetColorTexture(c.r, c.g, c.b, 1.0)
+            b.topLine:SetColorTexture(c.r, c.g, c.b, 0.92)
+            b.botLine:SetColorTexture(c.r, c.g, c.b, 0.92)
+            b.rightLine:SetColorTexture(c.r, c.g, c.b, 0.92)
+            if b.targetHalo then
+                b.targetHalo:SetVertexColor(c.r, c.g, c.b, 0.42)
+                b.targetHalo:Show()
+            end
+            b.bg:Show()
+            b.accent:Show()
+            b.topLine:Show()
+            b.botLine:Show()
+            b.rightLine:Show()
+            b.lbl:Show()
+
+            if showTargetArrow then
+                b.targetArrow:ClearAllPoints()
+                b.targetArrow:SetPoint("BOTTOM", b, "TOP", 0, 2)
+                b.targetArrow:Show()
+            else
+                b.targetArrow:Hide()
+            end
+            b:Show()
+            return
+        end
+    end
+
+    if b.subLbl then b.subLbl:Hide() end
+    if b.targetHalo then b.targetHalo:Hide() end
+
     if showBadge then
+        ApplyBadgeFontMode(b, false)
+        b.lbl:ClearAllPoints()
+        b.lbl:SetPoint("CENTER", 2, 0)
         local stance = entry.stance or "SAME"
         local c = STANCE_COLORS[stance] or STANCE_COLORS.SAME
         local labelKey = PLATE_STANCE_LABEL_KEYS[stance] or "CLAN"
         local rawLabel = L[labelKey] or labelKey
         local labelTxt = type(rawLabel) == "string" and rawLabel:upper() or rawLabel
 
+        b.bg:SetColorTexture(0.04, 0.05, 0.07, 0.90)
+        b.accent:SetWidth(3)
+        b.accent:SetHeight(18)
         b.accent:SetColorTexture(c.r, c.g, c.b, 1.0)
         b.topLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
         b.botLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
         b.rightLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
-        b.lbl:SetText(labelTxt)
+        if b._lastLabel ~= labelTxt then
+            b._lastLabel = labelTxt
+            b.lbl:SetText(labelTxt)
+        end
         b.lbl:SetTextColor(c.r, c.g, c.b, 1.0)
 
         local textW = b.lbl:GetStringWidth() or 60
@@ -1425,7 +1602,7 @@ function Spotter:UpdatePlateBadge(plate, unit, entry)
         b.rightLine:Show()
         b.lbl:Show()
 
-        if isTarget then
+        if showTargetArrow then
             b.targetArrow:ClearAllPoints()
             b.targetArrow:SetPoint("BOTTOM", b, "TOP", 0, 2)
             b.targetArrow:Show()
@@ -1433,7 +1610,7 @@ function Spotter:UpdatePlateBadge(plate, unit, entry)
             b.targetArrow:Hide()
         end
     else
-        -- Targeted bystander player (no stance badge, but show the striking target arrow above plate!)
+        -- Targeted unit with arrow-only mode (no highlight banner)
         b.bg:Hide()
         b.accent:Hide()
         b.topLine:Hide()
@@ -1451,7 +1628,7 @@ end
 
 function Spotter:UpdateAllPlateBadges()
     local s = ns.db and ns.db.settings
-    if not self:IsEnabled() or (s and s.spotterNameplateBadges == false and s.spotterNameplateArrow == false) then
+    if not self:IsEnabled() or (s and s.spotterNameplateBadges == false and s.spotterNameplateArrow == false and s.spotterNameplateTargetHighlight == false) then
         HideAllPlateBadges()
         return
     end
@@ -3303,6 +3480,32 @@ local function ScheduleReindexRefresh(allowVisiblePlateRefresh)
     end)
 end
 
+local pendingPlateUnits = {}
+local plateRecheckQueued = false
+local function FlushPendingPlateRechecks()
+    plateRecheckQueued = false
+    if not Spotter:IsEnabled() then
+        wipe(pendingPlateUnits)
+        return
+    end
+    local updatedTarget = false
+    for capUnit in pairs(pendingPlateUnits) do
+        pendingPlateUnits[capUnit] = nil
+        local pl = activePlatesByUnit[capUnit]
+        if pl then
+            local key = Spotter.visibleUnits[capUnit]
+            local entry = key and Spotter.entries[key] or nil
+            if entry or (Safe.Value(Safe.Call(UnitIsUnit, capUnit, "target")) == true) then
+                Spotter:UpdatePlateBadge(pl, capUnit, entry)
+                updatedTarget = true
+            end
+        end
+    end
+    if updatedTarget then
+        Spotter:UpdateFocusedPlateMarker()
+    end
+end
+
 function Spotter:Init()
     self.lastScopeToken = ns.Clan and ns.Clan.GetActiveScopeToken and ns.Clan:GetActiveScopeToken() or ""
 
@@ -3337,18 +3540,12 @@ function Spotter:Init()
                         Spotter:UpdatePlateBadge(addedPlate, arg1, knownEntry)
                     end
                 end
-                if addedPlate and C_Timer and C_Timer.After then
-                    local capUnit = arg1
-                    C_Timer.After(0, function()
-                        if Spotter:IsEnabled() and capUnit and activePlatesByUnit[capUnit] then
-                            local key = Spotter.visibleUnits[capUnit]
-                            local entry = key and Spotter.entries[key] or nil
-                            if entry then
-                                Spotter:UpdatePlateBadge(activePlatesByUnit[capUnit], capUnit, entry)
-                            end
-                            Spotter:UpdateFocusedPlateMarker()
-                        end
-                    end)
+                if addedPlate and (insp or Spotter.visibleUnits[arg1] or Safe.Value(Safe.Call(UnitIsUnit, arg1, "target")) == true) and C_Timer and C_Timer.After then
+                    pendingPlateUnits[arg1] = true
+                    if not plateRecheckQueued then
+                        plateRecheckQueued = true
+                        C_Timer.After(0, FlushPendingPlateRechecks)
+                    end
                 end
             elseif event == "FORBIDDEN_NAME_PLATE_UNIT_ADDED" then
                 if arg1 then

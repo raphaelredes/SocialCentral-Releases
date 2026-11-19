@@ -196,22 +196,47 @@ local function NewScanContext()
     }
 end
 
+local guildRosterScanGen = 0
+local guildPatchScratch = {
+    bnetState = "wow_forever",
+    online = true,
+    guildOnline = true,
+    samePool = true,
+    sameFaction = true,
+    sources = { guild = true },
+}
+
+local function IsGuildOrSocialUiOpen()
+    local sc = _G.SocialCentralFrame
+    if sc and sc.IsShown and sc:IsShown() then return true end
+    local fr = _G.SocialUIFrame or _G.FriendsFrame
+    if fr and fr.IsShown and fr:IsShown() then return true end
+    local cf = _G.CommunitiesFrame or _G.GuildFrame
+    if cf and cf.IsShown and cf:IsShown() then return true end
+    local gEmbed = _G.SocialCentralGuildEmbeddedFrame
+    if gEmbed and gEmbed.IsShown and gEmbed:IsShown() then return true end
+    return false
+end
+
 local function ScanGuild(onlineCtx, dirCtx, wlObsMap)
     local inGuild = Safe.Value(IsInGuild and IsInGuild()) == true
     local info = Store.guildInfo
     info.inGuild = inGuild
+    local includeOffline = IsGuildOrSocialUiOpen()
+    Social._rosterRanksIncludeOffline = includeOffline
     local rosterRanks = Store.guildRosterRanks
     if type(rosterRanks) ~= "table" then
         rosterRanks = {}
         Store.guildRosterRanks = rosterRanks
-    else
-        wipe(rosterRanks)
     end
     if not inGuild or not GetGuildRosterInfo then
+        wipe(rosterRanks)
         info.name, info.motd, info.onlineCount, info.totalCount = nil, nil, 0, 0
         info.myRankIndex, info.myRankName, info.isGuildLeader = nil, nil, false
         return
     end
+    guildRosterScanGen = guildRosterScanGen + 1
+    local curGen = guildRosterScanGen
     info.isGuildLeader = (IsGuildLeader and Safe.Value(Safe.Call(IsGuildLeader)) == true) or false
     info.myRankIndex = nil
     info.myRankName = nil
@@ -237,103 +262,117 @@ local function ScanGuild(onlineCtx, dirCtx, wlObsMap)
     for i = 1, total do
         local okG, name, rankName, rankIndex, level, classLoc, area, note, _, online, status, classFile, _, _, _, _, _, guid = pcall(GetGuildRosterInfo, i)
         if okG then
-            name = Safe.String(name)
-            guid = Safe.String(guid)
-            local cleanRankName = Safe.String(rankName) or ""
-            local cleanRankIdx = Safe.Number(rankIndex)
-            local cleanLevel = Safe.Number(level) or 0
-            local cleanArea = Safe.String(area) or ""
-            local cleanNote = Safe.String(note)
-            local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
-            local cleanStatus = Safe.Number(status) or 0
             local isOnline = (online == true or online == 1)
-            local offlineDays = 0
-            if not isOnline and GetGuildRosterLastOnline then
-                local okTime, yr, mo, dy, hr = pcall(GetGuildRosterLastOnline, i)
-                if okTime then
-                    local y = Safe.Number(yr) or 0
-                    local m = Safe.Number(mo) or 0
-                    local d = Safe.Number(dy) or 0
-                    local h = Safe.Number(hr) or 0
-                    offlineDays = (y * 365) + (m * 30) + d + (h / 24)
-                end
-            end
-            local isMe = name and Compat.IsMe(name, guid)
-            local parsed = name and Compat.ParseCharacterName(name) or nil
-            if parsed and parsed.lookupKey then
-                if verifiedFriendConnected[parsed.lookupKey] == false then
-                    isOnline = false
-                end
-                rosterRanks[parsed.lookupKey] = {
-                    rankIndex = cleanRankIdx,
-                    rankName = cleanRankName,
-                    guid = guid,
-                    displayName = parsed.displayName,
-                    lookupKey = parsed.lookupKey,
-                    level = cleanLevel,
-                    classFile = cleanClass,
-                    area = cleanArea,
-                    note = cleanNote or "",
-                    statusFlag = cleanStatus,
-                    online = isOnline,
-                    offlineDays = offlineDays,
-                    isSelf = isMe,
-                    rosterIndex = i,
-                }
-                if isMe then
-                    info.myRankIndex = cleanRankIdx
-                    info.myRankName = cleanRankName
-                    if cleanRankIdx == 0 then
-                        info.isGuildLeader = true
+            -- Idle memory optimization: when Guild/Social windows are closed, skip offline members'
+            -- heavy last-online queries, rosterRank subtables, and GUID cache eviction thrashing.
+            if isOnline or includeOffline or hasWatchlist or (i <= 20) then
+                name = Safe.String(name)
+                guid = Safe.String(guid)
+                local cleanRankName = Safe.String(rankName) or ""
+                local cleanRankIdx = Safe.Number(rankIndex)
+                local cleanLevel = Safe.Number(level) or 0
+                local cleanArea = Safe.String(area) or ""
+                local cleanNote = Safe.String(note)
+                local cleanClass = Safe.String(classFile) or Compat.ClassFileFromLocalized(Safe.String(classLoc))
+                local cleanStatus = Safe.Number(status) or 0
+                local isMe = name and Compat.IsMe(name, guid)
+                local offlineDays = 0
+                if not isOnline and includeOffline and GetGuildRosterLastOnline then
+                    local okTime, yr, mo, dy, hr = pcall(GetGuildRosterLastOnline, i)
+                    if okTime then
+                        local y = Safe.Number(yr) or 0
+                        local m = Safe.Number(mo) or 0
+                        local d = Safe.Number(dy) or 0
+                        local h = Safe.Number(hr) or 0
+                        offlineDays = (y * 365) + (m * 30) + d + (h / 24)
                     end
                 end
-            end
-            if parsed and not isMe then
-                if guid and Compat.CacheForeverFullName then
-                    Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+                local lk, firstName, dispName, surname = nil, nil, nil, nil
+                if name and (isOnline or includeOffline or isMe or hasWatchlist) and Compat.ParseCharacterFields then
+                    lk, firstName, dispName, surname = Compat.ParseCharacterFields(name)
                 end
-                if Compat.CacheGuildMember then
-                    Compat.CacheGuildMember(guid, parsed.firstName, parsed.displayName)
+                if lk then
+                    if verifiedFriendConnected[lk] == false then
+                        isOnline = false
+                    end
+                    if isOnline or includeOffline or isMe then
+                        local rec = rosterRanks[lk]
+                        if not rec then
+                            rec = {}
+                            rosterRanks[lk] = rec
+                        end
+                        rec._scanGen = curGen
+                        rec.rankIndex = cleanRankIdx
+                        rec.rankName = cleanRankName
+                        rec.guid = guid
+                        rec.displayName = dispName
+                        rec.lookupKey = lk
+                        rec.level = cleanLevel
+                        rec.classFile = cleanClass
+                        rec.area = cleanArea
+                        rec.note = cleanNote or ""
+                        rec.statusFlag = cleanStatus
+                        rec.online = isOnline
+                        rec.offlineDays = offlineDays
+                        rec.isSelf = isMe
+                        rec.rosterIndex = i
+                    end
+                    if isMe then
+                        info.myRankIndex = cleanRankIdx
+                        info.myRankName = cleanRankName
+                        if cleanRankIdx == 0 then
+                            info.isGuildLeader = true
+                        end
+                    end
                 end
-                if parsed.surname and Store.MigrateSocialSurnameRecords then
-                    Store:MigrateSocialSurnameRecords(parsed.firstName, parsed.lookupKey)
-                end
-                if isOnline then
+                if lk and not isMe then
+                    if isOnline or includeOffline then
+                        if guid and Compat.CacheForeverFullName then
+                            Compat.CacheForeverFullName(guid, dispName, firstName)
+                        end
+                        if Compat.CacheGuildMember then
+                            Compat.CacheGuildMember(guid, firstName, dispName)
+                        end
+                        if surname and Store.MigrateSocialSurnameRecords then
+                            Store:MigrateSocialSurnameRecords(firstName, lk)
+                        end
+                    end
+                    if isOnline then
+                        onlineCount = onlineCount + 1
+                        local patch = guildPatchScratch
+                        patch.displayName = dispName
+                        patch.lookupKey = lk
+                        patch.guid = guid
+                        patch.level = cleanLevel
+                        patch.classFile = cleanClass
+                        patch.area = cleanArea
+                        patch.guild = info.name
+                        patch.rankName = cleanRankName
+                        patch.rankIndex = cleanRankIdx
+                        patch.guildNote = cleanNote
+                        patch.statusFlag = cleanStatus
+                        patch.afk = (cleanStatus == 1)
+                        patch.dnd = (cleanStatus == 2)
+                        local keyOnline = FindMergeKey(onlineCtx, guid or ("char:" .. lk), guid, nil, lk, true)
+                        MergeEntry(onlineCtx, keyOnline, patch)
+                        local keyDir = FindMergeKey(dirCtx, guid or ("char:" .. lk), guid, nil, lk, true)
+                        MergeEntry(dirCtx, keyDir, patch)
+                        if hasWatchlist and wlObsMap then
+                            QueueWatchlistObs(wlObsMap, lk, dispName, true, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
+                        end
+                    elseif hasWatchlist and wlObsMap then
+                        QueueWatchlistObs(wlObsMap, lk, dispName, false, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
+                    end
+                elseif isOnline and name then
                     onlineCount = onlineCount + 1
-                    local patch = {
-                        displayName = parsed.displayName,
-                        lookupKey = parsed.lookupKey,
-                        guid = guid,
-                        level = cleanLevel,
-                        classFile = cleanClass,
-                        area = cleanArea,
-                        guild = info.name,
-                        rankName = cleanRankName,
-                        rankIndex = cleanRankIdx,
-                        guildNote = cleanNote,
-                        statusFlag = cleanStatus,
-                        afk = cleanStatus == 1,
-                        dnd = cleanStatus == 2,
-                        online = true,
-                        guildOnline = true,
-                        samePool = true,
-                        sameFaction = true,
-                        bnetState = "wow_forever",
-                        sources = { guild = true },
-                    }
-                    local keyOnline = FindMergeKey(onlineCtx, guid or ("char:" .. parsed.lookupKey), guid, nil, parsed.lookupKey, true)
-                    MergeEntry(onlineCtx, keyOnline, patch)
-                    local keyDir = FindMergeKey(dirCtx, guid or ("char:" .. parsed.lookupKey), guid, nil, parsed.lookupKey, true)
-                    MergeEntry(dirCtx, keyDir, patch)
-                    if hasWatchlist and wlObsMap then
-                        QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
-                    end
-                elseif hasWatchlist and wlObsMap then
-                    QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, false, cleanLevel, cleanClass, cleanArea, info.name or "", "guild")
                 end
-            elseif isOnline and name then
-                onlineCount = onlineCount + 1
             end
+        end
+    end
+
+    for k, rec in pairs(rosterRanks) do
+        if type(rec) ~= "table" or rec._scanGen ~= curGen then
+            rosterRanks[k] = nil
         end
     end
 
@@ -490,12 +529,46 @@ end
 
 local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnline)
     if not (BNGetNumFriends and C_BattleNet and C_BattleNet.GetFriendAccountInfo) then return end
+    for _, bRec in pairs(bnetInfoByAccId) do
+        if type(bRec) == "table" then
+            bRec.activeForeverLookups = nil
+        end
+    end
     local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
     local hasWatchlist = type(wlTable) == "table" and next(wlTable) ~= nil
     local wowProg = BNET_CLIENT_WOW or "WoW"
     local now = time()
     local count = Safe.Number(Safe.Call(BNGetNumFriends)) or 0
     local bnetStateChanged = false
+
+    local function CollectOnlineForeverLookups(friendIndex, account)
+        local activeSet = {}
+        local foundAny = false
+        local function markGi(gi)
+            if type(gi) ~= "table" then return end
+            if Safe.Value(gi.isOnline) ~= true then return end
+            if Safe.String(gi.clientProgram) ~= wowProg then return end
+            if WOW_PROJECT_ID and Safe.Value(gi.wowProjectID) ~= WOW_PROJECT_ID then return end
+            local rn = Safe.String(gi.realmName)
+            if rn and not Compat.IsForeverShardLabel(rn) then return end
+            local cn = Safe.String(gi.characterName)
+            local cp = cn and Compat.ParseCharacterName(cn) or nil
+            if cp and cp.lookupKey then
+                activeSet[cp.lookupKey] = true
+                foundAny = true
+            end
+        end
+        if C_BattleNet and C_BattleNet.GetFriendNumGameAccounts and C_BattleNet.GetFriendGameAccountInfo then
+            local gCount = Safe.Number(Safe.Call(C_BattleNet.GetFriendNumGameAccounts, friendIndex)) or 0
+            for g = 1, gCount do
+                markGi(Safe.Call(C_BattleNet.GetFriendGameAccountInfo, friendIndex, g))
+            end
+        end
+        if not foundAny and type(account) == "table" and type(account.gameAccountInfo) == "table" then
+            markGi(account.gameAccountInfo)
+        end
+        return activeSet
+    end
 
     for i = 1, count do
         local account = Safe.Call(C_BattleNet.GetFriendAccountInfo, i)
@@ -612,6 +685,8 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                     if bnetState == "wow_forever" and parsed and parsed.lookupKey then
                         bRec.activeLookupKey = parsed.lookupKey
                         bRec.activeDisplayName = parsed.displayName
+                        bRec.activeForeverLookups = CollectOnlineForeverLookups(i, account)
+                        bRec.activeForeverLookups[parsed.lookupKey] = true
                         if not bRec.chars[parsed.lookupKey] then
                             for existingLk in pairs(bRec.chars) do
                                 if existingLk ~= parsed.lookupKey and Store.RecordObservedAltPair then
@@ -624,6 +699,7 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                     elseif bnetState ~= "wow_forever" then
                         bRec.activeLookupKey = nil
                         bRec.activeDisplayName = nil
+                        bRec.activeForeverLookups = nil
                     end
                     if prevOnline ~= bRec.online or prevActive ~= bRec.activeLookupKey then
                         bnetStateChanged = true
@@ -892,10 +968,16 @@ end
 
 local SCANNERS = { ScanCharacterFriends, ScanGuild, ScanBattleNet }
 
+function Social:EnsureFullGuildScan()
+    if not self._rosterRanksIncludeOffline then
+        self:Scan()
+    end
+end
+
 function Social:Scan()
     lastScanAt = (GetTime and GetTime()) or 0
     if Compat.SyncRosterForeverNames then
-        Compat.SyncRosterForeverNames()
+        Compat.SyncRosterForeverNames(false, true)
     end
 
     wipe(verifiedFriendConnected)
@@ -909,10 +991,48 @@ function Social:Scan()
     end
 
     local wlTable = Store.GetWatchlistTable and Store:GetWatchlistTable()
+    -- Suppress stale guild/cache online ghosts for Battle.net siblings when only another alt is active on that BNet account.
+    for _, bRec in pairs(bnetInfoByAccId) do
+        if type(bRec) == "table" and bRec.online and bRec.activeForeverLookups and bRec.activeLookupKey and type(bRec.chars) == "table" then
+            for otherLk, otherDisp in pairs(bRec.chars) do
+                if not bRec.activeForeverLookups[otherLk] and verifiedFriendConnected[otherLk] ~= true then
+                    local existingObs = wlObsMap[otherLk]
+                    if existingObs and existingObs.online == true then
+                        existingObs.online = false
+                    elseif type(wlTable) == "table" then
+                        local wlRec = wlTable[otherLk]
+                        if type(wlRec) == "table" and wlRec.status == "online" then
+                            QueueWatchlistObs(wlObsMap, otherLk, wlRec.displayName or otherDisp, false, nil, nil, nil, nil, "bnet")
+                            if wlObsMap[otherLk] then
+                                wlObsMap[otherLk].online = false
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
     if type(wlTable) == "table" and next(wlTable) ~= nil then
         for lookupKey, prevDispName in pairs(prevBNetWatchlistOnline) do
             if not onlineCtx.byLookup[lookupKey] and not wlObsMap[lookupKey] then
                 QueueWatchlistObs(wlObsMap, lookupKey, prevDispName, false, nil, nil, nil, nil, "bnet")
+            end
+        end
+        local bnetReady = (not BNConnected or Safe.Value(BNConnected()) == true)
+            and (((GetTime and GetTime()) or 0) - loginMonoAt) >= 8.0
+        for wlKey, wlEntry in pairs(wlTable) do
+            if type(wlEntry) == "table" and wlEntry.status == "online" then
+                local lk = wlEntry.id or wlKey
+                if lk and not wlObsMap[lk] and not onlineCtx.byLookup[lk] then
+                    local dirKey = dirCtx.byLookup[lk]
+                    local dirRow = dirKey and dirCtx.map[dirKey]
+                    if dirRow and not IsRowWoWOnline(dirRow) then
+                        local src = (dirRow.sources and ((dirRow.sources.bnet and "bnet") or (dirRow.sources.friend and "friend") or (dirRow.sources.guild and "guild"))) or wlEntry.source
+                        QueueWatchlistObs(wlObsMap, lk, wlEntry.displayName or dirRow.displayName, false, nil, nil, nil, nil, src)
+                    elseif wlEntry.source == "bnet" and bnetReady then
+                        QueueWatchlistObs(wlObsMap, lk, wlEntry.displayName, false, nil, nil, nil, nil, "bnet")
+                    end
+                end
             end
         end
     end
@@ -974,6 +1094,9 @@ function Social:Scan()
         })
     end
     hasInitialScan = true
+    if ns.Watchlist and ns.Watchlist.ExpireStaleOnlineEntries then
+        ns.Watchlist:ExpireStaleOnlineEntries(true)
+    end
 
     ns:Emit("SOCIAL_UPDATED")
 end
@@ -1109,6 +1232,7 @@ function Social:GetBNetLinkInfo(lookupKey)
         online = (info and info.online == true) or (dirRow and dirRow.online == true) or false,
         activeLookupKey = info and info.activeLookupKey or nil,
         activeDisplayName = info and info.activeDisplayName or nil,
+        activeLookupKeys = info and info.activeForeverLookups or nil,
         faction = resolvedFac,
         sameFaction = isSameFac,
         otherChars = otherChars,
@@ -1255,10 +1379,15 @@ end
 function Social:QueueScan(delay)
     if scanQueued then return end
     scanQueued = true
-    local minWait = math.max(2.0, tonumber(delay) or 2.0)
+    local anyUiOpen = (_G.SocialCentralFrame and _G.SocialCentralFrame.IsShown and _G.SocialCentralFrame:IsShown())
+        or (_G.FriendsFrame and _G.FriendsFrame.IsShown and _G.FriendsFrame:IsShown())
+        or (_G.CommunitiesFrame and _G.CommunitiesFrame.IsShown and _G.CommunitiesFrame:IsShown())
+        or (_G.SocialCentralGuildEmbeddedFrame and _G.SocialCentralGuildEmbeddedFrame.IsShown and _G.SocialCentralGuildEmbeddedFrame:IsShown())
+    local minGap = anyUiOpen and 4.5 or 8.0
+    local minWait = math.max(anyUiOpen and 2.0 or 3.0, tonumber(delay) or (anyUiOpen and 2.0 or 3.0))
     local now = (GetTime and GetTime()) or 0
-    if lastScanAt > 0 and (now - lastScanAt) < 5.0 then
-        minWait = math.max(minWait, 5.0 - (now - lastScanAt))
+    if lastScanAt > 0 and (now - lastScanAt) < minGap then
+        minWait = math.max(minWait, minGap - (now - lastScanAt))
     end
     C_Timer.After(minWait, function()
         scanQueued = false

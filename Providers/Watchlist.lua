@@ -24,7 +24,9 @@ local Watchlist = {
     suppressPopupUntil = 0,
     onShowHooked = false,
     lfgOnShowHooked = false,
+    whoListOnShowHooked = false,
     whoOnShowHooked = false,
+    restoreSeq = 0,
     chatFilterActive = false,
     tokenCounter = 0,
 }
@@ -43,20 +45,43 @@ local function GetWhoMode()
     return "silent_ui"
 end
 
+local function IsSafeWhoFrame(f)
+    if not f then return false end
+    if f.IsForbidden then
+        local ok, forb = pcall(f.IsForbidden, f)
+        if not ok or forb then return false end
+    end
+    if f.IsProtected then
+        local ok, prot = pcall(f.IsProtected, f)
+        if not ok or prot then return false end
+    end
+    return true
+end
+
 local function SafeHideFrame(f)
     if not f or (InCombatLockdown and InCombatLockdown()) then return end
-    if HideUIPanel and f == _G.LFGParentFrame then
-        pcall(HideUIPanel, f)
-    end
+    if not IsSafeWhoFrame(f) then return end
     if f.IsShown and f:IsShown() and f.Hide then
         pcall(f.Hide, f)
     end
 end
 
+local function IsOwnAddonWhoFrame(f)
+    if not f then return true end
+    if f == _G.UIParent or (ns and ns._eventFrame and f == ns._eventFrame) then
+        return true
+    end
+    local okName, fName = pcall(f.GetName, f)
+    if okName and type(fName) == "string" and fName:find("^SocialCentral") then
+        return true
+    end
+    return false
+end
+
 local function CollectWhoListeningFrames(root, depth, out, seen)
     if not root or (depth or 0) <= 0 or seen[root] then return end
     seen[root] = true
-    if root.IsEventRegistered and root.UnregisterEvent and root.RegisterEvent then
+    if not IsOwnAddonWhoFrame(root) and root.IsEventRegistered and root.UnregisterEvent and root.RegisterEvent then
         local ok, reg = pcall(root.IsEventRegistered, root, "WHO_LIST_UPDATE")
         if ok and reg then
             out[#out + 1] = root
@@ -73,6 +98,7 @@ local function CollectWhoListeningFrames(root, depth, out, seen)
 end
 
 local function RestoreFriendsFrameEvent()
+    Watchlist.restoreSeq = (Watchlist.restoreSeq or 0) + 1
     if not (Watchlist.friendsBorrowed or Watchlist.needsFriendsRestore) then
         return
     end
@@ -85,21 +111,46 @@ local function RestoreFriendsFrameEvent()
     Watchlist.friendsBorrowed = false
     Watchlist.needsFriendsRestore = false
     for _, f in ipairs(Watchlist.suppressedWhoFrames or {}) do
-        if f and f.RegisterEvent then
+        if f and IsSafeWhoFrame(f) and f.RegisterEvent then
             pcall(f.RegisterEvent, f, "WHO_LIST_UPDATE")
         end
     end
     Watchlist.suppressedWhoFrames = {}
-    if _G.FriendsFrame and _G.FriendsFrame.RegisterEvent then
+    if _G.FriendsFrame and IsSafeWhoFrame(_G.FriendsFrame) and _G.FriendsFrame.RegisterEvent then
         pcall(_G.FriendsFrame.RegisterEvent, _G.FriendsFrame, "WHO_LIST_UPDATE")
+    end
+    if _G.LFGWhoListFrame and IsSafeWhoFrame(_G.LFGWhoListFrame) and _G.LFGWhoListFrame.RegisterEvent then
+        pcall(_G.LFGWhoListFrame.RegisterEvent, _G.LFGWhoListFrame, "WHO_LIST_UPDATE")
     end
     if not Watchlist.lfgWasShownBeforeWho and (GetTime() < (Watchlist.suppressPopupUntil or 0) or Watchlist.pending) then
         SafeHideFrame(_G.LFGParentFrame)
     end
 end
 
+local function ScheduleRestoreFriendsFrameEvent()
+    if InCombatLockdown and InCombatLockdown() then
+        RestoreFriendsFrameEvent()
+        return
+    end
+    if not (Watchlist.friendsBorrowed or Watchlist.needsFriendsRestore) then
+        return
+    end
+    Watchlist.restoreSeq = (Watchlist.restoreSeq or 0) + 1
+    local seq = Watchlist.restoreSeq
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.05, function()
+            if Watchlist.restoreSeq == seq and not Watchlist.pending then
+                RestoreFriendsFrameEvent()
+            end
+        end)
+    else
+        RestoreFriendsFrameEvent()
+    end
+end
+
 local function SuppressWhoUiFrames()
     if InCombatLockdown and InCombatLockdown() then return end
+    Watchlist.restoreSeq = (Watchlist.restoreSeq or 0) + 1
     Watchlist.lfgWasShownBeforeWho = (_G.LFGParentFrame and _G.LFGParentFrame.IsShown and _G.LFGParentFrame:IsShown()) == true
     Watchlist.friendsWasShownBeforeWho = (_G.FriendsFrame and _G.FriendsFrame.IsShown and _G.FriendsFrame:IsShown()) == true
 
@@ -119,6 +170,17 @@ local function SuppressWhoUiFrames()
             end
         end)
     end
+    if _G.LFGWhoListFrame and not Watchlist.whoListOnShowHooked then
+        Watchlist.whoListOnShowHooked = true
+        _G.LFGWhoListFrame:HookScript("OnShow", function(selfWhoList)
+            if not (InCombatLockdown and InCombatLockdown()) and not Watchlist.lfgWasShownBeforeWho then
+                if (Watchlist.pending and Watchlist.pending.mode == "silent_ui") or (GetTime() < (Watchlist.suppressPopupUntil or 0)) then
+                    SafeHideFrame(selfWhoList)
+                    SafeHideFrame(_G.LFGParentFrame)
+                end
+            end
+        end)
+    end
     if _G.WhoFrame and not Watchlist.whoOnShowHooked then
         Watchlist.whoOnShowHooked = true
         _G.WhoFrame:HookScript("OnShow", function(selfWho)
@@ -132,17 +194,50 @@ local function SuppressWhoUiFrames()
     end
 
     local list, seen = {}, {}
-    for _, root in ipairs({ _G.FriendsFrame, _G.WhoFrame, _G.LFGParentFrame, _G.WhoListingFrame, _G.WhoListScrollFrame }) do
+    local suppressedSet = {}
+    Watchlist.suppressedWhoFrames = Watchlist.suppressedWhoFrames or {}
+    for _, existing in ipairs(Watchlist.suppressedWhoFrames) do
+        suppressedSet[existing] = true
+    end
+
+    for _, root in ipairs({
+        _G.FriendsFrame,
+        _G.WhoFrame,
+        _G.LFGParentFrame,
+        _G.LFGWhoListFrame,
+        _G.LFGListingFrame,
+        _G.LFGBrowseFrame,
+        _G.WhoListingFrame,
+        _G.WhoListScrollFrame,
+    }) do
         if root then
-            CollectWhoListeningFrames(root, 3, list, seen)
+            CollectWhoListeningFrames(root, 5, list, seen)
         end
     end
-    Watchlist.suppressedWhoFrames = {}
+    if GetFramesRegisteredForEvent then
+        local okReg, regFrames = pcall(function()
+            return { GetFramesRegisteredForEvent("WHO_LIST_UPDATE") }
+        end)
+        if okReg and type(regFrames) == "table" then
+            for _, f in ipairs(regFrames) do
+                if f and not seen[f] and not IsOwnAddonWhoFrame(f) then
+                    seen[f] = true
+                    list[#list + 1] = f
+                end
+            end
+        end
+    end
+
     for _, f in ipairs(list) do
-        local ok = pcall(f.UnregisterEvent, f, "WHO_LIST_UPDATE")
-        if ok then
-            Watchlist.suppressedWhoFrames[#Watchlist.suppressedWhoFrames + 1] = f
-            Watchlist.friendsBorrowed = true
+        if IsSafeWhoFrame(f) and f.UnregisterEvent then
+            local ok = pcall(f.UnregisterEvent, f, "WHO_LIST_UPDATE")
+            if ok then
+                if not suppressedSet[f] then
+                    suppressedSet[f] = true
+                    Watchlist.suppressedWhoFrames[#Watchlist.suppressedWhoFrames + 1] = f
+                end
+                Watchlist.friendsBorrowed = true
+            end
         end
     end
 end
@@ -186,7 +281,7 @@ local function SystemChatFilter(_, _, msg)
 
     -- Suppress trailing /who summary line ("0 players total" / "Total: 0 jogadores") during active query.
     local lower = clean:lower()
-    local looksLikeWhoSummary = clean:find("%d+") and (lower:find("total") or lower:find("player") or lower:find("jogador") or lower:find("jugador"))
+    local looksLikeWhoSummary = clean:find("%d+") and (lower:find("total") or lower:find("player") or lower:find("jogador") or lower:find("jugador") or lower:find("encontrad") or lower:find("pessoa"))
     if looksLikeWhoSummary then
         Watchlist.pending.sawSummary = true
         C_Timer.After(0.05, function()
@@ -200,11 +295,21 @@ local function SystemChatFilter(_, _, msg)
     return false
 end
 
-local function CleanupPending()
+local function CleanupPending(preserveSuppress)
     local pending = Watchlist.pending
     local wasSilentUi = pending and pending.mode == "silent_ui"
     local prevWhoToUi = pending and pending.prevWhoToUi
-    RestoreFriendsFrameEvent()
+    Watchlist.pending = nil
+    if preserveSuppress and wasSilentUi then
+        if not Watchlist.lfgWasShownBeforeWho then
+            SafeHideFrame(_G.LFGWhoListFrame)
+            SafeHideFrame(_G.LFGParentFrame)
+        end
+        ScheduleRestoreFriendsFrameEvent()
+    else
+        Watchlist.suppressPopupUntil = 0
+        RestoreFriendsFrameEvent()
+    end
     if wasSilentUi and prevWhoToUi ~= nil then
         if C_FriendList and C_FriendList.SetWhoToUi then
             pcall(C_FriendList.SetWhoToUi, prevWhoToUi == true)
@@ -222,7 +327,6 @@ local function CleanupPending()
         Watchlist.chatFilterActive = false
         RemoveChatFilter(SystemChatFilter)
     end
-    Watchlist.pending = nil
 end
 
 function Watchlist:GetCooldownRemaining()
@@ -463,7 +567,55 @@ function Watchlist:PinToFriends(id)
     return false
 end
 
+local STALE_ONLINE_SECONDS = 300
+local INIT_STALE_ONLINE_SECONDS = 180
+
+local function IsEntryLiveConfirmed(entry, now)
+    if type(entry) ~= "table" then return false end
+    local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
+    if socRow and socRow.online == true then
+        return true
+    end
+    if Compat.IsInMyGroup and Compat.IsInMyGroup(entry.displayName, entry.guid) then
+        return true
+    end
+    local nearbyRow = Store and Store.nearby and entry.id and Store.nearby[entry.id]
+    if nearbyRow and (now - (nearbyRow.lastSeen or 0)) <= 180 then
+        return true
+    end
+    return false
+end
+
+function Watchlist:ExpireStaleOnlineEntries(silentEmit)
+    local list = Store:GetWatchlistTable()
+    if type(list) ~= "table" or next(list) == nil then
+        return false
+    end
+    local now = time()
+    local changed = false
+    for _, entry in pairs(list) do
+        if type(entry) == "table" and entry.status == "online" then
+            if not IsEntryLiveConfirmed(entry, now) then
+                if entry.source == "friend" or entry.source == "guild" or entry.source == "bnet" then
+                    entry.source = nil
+                end
+                local lastConfirm = entry.lastSeen or entry.lastChecked or 0
+                if (now - lastConfirm) >= STALE_ONLINE_SECONDS then
+                    entry.status = "unknown"
+                    entry._expiredOnline = true
+                    changed = true
+                end
+            end
+        end
+    end
+    if changed and not silentEmit then
+        ns:Emit("WATCHLIST_UPDATED")
+    end
+    return changed
+end
+
 function Watchlist:GetEntries(groupFilter, sortBy)
+    self:ExpireStaleOnlineEntries(true)
     local list = Store:GetWatchlistTable()
     local out = {}
     for _, entry in pairs(list) do
@@ -499,6 +651,7 @@ function Watchlist:GetEntries(groupFilter, sortBy)
 end
 
 function Watchlist:GetStats()
+    self:ExpireStaleOnlineEntries(true)
     local online, offline, unknown = 0, 0, 0
     for _, entry in pairs(Store:GetWatchlistTable()) do
         if entry.status == "online" then
@@ -744,9 +897,11 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                 local parsed = m.parsed
                 if parsed and MatchEntry(entry, parsed) then
                     local prevStatus = entry.status
+                    local wasExpired = (entry._expiredOnline == true)
                     local hasSurname = type(entry.surname) == "string" and entry.surname ~= ""
                     local candidateOnly = (not hasSurname) and parsed.surname and parsed.surname ~= ""
                     entry.status = "online"
+                    entry._expiredOnline = nil
                     entry.source = "who"
                     entry.lastChecked = now
                     entry.lastSeen = now
@@ -761,7 +916,7 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                         if Compat.CacheForeverFullName then
                             Compat.CacheForeverFullName(nil, parsed.displayName, parsed.firstName)
                         end
-                    elseif prevStatus ~= "online" then
+                    elseif prevStatus ~= "online" and not wasExpired then
                         Store:NotifyWatchlistOnline(entry)
                     end
                     if not candidateOnly and parsed.surname and parsed.surname ~= "" and ns.Clan and ns.Clan.QueueCooperativeSighting then
@@ -818,15 +973,19 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
             local socRow = Store.socialByLookup and Store.socialByLookup[pending.id]
             if socRow and socRow.online == true then
                 targetEntry.status = "online"
+                targetEntry._expiredOnline = nil
             else
                 targetEntry.status = "offline"
+                targetEntry._expiredOnline = nil
             end
             targetEntry.truncatedWarning = nil
         end
     end
 
-    Watchlist.suppressPopupUntil = GetTime() + 0.35
-    CleanupPending()
+    if Watchlist.pending and Watchlist.pending.mode == "silent_ui" then
+        Watchlist.suppressPopupUntil = GetTime() + 0.35
+    end
+    CleanupPending(true)
     ns:Emit("WATCHLIST_UPDATED")
     if disambiguateTarget then
         local pickLink = "|Haddon:SCentral:wldisambig:" .. tostring(disambiguateTarget.id) .. "|h|cff58a6ff[" .. L["Choose"] .. "]|r|h"
@@ -966,8 +1125,10 @@ function Watchlist:CheckEntry(id, silent)
             else
                 local wasSilent = Watchlist.pending.silent
                 Watchlist.backoffUntil = GetTime() + 10
-                Watchlist.suppressPopupUntil = GetTime() + 0.35
-                CleanupPending()
+                if Watchlist.pending.mode == "silent_ui" then
+                    Watchlist.suppressPopupUntil = GetTime() + 0.35
+                end
+                CleanupPending(true)
                 if not wasSilent then
                     ns:Print(L["Check skipped: /who response timed out or was throttled."])
                 end
@@ -984,14 +1145,16 @@ end
 local function ComputeWatchlistCheckPriority(entry, now)
     if type(entry) ~= "table" then return -1 end
     local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
-    local isPassiveKnown = (socRow ~= nil) or (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
     if socRow and socRow.online == true then
         return -1
     end
+    local dirRow = Store and Store.socialDirectoryByLookup and entry.id and Store.socialDirectoryByLookup[entry.id]
+    local isPassiveKnown = (socRow ~= nil) or (dirRow ~= nil and dirRow.online == true)
     local age = entry.lastChecked and math.max(0, now - entry.lastChecked) or 999999
     local isUnknown = (entry.status == "unknown")
+    local isUnverifiedOnline = (entry.status == "online")
     if not isUnknown then
-        local minAge = isPassiveKnown and 120 or 45
+        local minAge = isUnverifiedOnline and 20 or (isPassiveKnown and 120 or 45)
         if age < minAge then
             return -1
         end
@@ -1000,7 +1163,8 @@ local function ComputeWatchlistCheckPriority(entry, now)
     local seenAge = entry.lastSeen and math.max(0, now - entry.lastSeen) or (14 * 86400)
     local activePrior = 1.0 + (0.5 / (1 + (seenAge / 86400)))
     local passivePenalty = isPassiveKnown and 0.15 or 1.0
-    local base = isUnknown and (1000000 + math.min(age, 86400)) or age
+    local base = isUnknown and (1000000 + (entry._expiredOnline and 50000 or 0) + math.min(age, 86400))
+        or (isUnverifiedOnline and (50000 + math.min(age, 86400)) or age)
     return base * favMult * activePrior * passivePenalty
 end
 
@@ -1022,8 +1186,8 @@ function Watchlist:CheckNext(silent)
     local best, bestPrio = nil, -1
     local oldestFallback, oldestChecked, oldestAdded = nil, nil, nil
     for _, entry in ipairs(entries) do
-        local isPassiveOnline = (entry.status == "online")
-            and (entry.source == "friend" or entry.source == "guild" or entry.source == "bnet")
+        local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
+        local isPassiveOnline = (socRow ~= nil and socRow.online == true)
         if not isPassiveOnline then
             needCount = needCount + 1
             local prio = ComputeWatchlistCheckPriority(entry, now)
@@ -1167,7 +1331,7 @@ end
 local tooltipHooksRegistered = false
 local unitMenusRegistered = false
 
-local function AppendPlayerTooltipLines(tooltip)
+local function AppendPlayerTooltipLines(tooltip, isLegacyHook)
     if not tooltip or (tooltip ~= GameTooltip and tooltip ~= ItemRefTooltip) then return end
     if tooltip.IsForbidden and tooltip:IsForbidden() then return end
     if ns.db and ns.db.settings and ns.db.settings.tooltipPlayerNotes == false then return end
@@ -1224,8 +1388,9 @@ local function AppendPlayerTooltipLines(tooltip)
     if guildStance ~= "ENEMY" and guildStance ~= "ALLY" then
         guildStance = nil
     end
+    local activeLfg = (ns.Clan and ns.Clan.GetActiveLfgForPlayer) and ns.Clan:GetActiveLfgForPlayer(lookupKey) or nil
 
-    if not meta and not wl and not comp and not isPeer and not savedPeer and not guildStance and not linkedAlts and not nativeNote then
+    if not meta and not wl and not comp and not isPeer and not savedPeer and not guildStance and not linkedAlts and not nativeNote and not activeLfg then
         return
     end
 
@@ -1288,8 +1453,13 @@ local function AppendPlayerTooltipLines(tooltip)
     elseif savedPeer then
         tooltip:AddLine("|cff58a6ff[SocialCentral · " .. L["Registered"] .. "]|r", 0.35, 0.65, 1.0)
     end
+    if activeLfg then
+        tooltip:AddLine("|cff3fb950[" .. tostring(activeLfg.mode or "LFG") .. "]|r " .. tostring(activeLfg.activity or L["Group"]), 0.35, 0.92, 0.55, true)
+    end
 
-    pcall(tooltip.Show, tooltip)
+    if isLegacyHook then
+        pcall(tooltip.Show, tooltip)
+    end
 end
 
 local function RegisterPlayerTooltipIntegration()
@@ -1314,10 +1484,12 @@ local function RegisterPlayerTooltipIntegration()
 
     if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType and Enum.TooltipDataType.Unit then
         pcall(TooltipDataProcessor.AddTooltipPostCall, Enum.TooltipDataType.Unit, function(tooltip)
-            AppendPlayerTooltipLines(tooltip)
+            AppendPlayerTooltipLines(tooltip, false)
         end)
     elseif GameTooltip and GameTooltip.HookScript and GameTooltip:HasScript("OnTooltipSetUnit") then
-        GameTooltip:HookScript("OnTooltipSetUnit", AppendPlayerTooltipLines)
+        GameTooltip:HookScript("OnTooltipSetUnit", function(t)
+            AppendPlayerTooltipLines(t, true)
+        end)
     end
 end
 
@@ -1440,7 +1612,8 @@ local function RegisterUnitContextMenus()
 end
 
 function Watchlist:Init()
-    -- Normalize stored Watchlist entries (Forever FirstName Surname format & clear stale truncation flags).
+    -- Normalize stored Watchlist entries (Forever FirstName Surname format & clear stale truncation/online flags).
+    local now = time()
     for _, entry in pairs(Store:GetWatchlistTable()) do
         if type(entry) == "table" and entry.displayName then
             local p = Compat.ParseCharacterName(entry.displayName)
@@ -1451,6 +1624,18 @@ function Watchlist:Init()
             end
             if entry.surname and entry.surname ~= "" then
                 entry.truncatedWarning = nil
+            end
+            if entry.status == "online" then
+                local lastConfirm = entry.lastSeen or entry.lastChecked or 0
+                if (now - lastConfirm) >= INIT_STALE_ONLINE_SECONDS then
+                    entry.status = "unknown"
+                    entry._expiredOnline = true
+                    if entry.source == "friend" or entry.source == "guild" or entry.source == "bnet" then
+                        entry.source = nil
+                    end
+                end
+            elseif entry.status == "offline" then
+                entry._expiredOnline = nil
             end
         end
     end

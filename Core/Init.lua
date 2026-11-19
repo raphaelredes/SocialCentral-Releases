@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.16"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.16" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.17"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.17" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -36,6 +36,7 @@ end
 -- Safe Blizzard event dispatcher: pcall on RegisterEvent prevents fatal errors
 -- if a future patch removes or renames an optional event.
 local eventFrame = CreateFrame("Frame")
+ns._eventFrame = eventFrame
 local eventHandlers = {}
 
 eventFrame:SetScript("OnEvent", function(_, event, ...)
@@ -141,6 +142,8 @@ local DEFAULTS = {
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
         spotterNameplateArrow = true, -- show animated red arrow above focused/selected target nameplate when visible
         spotterNameplateBadges = true, -- show lightweight stance tags above visible tracked player nameplates
+        spotterNameplateTargetHighlight = true, -- highlight selected target overhead name & info cleanly above nameplate
+        altsWorldScope = "pool", -- "pool" | "all" | "world:<PvP|PvE|RP-PvE|RP-PvP|RP>" | "pool:<realmPool>"
         spotterPlateTutorialShown = false, -- show one-time nameplate tutorial (Shift+V / V) on first radar sighting
         spotterRadarTutorialShown = false, -- show one-time target radar proximity tutorial on first radar tracking
         spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
@@ -166,6 +169,11 @@ local DEFAULTS = {
         lfgAutoApplyDraft = true,   -- pre-fill your Level, Class & Role when whispering LFG posts
         lfgAntiSpam = true,         -- filter WTS/GDKP/boost spam from public LFG channels
         lfgHideAvoidEnemy = false,  -- hide LFG posts from Avoid-flagged or Enemy Guild leaders
+        lfgBrowseCategory = "ALL",  -- last chosen Browse category ("ALL" | "DUNGEONS" | "RAIDS" | "QUESTS" | "PVP" | "CUSTOM")
+        lfgBrowseSource = "ALL",    -- last chosen Browse source filter
+        lfgBrowseRole = "MINE",     -- last chosen Browse role filter ("MINE" by default)
+        lfgBrowseSuitableLevel = true, -- filter activities & groups to character level by default
+        lfgBrowseSelectedActivities = {}, -- [catId] = { [actKey] = true } persisted checked activities
         groupAvoidAlert = true,     -- warn in chat and toast if an Avoided player enters your party or raid
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
         worldBuffsExpiryAlert = true, -- warn out of combat when an active World Buff has < 5 minutes left
@@ -178,6 +186,7 @@ local DEFAULTS = {
     windowPositions = {},            -- [windowKey] = { dx, dy } center-normalized positions across all frames
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
+    itemCatalog = {},              -- [itemID] = "name\ticon\tquality\tclassID\tsubClassID" shared across all alts
     clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
     socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note, flag, favorite } }
     friendPresence = {},           -- [scopeKey] = { [lookupKey] = { lastSeen, lastArea, lastClass, lastLevel, favorite } } (strictly zero BattleTag/Real ID)
@@ -189,6 +198,7 @@ local DEFAULTS = {
     worldBuffsDrops = {},          -- [realmPool] = { [buffId] = timestamp }
     worldBuffsHistory = {},        -- [realmPool] = { [buffId] = { [hour0..23] = count } }
     worldBuffsPersonal = {},       -- [charKey] = { saygeAt = ts, saygePlayed = playedSec }
+    instanceRuns = {},             -- [i] = { sig, name, instType, enteredAt, charName, classFile }
 }
 
 local function DeepCopyValue(val)
@@ -502,6 +512,9 @@ ns.RegisterEvent(boot, "PLAYER_LOGOUT", function()
 end)
 
 ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
+    if ns.Store and ns.Store.NormalizeLegacyRealmScopes then
+        pcall(ns.Store.NormalizeLegacyRealmScopes, ns.Store)
+    end
     for _, mod in ipairs(ns.modules) do
         if type(mod.Init) == "function" then
             local ok, err = pcall(mod.Init, mod)
@@ -632,10 +645,51 @@ function ns:SetupOfficialChatConfigToggle()
     return true
 end
 
+local lastIdleGcAt = 0
+local idleGcQueued = false
+
+function ns:RequestIdleGcStep(steps, delay)
+    if type(collectgarbage) ~= "function" or not (C_Timer and C_Timer.After) then
+        return
+    end
+    local now = (GetTime and GetTime()) or 0
+    if lastIdleGcAt > 0 and (now - lastIdleGcAt) < 18.0 then
+        return
+    end
+    if idleGcQueued then
+        return
+    end
+    idleGcQueued = true
+    local stepBudget = math.max(80, math.min(600, tonumber(steps) or 250))
+    C_Timer.After(tonumber(delay) or 0.6, function()
+        idleGcQueued = false
+        local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+        if inCombat then
+            return
+        end
+        lastIdleGcAt = (GetTime and GetTime()) or 0
+        pcall(collectgarbage, "step", stepBudget)
+    end)
+end
+
 ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
     ns.UnregisterEvent(boot, "PLAYER_ENTERING_WORLD")
     if ns.Compat and ns.Compat.SyncRosterForeverNames then
-        ns.Compat.SyncRosterForeverNames()
+        ns.Compat.SyncRosterForeverNames(false, true)
+    end
+    if C_Timer and C_Timer.After and type(collectgarbage) == "function" then
+        C_Timer.After(4.5, function()
+            if not (InCombatLockdown and InCombatLockdown()) then
+                lastIdleGcAt = (GetTime and GetTime()) or 0
+                pcall(collectgarbage, "step", 450)
+            end
+        end)
+        C_Timer.After(11.0, function()
+            if not (InCombatLockdown and InCombatLockdown()) then
+                lastIdleGcAt = (GetTime and GetTime()) or 0
+                pcall(collectgarbage, "step", 350)
+            end
+        end)
     end
     if ns.db and ns.db.settings and not ns.db.settings.themeChosen then
         local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
@@ -720,8 +774,12 @@ function ns:NavigateToModule(modName, opts)
     if (opts.socialFilter or opts.socialSearch or opts.watchlistSearch ~= nil) and ns.UI and ns.UI.SetSocialNavigation then
         ns.UI:SetSocialNavigation(opts)
     end
-    if opts.clanRightView == "browse" and ns.LFGFrameTab then
+    if (opts.clanRightView == "browse" or opts.clanRightView == "lfg") and modName == "lfg" and ns.LFGFrameTab then
         ns.LFGFrameTab.viewMode = "browse"
+        if opts.lfgSelectKey and opts.lfgSelectKey ~= "" then
+            ns.LFGFrameTab.pendingSelectKey = opts.lfgSelectKey
+            ns.LFGFrameTab.sourceFilter = "ALL"
+        end
     elseif opts.clanRightView and ns.Clan and ns.Clan.SetPreferredRightView then
         ns.Clan:SetPreferredRightView(opts.clanRightView)
     end
@@ -786,7 +844,8 @@ if EventRegistry and EventRegistry.RegisterCallback then
                 ns:Print("%s", L["This module is disabled in Settings."])
                 return
             end
-            ns:NavigateToModule("lfg", { clanRightView = "lfg" })
+            local lfgKey = link:match("addon:SCentral:clanlfg:([^|]+)")
+            ns:NavigateToModule("lfg", { clanRightView = "browse", lfgSelectKey = lfgKey })
         elseif link:find("addon:SCentral:clanevt:", 1, true) then
             if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("clan") then
                 ns:Print("%s", L["This module is disabled in Settings."])

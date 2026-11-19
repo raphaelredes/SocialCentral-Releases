@@ -199,7 +199,7 @@ local function NavigateForItem(item)
         end
     elseif k == "CLAN_LFG" then
         if ns.NavigateToModule then
-            ns:NavigateToModule("lfg", { clanRightView = "browse" })
+            ns:NavigateToModule("lfg", { clanRightView = "browse", lfgSelectKey = item.lookupKey })
         end
     elseif k == "RMI" then
         if ns.NavigateToModule then
@@ -469,6 +469,13 @@ function Toast:EnsureFrame(index)
     buffAnnounceBtn:RegisterForClicks("LeftButtonUp")
     buffAnnounceBtn:SetScript("OnClick", function()
         local item = f.itemData
+        if item and item.kind == "CLAN_LFG" then
+            if ns.LFGFrameTab and ns.LFGFrameTab.QuickApplyToPlayer then
+                ns.LFGFrameTab:QuickApplyToPlayer(item.sender, item.lookupKey, item.activity)
+            end
+            Toast:DismissItem(item)
+            return
+        end
         if item and item.buffDef and ns.WorldBuffs and ns.WorldBuffs.OpenIndividualBuffAnnouncement then
             ns.WorldBuffs:OpenIndividualBuffAnnouncement(item.buffDef)
         elseif ns.WorldBuffs and ns.WorldBuffs.OpenChatAnnouncement then
@@ -590,7 +597,8 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
 
     local isInvite = (item.kind == "RMI" and item.roomId and item.roomId ~= "")
     local isBuffAction = (item.kind == "WORLDBUFF" and item.buffDef ~= nil)
-    local hasActionRow = isInvite or isBuffAction
+    local isLfgAction = (item.kind == "CLAN_LFG" and item.sender and item.sender ~= "")
+    local hasActionRow = isInvite or isBuffAction or isLfgAction
     f:SetWidth(TOAST_WIDTH)
 
     local gradKey = (item.avoidWarning and "SCOUT") or item.kind or "DIRECT"
@@ -692,6 +700,15 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
         f.declineBtn:Hide()
         if f.buffAnnounceBtn then
             Theme:SetButtonText(f.buffAnnounceBtn, L["Announce in Chat"])
+            Theme:AutoFitButton(f.buffAnnounceBtn, 120, 16, 210)
+            f.buffAnnounceBtn:Show()
+        end
+        f.actionRow:Show()
+    elseif isLfgAction then
+        f.acceptBtn:Hide()
+        f.declineBtn:Hide()
+        if f.buffAnnounceBtn then
+            Theme:SetButtonText(f.buffAnnounceBtn, L["Quick Apply (/w)"])
             Theme:AutoFitButton(f.buffAnnounceBtn, 120, 16, 210)
             f.buffAnnounceBtn:Show()
         end

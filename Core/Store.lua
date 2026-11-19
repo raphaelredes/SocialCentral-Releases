@@ -231,18 +231,190 @@ function Store:GetCurrentAltRecord()
     return legacyKey and alts[legacyKey] or nil
 end
 
-function Store:GetAltsList()
+--- Remove stale deleted/recreated same-world duplicate alt snapshots sharing exact full name & realm pool.
+function Store:CleanupDuplicateSameWorldAlts(curKey, myGuid, fullName, realmPool, worldType)
+    local alts = ns.db and ns.db.alts
+    if type(alts) ~= "table" or not curKey or type(fullName) ~= "string" or fullName == "" then
+        return 0
+    end
+    local targetName = fullName:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+    if targetName == "" then return 0 end
+    local curPool = (realmPool and Compat.RealmPool and Compat.RealmPool(realmPool))
+        or (Compat.RealmPool and Compat.RealmPool(Compat.Realm()))
+        or realmPool
+    local curWorld = worldType or (Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm())) or nil
+    local removed = 0
+    local toRemove = nil
+    for key, rec in pairs(alts) do
+        if key ~= curKey and type(rec) == "table" then
+            local recName = (rec.fullName or rec.name or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+            if recName == targetName then
+                local recPool = (rec.realmName and Compat.RealmPool and Compat.RealmPool(rec.realmName))
+                    or (rec.realmPool and Compat.RealmPool and Compat.RealmPool(rec.realmPool))
+                    or curPool
+                local recWorld = rec.worldType
+                    or (Compat.DetectWorldType and Compat.DetectWorldType(rec.realmName or rec.realmPool, rec.realmRaw))
+                    or curWorld
+                if recPool == curPool and (not curWorld or not recWorld or recWorld == curWorld) then
+                    local recGuid = rec.guid
+                    if (not myGuid or myGuid == "") or (not recGuid or recGuid == "" or recGuid ~= myGuid) then
+                        toRemove = toRemove or {}
+                        toRemove[#toRemove + 1] = key
+                    end
+                end
+            end
+        end
+    end
+    if toRemove then
+        local dst = alts[curKey]
+        for _, oldKey in ipairs(toRemove) do
+            local ghost = alts[oldKey]
+            if type(dst) == "table" and type(ghost) == "table" then
+                if not dst.firstSeen and ghost.firstSeen then
+                    dst.firstSeen = ghost.firstSeen
+                end
+            end
+            alts[oldKey] = nil
+            removed = removed + 1
+        end
+        if removed > 0 and ns.Alts then
+            ns.Alts._itemIndexBuilt = false
+            ns.Alts.itemIndex = nil
+        end
+    end
+    return removed
+end
+
+local WORLD_TYPE_SORT = {
+    PvP = 1,
+    PvE = 2,
+    ["RP-PvE"] = 3,
+    ["RP-PvP"] = 4,
+    RP = 5,
+}
+
+local function ResolveNormalizedWorldScope(scopeMode)
+    if scopeMode == true then
+        return "pool"
+    elseif scopeMode == false then
+        return "all"
+    elseif Compat.NormalizeWorldScope then
+        return Compat.NormalizeWorldScope(scopeMode)
+    end
+    return (scopeMode == "all") and "all" or "pool"
+end
+
+local function AltMatchesWorldScope(key, info, currentKey, curPool, curWorldType, scopeMode)
+    local wantScope = ResolveNormalizedWorldScope(scopeMode)
+    if wantScope == "all" then
+        return true
+    end
+    local infoWorld, infoPool
+    if Compat.GetAltWorldInfo then
+        infoWorld, infoPool = Compat.GetAltWorldInfo(info)
+    else
+        infoPool = info.realmName and Compat.RealmPool(info.realmName) or (info.realmPool and Compat.RealmPool(info.realmPool)) or curPool
+        infoWorld = info.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(info.realmName or info.realmPool, info.realmRaw))
+    end
+    if wantScope:sub(1, 6) == "world:" then
+        return infoWorld == wantScope:sub(7)
+    elseif wantScope:sub(1, 5) == "pool:" then
+        return infoPool == wantScope:sub(6)
+    end
+    if key == currentKey then
+        return true
+    end
+    if infoPool ~= curPool then
+        return false
+    end
+    if curWorldType and infoWorld and infoWorld ~= curWorldType then
+        return false
+    end
+    return true
+end
+
+function Store:AltMatchesWorldScope(info, scopeMode)
+    if type(info) ~= "table" then return false end
+    local currentKey = self:GetCurrentAltKey()
+    local curWorld, curPool
+    if Compat.GetAltWorldInfo then
+        curWorld, curPool = Compat.GetAltWorldInfo(nil)
+    else
+        curPool = Compat.RealmPool(Compat.Realm())
+        curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm()) or nil
+    end
+    return AltMatchesWorldScope(info.key, info, currentKey, curPool, curWorld, scopeMode)
+end
+
+function Store:GetRecordedAltWorlds()
+    local byKey = {}
+    local list = {}
+    local alts = ns.db and ns.db.alts or {}
+    local curKey = self:GetCurrentAltKey()
+    local curWorld, curPool
+    if Compat.GetAltWorldInfo then
+        curWorld, curPool = Compat.GetAltWorldInfo(nil)
+    else
+        curPool = Compat.RealmPool(Compat.Realm())
+        curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm()) or nil
+    end
+    for key, info in pairs(alts) do
+        if type(info) == "table" then
+            local wt, pool, disp
+            if Compat.GetAltWorldInfo then
+                wt, pool, disp = Compat.GetAltWorldInfo(info)
+            else
+                pool = info.realmName and Compat.RealmPool(info.realmName) or (info.realmPool and Compat.RealmPool(info.realmPool)) or curPool
+                wt = info.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(info.realmName or info.realmPool, info.realmRaw))
+                disp = wt or info.realmRaw or info.realmName or pool
+            end
+            local sKey = (wt and ("world:" .. wt)) or ("pool:" .. tostring(pool or "default"))
+            local bucket = byKey[sKey]
+            if not bucket then
+                bucket = {
+                    scopeKey = sKey,
+                    worldType = wt,
+                    realmPool = pool,
+                    displayLabel = tostring(disp or wt or pool or "?"),
+                    count = 0,
+                    isCurrentWorld = (curWorld and wt == curWorld) or (not curWorld and pool == curPool),
+                }
+                byKey[sKey] = bucket
+                list[#list + 1] = bucket
+            end
+            bucket.count = bucket.count + 1
+            if key == curKey then
+                bucket.isCurrentWorld = true
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        local ao = WORLD_TYPE_SORT[a.worldType] or 99
+        local bo = WORLD_TYPE_SORT[b.worldType] or 99
+        if ao ~= bo then
+            return ao < bo
+        end
+        return (a.displayLabel or "") < (b.displayLabel or "")
+    end)
+    return list
+end
+
+function Store:GetAltsList(scopeMode)
     local out = {}
     local alts = ns.db and ns.db.alts or {}
     local currentKey = self:GetCurrentAltKey()
-    local curPool = Compat.RealmPool(Compat.Realm())
+    local curWorld, curPool
+    if Compat.GetAltWorldInfo then
+        curWorld, curPool = Compat.GetAltWorldInfo(nil)
+    else
+        curPool = Compat.RealmPool(Compat.Realm())
+        curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm(), Safe and Safe.String and Safe.Call and Safe.String(Safe.Call(GetRealmName))) or nil
+    end
+    local wantScope = ResolveNormalizedWorldScope(scopeMode)
     for key, info in pairs(alts) do
-        if type(info) == "table" then
-            local infoPool = info.realmPool and Compat.RealmPool(info.realmPool) or curPool
-            if key == currentKey or infoPool == curPool then
-                info.key = key
-                table.insert(out, info)
-            end
+        if type(info) == "table" and AltMatchesWorldScope(key, info, currentKey, curPool, curWorld, wantScope) then
+            info.key = key
+            table.insert(out, info)
         end
     end
     table.sort(out, function(a, b)
@@ -251,43 +423,61 @@ function Store:GetAltsList()
         if aCur ~= bCur then
             return aCur
         end
+        if wantScope == "all" then
+            local aSame = AltMatchesWorldScope(a.key, a, currentKey, curPool, curWorld, "pool")
+            local bSame = AltMatchesWorldScope(b.key, b, currentKey, curPool, curWorld, "pool")
+            if aSame ~= bSame then
+                return aSame
+            end
+        end
         return (a.lastActive or 0) > (b.lastActive or 0)
     end)
     return out
 end
 
-function Store:GetAltsCount()
+function Store:GetAltsCount(scopeMode)
     local alts = ns.db and ns.db.alts
     if not alts then return 0 end
     local count = 0
     local currentKey = self:GetCurrentAltKey()
-    local curPool = Compat.RealmPool(Compat.Realm())
+    local curWorld, curPool
+    if Compat.GetAltWorldInfo then
+        curWorld, curPool = Compat.GetAltWorldInfo(nil)
+    else
+        curPool = Compat.RealmPool(Compat.Realm())
+        curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm()) or nil
+    end
+    local wantScope = ResolveNormalizedWorldScope(scopeMode)
     for key, info in pairs(alts) do
-        if type(info) == "table" then
-            local infoPool = info.realmPool and Compat.RealmPool(info.realmPool) or curPool
-            if key == currentKey or infoPool == curPool then
-                count = count + 1
-            end
+        if type(info) == "table" and AltMatchesWorldScope(key, info, currentKey, curPool, curWorld, wantScope) then
+            count = count + 1
         end
     end
     return count
 end
 
-function Store:GetTotalAltsGold(poolOnly, factionFilter)
-    self:GetCurrentAltKey()
+function Store:GetTotalAltsGold(poolOnlyOrScope, factionFilter)
+    local currentKey = self:GetCurrentAltKey()
     local total = 0
-    local curPool = poolOnly and Compat.RealmPool(Compat.Realm())
+    local wantScope = (poolOnlyOrScope == nil) and "pool" or ResolveNormalizedWorldScope(poolOnlyOrScope)
+    local curWorld, curPool
+    if Compat.GetAltWorldInfo then
+        curWorld, curPool = Compat.GetAltWorldInfo(nil)
+    else
+        curPool = Compat.RealmPool(Compat.Realm())
+        curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm()) or nil
+    end
     local wantFaction = nil
     if factionFilter == true then
         wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
     elseif type(factionFilter) == "string" and factionFilter ~= "" then
         wantFaction = factionFilter
     end
-    for _, info in pairs(ns.db and ns.db.alts or {}) do
+    for key, info in pairs(ns.db and ns.db.alts or {}) do
         if type(info) == "table" and tonumber(info.money) then
-            local matchPool = not curPool or (not info.realmPool) or info.realmPool == curPool
+            local matchWorld = AltMatchesWorldScope(key, info, currentKey, curPool, curWorld, wantScope)
             local matchFaction = not wantFaction or (info.faction == wantFaction)
-            if matchPool and matchFaction then
+            if matchWorld and matchFaction then
                 total = total + tonumber(info.money)
             end
         end
@@ -295,8 +485,8 @@ function Store:GetTotalAltsGold(poolOnly, factionFilter)
     return total
 end
 
-function Store:GetTotalAltsGoldByFaction(poolOnly)
-    self:GetCurrentAltKey()
+function Store:GetTotalAltsGoldByFaction(poolOnlyOrScope)
+    local currentKey = self:GetCurrentAltKey()
     local res = {
         Alliance = 0,
         Horde = 0,
@@ -304,11 +494,18 @@ function Store:GetTotalAltsGoldByFaction(poolOnly)
         total = 0,
         myFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil,
     }
-    local curPool = poolOnly and Compat.RealmPool(Compat.Realm())
-    for _, info in pairs(ns.db and ns.db.alts or {}) do
+    local wantScope = (poolOnlyOrScope == nil) and "pool" or ResolveNormalizedWorldScope(poolOnlyOrScope)
+    local curWorld, curPool
+    if Compat.GetAltWorldInfo then
+        curWorld, curPool = Compat.GetAltWorldInfo(nil)
+    else
+        curPool = Compat.RealmPool(Compat.Realm())
+        curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm()) or nil
+    end
+    for key, info in pairs(ns.db and ns.db.alts or {}) do
         if type(info) == "table" and tonumber(info.money) then
-            local matchPool = not curPool or (not info.realmPool) or info.realmPool == curPool
-            if matchPool then
+            local matchWorld = AltMatchesWorldScope(key, info, currentKey, curPool, curWorld, wantScope)
+            if matchWorld then
                 local m = tonumber(info.money) or 0
                 res.total = res.total + m
                 if info.faction == "Alliance" then
@@ -445,10 +642,29 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
         if not (exactMatch or firstMatch) then return end
 
         local prevStatus = entry.status
+        local obsOnline = data.online
+        if obsOnline == true and data.source ~= "bnet" and data.source ~= "friend" and data.source ~= "who"
+            and ns.Social and ns.Social.GetBNetLinkInfo
+        then
+            local bLink = ns.Social:GetBNetLinkInfo(parsed.lookupKey)
+            if bLink and bLink.isBNet and bLink.online and bLink.activeLookupKey then
+                local isActiveOnBNet = (bLink.activeLookupKeys and bLink.activeLookupKeys[parsed.lookupKey] == true)
+                    or (bLink.activeLookupKey == parsed.lookupKey)
+                if not isActiveOnBNet then
+                    -- Another character on the same Battle.net session is active; clear stale online state without alerting.
+                    if entry.status == "online" then
+                        entry.status = "offline"
+                        entry._expiredOnline = nil
+                        changed = true
+                    end
+                    return
+                end
+            end
+        end
         local trustedSurnameSource = (data.source == "friend" or data.source == "bnet" or data.source == "guild" or data.source == "target" or data.source == "who")
             or (data.guid and entry.guid and data.guid == entry.guid)
-        if data.online ~= nil then
-            entry.status = data.online and "online" or "offline"
+        if obsOnline ~= nil then
+            entry.status = obsOnline and "online" or "offline"
             entry.lastChecked = now
             entry.truncatedWarning = nil
         end
@@ -476,13 +692,17 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
                 entry.observedCandidate = parsed.displayName
             end
         end
-        if data.online then
+        if obsOnline then
+            local wasExpired = (entry._expiredOnline == true)
+            entry._expiredOnline = nil
             entry.lastSeen = now
             entry.lastChecked = now
-            local allowUnknown = opts and opts.allowUnknownTransition == true and (now - (entry.addedAt or 0)) >= 3
+            local allowUnknown = opts and opts.allowUnknownTransition == true and (now - (entry.addedAt or 0)) >= 3 and not wasExpired
             if not (opts and opts.suppressAlert) and (prevStatus == "offline" or (prevStatus == "unknown" and allowUnknown)) then
                 self:NotifyWatchlistOnline(entry, opts)
             end
+        elseif obsOnline == false then
+            entry._expiredOnline = nil
         end
         changed = true
     end
@@ -1019,9 +1239,13 @@ end
 
 function Store:GetRecentCompanion(rawNameOrKey)
     if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" then return nil end
-    local parsed = Compat.ParseCharacterName(rawNameOrKey)
-    if not parsed then return nil end
-    return self:GetRecentCompanionsTable()[parsed.lookupKey]
+    local lk = Compat.ParseCharacterFields and Compat.ParseCharacterFields(rawNameOrKey)
+    if not lk then
+        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(rawNameOrKey)
+        lk = parsed and parsed.lookupKey
+    end
+    if not lk then return nil end
+    return self:GetRecentCompanionsTable()[lk]
 end
 
 --- Time-decayed frecency + explicit feedback social affinity score (returns -1000 for AVOID).
@@ -1072,4 +1296,140 @@ function Store:GetRecentCompanionsList()
         return (a.lastSeen or 0) > (b.lastSeen or 0)
     end)
     return out
+end
+
+local function CompactOrPruneClanBucket(bucket, scopeKey, nowTs)
+    if type(bucket) ~= "table" then return end
+    if scopeKey and scopeKey:find("::_noguild", 1, true) then
+        bucket.rosterSnapshot = nil
+        return
+    end
+    local snap = bucket.rosterSnapshot
+    if type(snap) ~= "table" then return end
+    if snap.updatedAt and (nowTs - snap.updatedAt) > (30 * 86400) then
+        bucket.rosterSnapshot = nil
+        return
+    end
+    if type(snap.members) == "table" then
+        local buf = {}
+        local n = 0
+        for lk, val in pairs(snap.members) do
+            local cleanLk = tostring(lk):gsub("[\t\r\n]", "")
+            local packedLine
+            if type(val) == "string" then
+                packedLine = cleanLk .. "\t" .. val:gsub("[\r\n]", " ")
+            elseif type(val) == "table" then
+                packedLine = cleanLk .. "\t" .. tostring(val.name or ""):gsub("[\t\r\n]", " ") .. "\t" .. tostring(val.rank or ""):gsub("[\t\r\n]", " ")
+            end
+            if packedLine then
+                n = n + 1
+                buf[n] = packedLine
+            end
+        end
+        snap.packed = table.concat(buf, "\n")
+        snap.members = nil
+        snap.updatedAt = snap.updatedAt or nowTs
+    end
+end
+
+local function MergeMissingEntries(dst, src)
+    if type(dst) ~= "table" or type(src) ~= "table" then return end
+    for k, v in pairs(src) do
+        if dst[k] == nil then
+            dst[k] = v
+        end
+    end
+end
+
+--- Consolidate split sub-realm shard keys (e.g. camwowus1realm6pvp -> camwowus1realmpvp)
+--- and pack legacy guild roster snapshots to eliminate SavedVariables & boot memory bloat.
+function Store:NormalizeLegacyRealmScopes()
+    if not (ns.db and Compat and Compat.RealmPool) then return end
+    local nowTs = time()
+
+    if type(ns.db.alts) == "table" then
+        for _, info in pairs(ns.db.alts) do
+            if type(info) == "table" then
+                local srcPool = info.realmName or info.realmPool
+                if type(srcPool) == "string" and srcPool ~= "" then
+                    local norm = Compat.RealmPool(srcPool)
+                    if norm and norm ~= "" then
+                        info.realmPool = norm
+                    end
+                end
+            end
+        end
+    end
+
+    local scopedKeys = {
+        "watchlist", "socialMeta", "friendPresence", "recentCompanions",
+        "observedAlts", "locationShareAllow", "chatHistory", "chatRooms", "addonPeers",
+    }
+    for _, field in ipairs(scopedKeys) do
+        local root = ns.db[field]
+        if type(root) == "table" then
+            local toMove = nil
+            for scopeKey, sub in pairs(root) do
+                if type(scopeKey) == "string" then
+                    local pool, rest = scopeKey:match("^([^:]+):(.+)$")
+                    if pool and rest then
+                        local normPool = Compat.RealmPool(pool)
+                        if normPool and normPool ~= "" and normPool ~= pool then
+                            local targetKey = normPool .. ":" .. rest
+                            if not toMove then toMove = {} end
+                            toMove[scopeKey] = { target = targetKey, data = sub }
+                        end
+                    end
+                end
+            end
+            if toMove then
+                for oldKey, item in pairs(toMove) do
+                    if type(item.data) == "table" then
+                        if type(root[item.target]) ~= "table" then
+                            root[item.target] = item.data
+                        else
+                            MergeMissingEntries(root[item.target], item.data)
+                        end
+                    end
+                    root[oldKey] = nil
+                end
+            end
+        end
+    end
+
+    if type(ns.db.clan) == "table" then
+        local clanToMove = nil
+        for scopeKey, bucket in pairs(ns.db.clan) do
+            if type(bucket) == "table" then
+                CompactOrPruneClanBucket(bucket, scopeKey, nowTs)
+            end
+            if type(scopeKey) == "string" then
+                local pool, rest = scopeKey:match("^([^:]+):(.+)$")
+                if pool and rest then
+                    local normPool = Compat.RealmPool(pool)
+                    if normPool and normPool ~= "" and normPool ~= pool then
+                        local targetKey = normPool .. ":" .. rest
+                        if not clanToMove then clanToMove = {} end
+                        clanToMove[scopeKey] = { target = targetKey, data = bucket }
+                    end
+                end
+            end
+        end
+        if clanToMove then
+            for oldKey, item in pairs(clanToMove) do
+                if type(item.data) == "table" then
+                    local dst = ns.db.clan[item.target]
+                    if type(dst) ~= "table" then
+                        ns.db.clan[item.target] = item.data
+                    else
+                        MergeMissingEntries(dst.events, item.data.events)
+                        if type(dst.diplomacy) == "table" and type(item.data.diplomacy) == "table" then
+                            MergeMissingEntries(dst.diplomacy.guilds, item.data.diplomacy.guilds)
+                        end
+                    end
+                end
+                ns.db.clan[oldKey] = nil
+            end
+        end
+    end
 end

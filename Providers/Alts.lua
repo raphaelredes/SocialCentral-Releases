@@ -88,6 +88,246 @@ local SECONDARY_PROF_PATTERNS = {
     "fishing", "pescaria", "pesca",
 }
 
+local CLASS_REAGENT_ITEMS = {
+    WARLOCK = { [6265] = "Soul Shards" },
+    SHAMAN  = { [17030] = "Ankh", [17058] = "Fish Oil", [17057] = "Shiny Fish Scales" },
+    MAGE    = { [17031] = "Rune of Teleportation", [17032] = "Rune of Portals", [17020] = "Arcane Powder" },
+    PRIEST  = { [17029] = "Sacred Candle", [17028] = "Holy Candle" },
+    DRUID   = { [17026] = "Wild Thornroot", [17038] = "Ironwood Seed" },
+    PALADIN = { [17033] = "Symbol of Divinity", [21177] = "Symbol of Kings" },
+    ROGUE   = { [5140] = "Flash Powder", [5530] = "Blinding Powder", [5060] = "Thieves' Tools" },
+}
+
+local catalogParsedCache = {}
+local catalogCacheCount = 0
+
+local function ExtractLinkDisplayName(link)
+    if type(link) ~= "string" then return "" end
+    return link:match("%[(.-)%]") or ""
+end
+
+local function CompactItemLinkStr(link)
+    if type(link) ~= "string" or link == "" then return nil end
+    local raw = link:match("|H(item:[^|]+)|h") or link:match("^(item:[^|]+)")
+    if not raw then return nil end
+    local f = { strsplit(":", raw) }
+    local hasMod = false
+    for idx = 3, 8 do
+        if f[idx] and f[idx] ~= "" and f[idx] ~= "0" then
+            hasMod = true
+            break
+        end
+    end
+    if not hasMod then
+        local modsMask = f[12]
+        local numBonus = tonumber(f[14]) or 0
+        if (modsMask and modsMask ~= "" and modsMask ~= "0") or numBonus > 0 then
+            hasMod = true
+        end
+    end
+    if not hasMod then
+        return nil
+    end
+    while #f > 2 and (f[#f] == "" or f[#f]:find("^Player%-")) do
+        f[#f] = nil
+    end
+    return table.concat(f, ":")
+end
+
+local function CatalogUpsert(itemID, link, name, icon, quality)
+    local id = tonumber(itemID)
+    if not id or id <= 0 then
+        if type(link) == "string" then
+            id = tonumber(link:match("item:(%d+)"))
+        end
+    end
+    if not id or id <= 0 then return nil end
+
+    local catalog = ns.db and ns.db.itemCatalog
+    local existingRaw = catalog and catalog[id]
+    local cName, cIcon, cQual, cClass, cSub, cEquip
+    if type(existingRaw) == "string" and existingRaw ~= "" then
+        local p1, p2, p3, p4, p5, p6 = strsplit("\t", existingRaw)
+        cName = p1 ~= "" and p1 or nil
+        cIcon = tonumber(p2) or (p2 ~= "" and p2 or nil)
+        cQual = tonumber(p3)
+        cClass = tonumber(p4)
+        cSub = tonumber(p5)
+        cEquip = (p6 and p6 ~= "") and p6 or nil
+    end
+
+    local resolvedName = (type(name) == "string" and name ~= "") and name or ExtractLinkDisplayName(link)
+    if (not resolvedName or resolvedName == "") and not cName and C_Item and C_Item.GetItemNameByID then
+        local okN, iName = pcall(C_Item.GetItemNameByID, id)
+        local cleanN = okN and Safe.String(iName) or nil
+        if cleanN and cleanN ~= "" then resolvedName = cleanN end
+    end
+    local finalName = resolvedName or cName or ""
+    finalName = finalName:gsub("[\t\r\n]+", " ")
+
+    local needInstant = (cClass == nil) or (not icon and not cIcon)
+    local instIcon, classID, subClassID, equipLoc = cIcon, cClass, cSub, cEquip
+    if needInstant and GetItemInfoInstant then
+        local okI, _, _, _, eqLoc, fIcon, cId, sId = pcall(GetItemInfoInstant, link or id)
+        if okI then
+            equipLoc = Safe.String(eqLoc) or equipLoc
+            instIcon = Safe.Value(fIcon) or instIcon
+            classID = Safe.Number(cId) or classID
+            subClassID = Safe.Number(sId) or subClassID
+        end
+    end
+
+    local finalIcon = icon or instIcon or cIcon
+    if not finalIcon and C_Item and C_Item.GetItemIconByID then
+        local okIc, fID = pcall(C_Item.GetItemIconByID, id)
+        if okIc and Safe.Value(fID) then finalIcon = Safe.Value(fID) end
+    end
+
+    local finalQual = quality or cQual
+    if not finalQual and C_Item and C_Item.GetItemQualityByID then
+        local okQ, qVal = pcall(C_Item.GetItemQualityByID, id)
+        if okQ and Safe.Number(qVal) then finalQual = Safe.Number(qVal) end
+    end
+    finalQual = finalQual or 1
+
+    if catalog and (not existingRaw or (finalName ~= "" and not cName) or (cClass == nil and classID ~= nil)) then
+        local packed = table.concat({
+            finalName,
+            tostring(finalIcon or ""),
+            tostring(finalQual),
+            tostring(classID or ""),
+            tostring(subClassID or ""),
+            tostring(equipLoc or ""),
+        }, "\t")
+        if packed ~= existingRaw then
+            catalog[id] = packed
+            catalogParsedCache[id] = nil
+        end
+    end
+    return id, finalName, finalIcon, finalQual, classID, subClassID, equipLoc
+end
+
+local function CatalogLookup(itemID)
+    local id = tonumber(itemID)
+    if not id or id <= 0 then return nil end
+    local cached = catalogParsedCache[id]
+    if cached then
+        return cached[1], cached[2], cached[3], cached[4], cached[5], cached[6]
+    end
+    local catalog = ns.db and ns.db.itemCatalog
+    local raw = catalog and catalog[id]
+    if type(raw) ~= "string" or raw == "" then
+        return nil
+    end
+    local p1, p2, p3, p4, p5, p6 = strsplit("\t", raw)
+    local name = (p1 and p1 ~= "") and p1 or nil
+    local icon = tonumber(p2) or ((p2 and p2 ~= "") and p2 or nil)
+    local qual = tonumber(p3)
+    local cls = tonumber(p4)
+    local sub = tonumber(p5)
+    local eq = (p6 and p6 ~= "") and p6 or nil
+    if catalogCacheCount >= 1200 then
+        wipe(catalogParsedCache)
+        catalogCacheCount = 0
+    end
+    catalogParsedCache[id] = { name, icon, qual, cls, sub, eq }
+    catalogCacheCount = catalogCacheCount + 1
+    return name, icon, qual, cls, sub, eq
+end
+
+local function BuildPackedSlotString(itemID, count, itemStr)
+    local cnt = math.max(1, tonumber(count) or 1)
+    if itemStr and itemStr ~= "" then
+        return string.format("%d\t%d\t%s", itemID, cnt, itemStr:gsub("[\r\n]", ""))
+    elseif cnt > 1 then
+        return string.format("%d\t%d", itemID, cnt)
+    end
+    return tostring(itemID)
+end
+
+local function PackRawItem(raw)
+    if type(raw) == "string" then
+        return raw
+    end
+    if type(raw) ~= "table" then return nil end
+    local id = tonumber(raw.itemID)
+    if not id or id <= 0 then
+        id = type(raw.link) == "string" and tonumber(raw.link:match("item:(%d+)")) or nil
+    end
+    if not id or id <= 0 then
+        return raw
+    end
+    CatalogUpsert(id, raw.link, raw.name, raw.icon, raw.quality)
+    local customStr = CompactItemLinkStr(raw.link)
+    return BuildPackedSlotString(id, raw.count or 1, customStr)
+end
+
+local function PackContainerList(rawItems)
+    if type(rawItems) ~= "table" then return {}, "" end
+    local packed = {}
+    local mergedPlainIdx = {}
+    for _, raw in ipairs(rawItems) do
+        if type(raw) == "string" then
+            local p1, p2, p3 = strsplit("\t", raw)
+            local id = tonumber(p1)
+            local cnt = math.max(1, tonumber(p2) or 1)
+            local itemStr = (p3 and p3 ~= "") and p3 or nil
+            if id and not itemStr then
+                local existingIdx = mergedPlainIdx[id]
+                if existingIdx then
+                    local ep1, ep2 = strsplit("\t", packed[existingIdx])
+                    packed[existingIdx] = BuildPackedSlotString(id, (tonumber(ep2) or 1) + cnt, nil)
+                else
+                    local idx = #packed + 1
+                    packed[idx] = BuildPackedSlotString(id, cnt, nil)
+                    mergedPlainIdx[id] = idx
+                end
+            else
+                packed[#packed + 1] = raw
+            end
+        elseif type(raw) == "table" then
+            local id = tonumber(raw.itemID) or (type(raw.link) == "string" and tonumber(raw.link:match("item:(%d+)")))
+            if id and id > 0 then
+                CatalogUpsert(id, raw.link, raw.name, raw.icon, raw.quality)
+                local customStr = CompactItemLinkStr(raw.link)
+                local cnt = math.max(1, tonumber(raw.count) or 1)
+                if not customStr then
+                    local existingIdx = mergedPlainIdx[id]
+                    if existingIdx then
+                        local _, ep2 = strsplit("\t", packed[existingIdx])
+                        packed[existingIdx] = BuildPackedSlotString(id, (tonumber(ep2) or 1) + cnt, nil)
+                    else
+                        local idx = #packed + 1
+                        packed[idx] = BuildPackedSlotString(id, cnt, nil)
+                        mergedPlainIdx[id] = idx
+                    end
+                else
+                    packed[#packed + 1] = BuildPackedSlotString(id, cnt, customStr)
+                end
+            else
+                packed[#packed + 1] = raw
+            end
+        end
+    end
+    return packed, table.concat(packed, "\n")
+end
+
+local function BuildEquipDigest(equipTbl)
+    if type(equipTbl) ~= "table" then return "" end
+    local parts = {}
+    for slotId = 1, EQUIP_SLOT_COUNT do
+        local v = equipTbl[slotId]
+        if type(v) == "string" then
+            parts[slotId] = v
+        elseif type(v) == "table" then
+            parts[slotId] = tostring(PackRawItem(v) or "")
+        else
+            parts[slotId] = ""
+        end
+    end
+    return table.concat(parts, "\n")
+end
+
 local function IsSecondarySkillName(skillName)
     if type(skillName) ~= "string" then return false end
     local low = skillName:lower()
@@ -233,6 +473,10 @@ local function ReadEquipSlot(slotId)
     local quality = Safe.Number(Safe.Call(GetInventoryItemQuality, "player", slotId))
     if itemID or link then
         icon, quality, link = ResolveItemVisuals(link or itemID, icon, quality, link)
+        local id = CatalogUpsert(itemID, link, nil, icon, quality)
+        if id then
+            return BuildPackedSlotString(id, 1, CompactItemLinkStr(link))
+        end
         return {
             itemID = itemID,
             link = link,
@@ -259,21 +503,26 @@ local function SnapshotEquipmentDelta(prevEquip, dirtySlots, isFull, ownerKey)
         local equip = SnapshotEquipment()
         Alts._equipCacheValid = true
         Alts._equipCacheOwner = ownerKey
-        return equip, true
+        local changed = true
+        if type(prevEquip) == "table" and BuildEquipDigest(equip) == BuildEquipDigest(prevEquip) then
+            changed = false
+        end
+        return equip, changed
     end
     if type(dirtySlots) ~= "table" or next(dirtySlots) == nil then
         return prevEquip, false
     end
     local out = {}
     for k, v in pairs(prevEquip) do
-        out[k] = v
+        out[k] = PackRawItem(v) or v
     end
     for slotId in pairs(dirtySlots) do
         if type(slotId) == "number" and slotId >= 1 and slotId <= EQUIP_SLOT_COUNT then
             out[slotId] = ReadEquipSlot(slotId)
         end
     end
-    return out, true
+    local changed = BuildEquipDigest(out) ~= BuildEquipDigest(prevEquip)
+    return out, changed
 end
 
 local function SnapshotContainerRange(bagList)
@@ -330,15 +579,18 @@ local function SnapshotContainerRange(bagList)
                 if icon or link or itemID then
                     icon, quality, link = ResolveItemVisuals(link or itemID, icon, quality, link)
                     if #items < MAX_CONTAINER_ITEMS then
-                        items[#items + 1] = {
-                            bag = bagId,
-                            slot = slotId,
-                            itemID = itemID,
-                            link = link,
-                            icon = icon,
-                            count = (count and count > 1) and count or 1,
-                            quality = quality or 1,
-                        }
+                        local id = CatalogUpsert(itemID, link, nil, icon, quality)
+                        if id then
+                            items[#items + 1] = BuildPackedSlotString(id, count or 1, CompactItemLinkStr(link))
+                        else
+                            items[#items + 1] = {
+                                itemID = itemID,
+                                link = link,
+                                icon = icon,
+                                count = (count and count > 1) and count or 1,
+                                quality = quality or 1,
+                            }
+                        end
                     end
                 else
                     freeSlots = freeSlots + 1
@@ -354,10 +606,10 @@ local function SnapshotBagsIncremental(prevAlt, dirtyBags, isFull, ownerKey)
     Alts._bagContainerCache = Alts._bagContainerCache or {}
     local cacheValid = (not isFull) and Alts._bagCacheValid and (Alts._bagCacheOwner == ownerKey)
     if cacheValid and type(prevAlt) == "table" and type(prevAlt.bags) == "table" and type(dirtyBags) == "table" and next(dirtyBags) == nil then
-        return prevAlt.bags, prevAlt.bagFree or 0, prevAlt.bagTotal or 0, false
+        return prevAlt.bags, prevAlt.bagFree or 0, prevAlt.bagTotal or 0, false, prevAlt._bagsSig
     end
 
-    local bags = {}
+    local rawBags = {}
     local bagFree = 0
     local bagTotal = 0
     for _, bagId in ipairs(BAG_IDS) do
@@ -375,14 +627,20 @@ local function SnapshotBagsIncremental(prevAlt, dirtyBags, isFull, ownerKey)
         bagTotal = bagTotal + (bagCache.total or 0)
         if type(bagCache.items) == "table" then
             for i = 1, #bagCache.items do
-                if #bags >= MAX_CONTAINER_ITEMS then break end
-                bags[#bags + 1] = bagCache.items[i]
+                if #rawBags >= MAX_CONTAINER_ITEMS then break end
+                rawBags[#rawBags + 1] = bagCache.items[i]
             end
         end
     end
+    local bags, bagsSig = PackContainerList(rawBags)
     Alts._bagCacheValid = true
     Alts._bagCacheOwner = ownerKey
-    return bags, bagFree, bagTotal, true
+    local prevSig = (type(prevAlt) == "table") and (prevAlt._bagsSig or (type(prevAlt.bags) == "table" and select(2, PackContainerList(prevAlt.bags)))) or nil
+    local changed = (bagsSig ~= prevSig) or (bagFree ~= (prevAlt and prevAlt.bagFree)) or (bagTotal ~= (prevAlt and prevAlt.bagTotal))
+    if not changed and type(prevAlt) == "table" and type(prevAlt.bags) == "table" and type(prevAlt.bags[1]) ~= "table" then
+        return prevAlt.bags, bagFree, bagTotal, false, bagsSig
+    end
+    return bags, bagFree, bagTotal, true, bagsSig
 end
 
 function Alts:GetHearthstoneStatus(altData)
@@ -425,10 +683,16 @@ function Alts:GetArmoryURL(altEntry)
     slug = slug:gsub("[^%w%-]", function(ch)
         return string.format("%%%02X", string.byte(ch))
     end)
-    -- Region and ruleset come from the character's realm pool (e.g. "camwowus1realmpvp").
-    local pool = tostring(altEntry.realmPool or Compat.RealmPool(Compat.Realm()) or ""):lower()
+    -- Region and ruleset come from the character's realm pool / world type (e.g. "camwowus1realmpvp").
+    local pool = tostring(altEntry.realmPool or altEntry.realmName or Compat.RealmPool(Compat.Realm()) or ""):lower()
     local region = pool:match("^camwow(%a%a)%d*") or "us"
-    local ruleset = pool:match("realm(%a+)$") or "pvp"
+    local wt = type(altEntry.worldType) == "string" and altEntry.worldType:lower() or ""
+    local ruleset = ((wt:find("pve", 1, true) or wt:find("normal", 1, true)) and "pve")
+        or (wt:find("pvp", 1, true) and "pvp")
+        or ((pool:find("pve", 1, true) or pool:find("normal", 1, true)) and "pve")
+        or (pool:find("pvp", 1, true) and "pvp")
+        or pool:match("realm(%a+)$")
+        or "pvp"
     if region ~= "us" and region ~= "eu" then region = "us" end
     return "https://armorywowforever.com/c/forever/" .. region .. "/" .. ruleset .. "/" .. slug
 end
@@ -527,11 +791,13 @@ function Alts:Snapshot(includeBank, force)
         end
         local bItems, bFree, bTot = SnapshotContainerRange(bankBags)
         if bTot > 0 then
-            bank = bItems
+            local bankPacked, bankSig = PackContainerList(bItems)
+            local prevBankSig = (type(prev) == "table" and type(prev.bank) == "table") and select(2, PackContainerList(prev.bank)) or nil
+            bankChanged = (bankSig ~= prevBankSig) or (bFree ~= bankFree) or (bTot ~= bankTotal)
+            bank = bankPacked
             bankFree = bFree
             bankTotal = bTot
             bankUpdatedAt = time()
-            bankChanged = true
         end
     end
 
@@ -572,12 +838,20 @@ function Alts:Snapshot(includeBank, force)
     if itemsChanged then
         nextItemSeq = nextItemSeq + 1
     end
+    local wasResting = (IsResting and Safe.Value(Safe.Call(IsResting)) == true) or false
+    local realmNorm = Compat.Realm()
+    local realmRaw = GetRealmName and Safe.String(Safe.Call(GetRealmName)) or nil
+    local worldType = Compat.DetectWorldType and Compat.DetectWorldType(realmNorm, realmRaw) or nil
+    local realmPool = Compat.RealmPool(realmNorm)
     ns.db.alts[key] = {
         name = name,
         firstName = resolved and resolved.firstName or name,
         surname = resolved and resolved.surname or nil,
         fullName = resolved and resolved.fullName or name,
-        realmPool = Compat.RealmPool(Compat.Realm()),
+        realmName = realmNorm,
+        realmRaw = realmRaw,
+        worldType = worldType,
+        realmPool = realmPool,
         faction = faction,
         className = Safe.String(className) or (type(prev) == "table" and prev.className or nil),
         classFile = Safe.String(classFile),
@@ -590,11 +864,13 @@ function Alts:Snapshot(includeBank, force)
         xp = xp,
         xpMax = xpMax,
         rested = rested,
+        wasResting = wasResting,
         money = money,
         zone = currentZone or "",
         bindLocation = bindLocation or "",
         hearthReadyAt = hearthReadyAt,
         professions = professions,
+        craftCooldowns = type(prev) == "table" and prev.craftCooldowns or nil,
         lockouts = lockouts,
         guild = guild,
         equipment = equipment,
@@ -608,9 +884,15 @@ function Alts:Snapshot(includeBank, force)
         hasMail = hasNewMail,
         mailSenders = mailSenders,
         mailSince = mailSince,
+        firstSeen = (type(prev) == "table" and prev.firstSeen) or time(),
         _itemSeq = nextItemSeq,
         lastActive = time(),
     }
+
+    if self._dupAltsCleanedForKey ~= key and ns.Store and ns.Store.CleanupDuplicateSameWorldAlts then
+        self._dupAltsCleanedForKey = key
+        ns.Store:CleanupDuplicateSameWorldAlts(key, myGuid, resolved and resolved.fullName or name, realmPool, worldType)
+    end
 
     if resolved and resolved.surname and resolved.fullName and Compat.CacheForeverFullName then
         Compat.CacheForeverFullName(myGuid, resolved.fullName, resolved.firstName)
@@ -642,6 +924,9 @@ function Alts:UpdateScalars()
     if xpMax and xpMax > 0 then rec.xpMax = xpMax end
     local rested = Safe.Number(Safe.Call(GetXPExhaustion))
     if rested ~= nil then rec.rested = rested end
+    if IsResting then
+        rec.wasResting = (Safe.Value(Safe.Call(IsResting)) == true) or false
+    end
     local money = Safe.Number(Safe.Call(GetMoney))
     if money and money >= 0 then rec.money = money end
     local currentZone = Compat.CurrentZoneName()
@@ -653,6 +938,21 @@ function Alts:UpdateScalars()
         rec.hasMail = hasNew
         if hasNew then
             rec.mailSince = rec.mailSince or time()
+            if (not rec.mailSenders or #rec.mailSenders == 0) and GetLatestThreeSenders then
+                local okM, s1, s2, s3 = pcall(GetLatestThreeSenders)
+                if okM then
+                    local list = {}
+                    for _, rawS in ipairs({ s1, s2, s3 }) do
+                        local cleanS = Safe.String(rawS)
+                        if cleanS and cleanS ~= "" then
+                            list[#list + 1] = cleanS
+                        end
+                    end
+                    if #list > 0 then
+                        rec.mailSenders = list
+                    end
+                end
+            end
         else
             rec.mailSince = nil
             rec.mailSenders = nil
@@ -691,15 +991,377 @@ function Alts:QueueSnapshot(includeBank, delay)
     end
 end
 
-local function ExtractItemID(item)
-    if type(item) ~= "table" then return nil end
-    local id = tonumber(item.itemID)
-    if id and id > 0 then return id end
-    if type(item.link) == "string" then
-        id = tonumber(item.link:match("item:(%d+)"))
-        if id and id > 0 then return id end
+local function BuildDisplayHyperlink(itemID, itemStr, name, quality)
+    local rawStr = (type(itemStr) == "string" and itemStr ~= "") and itemStr or (itemID and ("item:" .. tostring(itemID)))
+    if not rawStr then return nil end
+    local q = tonumber(quality) or 1
+    local qc = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
+    local hex = (qc and qc.hex) or "|cffffffff"
+    local disp = (type(name) == "string" and name ~= "") and name or ("Item #" .. tostring(itemID or "?"))
+    return hex .. "|H" .. rawStr .. "|h[" .. disp .. "]|h|r"
+end
+
+function Alts:ParseItemRaw(entry)
+    if type(entry) == "string" then
+        local p1, p2, p3 = strsplit("\t", entry)
+        local id = tonumber(p1)
+        if not id or id <= 0 then return nil end
+        local cnt = math.max(1, tonumber(p2) or 1)
+        local itemStr = (p3 and p3 ~= "") and p3 or nil
+        local name, icon, quality, classID, subClassID, equipLoc = CatalogLookup(id)
+        if not name or not icon or classID == nil then
+            local _, cName, cIcon, cQual, cCls, cSub, cEq = CatalogUpsert(id, itemStr, name, icon, quality)
+            name = name or cName
+            icon = icon or cIcon
+            quality = quality or cQual
+            classID = classID or cCls
+            subClassID = subClassID or cSub
+            equipLoc = equipLoc or cEq
+        end
+        return id, cnt, itemStr, name, icon, quality or 1, classID, subClassID, equipLoc
+    elseif type(entry) == "table" then
+        local id = tonumber(entry.itemID)
+        if not id or id <= 0 then
+            id = type(entry.link) == "string" and tonumber(entry.link:match("item:(%d+)")) or nil
+        end
+        local cnt = math.max(1, tonumber(entry.count) or 1)
+        local name = (type(entry.name) == "string" and entry.name ~= "") and entry.name or ExtractLinkDisplayName(entry.link)
+        local icon = entry.icon
+        local quality = entry.quality
+        local classID, subClassID, equipLoc
+        if id and id > 0 then
+            local cName, cIcon, cQual, cCls, cSub, cEq = CatalogLookup(id)
+            if not cName or cCls == nil then
+                local _, uName, uIcon, uQual, uCls, uSub, uEq = CatalogUpsert(id, entry.link, name, icon, quality)
+                cName, cIcon, cQual, cCls, cSub, cEq = uName, uIcon, uQual, uCls, uSub, uEq
+            end
+            name = (name ~= "" and name) or cName
+            icon = icon or cIcon
+            quality = quality or cQual
+            classID, subClassID, equipLoc = cCls, cSub, cEq
+        end
+        return id, cnt, entry.link, name, icon, quality or 1, classID, subClassID, equipLoc
     end
     return nil
+end
+
+function Alts:UnpackItem(entry, locLabel, slotId)
+    local id, cnt, rawLink, name, icon, quality, classID, subClassID, equipLoc = self:ParseItemRaw(entry)
+    if not id and type(entry) ~= "table" then return nil end
+    local fullLink = (type(rawLink) == "string" and rawLink:find("|Hitem:", 1, true))
+        and rawLink
+        or BuildDisplayHyperlink(id, rawLink, name, quality)
+    return {
+        itemID = id,
+        link = fullLink,
+        name = name,
+        icon = icon,
+        quality = quality or 1,
+        count = cnt or 1,
+        classID = classID,
+        subClassID = subClassID,
+        equipLoc = equipLoc,
+        _isEquip = slotId ~= nil or nil,
+        _slotId = slotId,
+        _locLabel = locLabel,
+    }
+end
+
+local function MatchItemFilters(itemCat, minQuality, quality, classID, subClassID, equipLoc)
+    if minQuality and minQuality > 0 and (quality or 1) < minQuality then
+        return false
+    end
+    if not itemCat or itemCat == "all" then
+        return true
+    end
+    local c = tonumber(classID)
+    local eq = (type(equipLoc) == "string" and equipLoc ~= "")
+    if itemCat == "equip" then
+        return eq or c == 2 or c == 4
+    elseif itemCat == "consumable" then
+        return c == 0
+    elseif itemCat == "trade" then
+        return c == 7 or c == 9
+    elseif itemCat == "other" then
+        return not (eq or c == 2 or c == 4 or c == 0 or c == 7 or c == 9)
+    end
+    return true
+end
+
+function Alts:GetEstimatedRested(altData)
+    if type(altData) ~= "table" then
+        return 0, false, 0, false, 0
+    end
+    local lvl = tonumber(altData.level) or 0
+    if lvl >= 60 then
+        return 0, false, 0, false, 0
+    end
+    local curKey = CurrentAltKey()
+    local xpMax = math.max(1, tonumber(altData.xpMax) or 1)
+    if altData.key == curKey then
+        local liveRested = Safe.Number(Safe.Call(GetXPExhaustion))
+        local val = (liveRested ~= nil) and liveRested or (tonumber(altData.rested) or 0)
+        local pct = math.min(150, math.floor((val / xpMax) * 100 + 0.5))
+        local restingNow = (IsResting and Safe.Value(Safe.Call(IsResting)) == true) or (altData.wasResting == true)
+        return pct, false, 0, restingNow, pct
+    end
+    local baseRested = math.max(0, tonumber(altData.rested) or 0)
+    local recordedPct = math.min(150, math.floor((baseRested / xpMax) * 100 + 0.5))
+    local lastTs = tonumber(altData.lastActive) or time()
+    local elapsed = math.max(0, time() - lastTs)
+    local wasResting = (altData.wasResting == true)
+    -- WoW Classic/Forever Rested XP accumulation: 5% level per 8h in Inn/City, 4x slower outdoors.
+    local ratePerSec = wasResting and ((xpMax * 0.05) / 28800) or ((xpMax * 0.05) / 115200)
+    local maxRested = xpMax * 1.5
+    local estRested = math.min(maxRested, baseRested + (elapsed * ratePerSec))
+    local estPct = math.min(150, math.floor((estRested / xpMax) * 100 + 0.5))
+    local remRested = math.max(0, maxRested - estRested)
+    local etaSec = (remRested > 1 and ratePerSec > 0) and math.ceil(remRested / ratePerSec) or 0
+    return estPct, (elapsed >= 1800 and estPct > recordedPct), etaSec, wasResting, recordedPct
+end
+
+function Alts:GetCraftCooldowns(altData)
+    if type(altData) ~= "table" or type(altData.craftCooldowns) ~= "table" then
+        return {}
+    end
+    local now = time()
+    local out = {}
+    for _, cd in ipairs(altData.craftCooldowns) do
+        if type(cd) == "table" and cd.name and cd.name ~= "" then
+            local readyAt = tonumber(cd.readyAt) or 0
+            local rem = math.max(0, readyAt - now)
+            if (now - readyAt) <= (7 * 86400) then
+                out[#out + 1] = {
+                    name = cd.name,
+                    prof = cd.prof or "",
+                    readyAt = readyAt,
+                    remaining = rem,
+                    isReady = rem == 0,
+                }
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.isReady ~= b.isReady then return a.isReady end
+        return (a.remaining or 0) < (b.remaining or 0)
+    end)
+    return out
+end
+
+function Alts:HasReadyCraftCooldown(altData)
+    if type(altData) ~= "table" or type(altData.craftCooldowns) ~= "table" then
+        return false
+    end
+    local now = time()
+    for _, cd in ipairs(altData.craftCooldowns) do
+        if type(cd) == "table" and (tonumber(cd.readyAt) or 0) > 0 then
+            local readyAt = tonumber(cd.readyAt)
+            if readyAt <= now and (now - readyAt) <= (7 * 86400) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function Alts:ScanTradeSkillCooldowns()
+    if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then return end
+    local key = CurrentAltKey()
+    local rec = key and ns.db and ns.db.alts and ns.db.alts[key]
+    if type(rec) ~= "table" then return end
+
+    local now = time()
+    local profName
+    local foundMap = {}
+    local sharedBuckets = {}
+
+    if C_TradeSkillUI and C_TradeSkillUI.GetAllRecipeIDs and C_TradeSkillUI.GetRecipeCooldown then
+        if C_TradeSkillUI.GetChildProfessionInfo then
+            local okP, pInfo = pcall(C_TradeSkillUI.GetChildProfessionInfo)
+            if okP and type(pInfo) == "table" then
+                profName = Safe.String(pInfo.professionName)
+            end
+        end
+        if not profName and GetTradeSkillLine then
+            profName = Safe.String(Safe.Call(GetTradeSkillLine))
+        end
+        local okIds, ids = pcall(C_TradeSkillUI.GetAllRecipeIDs)
+        if okIds and type(ids) == "table" then
+            for i = 1, math.min(#ids, 600) do
+                local rid = ids[i]
+                local okCd, rem = pcall(C_TradeSkillUI.GetRecipeCooldown, rid)
+                rem = okCd and Safe.Number(rem) or nil
+                if rem and rem > 60 then
+                    local okInfo, rInfo = C_TradeSkillUI.GetRecipeInfo and pcall(C_TradeSkillUI.GetRecipeInfo, rid)
+                    local rName = (okInfo and type(rInfo) == "table") and Safe.String(rInfo.name) or nil
+                    if rName and rName ~= "" then
+                        local readyAt = now + math.floor(rem + 0.5)
+                        local bucket = (profName or "Trade") .. ":" .. tostring(math.floor(readyAt / 15))
+                        sharedBuckets[bucket] = (sharedBuckets[bucket] or 0) + 1
+                        if not foundMap[bucket] then
+                            foundMap[bucket] = { name = rName, prof = profName or "", readyAt = readyAt, count = 1 }
+                        else
+                            foundMap[bucket].count = sharedBuckets[bucket]
+                            local low = rName:lower()
+                            if low:find("transmut", 1, true) then
+                                foundMap[bucket].isTransmute = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if next(foundMap) == nil and GetNumTradeSkills and GetTradeSkillInfo and GetTradeSkillCooldown then
+        if not profName and GetTradeSkillLine then
+            profName = Safe.String(Safe.Call(GetTradeSkillLine))
+        end
+        local numSkills = Safe.Number(Safe.Call(GetNumTradeSkills)) or 0
+        for i = 1, math.min(numSkills, 600) do
+            local okI, sName, sType = pcall(GetTradeSkillInfo, i)
+            if okI and sType ~= "header" then
+                sName = Safe.String(sName)
+                local okCd, rem = pcall(GetTradeSkillCooldown, i)
+                rem = okCd and Safe.Number(rem) or nil
+                if sName and sName ~= "" and rem and rem > 60 then
+                    local readyAt = now + math.floor(rem + 0.5)
+                    local bucket = (profName or "Trade") .. ":" .. tostring(math.floor(readyAt / 15))
+                    sharedBuckets[bucket] = (sharedBuckets[bucket] or 0) + 1
+                    if not foundMap[bucket] then
+                        foundMap[bucket] = { name = sName, prof = profName or "", readyAt = readyAt, count = 1 }
+                    else
+                        foundMap[bucket].count = sharedBuckets[bucket]
+                        if sName:lower():find("transmut", 1, true) then
+                            foundMap[bucket].isTransmute = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if not profName or profName == "" or profName == "UNKNOWN" then
+        return
+    end
+
+    local nextList = {}
+    if type(rec.craftCooldowns) == "table" then
+        for _, oldCd in ipairs(rec.craftCooldowns) do
+            if type(oldCd) == "table" and oldCd.prof ~= profName and (now - (tonumber(oldCd.readyAt) or 0)) <= (7 * 86400) then
+                nextList[#nextList + 1] = oldCd
+            end
+        end
+    end
+    for _, item in pairs(foundMap) do
+        local label = item.name
+        if (item.count or 1) > 1 and item.isTransmute then
+            label = L["Transmutation"]
+        elseif (item.count or 1) > 2 then
+            label = string.format("%s (+%d)", item.name, item.count - 1)
+        end
+        nextList[#nextList + 1] = {
+            name = label,
+            prof = profName,
+            readyAt = item.readyAt,
+        }
+    end
+    while #nextList > 12 do
+        table.remove(nextList)
+    end
+    rec.craftCooldowns = (#nextList > 0) and nextList or nil
+    if ns.UI and ns.UI.IsAltsVisible and ns.UI:IsAltsVisible() then
+        ns:Emit("ALTS_UPDATED")
+    end
+end
+
+function Alts:GetClassSuppliesSummary(altData)
+    if type(altData) ~= "table" or type(altData.bags) ~= "table" then
+        return nil
+    end
+    local cls = altData.classFile
+    local counts = {}
+    local labels = {}
+    local ammoTotal = 0
+    local wantMap = cls and CLASS_REAGENT_ITEMS[cls] or nil
+    if cls ~= "HUNTER" and not wantMap then
+        return nil
+    end
+    for _, entry in ipairs(altData.bags) do
+        local id, cnt, _, name, _, _, classID = self:ParseItemRaw(entry)
+        if id then
+            if cls == "HUNTER" and tonumber(classID) == 6 then
+                ammoTotal = ammoTotal + (cnt or 1)
+            elseif wantMap and wantMap[id] then
+                counts[id] = (counts[id] or 0) + (cnt or 1)
+                if not labels[id] then
+                    labels[id] = (name and name ~= "") and name or L[wantMap[id]]
+                end
+            end
+        end
+    end
+    local parts = {}
+    if ammoTotal > 0 then
+        parts[#parts + 1] = string.format("%s: %d", L["Ammo"], ammoTotal)
+    end
+    for id, qty in pairs(counts) do
+        parts[#parts + 1] = string.format("%s: %d", labels[id] or "?", qty)
+    end
+    if #parts == 0 then return nil end
+    table.sort(parts)
+    return table.concat(parts, " · ")
+end
+
+function Alts:CompactSavedAlts()
+    if not (ns.db and ns.db.alts) then return end
+    ns.db.itemCatalog = ns.db.itemCatalog or {}
+    local usedIds = {}
+    local anyChanged = false
+    for _, alt in pairs(ns.db.alts) do
+        if type(alt) == "table" then
+            if type(alt.equipment) == "table" then
+                for slotId, item in pairs(alt.equipment) do
+                    local packed = PackRawItem(item)
+                    if packed ~= item then
+                        alt.equipment[slotId] = packed
+                        anyChanged = true
+                    end
+                    local id = self:ParseItemRaw(alt.equipment[slotId])
+                    if id then usedIds[id] = true end
+                end
+            end
+            for _, field in ipairs({ "bags", "bank" }) do
+                local list = alt[field]
+                if type(list) == "table" then
+                    local needsPack = false
+                    for _, item in ipairs(list) do
+                        if type(item) == "table" then
+                            needsPack = true
+                            break
+                        end
+                    end
+                    if needsPack then
+                        local packed = PackContainerList(list)
+                        alt[field] = packed
+                        anyChanged = true
+                    end
+                    for _, item in ipairs(alt[field]) do
+                        local id = self:ParseItemRaw(item)
+                        if id then usedIds[id] = true end
+                    end
+                end
+            end
+        end
+    end
+    for cid in pairs(ns.db.itemCatalog) do
+        if not usedIds[cid] then
+            ns.db.itemCatalog[cid] = nil
+        end
+    end
+    if anyChanged then
+        self._itemIndexBuilt = false
+        self.itemIndex = nil
+    end
 end
 
 local function CompareAltOwners(a, b)
@@ -711,13 +1373,17 @@ local function CompareAltOwners(a, b)
     return (a.displayName or "") < (b.displayName or "")
 end
 
-function Alts:RebuildItemIndex(factionFilter)
+function Alts:RebuildItemIndex(factionFilter, worldScope)
     local index = {}
-    local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
+    local scopeArg = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(worldScope))
+        or ((worldScope == "all") and "all" or "pool")
+    local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList(scopeArg) or {}
     local curKey = CurrentAltKey()
     local wantFaction = factionFilter
     if wantFaction == nil then
         wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    elseif wantFaction == "ALL" then
+        wantFaction = nil
     end
     local buckets = self._altBuckets
     if type(buckets) ~= "table" or self._itemIndexBuilt == false then
@@ -733,37 +1399,51 @@ function Alts:RebuildItemIndex(factionFilter)
             liveKeys[alt.key] = true
             local displayName = alt.fullName or alt.name or alt.key or "?"
             local classFile = alt.classFile
-            local stamp = alt.lastActive or alt.updatedAt or 0
             local itemSeq = tonumber(alt._itemSeq) or 0
             local cached = buckets[alt.key]
             local perItem
 
-            if cached and cached.updatedAt == stamp and cached.itemSeq == itemSeq and cached.displayName == displayName and cached.classFile == classFile and (alt.key ~= curKey or itemSeq > 0) then
+            if cached
+                and cached.itemSeq == itemSeq
+                and cached.meta
+                and cached.meta.displayName == displayName
+                and cached.meta.classFile == classFile
+                and cached.meta.worldType == alt.worldType
+                and cached.meta.realmPool == alt.realmPool
+                and (alt.key ~= curKey or itemSeq > 0)
+            then
                 perItem = cached.perItem
             else
                 perItem = {}
+                local altMeta = {
+                    altKey = alt.key,
+                    displayName = displayName,
+                    classFile = classFile,
+                    faction = alt.faction,
+                    worldType = alt.worldType,
+                    realmName = alt.realmName,
+                    realmPool = alt.realmPool,
+                }
+                local metaMT = { __index = altMeta }
 
                 local function AddBucket(list, field)
                     if type(list) ~= "table" then return end
                     for _, item in pairs(list) do
-                        local itemID = ExtractItemID(item)
+                        local itemID, qty = Alts:ParseItemRaw(item)
                         if itemID then
                             local rec = perItem[itemID]
                             if not rec then
-                                rec = {
-                                    altKey = alt.key,
-                                    displayName = displayName,
-                                    classFile = classFile,
+                                rec = setmetatable({
                                     equipped = 0,
                                     bags = 0,
                                     bank = 0,
                                     total = 0,
-                                }
+                                }, metaMT)
                                 perItem[itemID] = rec
                             end
-                            local qty = math.max(1, tonumber(item.count) or 1)
-                            rec[field] = rec[field] + qty
-                            rec.total = rec.total + qty
+                            local nQty = math.max(1, tonumber(qty) or 1)
+                            rec[field] = rec[field] + nQty
+                            rec.total = rec.total + nQty
                         end
                     end
                 end
@@ -773,10 +1453,8 @@ function Alts:RebuildItemIndex(factionFilter)
                 AddBucket(alt.bank, "bank")
 
                 buckets[alt.key] = {
-                    updatedAt = stamp,
                     itemSeq = itemSeq,
-                    displayName = displayName,
-                    classFile = classFile,
+                    meta = altMeta,
                     perItem = perItem,
                 }
             end
@@ -804,26 +1482,36 @@ function Alts:RebuildItemIndex(factionFilter)
         end
     end
 
-    self._itemIndexFaction = wantFaction
+    self._itemIndexScope = scopeArg
+    self._itemIndexFaction = wantFaction or "ALL"
     self.itemIndex = index
     return index
 end
 
-function Alts:GetItemOwners(itemID, factionFilter)
+function Alts:GetItemOwners(itemID, factionFilter, worldScope)
     local numId = tonumber(itemID)
     if not numId or numId <= 0 then return nil end
+    local wantScope = worldScope
+    if wantScope == nil then
+        local rawSet = ns.db and ns.db.settings and ns.db.settings.altsWorldScope
+        wantScope = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(rawSet))
+            or ((rawSet == "all") and "all" or "pool")
+    elseif Compat.NormalizeWorldScope then
+        wantScope = Compat.NormalizeWorldScope(wantScope)
+    end
     local wantFaction = factionFilter
     if wantFaction == nil then
-        wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+        wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or "ALL"
     end
-    if not self.itemIndex or self._itemIndexFaction ~= wantFaction or self._itemIndexBuilt == false then
-        self:RebuildItemIndex(wantFaction)
+    local cacheFac = (wantFaction == "ALL" or not wantFaction) and "ALL" or wantFaction
+    if not self.itemIndex or self._itemIndexFaction ~= cacheFac or self._itemIndexScope ~= wantScope or self._itemIndexBuilt == false then
+        self:RebuildItemIndex(wantFaction, wantScope)
     end
     return self.itemIndex and self.itemIndex[numId]
 end
 
-function Alts:GetAccountItemTotal(itemID, factionFilter)
-    local owners = self:GetItemOwners(itemID, factionFilter)
+function Alts:GetAccountItemTotal(itemID, factionFilter, worldScope)
+    local owners = self:GetItemOwners(itemID, factionFilter, worldScope)
     if not owners then return 0 end
     local total = 0
     for _, o in ipairs(owners) do
@@ -843,14 +1531,16 @@ function Alts:ResolveItemName(item)
     if fromLink ~= "" then return fromLink end
     if type(item.name) == "string" and item.name ~= "" then return item.name end
     local id = tonumber(item.itemID)
-    if id and id > 0 and C_Item and C_Item.GetItemNameByID then
-        local ok, iName = pcall(C_Item.GetItemNameByID, id)
-        local clean = ok and Safe.String(iName) or nil
-        if clean and clean ~= "" then
-            return clean
-        end
-    end
     if id and id > 0 then
+        local cName = CatalogLookup(id)
+        if cName and cName ~= "" then return cName end
+        if C_Item and C_Item.GetItemNameByID then
+            local ok, iName = pcall(C_Item.GetItemNameByID, id)
+            local clean = ok and Safe.String(iName) or nil
+            if clean and clean ~= "" then
+                return clean
+            end
+        end
         return "Item #" .. tostring(id)
     end
     return ""
@@ -904,23 +1594,36 @@ function Alts:GetMailStatus(altData)
     return true, ageDays, remDays, altData.mailSenders
 end
 
---- Search items across all recorded characters on the current realm pool.
-function Alts:SearchAllItems(queryText, excludeAltKey, sourceFilter, factionFilter)
+--- Search items across recorded characters on the current realm pool (or all Forever worlds).
+function Alts:SearchAllItems(queryText, excludeAltKey, sourceFilter, factionFilter, worldScope, opts)
     local q = Compat.Trim and Compat.Trim(queryText or "") or tostring(queryText or "")
     local qLow = q:lower()
     local src = sourceFilter or "all"
-    local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
+    local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList(worldScope) or {}
     local curKey = CurrentAltKey()
     local wantFaction = factionFilter
     if wantFaction == nil then
         wantFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    elseif wantFaction == "ALL" then
+        wantFaction = nil
     end
+    local itemCat = type(opts) == "table" and opts.itemCat or "all"
+    local minQuality = type(opts) == "table" and tonumber(opts.minQuality) or 0
     local groups = {}
 
-    local function ItemMatches(item)
-        if qLow == "" then return true end
-        local iName = Alts:ResolveItemName(item):lower()
-        return iName:find(qLow, 1, true) ~= nil
+    local function EntryMatches(entry)
+        local id, cnt, rawLink, name, icon, quality, classID, subClassID, equipLoc = self:ParseItemRaw(entry)
+        if not id and type(entry) ~= "table" then return false end
+        if not MatchItemFilters(itemCat, minQuality, quality, classID, subClassID, equipLoc) then
+            return false
+        end
+        if qLow ~= "" then
+            local nm = (name and name ~= "") and name or (id and ("Item #" .. tostring(id)) or "")
+            if not nm:lower():find(qLow, 1, true) then
+                return false
+            end
+        end
+        return true, id, cnt, rawLink, name, icon, quality, classID, subClassID, equipLoc
     end
 
     for _, alt in ipairs(alts) do
@@ -930,31 +1633,41 @@ function Alts:SearchAllItems(queryText, excludeAltKey, sourceFilter, factionFilt
             if (src == "all" or src == "all_alts" or src == "equip") and type(alt.equipment) == "table" then
                 for slotId = 1, EQUIP_SLOT_COUNT do
                     local entry = alt.equipment[slotId]
-                    if entry and (entry.icon or entry.itemID or entry.link) and ItemMatches(entry) then
-                        matched[#matched + 1] = {
-                            itemID = entry.itemID,
-                            link = entry.link,
-                            name = entry.name,
-                            icon = entry.icon,
-                            quality = entry.quality,
-                            count = 1,
-                            _isEquip = true,
-                            _slotId = slotId,
-                            _locLabel = L["Equipped"],
-                        }
+                    if entry then
+                        local ok, id, _, rawLink, name, icon, quality, classID, subClassID, equipLoc = EntryMatches(entry)
+                        if ok then
+                            matched[#matched + 1] = {
+                                itemID = id,
+                                link = (type(rawLink) == "string" and rawLink:find("|Hitem:", 1, true)) and rawLink or BuildDisplayHyperlink(id, rawLink, name, quality),
+                                name = name,
+                                icon = icon,
+                                quality = quality or 1,
+                                count = 1,
+                                classID = classID,
+                                subClassID = subClassID,
+                                equipLoc = equipLoc,
+                                _isEquip = true,
+                                _slotId = slotId,
+                                _locLabel = L["Equipped"],
+                            }
+                        end
                     end
                 end
             end
             if (src == "all" or src == "all_alts" or src == "bags") and type(alt.bags) == "table" then
                 for _, entry in ipairs(alt.bags) do
-                    if ItemMatches(entry) then
+                    local ok, id, cnt, rawLink, name, icon, quality, classID, subClassID, equipLoc = EntryMatches(entry)
+                    if ok then
                         matched[#matched + 1] = {
-                            itemID = entry.itemID,
-                            link = entry.link,
-                            name = entry.name,
-                            icon = entry.icon,
-                            quality = entry.quality,
-                            count = entry.count or 1,
+                            itemID = id,
+                            link = (type(rawLink) == "string" and rawLink:find("|Hitem:", 1, true)) and rawLink or BuildDisplayHyperlink(id, rawLink, name, quality),
+                            name = name,
+                            icon = icon,
+                            quality = quality or 1,
+                            count = cnt or 1,
+                            classID = classID,
+                            subClassID = subClassID,
+                            equipLoc = equipLoc,
                             _locLabel = L["Bags"],
                         }
                     end
@@ -962,14 +1675,18 @@ function Alts:SearchAllItems(queryText, excludeAltKey, sourceFilter, factionFilt
             end
             if (src == "all" or src == "all_alts" or src == "bank") and type(alt.bank) == "table" then
                 for _, entry in ipairs(alt.bank) do
-                    if ItemMatches(entry) then
+                    local ok, id, cnt, rawLink, name, icon, quality, classID, subClassID, equipLoc = EntryMatches(entry)
+                    if ok then
                         matched[#matched + 1] = {
-                            itemID = entry.itemID,
-                            link = entry.link,
-                            name = entry.name,
-                            icon = entry.icon,
-                            quality = entry.quality,
-                            count = entry.count or 1,
+                            itemID = id,
+                            link = (type(rawLink) == "string" and rawLink:find("|Hitem:", 1, true)) and rawLink or BuildDisplayHyperlink(id, rawLink, name, quality),
+                            name = name,
+                            icon = icon,
+                            quality = quality or 1,
+                            count = cnt or 1,
+                            classID = classID,
+                            subClassID = subClassID,
+                            equipLoc = equipLoc,
                             _locLabel = L["Bank"],
                         }
                     end
@@ -980,6 +1697,10 @@ function Alts:SearchAllItems(queryText, excludeAltKey, sourceFilter, factionFilt
                     altKey = alt.key,
                     displayName = alt.fullName or alt.name or alt.key or "?",
                     classFile = alt.classFile,
+                    faction = alt.faction,
+                    worldType = alt.worldType,
+                    realmName = alt.realmName,
+                    realmPool = alt.realmPool,
                     isCurrent = (alt.key == curKey),
                     items = matched,
                 }
@@ -991,7 +1712,7 @@ end
 
 local itemTooltipRegistered = false
 
-local function AppendAltItemTooltip(tooltip, data)
+local function AppendAltItemTooltip(tooltip, data, isLegacyHook)
     if not tooltip or (tooltip ~= GameTooltip and tooltip ~= ItemRefTooltip) then return end
     if tooltip.IsForbidden and tooltip:IsForbidden() then return end
     if ns.db and ns.db.settings and (ns.db.settings.embedCharacterWindow == false or ns.db.settings.tooltipItemAlts == false) then return end
@@ -1004,21 +1725,24 @@ local function AppendAltItemTooltip(tooltip, data)
             itemID = cleanLink and tonumber(cleanLink:match("item:(%d+)")) or nil
         end
     end
-    local nowT = GetTime and GetTime() or 0
-    if not itemID or itemID <= 0 or tooltip._scAltItemId == itemID or (tooltip._scAltLastId == itemID and (nowT - (tooltip._scAltLastAt or 0)) < 0.05) then
+    if not itemID or itemID <= 0 or tooltip._scAltItemId == itemID then
         return
     end
-    tooltip._scAltLastId = itemID
-    tooltip._scAltLastAt = nowT
 
-    local owners = Alts:GetItemOwners(itemID)
+    local rawScope = ns.db and ns.db.settings and ns.db.settings.altsWorldScope
+    local worldScope = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(rawScope))
+        or ((rawScope == "all") and "all" or "pool")
+    local owners = Alts:GetItemOwners(itemID, nil, worldScope)
     if not owners or #owners == 0 then
+        tooltip._scAltItemId = itemID
         return
     end
 
     tooltip._scAltItemId = itemID
     tooltip:AddLine(" ")
 
+    local curPool = (worldScope ~= "pool" and Compat.RealmPool) and Compat.RealmPool(Compat.Realm()) or nil
+    local curWorld = (worldScope ~= "pool" and Compat.DetectWorldType) and Compat.DetectWorldType(Compat.Realm()) or nil
     local grandTotal = 0
     local shown = 0
     for _, o in ipairs(owners) do
@@ -1026,6 +1750,22 @@ local function AppendAltItemTooltip(tooltip, data)
         if shown < 8 then
             shown = shown + 1
             local hex = Compat.ClassHex(o.classFile)
+            local wTag = ""
+            if worldScope ~= "pool" then
+                local oWorld, oPool, oLbl
+                if Compat.GetAltWorldInfo then
+                    oWorld, oPool, oLbl = Compat.GetAltWorldInfo(o)
+                else
+                    oPool = o.realmName and Compat.RealmPool and Compat.RealmPool(o.realmName) or o.realmPool
+                    oWorld = o.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(o.realmName or o.realmPool))
+                    oLbl = oWorld or o.realmName
+                end
+                if (oPool and curPool and oPool ~= curPool) or (oWorld and curWorld and oWorld ~= curWorld) then
+                    local wtLabel = oLbl or "?"
+                    local wtCol = (oWorld == "PvP" or oWorld == "RP-PvP") and "|cffd29922" or "|cff58a6ff"
+                    wTag = " " .. wtCol .. "[" .. wtLabel .. "]|r"
+                end
+            end
             local locParts = {}
             if (o.equipped or 0) > 0 then
                 table.insert(locParts, L["Eq: %d"]:format(o.equipped))
@@ -1037,7 +1777,7 @@ local function AppendAltItemTooltip(tooltip, data)
                 table.insert(locParts, L["Bank: %d"]:format(o.bank))
             end
             local rightTxt = ("|cffffffff%d|r |cff9da7b5(%s)|r"):format(o.total or 0, table.concat(locParts, ", "))
-            tooltip:AddDoubleLine(hex .. (o.displayName or "?") .. "|r", rightTxt)
+            tooltip:AddDoubleLine(hex .. (o.displayName or "?") .. "|r" .. wTag, rightTxt)
         end
     end
     if #owners > 8 then
@@ -1046,7 +1786,9 @@ local function AppendAltItemTooltip(tooltip, data)
     if #owners > 1 or grandTotal > (owners[1].total or 0) then
         tooltip:AddDoubleLine("|cff9da7b5" .. L["Total (Account)"] .. "|r", "|cffffd24d" .. grandTotal .. "|r")
     end
-    pcall(tooltip.Show, tooltip)
+    if isLegacyHook then
+        pcall(tooltip.Show, tooltip)
+    end
 end
 
 local function RegisterItemTooltipIntegration()
@@ -1071,16 +1813,94 @@ local function RegisterItemTooltipIntegration()
 
     if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType and Enum.TooltipDataType.Item then
         pcall(TooltipDataProcessor.AddTooltipPostCall, Enum.TooltipDataType.Item, function(tooltip, data)
-            AppendAltItemTooltip(tooltip, data)
+            AppendAltItemTooltip(tooltip, data, false)
         end)
     else
         for _, tip in ipairs({ GameTooltip, ItemRefTooltip }) do
             if tip and tip.HookScript and tip:HasScript("OnTooltipSetItem") then
                 tip:HookScript("OnTooltipSetItem", function(t)
-                    AppendAltItemTooltip(t, nil)
+                    AppendAltItemTooltip(t, nil, true)
                 end)
             end
         end
+    end
+end
+
+local mailPickerBtn
+
+local function EnsureMailRecipientPicker()
+    local mailComposeFrame = _G["SendMailFrame"]
+    local recipientInput = _G["SendMailNameEditBox"]
+    if not (mailComposeFrame and recipientInput) then return end
+    if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then
+        if mailPickerBtn then mailPickerBtn:Hide() end
+        return
+    end
+    if not mailPickerBtn and ns.Theme and ns.Theme.CreateButton then
+        local btn = ns.Theme:CreateButton(mailComposeFrame, 78, 18, L["Alts"] .. " v", "default")
+        btn:SetFrameLevel(math.max(10, (mailComposeFrame:GetFrameLevel() or 1) + 12))
+        btn:SetPoint("BOTTOMRIGHT", recipientInput, "TOPRIGHT", 0, 3)
+        btn:SetScript("OnEnter", function(selfBtn)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(L["Quick Select Alt Recipient"], 1, 0.88, 0.35, true)
+            GameTooltip:AddLine(L["Pick one of your saved characters on this world & faction to fill the recipient field in 1 click."], 0.85, 0.88, 0.94, true)
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function(selfBtn)
+            if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
+        end)
+        btn:SetScript("OnClick", function(selfBtn)
+            if InCombatLockdown and InCombatLockdown() then return end
+            local myKey = CurrentAltKey()
+            local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+            local rawAlts = (ns.Store and ns.Store.GetAltsList) and ns.Store:GetAltsList("pool") or {}
+            local candidates = {}
+            for _, alt in ipairs(rawAlts) do
+                if type(alt) == "table" and alt.key ~= myKey and (not myFac or not alt.faction or alt.faction == myFac) then
+                    candidates[#candidates + 1] = alt
+                end
+            end
+            table.sort(candidates, function(a, b)
+                return (a.fullName or a.name or ""):lower() < (b.fullName or b.name or ""):lower()
+            end)
+            if MenuUtil and MenuUtil.CreateContextMenu then
+                MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+                    root:CreateTitle(L["My Alts"])
+                    if #candidates == 0 then
+                        root:CreateTitle("|cff8d98a6" .. L["No other saved characters on this world & faction."] .. "|r")
+                        return
+                    end
+                    for _, alt in ipairs(candidates) do
+                        local targetName = alt.fullName or alt.name or ""
+                        local hex = Compat.ClassHex(alt.classFile)
+                        local mailTag = alt.hasMail and (" |cffffd24d[" .. L["Mailbox"] .. "]|r") or ""
+                        local lvlTxt = L["Lv %d"]:format(tonumber(alt.level) or 0)
+                        local lbl = ("%s%s|r |cffc6ceda(%s)|r%s"):format(hex, targetName, lvlTxt, mailTag)
+                        root:CreateButton(lbl, function()
+                            if recipientInput and recipientInput.SetText and targetName ~= "" then
+                                recipientInput:SetText(targetName)
+                                local subjBox = _G["SendMailSubjectEditBox"]
+                                if subjBox and subjBox.SetFocus then
+                                    pcall(subjBox.SetFocus, subjBox)
+                                elseif recipientInput.ClearFocus then
+                                    pcall(recipientInput.ClearFocus, recipientInput)
+                                end
+                            end
+                        end)
+                    end
+                end)
+            end
+        end)
+        mailPickerBtn = btn
+    end
+    if mailPickerBtn then
+        if ns.Theme and ns.Theme.AutoFitButton then
+            ns.Theme:AutoFitButton(mailPickerBtn, 62, 12, 118)
+            mailPickerBtn:SetHeight(18)
+        end
+        mailPickerBtn:Show()
     end
 end
 
@@ -1114,6 +1934,12 @@ function Alts:Init()
         else
             self:QueueSnapshot(false, 1.5)
         end
+        if not self._compactedSavedOnce and C_Timer and C_Timer.After then
+            self._compactedSavedOnce = true
+            C_Timer.After(2.5, function()
+                Alts:CompactSavedAlts()
+            end)
+        end
         if RequestRaidInfo and not self._raidInfoRequested and C_Timer and C_Timer.After then
             self._raidInfoRequested = true
             C_Timer.After(3.0, function()
@@ -1125,13 +1951,19 @@ function Alts:Init()
             C_Timer.After(6.5, function()
                 local myAltKey = CurrentAltKey()
                 local nowTs = time()
-                local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList() or {}
+                local alts = ns.Store and ns.Store.GetAltsList and ns.Store:GetAltsList("all") or {}
+                local curPool = Compat.RealmPool and Compat.RealmPool(Compat.Realm()) or nil
+                local curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm()) or nil
                 local pendingAlts = {}
                 for _, alt in ipairs(alts) do
                     if type(alt) == "table" and alt.key ~= myAltKey and alt.hasMail and alt.mailSince then
                         local ageDays = math.floor((nowTs - alt.mailSince) / 86400)
                         if ageDays >= 7 then
-                            pendingAlts[#pendingAlts + 1] = ("%s (%dd+)"):format(alt.fullName or alt.name or "Alt", ageDays)
+                            local altPool = (alt.realmName and Compat.RealmPool and Compat.RealmPool(alt.realmName)) or alt.realmPool
+                            local altWorld = alt.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(alt.realmName or alt.realmPool))
+                            local worldSuffix = ((altPool and curPool and altPool ~= curPool) or (altWorld and curWorld and altWorld ~= curWorld))
+                                and (" [" .. tostring(altWorld or alt.realmName or "?") .. "]") or ""
+                            pendingAlts[#pendingAlts + 1] = ("%s%s (%dd+)"):format(alt.fullName or alt.name or "Alt", worldSuffix, ageDays)
                         end
                     end
                 end
@@ -1142,9 +1974,13 @@ function Alts:Init()
         end
     end)
 
+    ns.RegisterEvent(self, "MAIL_SHOW", function()
+        EnsureMailRecipientPicker()
+        self:QueueSnapshot(false, 0.6)
+    end)
+
     for _, mailEvent in ipairs({
         "UPDATE_PENDING_MAIL",
-        "MAIL_SHOW",
         "MAIL_CLOSED",
     }) do
         ns.RegisterEvent(self, mailEvent, function()
@@ -1155,6 +1991,7 @@ function Alts:Init()
     for _, scalarEvent in ipairs({
         "PLAYER_XP_UPDATE",
         "UPDATE_EXHAUSTION",
+        "PLAYER_UPDATE_RESTING",
         "PLAYER_MONEY",
         "ZONE_CHANGED_NEW_AREA",
     }) do
@@ -1189,10 +2026,24 @@ function Alts:Init()
         self:QueueSnapshot(false, 1.0)
     end)
 
-    for _, skillEvent in ipairs({ "SKILL_LINES_CHANGED", "TRADE_SKILL_UPDATE" }) do
-        ns.RegisterEvent(self, skillEvent, function()
+    ns.RegisterEvent(self, "SKILL_LINES_CHANGED", function()
+        self._dirtyProfs = true
+        self:QueueSnapshot(false, 1.5)
+    end)
+
+    for _, tsEvent in ipairs({ "TRADE_SKILL_SHOW", "TRADE_SKILL_UPDATE" }) do
+        ns.RegisterEvent(self, tsEvent, function()
             self._dirtyProfs = true
             self:QueueSnapshot(false, 1.5)
+            if not self._cdScanQueued and C_Timer and C_Timer.After then
+                self._cdScanQueued = true
+                C_Timer.After(0.45, function()
+                    Alts._cdScanQueued = false
+                    Alts:ScanTradeSkillCooldowns()
+                end)
+            else
+                self:ScanTradeSkillCooldowns()
+            end
         end)
     end
 

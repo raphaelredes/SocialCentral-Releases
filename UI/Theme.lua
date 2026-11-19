@@ -688,9 +688,11 @@ local function ApplyButtonColors(btn, hovered)
                 if not btn:IsEnabled() then
                     vis:Disable()
                     vis:UnlockHighlight()
+                    vis:SetAlpha(0.60)
                     TintBlizzButtonTextures(vis, true, 0.38, 0.38, 0.40)
                 else
                     vis:Enable()
+                    vis:SetAlpha(1.0)
                     if btn._scPushed then
                         vis:SetButtonState("PUSHED")
                     else
@@ -2471,7 +2473,17 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
         list:Render()
     end)
 
-    viewport:SetScript("OnSizeChanged", function()
+    viewport:SetScript("OnSizeChanged", function(selfVp, w, h)
+        if not (container:IsVisible() and selfVp:IsVisible()) then
+            return
+        end
+        local nw = math.floor((w or selfVp:GetWidth() or 0) + 0.5)
+        local nh = math.floor((h or selfVp:GetHeight() or 0) + 0.5)
+        if list._lastVpW == nw and list._lastVpH == nh then
+            return
+        end
+        list._lastVpW = nw
+        list._lastVpH = nh
         list:Render()
     end)
 

@@ -195,6 +195,10 @@ local function NonEmptyField(text, maxLen, fallback)
     return s
 end
 
+local MAX_CHAT_SESSION_CACHE = 400
+local knownFullCount = 0
+local knownFactionCount = 0
+
 local function NoteKnownFullName(rawName, factionHint)
     if type(rawName) ~= "string" or rawName == "" or not Compat.ParseCharacterFields then
         return
@@ -206,6 +210,11 @@ local function NoteKnownFullName(rawName, factionHint)
         Chat.knownFullByFirst = Chat.knownFullByFirst or {}
         local cur = Chat.knownFullByFirst[firstLow]
         if cur == nil then
+            if knownFullCount >= MAX_CHAT_SESSION_CACHE then
+                wipe(Chat.knownFullByFirst)
+                knownFullCount = 0
+            end
+            knownFullCount = knownFullCount + 1
             Chat.knownFullByFirst[firstLow] = {
                 lookupKey = lk,
                 displayName = disp,
@@ -220,6 +229,13 @@ local function NoteKnownFullName(rawName, factionHint)
         local nf = Compat.NormalizeFaction(factionHint)
         if nf then
             Chat.knownFactionByKey = Chat.knownFactionByKey or {}
+            if Chat.knownFactionByKey[lk] == nil then
+                if knownFactionCount >= MAX_CHAT_SESSION_CACHE then
+                    wipe(Chat.knownFactionByKey)
+                    knownFactionCount = 0
+                end
+                knownFactionCount = knownFactionCount + 1
+            end
             Chat.knownFactionByKey[lk] = nf
         end
     end
@@ -5780,6 +5796,15 @@ function Chat:Init()
                     Chat.sessionOfflineChars = Chat.sessionOfflineChars or {}
                     Chat.sessionOfflineChars[rec.lookupKey] = monoNow + 60
                     Chat:BumpPeerStateGen()
+                    if Store and Store.SyncWatchlistObservation and ns.Watchlist and ns.Watchlist.GetEntry and ns.Watchlist:GetEntry(rec.lookupKey) then
+                        local socRow = Store.socialByLookup and Store.socialByLookup[rec.lookupKey]
+                        if not (socRow and socRow.online == true) then
+                            Store:SyncWatchlistObservation(rec.targetStr or rec.lookupKey, {
+                                online = false,
+                                source = "whisper_miss",
+                            })
+                        end
+                    end
                 end
                 RecoverManualWhisperSend(looksIgnored and "ignored" or "offline")
             end

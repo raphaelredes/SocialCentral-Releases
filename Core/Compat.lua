@@ -102,7 +102,8 @@ local realmPoolCache = {}
 local realmPoolCacheCount = 0
 
 -- Collapse numbered Forever shard realms into a single ruleset pool key:
--- "CAMWOWUS1Realm2PvP" and "CAMWOWUS1Realm9PvP" -> "camwowus1realmpvp".
+-- "CAMWOWUS1Realm2PvP" and "CAMWOWUS1Realm9PvP" -> "camwowus1realmpvp",
+-- while keeping PvE vs PvP (and distinct non-ruleset realm numbers) separated.
 function Compat.RealmPool(realmName)
     if type(realmName) ~= "string" or realmName == "" then
         realmName = Compat.Realm()
@@ -110,7 +111,28 @@ function Compat.RealmPool(realmName)
     if realmName == "" then return "default" end
     local cached = realmPoolCache[realmName]
     if cached then return cached end
-    local key = Plain(realmName):gsub("realm%d+", "realm")
+    local plain = Plain(realmName)
+    local key = plain
+    local base, tag = plain:match("^(.-)realm%d+(%a+)$")
+    if tag then
+        if tag == "normal" then
+            tag = "pve"
+        elseif tag == "rpnormal" then
+            tag = "rppve"
+        end
+        if tag == "rppvp" or tag == "rppve" or tag == "pvp" or tag == "pve" or tag == "rp" then
+            key = (base or "") .. "realm" .. tag
+        end
+    else
+        local basePlain, tagOnly = plain:match("^(.-)realm(%a+)$")
+        if tagOnly == "normal" then
+            key = (basePlain or "") .. "realmpve"
+        elseif tagOnly == "rpnormal" then
+            key = (basePlain or "") .. "realmrppve"
+        elseif tagOnly == "rppve" or tagOnly == "rppvp" or tagOnly == "pve" or tagOnly == "pvp" or tagOnly == "rp" then
+            key = (basePlain or "") .. "realm" .. tagOnly
+        end
+    end
     if realmPoolCacheCount >= 64 then
         wipe(realmPoolCache)
         realmPoolCacheCount = 0
@@ -118,6 +140,62 @@ function Compat.RealmPool(realmName)
     realmPoolCache[realmName] = key
     realmPoolCacheCount = realmPoolCacheCount + 1
     return key
+end
+
+function Compat.DetectWorldType(realmName, rawRealmName)
+    local combined = ((type(realmName) == "string" and realmName or "") .. " " .. (type(rawRealmName) == "string" and rawRealmName or "")):lower()
+    if combined == " " and GetRealmName then
+        local rn = Safe.String(Safe.Call(GetRealmName)) or ""
+        combined = (Compat.Realm() .. " " .. rn):lower()
+    end
+    -- Check compound RP modes before generic PvP / PvE so "RP-PvE" never degrades into plain "PvE".
+    if combined:find("rppvp", 1, true) or combined:find("rp%-pvp", 1, true) or combined:find("rp pvp", 1, true) then
+        return "RP-PvP"
+    elseif combined:find("rppve", 1, true) or combined:find("rp%-pve", 1, true) or combined:find("rp pve", 1, true)
+        or combined:find("rpnormal", 1, true) or combined:find("rp%-normal", 1, true) or combined:find("rp normal", 1, true) then
+        return "RP-PvE"
+    elseif combined:find("pve", 1, true) or combined:find("normal", 1, true) then
+        return "PvE"
+    elseif combined:find("pvp", 1, true) then
+        return "PvP"
+    elseif combined:find("%f[%a]rp%f[%A]") then
+        return "RP"
+    end
+    return nil
+end
+
+function Compat.FormatWorldTypeLabel(worldType)
+    if worldType == "RP-PvE" then
+        return "RP PvE"
+    elseif worldType == "RP-PvP" then
+        return "RP PvP"
+    end
+    return worldType
+end
+
+function Compat.GetAltWorldInfo(alt)
+    if type(alt) ~= "table" then
+        local curPool = Compat.RealmPool(Compat.Realm())
+        local rawCur = GetRealmName and Safe.String(Safe.Call(GetRealmName)) or nil
+        local curWorld = Compat.DetectWorldType(Compat.Realm(), rawCur)
+        return curWorld, curPool, Compat.FormatWorldTypeLabel(curWorld) or Compat.Realm()
+    end
+    local detected = Compat.DetectWorldType(alt.realmName or alt.realmPool, alt.realmRaw)
+    local wt = detected or alt.worldType
+    local pool = (alt.realmName and Compat.RealmPool(alt.realmName))
+        or (alt.realmPool and Compat.RealmPool(alt.realmPool))
+        or Compat.RealmPool(Compat.Realm())
+    local label = Compat.FormatWorldTypeLabel(wt) or alt.realmRaw or alt.realmName or pool
+    return wt, pool, label
+end
+
+function Compat.NormalizeWorldScope(scopeMode)
+    if scopeMode == "all" then
+        return "all"
+    elseif type(scopeMode) == "string" and ((scopeMode:sub(1, 6) == "world:" and #scopeMode > 6) or (scopeMode:sub(1, 5) == "pool:" and #scopeMode > 5)) then
+        return scopeMode
+    end
+    return "pool"
 end
 
 function Compat.IsForeverShardLabel(label)
@@ -212,7 +290,24 @@ local parseCharCache = {}
 local parseCharCacheCount = 0
 local parseForeverCache = {}
 local parseForeverCacheCount = 0
-local PARSE_CACHE_LIMIT = 1500
+local PARSE_CACHE_LIMIT = 500
+
+local function IterChildrenVararg(fn, ...)
+    local n = select("#", ...)
+    for i = 1, n do
+        local child = select(i, ...)
+        if child then
+            fn(child)
+        end
+    end
+end
+
+--- Iterate child frames of a WoW UI container without allocating temporary wrapper tables.
+function Compat.ForEachChild(parent, fn)
+    if parent and parent.GetChildren and type(fn) == "function" then
+        IterChildrenVararg(fn, parent:GetChildren())
+    end
+end
 
 local function CopyCharParsed(entry)
     return {
@@ -466,8 +561,9 @@ local unitGuildMissAt = {}
 local tooltipTitleMissAt = {}
 local foreverLookupMissAt = {}
 local foreverLookupMissCount = 0
-local GUID_CACHE_LIMIT = 800
+local GUID_CACHE_LIMIT = 400
 local lastRosterSyncAt = 0
+local lastSyncedGuildTotal = -1
 local scanTooltip
 
 local function PutBoundedMap(tbl, curCount, maxCount, key, val)
@@ -814,29 +910,34 @@ function Compat.LookupForeverFullName(guid, firstName, allowRosterSync)
     return nil
 end
 
-function Compat.SyncRosterForeverNames(force)
+function Compat.SyncRosterForeverNames(force, friendsOnly)
     local nowClock = (GetTime and GetTime()) or 0
-    if not force and lastRosterSyncAt > 0 and (nowClock - lastRosterSyncAt) < 15 then
+    local numGuild = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
+    if not force and not friendsOnly and lastRosterSyncAt > 0 and (nowClock - lastRosterSyncAt) < 30 and lastSyncedGuildTotal == numGuild then
         return
     end
     lastRosterSyncAt = nowClock
+    lastSyncedGuildTotal = numGuild
     wipe(foreverLookupMissAt)
     foreverLookupMissCount = 0
 
-    local numGuild = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
-    if numGuild > 0 and GetGuildRosterInfo then
+    if not friendsOnly and numGuild > 0 and GetGuildRosterInfo then
         for i = 1, numGuild do
-            local gName, cleanGuid = SafeGetGuildRosterNameAndGuid(i)
-            local parsed = gName and ParseForeverInternal(gName)
-            if parsed then
-                Compat.CacheGuildMember(cleanGuid, parsed.firstName, parsed.fullName)
-                if parsed.surname then
-                    local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
-                    if cleanGuid then
-                        foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
-                    end
-                    if rec.firstName then
-                        StoreFirstNameSurnameCandidate(rec.firstName:lower(), rec, cleanGuid)
+            local okG, gNameRaw, _, _, _, _, _, _, _, gOnline, _, _, _, _, _, _, _, gGuidRaw = pcall(GetGuildRosterInfo, i)
+            if okG and (force or gOnline == true or gOnline == 1) then
+                local gName = Safe.String(gNameRaw)
+                local cleanGuid = Safe.String(gGuidRaw)
+                local parsed = gName and ParseForeverInternal(gName)
+                if parsed then
+                    Compat.CacheGuildMember(cleanGuid, parsed.firstName, parsed.fullName)
+                    if parsed.surname then
+                        local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
+                        if cleanGuid then
+                            foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
+                        end
+                        if rec.firstName then
+                            StoreFirstNameSurnameCandidate(rec.firstName:lower(), rec, cleanGuid)
+                        end
                     end
                 end
             end
@@ -1695,6 +1796,64 @@ function Compat.LeaveGroup()
         if ok then return true end
     end
     return false
+end
+
+function Compat.CanManageGroupListing()
+    if not Compat.IsInGroup() then
+        return true
+    end
+    return Compat.IsGroupLeader("player") == true
+end
+
+function Compat.CanInviteToGroup()
+    if not Compat.IsInGroup() then
+        return true
+    end
+    if Compat.IsGroupLeader("player") then
+        return true
+    end
+    if Compat.IsInRaid() and Compat.IsGroupAssistant("player") then
+        return true
+    end
+    return false
+end
+
+function Compat.GetGroupLeaderName()
+    if not Compat.IsInGroup() then
+        return nil
+    end
+    local function ResolveUnitLabel(unit)
+        if Compat.ResolveUnitFullName then
+            local rec = Compat.ResolveUnitFullName(unit, nil, nil, true)
+            if type(rec) == "table" and (rec.displayName or rec.fullName) then
+                return rec.displayName or rec.fullName
+            end
+        end
+        if UnitName then
+            return Safe.String(Safe.Call(UnitName, unit))
+        end
+        return nil
+    end
+    if Compat.IsGroupLeader("player") then
+        return ResolveUnitLabel("player")
+    end
+    if Compat.IsInRaid() then
+        local maxCount = (GetNumGroupMembers and Safe.Number(Safe.Call(GetNumGroupMembers))) or 40
+        for i = 1, math.min(40, math.max(1, maxCount)) do
+            local unit = "raid" .. i
+            if Compat.IsGroupLeader(unit) then
+                return ResolveUnitLabel(unit)
+            end
+        end
+    else
+        for i = 1, 4 do
+            local unit = "party" .. i
+            if Compat.IsGroupLeader(unit) then
+                return ResolveUnitLabel(unit)
+            end
+        end
+    end
+    return nil
 end
 
 local ALLIANCE_RACE_SET = {

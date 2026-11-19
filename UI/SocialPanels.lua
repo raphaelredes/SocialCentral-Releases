@@ -1012,10 +1012,445 @@ end
 --------------------------------------------------------------------------------
 -- Group & Recent Companions Tab Panel
 --------------------------------------------------------------------------------
+local GROUP_CLASS_ORDER = {
+    "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID",
+}
+
+local function GetLocalizedClassShort(cf)
+    local loc = (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[cf]) or cf or "?"
+    return loc
+end
+
+local function OpenGroupMemberMenu(anchor, panel, item)
+    if not (anchor and item and MenuUtil and MenuUtil.CreateContextMenu) then return end
+    local rKey = item.lookupKey or item.displayName
+    local bInfo = (rKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(rKey) or nil
+    local isCrossFac = (item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
+    local bnetName = item.bnetName or (bInfo and bInfo.bnetName)
+    local bnetId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
+    MenuUtil.CreateContextMenu(anchor, function(_, root)
+        root:CreateTitle(item.displayName or "")
+        local radarModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("radar")
+        local chatModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
+        if radarModOn and not item.isMe and item.displayName and ns.Spotter and ns.Spotter.TrackPlayer then
+            local isTracked = ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(item.displayName, item.guid)
+            if isTracked and ns.Spotter.UntrackPlayer then
+                root:CreateButton(L["Untrack from Radar"], function()
+                    ns.Spotter:UntrackPlayer(item.displayName, item.guid)
+                end)
+            else
+                root:CreateButton(L["Track on Radar"], function()
+                    ns.Spotter:TrackPlayer(item.displayName, item.guild, item.classFile, item.level, item.guid, nil)
+                end)
+            end
+        end
+        local scConfirmed = chatModOn and (not item.isMe) and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetId)
+        if scConfirmed then
+            root:CreateButton(L["Whisper in SocialCentral"], function()
+                if ns.Chat and ns.Chat.OpenDirectConversation then
+                    ns.Chat:OpenDirectConversation({
+                        targetName = rKey,
+                        classFile = item.classFile,
+                        autoProbe = true,
+                    })
+                    if ns.UI and ns.UI.OpenTab then
+                        ns.UI:OpenTab("chat")
+                    end
+                elseif isCrossFac and bnetName and Compat.BNetWhisper then
+                    Compat.BNetWhisper(bnetName, item.displayName)
+                elseif Compat.Whisper then
+                    Compat.Whisper(item.displayName)
+                end
+            end)
+        end
+        if isCrossFac and bnetName and Compat.BNetWhisper then
+            root:CreateButton(L["Battle.net Whisper"], function()
+                Compat.BNetWhisper(bnetName, item.displayName)
+            end)
+        elseif not isCrossFac and not item.isMe then
+            root:CreateButton(L["WoW Whisper (/w)"], function()
+                Compat.Whisper(item.displayName)
+            end)
+        end
+        if item.isMe then
+            root:CreateButton(L["Leave Group"], function()
+                if ns.Group and ns.Group.LeaveGroup then
+                    ns.Group:LeaveGroup()
+                end
+            end)
+        else
+            if panel._view == "current" then
+                local iAmLeader = UnitIsGroupLeader and ns.Safe.Value(UnitIsGroupLeader("player")) == true
+                if iAmLeader and not item.isLeader and item.unit then
+                    root:CreateButton(L["Promote"], function()
+                        if ns.Group then ns.Group:PromoteMember(item.unit) end
+                    end)
+                    if Compat.IsInRaid and Compat.IsInRaid() and ns.Group and ns.Group.ToggleAssistant then
+                        root:CreateButton(item.isAssistant and L["Demote Assistant"] or L["Promote to Assistant"], function()
+                            ns.Group:ToggleAssistant(item.unit)
+                        end)
+                    end
+                end
+            end
+            local inGroupAlready = (panel._view == "current")
+                or (item.inCurrentGroup == true)
+                or (Compat.IsInMyGroup and Compat.IsInMyGroup(item.displayName, item.guid))
+            if (not isCrossFac) and (not inGroupAlready) then
+                root:CreateButton(L["Invite"], function()
+                    Compat.Invite(item.displayName, bnetId)
+                end)
+            end
+            root:CreateButton(L["Add to Watchlist"], function()
+                if ns.Watchlist then ns.Watchlist:Add(item.lookupKey or item.displayName) end
+            end)
+            root:CreateButton(L["Edit Social Card"], function()
+                SocialPanels:OpenSocialMetaModal(item.displayName, item.lookupKey or item.displayName)
+            end)
+            if Store and Store.SetSocialFlag then
+                local curMeta = Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or item.displayName)
+                local goodLbl = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
+                local avoidLbl = (curMeta and curMeta.flag == "AVOID") and ("|cffff4d4d[x]|r " .. L["Flag: Avoid"]) or L["Flag: Avoid"]
+                root:CreateButton(goodLbl, function()
+                    Store:SetSocialFlag(item.lookupKey or item.displayName, "GOOD")
+                end)
+                root:CreateButton(avoidLbl, function()
+                    Store:SetSocialFlag(item.lookupKey or item.displayName, "AVOID")
+                end)
+            end
+        end
+    end)
+end
+
+local function AppendGroupSynergyTooltip(tt, comp, instStat)
+    if not tt then return end
+    tt:AddLine(L["Class & Buff Synergy"], 1.0, 0.82, 0.0)
+    if not comp or not comp.counts or (comp.counts.total or 0) == 0 then
+        local rec = (ns.Clan and ns.Clan.GetRecommendedRolesForCharacter) and ns.Clan:GetRecommendedRolesForCharacter() or nil
+        if rec then
+            tt:AddDoubleLine(rec.whoDesc or L["Player"], rec.rolesLabel or L["DPS"], 0.78, 0.84, 0.92, 0.35, 0.92, 0.55)
+        end
+        if ns.Group and ns.Group.AppendInstanceHistoryTooltip then
+            ns.Group:AppendInstanceHistoryTooltip(tt)
+        end
+        return
+    end
+    local c = comp.counts
+    tt:AddDoubleLine(L["Members"], string.format("%d  (%d %s · T:%d H:%d D:%d)", c.total, c.online or 0, L["Online"], c.TANK or 0, c.HEALER or 0, c.DAMAGER or 0), 0.78, 0.84, 0.92, 0.92, 0.96, 1.0)
+    if (c.dead or 0) > 0 then
+        tt:AddDoubleLine(L["Dead"], tostring(c.dead), 0.78, 0.84, 0.92, 1.0, 0.35, 0.35)
+    end
+    local u = comp.utilities or {}
+    tt:AddLine(" ")
+    tt:AddLine(L["Utility"], 0.35, 0.78, 1.0)
+    local resVal = (u.resurrection or 0) > 0 and ("|cff3fb950" .. tostring(u.resurrection) .. "|r") or ("|cffff55550|r")
+    tt:AddDoubleLine(L["Resurrection"], resVal, 0.82, 0.86, 0.92, 1, 1, 1)
+    local dispParts = {
+        L["Magic"] .. ": " .. ((u.dispelMagic or 0) > 0 and "|cff3fb950OK|r" or "|cff8b949e-|r"),
+        L["Curse"] .. ": " .. ((u.dispelCurse or 0) > 0 and "|cff3fb950OK|r" or "|cff8b949e-|r"),
+        L["Poison"] .. ": " .. ((u.dispelPoison or 0) > 0 and "|cff3fb950OK|r" or "|cff8b949e-|r"),
+        L["Disease"] .. ": " .. ((u.dispelDisease or 0) > 0 and "|cff3fb950OK|r" or "|cff8b949e-|r"),
+    }
+    tt:AddLine(L["Dispels"] .. ": " .. table.concat(dispParts, "  ·  "), 0.88, 0.92, 0.96, true)
+
+    local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    local buffList = {
+        { label = "Fortitude", ok = (u.fortitude or 0) > 0 },
+        { label = "Intellect", ok = (u.intellect or 0) > 0 },
+        { label = "MotW", ok = (u.mark or 0) > 0 },
+        { label = "Battle Shout", ok = (u.shout or 0) > 0 },
+        { label = "HS / Summon", ok = (u.warlock or 0) > 0 },
+    }
+    if myFac ~= "Horde" then
+        buffList[#buffList + 1] = { label = "Blessings", ok = (u.blessings or 0) > 0 }
+    end
+    if myFac ~= "Alliance" then
+        buffList[#buffList + 1] = { label = "Totems", ok = (u.totems or 0) > 0 }
+    end
+    local bParts = {}
+    for _, bf in ipairs(buffList) do
+        bParts[#bParts + 1] = (bf.ok and "|cff3fb950" or "|cff6e7681") .. bf.label .. "|r"
+    end
+    tt:AddLine(table.concat(bParts, "  ·  "), 0.9, 0.9, 0.9, true)
+
+    if comp.missingClasses and #comp.missingClasses > 0 then
+        local mNames = {}
+        for _, cf in ipairs(comp.missingClasses) do
+            mNames[#mNames + 1] = GetLocalizedClassShort(cf)
+        end
+        tt:AddLine(L["Missing"] .. ": " .. table.concat(mNames, ", "), 0.72, 0.76, 0.82, true)
+    else
+        tt:AddLine(L["All classes covered"], 0.35, 0.92, 0.55)
+    end
+    if ns.Group and ns.Group.AppendInstanceHistoryTooltip then
+        ns.Group:AppendInstanceHistoryTooltip(tt)
+    end
+end
+
+local function CreateGroupCompCard(panel, topCard)
+    local card = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    card:SetPoint("TOPLEFT", topCard, "BOTTOMLEFT", 0, -6)
+    card:SetPoint("TOPRIGHT", topCard, "BOTTOMRIGHT", 0, -6)
+    card:SetHeight(48)
+    card:EnableMouse(true)
+
+    local line1 = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    line1:SetPoint("TOPLEFT", 10, -7)
+    line1:SetPoint("TOPRIGHT", -10, -7)
+    line1:SetJustifyH("LEFT")
+    line1:SetWordWrap(false)
+    card.line1 = line1
+
+    local line2 = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    line2:SetPoint("BOTTOMLEFT", 10, 7)
+    line2:SetPoint("BOTTOMRIGHT", -10, 7)
+    line2:SetJustifyH("LEFT")
+    line2:SetWordWrap(false)
+    card.line2 = line2
+
+    card:SetScript("OnEnter", function(selfCard)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(selfCard, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        local comp = ns.Group and ns.Group.GetCompositionAnalysis and ns.Group:GetCompositionAnalysis() or nil
+        local instStat = ns.Group and ns.Group.GetHourlyInstanceStatus and ns.Group:GetHourlyInstanceStatus() or nil
+        AppendGroupSynergyTooltip(GameTooltip, comp, instStat)
+        GameTooltip:Show()
+    end)
+    card:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+
+    panel.compCard = card
+    return card
+end
+
+local function UpdateGroupCompCard(panel, comp, instStat)
+    local card = panel.compCard
+    if not card then return end
+    local showComp = (panel._view == "current")
+    card:SetShown(showComp)
+    if not showComp then return end
+
+    local pal = Theme:GetPalette()
+    Theme:ApplyBackdrop(card, "surface", pal)
+
+    if comp and comp.counts and (comp.counts.total or 0) > 0 then
+        local c = comp.counts
+        local p1 = {
+            "|cff58a6ffT:" .. tostring(c.TANK or 0) .. "|r",
+            "|cff3fb950H:" .. tostring(c.HEALER or 0) .. "|r",
+            "|cffff6b6bD:" .. tostring(c.DAMAGER or 0) .. "|r",
+        }
+        if (c.NONE or 0) > 0 then
+            p1[#p1 + 1] = "|cff9da7b5?:" .. tostring(c.NONE) .. "|r"
+        end
+        p1[#p1 + 1] = "|cff3fb950" .. tostring(c.online or 0) .. "/" .. tostring(c.total or 0) .. " " .. L["Online"] .. "|r"
+        if (c.dead or 0) > 0 then
+            p1[#p1 + 1] = "|cffff4d4d" .. L["Dead"] .. ": " .. tostring(c.dead) .. "|r"
+        end
+        if (comp.scUsers or 0) > 0 then
+            p1[#p1 + 1] = "|cff3fb950[SC:" .. tostring(comp.scUsers) .. "]|r"
+        end
+        if (comp.avoidCount or 0) > 0 then
+            p1[#p1 + 1] = "|cffff4d4d[!] " .. L["Alert: %d Avoid-flagged player(s) in group!"]:format(comp.avoidCount) .. "|r"
+        elseif comp.missingRolesText and comp.missingRolesText ~= "" then
+            p1[#p1 + 1] = "|cffffd24d" .. L["Need"] .. ": " .. comp.missingRolesText .. "|r"
+        elseif (not comp.inRaid) and comp.utilities and (comp.utilities.resurrection or 0) == 0 then
+            p1[#p1 + 1] = "|cffff9b3d" .. L["No resurrection class in group"] .. "|r"
+        end
+        card.line1:SetText(table.concat(p1, "  ·  "))
+
+        local clsParts = {}
+        for _, cf in ipairs(GROUP_CLASS_ORDER) do
+            local n = comp.classCounts and comp.classCounts[cf] or 0
+            if n > 0 then
+                local hex = Compat.ClassHex and Compat.ClassHex(cf) or "|cffffffff"
+                clsParts[#clsParts + 1] = hex .. GetLocalizedClassShort(cf) .. ":" .. tostring(n) .. "|r"
+            end
+        end
+        local u = comp.utilities or {}
+        local dispCount = ((u.dispelMagic or 0) > 0 and 1 or 0) + ((u.dispelCurse or 0) > 0 and 1 or 0) + ((u.dispelPoison or 0) > 0 and 1 or 0) + ((u.dispelDisease or 0) > 0 and 1 or 0)
+        local synSuffix = "  |  |cff8ab4f8" .. L["Dispels"] .. " " .. tostring(dispCount) .. "/4|r"
+        if comp.utilities and (comp.utilities.resurrection or 0) > 0 then
+            synSuffix = synSuffix .. "  ·  |cff3fb950" .. L["Resurrection"] .. ":" .. tostring(comp.utilities.resurrection) .. "|r"
+        end
+        card.line2:SetText((#clsParts > 0 and table.concat(clsParts, " ") or L["Class & Buff Synergy"]) .. synSuffix)
+    else
+        local rec = (ns.Clan and ns.Clan.GetRecommendedRolesForCharacter) and ns.Clan:GetRecommendedRolesForCharacter() or nil
+        local usedH = instStat and instStat.used or 0
+        local maxH = instStat and instStat.max or 5
+        local instCol = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff3fb950")
+        if rec then
+            card.line1:SetText("|cffffd24d" .. L["Character Readiness & Suggested Roles"] .. ":|r " .. (rec.whoDesc or "") .. " · |cff3fb950" .. (rec.rolesLabel or L["DPS"]) .. "|r")
+        else
+            card.line1:SetText("|cffffd24d" .. L["Character Readiness & Suggested Roles"] .. "|r")
+        end
+        local capLine = instCol .. L["Instances (1h): %d/%d"]:format(usedH, maxH) .. "|r"
+        if usedH > 0 and instStat and (instStat.nextSlotSecs or 0) > 0 and ns.Clan and ns.Clan.FormatResetDuration then
+            capLine = capLine .. "  ·  |cffffb833" .. L["Next slot frees in %s"]:format(ns.Clan:FormatResetDuration(instStat.nextSlotSecs)) .. "|r"
+        else
+            capLine = capLine .. "  ·  |cff8b949e" .. L["Available now (max 5 dungeons per hour)"] .. "|r"
+        end
+        card.line2:SetText(capLine)
+    end
+end
+
+local function CreateRaidGridFrame(listCard, panel)
+    local sf = CreateFrame("ScrollFrame", nil, listCard)
+    sf:SetPoint("TOPLEFT", 6, -6)
+    sf:SetPoint("BOTTOMRIGHT", -6, 6)
+    sf:Hide()
+
+    local child = CreateFrame("Frame", nil, sf)
+    child:SetSize(640, 460)
+    sf:SetScrollChild(child)
+    sf:EnableMouseWheel(true)
+    sf:SetScript("OnMouseWheel", function(selfSf, delta)
+        local cur = selfSf:GetVerticalScroll() or 0
+        local maxS = math.max(0, (child:GetHeight() or 0) - (selfSf:GetHeight() or 0))
+        local nextS = math.max(0, math.min(maxS, cur - delta * 28))
+        selfSf:SetVerticalScroll(nextS)
+    end)
+
+    local boxes = {}
+    for g = 1, 8 do
+        local box = CreateFrame("Frame", nil, child, "BackdropTemplate")
+        box:SetHeight(124)
+        local hdr = box:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        hdr:SetPoint("TOPLEFT", 8, -6)
+        hdr:SetPoint("TOPRIGHT", -8, -6)
+        hdr:SetJustifyH("LEFT")
+        hdr:SetWordWrap(false)
+        box.hdr = hdr
+
+        local slots = {}
+        for s = 1, 5 do
+            local btn = CreateFrame("Button", nil, box)
+            btn:SetHeight(19)
+            btn:SetPoint("TOPLEFT", box, "TOPLEFT", 6, -24 - (s - 1) * 19)
+            btn:SetPoint("TOPRIGHT", box, "TOPRIGHT", -6, -24 - (s - 1) * 19)
+            btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            local hl = btn:CreateTexture(nil, "HIGHLIGHT")
+            hl:SetAllPoints()
+            hl:SetColorTexture(1, 0.82, 0.25, 0.14)
+            local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            lbl:SetPoint("LEFT", 4, 0)
+            lbl:SetPoint("RIGHT", -4, 0)
+            lbl:SetJustifyH("LEFT")
+            lbl:SetWordWrap(false)
+            btn.lbl = lbl
+            btn:SetScript("OnClick", function(selfBtn)
+                if selfBtn._member then
+                    OpenGroupMemberMenu(selfBtn, panel, selfBtn._member)
+                end
+            end)
+            btn:SetScript("OnEnter", function(selfBtn)
+                if not (selfBtn._member and GameTooltip) then return end
+                local m = selfBtn._member
+                GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+                GameTooltip:ClearLines()
+                local hex = Compat.ClassHex and Compat.ClassHex(m.classFile) or "|cffffffff"
+                GameTooltip:AddLine(hex .. (m.displayName or "?") .. "|r" .. (m.level and (" Lv." .. m.level) or ""))
+                if m.zone and m.zone ~= "" then
+                    GameTooltip:AddLine(m.zone, 0.78, 0.84, 0.92)
+                end
+                if m.instanceUsed ~= nil then
+                    GameTooltip:AddLine(L["Instances (1h): %d/%d"]:format(m.instanceUsed, m.instanceMax or 5), 0.88, 0.82, 0.48)
+                end
+                GameTooltip:Show()
+            end)
+            btn:SetScript("OnLeave", function()
+                if GameTooltip then GameTooltip:Hide() end
+            end)
+            btn:Hide()
+            slots[s] = btn
+        end
+        box.slots = slots
+        boxes[g] = box
+    end
+
+    sf.content = child
+    sf.boxes = boxes
+
+    local function LayoutGrid()
+        local w = sf:GetWidth() or listCard:GetWidth() or 640
+        if w <= 40 then w = 640 end
+        child:SetWidth(w)
+        local cols = (w >= 430) and 2 or 1
+        local gap = 6
+        local boxW = math.floor((w - (cols - 1) * gap) / cols)
+        local activeCount = sf._visibleBoxes or 8
+        local rowsNeeded = math.max(1, math.ceil(activeCount / cols))
+        for g = 1, 8 do
+            local box = boxes[g]
+            if g <= activeCount then
+                local idx0 = g - 1
+                local col = idx0 % cols
+                local row = math.floor(idx0 / cols)
+                box:ClearAllPoints()
+                box:SetPoint("TOPLEFT", child, "TOPLEFT", col * (boxW + gap), -row * (124 + gap))
+                box:SetWidth(boxW)
+            end
+        end
+        child:SetHeight(rowsNeeded * (124 + gap))
+    end
+    sf:SetScript("OnSizeChanged", LayoutGrid)
+    sf.LayoutGrid = LayoutGrid
+
+    panel.raidGrid = sf
+    return sf
+end
+
+local function UpdateRaidGridFrame(panel, comp)
+    local sf = panel.raidGrid
+    if not sf then return end
+    local pal = Theme:GetPalette()
+    local visibleBoxes = math.max(2, comp and comp.maxSubgroup or 2)
+    sf._visibleBoxes = visibleBoxes
+    for g = 1, 8 do
+        local box = sf.boxes[g]
+        local sg = comp and comp.subgroups and comp.subgroups[g]
+        if g <= visibleBoxes and sg then
+            box:Show()
+            Theme:ApplyBackdrop(box, "row", pal)
+            local sup = sg.hasShaman and " |cff0070de[Sha]|r" or (sg.hasPaladin and " |cfff58cba[Pal]|r" or "")
+            box.hdr:SetText(string.format("|cffffd24d%s|r  |cff9da7b5T:%d H:%d D:%d|r%s", L["Subgroup %d"]:format(g), sg.TANK or 0, sg.HEALER or 0, sg.DAMAGER or 0, sup))
+            for s = 1, 5 do
+                local btn = box.slots[s]
+                local m = sg.members and sg.members[s]
+                if m then
+                    btn._member = m
+                    local hex = (m.online ~= false and not m.isDead) and Compat.ClassHex(m.classFile) or "|cff8b949e"
+                    local rShort = (m.role == "TANK" and "|cff58a6ff[T]|r ") or (m.role == "HEALER" and "|cff3fb950[H]|r ") or (m.role == "DAMAGER" and "|cffff6b6b[D]|r " or "|cff8b949e[?]|r ")
+                    local tags = ""
+                    if m.isLeader then tags = tags .. " |cffffd24d[L]|r"
+                    elseif m.isAssistant then tags = tags .. " |cff58a6ff[A]|r" end
+                    if m.raidRole == "MAINTANK" then tags = tags .. " |cff58a6ff[MT]|r"
+                    elseif m.raidRole == "MAINASSIST" then tags = tags .. " |cffffb833[MA]|r" end
+                    if m.isDead then tags = tags .. " |cffff4d4d[" .. L["Dead"] .. "]|r"
+                    elseif m.online == false then tags = tags .. " |cff8b949e[Off]|r" end
+                    if m.ready == true then tags = tags .. " |cff3fb950[OK]|r"
+                    elseif m.ready == false then tags = tags .. " |cffff4d4d[NO]|r" end
+                    btn.lbl:SetText(rShort .. hex .. (m.displayName or "?") .. "|r" .. tags)
+                    btn:Show()
+                else
+                    btn._member = nil
+                    btn:Hide()
+                end
+            end
+        else
+            box:Hide()
+        end
+    end
+    sf.LayoutGrid()
+end
+
 function SocialPanels:CreateGroupPanel(parent)
     local panel = CreateFrame("Frame", nil, parent)
     panel:SetAllPoints()
     panel._view = "current"
+    panel._raidLayout = "grid"
+    panel._recentFilter = "ALL"
 
     local topCard = CreateFrame("Frame", nil, panel, "BackdropTemplate")
     topCard:SetPoint("TOPLEFT", 0, 0)
@@ -1054,9 +1489,37 @@ function SocialPanels:CreateGroupPanel(parent)
         if ns.Group then ns.Group:OpenGroupChatAnnouncement() end
     end)
 
+    local btnBroadcast = Theme:CreateButton(topCard, 114, 22, L["Broadcast Group"], "primary")
+    Theme:AutoFitButton(btnBroadcast, 96, 14, 168)
+    btnBroadcast:SetPoint("RIGHT", btnAnnounce, "LEFT", -6, 0)
+    btnBroadcast:SetScript("OnClick", function()
+        if ns.Clan and ns.Clan.PostSmartGroupFormation then
+            local okPost, reason = ns.Clan:PostSmartGroupFormation()
+            if not okPost and reason == "needs_activity" then
+                if ns.LFGFrameTab then
+                    ns.LFGFrameTab.viewMode = "categories"
+                    if ns.LFGFrameTab.OpenOfficialModule then
+                        ns.LFGFrameTab:OpenOfficialModule("lfg")
+                    end
+                end
+                ns:Print("%s", L["Select the dungeon or activity you want to broadcast to Guild & Allies."])
+            end
+        end
+    end)
+    btnBroadcast:SetScript("OnEnter", function(selfBtn)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine(L["Broadcast Group"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Publishes your current party composition or role attempt to Guildmates, Allied Guilds, Friends, and SocialCentral [SC] users."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    btnBroadcast:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+
     local btnReady = Theme:CreateButton(topCard, 106, 22, L["Ready Check"], "default")
     Theme:AutoFitButton(btnReady, 92, 16, 165)
-    btnReady:SetPoint("RIGHT", btnAnnounce, "LEFT", -6, 0)
+    btnReady:SetPoint("RIGHT", btnBroadcast, "LEFT", -6, 0)
     btnReady:SetScript("OnClick", function()
         if ns.Group then ns.Group:StartReadyCheck() end
     end)
@@ -1081,6 +1544,50 @@ function SocialPanels:CreateGroupPanel(parent)
                     panel._view = "recent"
                     panel:Refresh(true)
                 end)
+                if Compat.IsInRaid and Compat.IsInRaid() then
+                    root:CreateDivider()
+                    root:CreateRadio(L["Raid Grid (G1-G8)"], function()
+                        return panel._view == "current" and panel._raidLayout ~= "list"
+                    end, function()
+                        panel._view = "current"
+                        panel._raidLayout = "grid"
+                        panel:Refresh(true)
+                    end)
+                    root:CreateRadio(L["Group List"], function()
+                        return panel._view == "current" and panel._raidLayout == "list"
+                    end, function()
+                        panel._view = "current"
+                        panel._raidLayout = "list"
+                        panel:Refresh(true)
+                    end)
+                end
+                root:CreateDivider()
+                root:CreateButton(L["Broadcast Group to Clan & Friends"], function()
+                    if ns.Clan and ns.Clan.PostSmartGroupFormation then
+                        local okPost, reason = ns.Clan:PostSmartGroupFormation()
+                        if not okPost and reason == "needs_activity" then
+                            if ns.LFGFrameTab then
+                                ns.LFGFrameTab.viewMode = "categories"
+                                if ns.LFGFrameTab.OpenOfficialModule then
+                                    ns.LFGFrameTab:OpenOfficialModule("lfg")
+                                end
+                            end
+                            ns:Print("%s", L["Select the dungeon or activity you want to broadcast to Guild & Allies."])
+                        end
+                    end
+                end)
+                root:CreateButton(L["Open Group Finder (I)"], function()
+                    if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+                        ns.LFGFrameTab:OpenOfficialModule("lfg")
+                    end
+                end)
+                root:CreateButton(L["Reset Dungeon Instances"], function()
+                    if ns.UI and ns.UI.ConfirmResetInstances then
+                        ns.UI:ConfirmResetInstances()
+                    elseif ns.Group and ns.Group.ResetDungeonInstances then
+                        ns.Group:ResetDungeonInstances()
+                    end
+                end)
             end)
         else
             panel._view = (panel._view == "current") and "recent" or "current"
@@ -1095,10 +1602,12 @@ function SocialPanels:CreateGroupPanel(parent)
         if w <= 0 then w = 730 end
         local compact = w < 540
         local showReady = btnReady:IsShown()
+        local showBroadcast = btnBroadcast:IsShown()
         titleLbl:ClearAllPoints()
         countLbl:ClearAllPoints()
         if compact then
             Theme:AutoFitButton(btnReady, 72, 10, 128)
+            Theme:AutoFitButton(btnBroadcast, 86, 10, 144)
             Theme:AutoFitButton(btnAnnounce, 76, 10, 134)
             Theme:AutoFitButton(btnView, 110, 10, 175)
 
@@ -1108,6 +1617,7 @@ function SocialPanels:CreateGroupPanel(parent)
             countLbl:SetPoint("TOPRIGHT", topCard, "TOPRIGHT", -10, -27)
 
             local flowBtns = { btnView }
+            if showBroadcast then table.insert(flowBtns, btnBroadcast) end
             if showReady then table.insert(flowBtns, btnReady) end
             table.insert(flowBtns, btnAnnounce)
             local rows = LayoutButtonFlow(topCard, flowBtns, 8, -46, w - 16, 24, 4)
@@ -1115,18 +1625,22 @@ function SocialPanels:CreateGroupPanel(parent)
         else
             topCard:SetHeight(60)
             Theme:AutoFitButton(btnAnnounce, 96, 16, 165)
+            Theme:AutoFitButton(btnBroadcast, 96, 14, 168)
             Theme:AutoFitButton(btnReady, 92, 16, 165)
             Theme:AutoFitButton(btnView, 128, 16, 210)
 
             btnAnnounce:ClearAllPoints()
             btnAnnounce:SetPoint("RIGHT", helpTop, "LEFT", -6, 0)
+            btnBroadcast:ClearAllPoints()
+            btnBroadcast:SetPoint("RIGHT", btnAnnounce, "LEFT", -6, 0)
             btnReady:ClearAllPoints()
-            btnReady:SetPoint("RIGHT", btnAnnounce, "LEFT", -6, 0)
+            btnReady:SetPoint("RIGHT", showBroadcast and btnBroadcast or btnAnnounce, "LEFT", -6, 0)
             btnView:ClearAllPoints()
             btnView:SetPoint("BOTTOMRIGHT", -8, 6)
 
+            local leftMostTopBtn = (showReady and btnReady) or (showBroadcast and btnBroadcast) or btnAnnounce
             titleLbl:SetPoint("TOPLEFT", 10, -8)
-            titleLbl:SetPoint("RIGHT", showReady and btnReady or btnAnnounce, "LEFT", -10, 0)
+            titleLbl:SetPoint("RIGHT", leftMostTopBtn, "LEFT", -10, 0)
             countLbl:SetPoint("BOTTOMLEFT", 10, 8)
             countLbl:SetPoint("RIGHT", btnView, "LEFT", -10, 0)
         end
@@ -1134,10 +1648,40 @@ function SocialPanels:CreateGroupPanel(parent)
     topCard:SetScript("OnSizeChanged", LayoutGroupTopBar)
     LayoutGroupTopBar()
 
+    local compCard = CreateGroupCompCard(panel, topCard)
+
     local listCard = CreateFrame("Frame", nil, panel, "BackdropTemplate")
-    listCard:SetPoint("TOPLEFT", topCard, "BOTTOMLEFT", 0, -8)
+    listCard:SetPoint("TOPLEFT", compCard, "BOTTOMLEFT", 0, -6)
     listCard:SetPoint("BOTTOMRIGHT", 0, 0)
     panel.listCard = listCard
+    CreateRaidGridFrame(listCard, panel)
+
+    local recentFilterBtn = Theme:CreateButton(listCard, 124, 22, L["All"] .. "  v", "default")
+    Theme:AutoFitButton(recentFilterBtn, 96, 14, 152)
+    recentFilterBtn:SetPoint("TOPRIGHT", -8, -6)
+    recentFilterBtn:Hide()
+    recentFilterBtn:SetScript("OnClick", function(selfBtn)
+        if not (MenuUtil and MenuUtil.CreateContextMenu) then return end
+        local opts = {
+            { id = "ALL", label = L["All"] },
+            { id = "ONLINE", label = L["Online Only"] },
+            { id = "GOOD", label = L["Good Partner (+)"] },
+            { id = "TANK", label = L["Tank"] },
+            { id = "HEALER", label = L["Healer"] },
+            { id = "DAMAGER", label = L["DPS"] },
+        }
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            for _, opt in ipairs(opts) do
+                local fid = opt.id
+                root:CreateRadio(opt.label, function()
+                    return panel._recentFilter == fid
+                end, function()
+                    panel._recentFilter = fid
+                    panel:Refresh(true)
+                end)
+            end
+        end)
+    end)
 
     local recentSearch = Theme:CreateEditBox(listCard, {
         height = 22,
@@ -1145,7 +1689,7 @@ function SocialPanels:CreateGroupPanel(parent)
         placeholder = L["Search companions by name or zone..."],
     })
     recentSearch:SetPoint("TOPLEFT", 8, -6)
-    recentSearch:SetPoint("TOPRIGHT", -8, -6)
+    recentSearch:SetPoint("RIGHT", recentFilterBtn, "LEFT", -6, 0)
     recentSearch:Hide()
     recentSearch:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
     recentSearch:HookScript("OnTextChanged", function()
@@ -1228,104 +1772,8 @@ function SocialPanels:CreateGroupPanel(parent)
         end)
 
         row:SetScript("OnClick", function(self, btn)
-            if (btn == "RightButton" or btn == "LeftButton") and self._item and MenuUtil and MenuUtil.CreateContextMenu then
-                local item = self._item
-                local rKey = item.lookupKey or item.displayName
-                local bInfo = (rKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(rKey) or nil
-                local isCrossFac = (item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
-                local bnetName = item.bnetName or (bInfo and bInfo.bnetName)
-                local bnetId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
-                MenuUtil.CreateContextMenu(self, function(_, root)
-                    root:CreateTitle(item.displayName or "")
-                    local radarModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("radar")
-                    local chatModOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
-                    if radarModOn and not item.isMe and item.displayName and ns.Spotter and ns.Spotter.TrackPlayer then
-                        local isTracked = ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(item.displayName, item.guid)
-                        if isTracked and ns.Spotter.UntrackPlayer then
-                            root:CreateButton(L["Untrack from Radar"], function()
-                                ns.Spotter:UntrackPlayer(item.displayName, item.guid)
-                            end)
-                        else
-                            root:CreateButton(L["Track on Radar"], function()
-                                ns.Spotter:TrackPlayer(item.displayName, item.guild, item.classFile, item.level, item.guid, nil)
-                            end)
-                        end
-                    end
-                    local scConfirmed = chatModOn and (not item.isMe) and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetId)
-                    if scConfirmed then
-                        root:CreateButton(L["Whisper in SocialCentral"], function()
-                            if ns.Chat and ns.Chat.OpenDirectConversation then
-                                ns.Chat:OpenDirectConversation({
-                                    targetName = rKey,
-                                    classFile = item.classFile,
-                                    autoProbe = true,
-                                })
-                                if ns.UI and ns.UI.OpenTab then
-                                    ns.UI:OpenTab("chat")
-                                end
-                            elseif isCrossFac and bnetName and Compat.BNetWhisper then
-                                Compat.BNetWhisper(bnetName, item.displayName)
-                            elseif Compat.Whisper then
-                                Compat.Whisper(item.displayName)
-                            end
-                        end)
-                    end
-                    if isCrossFac and bnetName and Compat.BNetWhisper then
-                        root:CreateButton(L["Battle.net Whisper"], function()
-                            Compat.BNetWhisper(bnetName, item.displayName)
-                        end)
-                    elseif not isCrossFac then
-                        root:CreateButton(L["WoW Whisper (/w)"], function()
-                            Compat.Whisper(item.displayName)
-                        end)
-                    end
-                    if item.isMe then
-                        root:CreateButton(L["Leave Group"], function()
-                            if ns.Group and ns.Group.LeaveGroup then
-                                ns.Group:LeaveGroup()
-                            end
-                        end)
-                    else
-                        if panel._view == "current" then
-                            local iAmLeader = UnitIsGroupLeader and ns.Safe.Value(UnitIsGroupLeader("player")) == true
-                            if iAmLeader and not item.isLeader and item.unit then
-                                root:CreateButton(L["Promote"], function()
-                                    if ns.Group then ns.Group:PromoteMember(item.unit) end
-                                end)
-                                if Compat.IsInRaid and Compat.IsInRaid() and ns.Group and ns.Group.ToggleAssistant then
-                                    root:CreateButton(item.isAssistant and L["Demote Assistant"] or L["Promote to Assistant"], function()
-                                        ns.Group:ToggleAssistant(item.unit)
-                                    end)
-                                end
-                            end
-                        end
-                        local inGroupAlready = (panel._view == "current")
-                            or (item.inCurrentGroup == true)
-                            or (Compat.IsInMyGroup and Compat.IsInMyGroup(item.displayName, item.guid))
-                        if (not isCrossFac) and (not inGroupAlready) then
-                            root:CreateButton(L["Invite"], function()
-                                Compat.Invite(item.displayName, bnetId)
-                            end)
-                        end
-                        root:CreateButton(L["Add to Watchlist"], function()
-                            if ns.Watchlist then ns.Watchlist:Add(item.lookupKey or item.displayName) end
-                        end)
-                        root:CreateButton(L["Edit Social Card"], function()
-                            SocialPanels:OpenSocialMetaModal(item.displayName, item.lookupKey or item.displayName)
-                        end)
-                        if Store and Store.SetSocialFlag then
-                            local curMeta = Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or item.displayName)
-                            local goodLbl = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
-                            local avoidLbl = (curMeta and curMeta.flag == "AVOID") and ("|cffff4d4d[x]|r " .. L["Flag: Avoid"]) or L["Flag: Avoid"]
-                            root:CreateButton(goodLbl, function()
-                                Store:SetSocialFlag(item.lookupKey or item.displayName, "GOOD")
-                            end)
-                            root:CreateButton(avoidLbl, function()
-                                Store:SetSocialFlag(item.lookupKey or item.displayName, "AVOID")
-                            end)
-                        end
-                    end
-                end)
+            if (btn == "RightButton" or btn == "LeftButton") and self._item then
+                OpenGroupMemberMenu(self, panel, self._item)
             end
         end)
 
@@ -1342,6 +1790,15 @@ function SocialPanels:CreateGroupPanel(parent)
         local hex = Compat.ClassHex(item.classFile)
         local lvl = (item.level and item.level > 0) and (" |cff9da7b5Lv." .. item.level .. "|r") or ""
         local roleTag = ROLE_BADGES[item.role or "NONE"] or ""
+        local subTag = (panel._view == "current" and Compat.IsInRaid and Compat.IsInRaid() and item.subgroup)
+            and (" |cff9da7b5[G" .. tostring(item.subgroup) .. "]|r") or ""
+        local raidRoleTag = ""
+        if panel._view == "current" then
+            if item.raidRole == "MAINTANK" then raidRoleTag = " |cff58a6ff[MT]|r"
+            elseif item.raidRole == "MAINASSIST" then raidRoleTag = " |cffffb833[MA]|r" end
+            if item.isML then raidRoleTag = raidRoleTag .. " |cfff2c94c[ML]|r" end
+            if item.isDead then raidRoleTag = raidRoleTag .. " |cffff4d4d[" .. L["Dead"] .. "]|r" end
+        end
         local leadTag = item.isLeader and (" |cffffd24d[" .. L["Leader"] .. "]|r") or (item.isAssistant and (" |cff58a6ff[" .. L["Assistant"] .. "]|r") or "")
         local readyTag = ""
         if item.ready == true then
@@ -1364,10 +1821,15 @@ function SocialPanels:CreateGroupPanel(parent)
         end
         local mainTag = (meta and meta.mainName) and (" |cff6ec1e4[" .. meta.mainName .. "]|r") or ""
 
-        row.nameText:SetText(flagTag .. hex .. (item.displayName or "") .. "|r" .. lvl .. " " .. roleTag .. leadTag .. readyTag .. scTag .. mainTag)
+        row.nameText:SetText(flagTag .. hex .. (item.displayName or "") .. "|r" .. lvl .. " " .. roleTag .. subTag .. leadTag .. raidRoleTag .. readyTag .. scTag .. mainTag)
 
         local subParts = {}
         if item.zone and item.zone ~= "" then table.insert(subParts, item.zone) end
+        if panel._view == "current" and item.instanceUsed ~= nil then
+            local iMax = item.instanceMax or 5
+            local iCol = (item.instanceUsed >= iMax) and "|cffff5555" or ((item.instanceUsed >= iMax - 1) and "|cffffb833" or "|cff3fb950")
+            table.insert(subParts, iCol .. L["Instances (1h): %d/%d"]:format(item.instanceUsed, iMax) .. "|r")
+        end
         if panel._view == "recent" and (item.runs or 0) > 1 then
             table.insert(subParts, L["%d runs"]:format(item.runs))
         end
@@ -1444,11 +1906,17 @@ function SocialPanels:CreateGroupPanel(parent)
         end
         self._lastThemeKey = p.key
         Theme:ApplyBackdrop(topCard, "surface", p)
+        if compCard then Theme:ApplyBackdrop(compCard, "surface", p) end
         Theme:ApplyBackdrop(listCard, "surface", p)
         Theme:StyleButton(btnView, "default")
         Theme:StyleButton(btnReady, "default")
+        Theme:StyleButton(btnBroadcast, "primary")
         Theme:StyleButton(btnAnnounce, "default")
+        Theme:StyleButton(recentFilterBtn, "default")
         if helpTop and helpTop.RefreshTheme then helpTop:RefreshTheme() end
+        if self.raidGrid and self.raidGrid:IsShown() and ns.Group and ns.Group.GetCompositionAnalysis then
+            UpdateRaidGridFrame(self, ns.Group:GetCompositionAnalysis())
+        end
         if scroll then
             scroll:RefreshTheme()
             if not skipRender then
@@ -1474,33 +1942,83 @@ function SocialPanels:CreateGroupPanel(parent)
         local ch = ns.Group and ns.Group:GetChannelName()
         local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
         local canLead = ch and ((UnitIsGroupLeader and ns.Safe.Value(UnitIsGroupLeader("player"))) or (UnitIsGroupAssistant and ns.Safe.Value(UnitIsGroupAssistant("player"))))
+        local counts = ns.Group and ns.Group:GetSummaryCounts() or { total = 0, TANK = 0, HEALER = 0, DAMAGER = 0 }
+        local inRaidNow = Compat.IsInRaid and Compat.IsInRaid()
         btnReady:SetShown(ch ~= nil and self._view == "current")
         btnReady:SetEnabled((not inCombat) and canLead == true)
+        btnBroadcast:SetShown(self._view == "current" and (not inRaidNow) and (counts.total or 0) < 5)
+        btnBroadcast:SetEnabled(not inCombat)
         btnAnnounce:SetEnabled(ch ~= nil)
         Theme:SetButtonText(btnView, ((self._view == "recent") and L["Recent Companions"] or L["Current Group"]) .. "  v")
         LayoutGroupTopBar()
 
         local showRecentSearch = (self._view == "recent")
         recentSearch:SetShown(showRecentSearch)
+        recentFilterBtn:SetShown(showRecentSearch)
+        if showRecentSearch then
+            local fLabels = {
+                ALL = L["All"],
+                ONLINE = L["Online Only"],
+                GOOD = L["Good Partner (+)"],
+                TANK = L["Tank"],
+                HEALER = L["Healer"],
+                DAMAGER = L["DPS"],
+            }
+            Theme:SetButtonText(recentFilterBtn, (fLabels[panel._recentFilter] or L["All"]) .. "  v")
+            Theme:SetButtonActive(recentFilterBtn, panel._recentFilter ~= "ALL", "default")
+            Theme:AutoFitButton(recentFilterBtn, 96, 14, 152)
+        end
         scroll.container:ClearAllPoints()
         scroll.container:SetPoint("TOPLEFT", 6, showRecentSearch and -32 or -6)
         scroll.container:SetPoint("BOTTOMRIGHT", -6, 6)
 
-        local counts = ns.Group and ns.Group:GetSummaryCounts() or { total = 0, TANK = 0, HEALER = 0, DAMAGER = 0 }
+        local instStat = (ns.Group and ns.Group.GetHourlyInstanceStatus and ns.Group:GetHourlyInstanceStatus()) or { used = 0, max = 5 }
+        local comp = (ns.Group and ns.Group.GetCompositionAnalysis) and ns.Group:GetCompositionAnalysis() or nil
+        UpdateGroupCompCard(panel, comp, instStat)
+        listCard:ClearAllPoints()
+        if panel.compCard and panel.compCard:IsShown() then
+            listCard:SetPoint("TOPLEFT", panel.compCard, "BOTTOMLEFT", 0, -6)
+        else
+            listCard:SetPoint("TOPLEFT", topCard, "BOTTOMLEFT", 0, -8)
+        end
+        listCard:SetPoint("BOTTOMRIGHT", 0, 0)
+
+        local useRaidGrid = (self._view == "current") and (comp and comp.inRaid) and (self._raidLayout ~= "list")
+        if panel.raidGrid then
+            panel.raidGrid:SetShown(useRaidGrid)
+        end
+        scroll.container:SetShown(not useRaidGrid)
+
+        local instTag = "  ·  " .. L["Instances (1h): %d/%d"]:format(instStat.used or 0, instStat.max or 5)
         local rQuery = showRecentSearch and (recentSearch:GetText() or "") or nil
         local rows, emptyText
         if self._view == "recent" then
             local allRecent = ns.Group and ns.Group:GetRecentCompanions(rQuery) or {}
             local onlineRecent = 0
+            local filteredRecent = {}
+            local rf = panel._recentFilter or "ALL"
             for _, rec in ipairs(allRecent) do
-                if rec.inCurrentGroup or (ns.Store and ns.Store.socialByLookup and rec.lookupKey and ns.Store.socialByLookup[rec.lookupKey]) then
+                local isOn = rec.inCurrentGroup or (ns.Store and ns.Store.socialByLookup and rec.lookupKey and ns.Store.socialByLookup[rec.lookupKey]) ~= nil
+                if isOn then
                     onlineRecent = onlineRecent + 1
+                end
+                local passFilter = true
+                if rf == "ONLINE" then
+                    passFilter = isOn == true
+                elseif rf == "GOOD" then
+                    local recMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(rec.lookupKey or rec.displayName) or Store:GetSocialMeta(rec.lookupKey or rec.displayName))
+                    passFilter = (recMeta and recMeta.flag == "GOOD") == true
+                elseif rf == "TANK" or rf == "HEALER" or rf == "DAMAGER" then
+                    passFilter = (rec.role == rf)
+                end
+                if passFilter then
+                    filteredRecent[#filteredRecent + 1] = rec
                 end
             end
             titleLbl:SetText(L["Recent Companions"])
-            countLbl:SetText(string.format("%s: %d  |cff3fb950(%d %s)|r", L["Recent Companions"], #allRecent, onlineRecent, L["Online"]))
-            rows = allRecent
-            emptyText = (rQuery and rQuery ~= "") and L["No matching players found."] or L["No recent companions recorded yet."]
+            countLbl:SetText(string.format("%s: %d  |cff3fb950(%d %s)|r%s", L["Recent Companions"], #filteredRecent, onlineRecent, L["Online"], instTag))
+            rows = filteredRecent
+            emptyText = (rQuery and rQuery ~= "" or rf ~= "ALL") and L["No matching players found."] or L["No recent companions recorded yet."]
         elseif ch then
             local rcTag = ""
             if ns.Group and ns.Group.readyCheckActive and ns.Group.GetReadyCheckProgress then
@@ -1508,17 +2026,21 @@ function SocialPanels:CreateGroupPanel(parent)
                 rcTag = "  |cffffd24d[" .. string.format(L["Ready Check: %d/%d"], rOk, rTot) .. "]|r"
             end
             titleLbl:SetText(L["Active Group"] .. "  |cff3fb950[" .. ch .. "]|r" .. rcTag)
-            countLbl:SetText(string.format("%s: %d  (T:%d  H:%d  D:%d)", L["Members"], counts.total, counts.TANK, counts.HEALER, counts.DAMAGER))
+            countLbl:SetText(string.format("%s: %d  (T:%d  H:%d  D:%d)%s", L["Members"], counts.total, counts.TANK, counts.HEALER, counts.DAMAGER, instTag))
             rows = ns.Group and ns.Group:GetMembers() or {}
             emptyText = L["Join a Party, Raid, or Instance group to track live members and roles."]
         else
             titleLbl:SetText(L["Not currently in a Party/Raid/Instance group"])
-            countLbl:SetText(L["Switch to 'Recent Companions' to re-contact past instance teammates."])
+            countLbl:SetText(L["Switch to 'Recent Companions' to re-contact past instance teammates."] .. instTag)
             rows = ns.Group and ns.Group:GetMembers() or {}
             emptyText = L["Join a Party, Raid, or Instance group to track live members and roles."]
         end
         countLbl:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-        scroll:SetData(rows, emptyText, resetScroll)
+        if useRaidGrid then
+            UpdateRaidGridFrame(panel, comp)
+        else
+            scroll:SetData(rows, emptyText, resetScroll)
+        end
     end
 
     panel:RefreshTheme()
@@ -1961,9 +2483,24 @@ function SocialPanels:CreateChatPanel(parent)
             end)
             if activeKey and activeThread then
                 root:CreateDivider()
-                local clearSub = root:CreateButton(L["Clear Active Chat"])
-                clearSub:CreateButton(L["Confirm Clear?"], function()
-                    ns.Chat:ClearHistory(activeKey)
+                root:CreateButton(L["Clear Active Chat"], function()
+                    local targetKey = activeKey
+                    local title = activeThread.title or activeKey
+                    local msg = L["Are you sure you want to clear all messages in '%s'?"]:format(title)
+                    if ns.UI and ns.UI.OpenConfirmModal then
+                        ns.UI:OpenConfirmModal({
+                            title = L["Clear Active Chat"],
+                            message = msg,
+                            confirmText = L["Clear"],
+                            onConfirm = function()
+                                if ns.Chat and ns.Chat.ClearHistory then
+                                    ns.Chat:ClearHistory(targetKey)
+                                end
+                            end,
+                        })
+                    elseif ns.Chat and ns.Chat.ClearHistory then
+                        ns.Chat:ClearHistory(targetKey)
+                    end
                 end)
                 if ns.Chat.CanDeleteThread and ns.Chat:CanDeleteThread(activeKey) and OpenDeleteThreadModal then
                     root:CreateButton("|cfff54747" .. L["Delete Conversation"] .. "|r", function()
@@ -2111,8 +2648,9 @@ function SocialPanels:CreateChatPanel(parent)
             local m = CreateFrame("Frame", "SocialCentralDeleteThreadModal", UIParent, "BackdropTemplate")
             m:SetSize(380, 176)
             m:SetPoint("CENTER")
-            m:SetFrameStrata("DIALOG")
-            m:SetFrameLevel(120)
+            m:SetFrameStrata("FULLSCREEN_DIALOG")
+            m:SetFrameLevel(840)
+            if m.SetToplevel then m:SetToplevel(true) end
             m:EnableMouse(true)
             Theme:MakeMovable(m, { key = "modal_delete_thread" })
             table.insert(UISpecialFrames, "SocialCentralDeleteThreadModal")
@@ -2194,6 +2732,7 @@ function SocialPanels:CreateChatPanel(parent)
         deleteThreadModal.input:SetText("")
         deleteThreadModal.btnConfirm:SetEnabled(false)
         deleteThreadModal:Show()
+        if deleteThreadModal.Raise then deleteThreadModal:Raise() end
         deleteThreadModal.input:SetFocus()
     end
 
@@ -2281,9 +2820,22 @@ function SocialPanels:CreateChatPanel(parent)
                                 ns.Chat:MarkThreadUnread(key)
                             end)
                         end
-                        local clearSub = root:CreateButton(L["Clear"])
-                        clearSub:CreateButton(L["Confirm Clear?"], function()
-                            ns.Chat:ClearHistory(key)
+                        root:CreateButton(L["Clear"], function()
+                            local threadTitle = r._item and r._item.title or key
+                            if ns.UI and ns.UI.OpenConfirmModal then
+                                ns.UI:OpenConfirmModal({
+                                    title = L["Clear"],
+                                    message = L["Are you sure you want to clear all messages in '%s'?"]:format(threadTitle),
+                                    confirmText = L["Clear"],
+                                    onConfirm = function()
+                                        if ns.Chat and ns.Chat.ClearHistory then
+                                            ns.Chat:ClearHistory(key)
+                                        end
+                                    end,
+                                })
+                            elseif ns.Chat and ns.Chat.ClearHistory then
+                                ns.Chat:ClearHistory(key)
+                            end
                         end)
                         if ns.Chat.CanDeleteThread and ns.Chat:CanDeleteThread(key) then
                             root:CreateDivider()
@@ -2623,31 +3175,19 @@ function SocialPanels:CreateChatPanel(parent)
         end,
     })
     btnClearNotes:SetPoint("RIGHT", 0, 0)
-    btnClearNotes:SetScript("OnClick", function(selfBtn)
-        local nowMono = GetTime and GetTime() or time()
-        if not selfBtn._confirmUntil or nowMono > selfBtn._confirmUntil then
-            selfBtn._confirmUntil = nowMono + 4.0
-            Theme:SetButtonActive(selfBtn, true, "danger")
-            if GameTooltip and GameTooltip:IsOwned(selfBtn) then
-                GameTooltip:ClearLines()
-                GameTooltip:AddLine(L["Confirm Clear?"], 1, 0.45, 0.45, true)
-                GameTooltip:AddLine(L["Click again to permanently delete all personal notes."], 0.85, 0.88, 0.94, true)
-                GameTooltip:Show()
-            end
-            if C_Timer and C_Timer.After then
-                local tok = selfBtn._confirmUntil
-                C_Timer.After(4.1, function()
-                    if selfBtn._confirmUntil == tok then
-                        selfBtn._confirmUntil = nil
-                        Theme:SetButtonActive(selfBtn, false, "danger")
+    btnClearNotes:SetScript("OnClick", function()
+        if ns.UI and ns.UI.OpenConfirmModal then
+            ns.UI:OpenConfirmModal({
+                title = L["Clear Notes"],
+                message = L["Are you sure you want to clear all saved personal notes?"],
+                confirmText = L["Clear"],
+                onConfirm = function()
+                    if ns.Chat and ns.Chat.ClearHistory then
+                        ns.Chat:ClearHistory("notes:self")
                     end
-                end)
-            end
-            return
-        end
-        selfBtn._confirmUntil = nil
-        Theme:SetButtonActive(selfBtn, false, "danger")
-        if ns.Chat and ns.Chat.ClearHistory then
+                end,
+            })
+        elseif ns.Chat and ns.Chat.ClearHistory then
             ns.Chat:ClearHistory("notes:self")
         end
     end)
@@ -2729,10 +3269,23 @@ function SocialPanels:CreateChatPanel(parent)
             if type(act.messages) == "table" and #act.messages > 0 then
                 root:CreateButton(L["Copy"], CopyActiveThreadLog)
                 root:CreateDivider()
-                local clrSub = root:CreateButton(L["Clear Active Chat"])
-                clrSub:CreateButton("|cffff5555" .. L["Confirm Clear?"] .. "|r", function()
-                    if ns.Chat and ns.Chat.ClearHistory then
-                        ns.Chat:ClearHistory(k)
+                root:CreateButton("|cffff5555" .. L["Clear Active Chat"] .. "|r", function()
+                    local targetKey = k
+                    local title = act.title or k
+                    if ns.UI and ns.UI.OpenConfirmModal then
+                        ns.UI:OpenConfirmModal({
+                            title = L["Clear Active Chat"],
+                            message = L["Are you sure you want to clear all messages in '%s'?"]:format(title),
+                            confirmText = L["Clear"],
+                            onConfirm = function()
+                                if ns.Chat and ns.Chat.ClearHistory then
+                                    ns.Chat:ClearHistory(targetKey)
+                                    panel:Refresh()
+                                end
+                            end,
+                        })
+                    elseif ns.Chat and ns.Chat.ClearHistory then
+                        ns.Chat:ClearHistory(targetKey)
                         panel:Refresh()
                     end
                 end)
@@ -2769,7 +3322,23 @@ function SocialPanels:CreateChatPanel(parent)
     btnLeaveRoom:SetScript("OnClick", function()
         local k = ns.Chat and ns.Chat.activeThreadKey
         if k and k:sub(1, 5) == "room:" and ns.Chat then
-            ns.Chat:LeaveRoom(k:sub(6))
+            local roomId = k:sub(6)
+            local thr = ns.Chat.threads and ns.Chat.threads[k]
+            local roomTitle = (thr and thr.title) or roomId
+            if ns.UI and ns.UI.OpenConfirmModal then
+                ns.UI:OpenConfirmModal({
+                    title = L["Leave"],
+                    message = L["Are you sure you want to leave room '%s'?"]:format(roomTitle),
+                    confirmText = L["Leave"],
+                    onConfirm = function()
+                        if ns.Chat and ns.Chat.LeaveRoom then
+                            ns.Chat:LeaveRoom(roomId)
+                        end
+                    end,
+                })
+            else
+                ns.Chat:LeaveRoom(roomId)
+            end
         end
     end)
     btnTargetCard:SetScript("OnClick", function()
@@ -2889,7 +3458,20 @@ function SocialPanels:CreateChatPanel(parent)
         if link:find("addon:SCentral:delnote:", 1, true) then
             local noteId = link:match("addon:SCentral:delnote:([^|]+)")
             if noteId and noteId ~= "" and ns.Chat and ns.Chat.DeletePersonalNote then
-                ns.Chat:DeletePersonalNote(noteId)
+                if ns.UI and ns.UI.OpenConfirmModal then
+                    ns.UI:OpenConfirmModal({
+                        title = L["Delete"],
+                        message = L["Are you sure you want to delete this personal note?"],
+                        confirmText = L["Delete"],
+                        onConfirm = function()
+                            if ns.Chat and ns.Chat.DeletePersonalNote then
+                                ns.Chat:DeletePersonalNote(noteId)
+                            end
+                        end,
+                    })
+                else
+                    ns.Chat:DeletePersonalNote(noteId)
+                end
             end
         elseif link:find("addon:SCentral:msgact:", 1, true) then
             local idx = tonumber(link:match("addon:SCentral:msgact:(%d+)"))
@@ -3147,11 +3729,37 @@ function SocialPanels:CreateChatPanel(parent)
             local sub = root:CreateButton(L["Remove Quick Reply"])
             for idx, tpl in ipairs(list) do
                 sub:CreateButton(tpl, function()
-                    ns.Chat:RemoveQuickReply(idx)
+                    if ns.UI and ns.UI.OpenConfirmModal then
+                        ns.UI:OpenConfirmModal({
+                            title = L["Remove Quick Reply"],
+                            message = L["Are you sure you want to remove this quick reply?"],
+                            confirmText = L["Remove"],
+                            onConfirm = function()
+                                if ns.Chat and ns.Chat.RemoveQuickReply then
+                                    ns.Chat:RemoveQuickReply(idx)
+                                end
+                            end,
+                        })
+                    else
+                        ns.Chat:RemoveQuickReply(idx)
+                    end
                 end)
             end
             root:CreateButton(L["Reset Defaults"], function()
-                ns.Chat:ResetQuickReplies()
+                if ns.UI and ns.UI.OpenConfirmModal then
+                    ns.UI:OpenConfirmModal({
+                        title = L["Reset Defaults"],
+                        message = L["Are you sure you want to reset all quick replies to defaults?"],
+                        confirmText = L["Reset"],
+                        onConfirm = function()
+                            if ns.Chat and ns.Chat.ResetQuickReplies then
+                                ns.Chat:ResetQuickReplies()
+                            end
+                        end,
+                    })
+                else
+                    ns.Chat:ResetQuickReplies()
+                end
             end)
         end)
     end)
@@ -4430,6 +5038,10 @@ local function CurrentAltKey()
 end
 local function EnsureAltRemoveModal()
     if altRemoveModal then
+        altRemoveModal:SetParent(UIParent)
+        altRemoveModal:SetFrameStrata("FULLSCREEN_DIALOG")
+        altRemoveModal:SetFrameLevel(840)
+        if altRemoveModal.SetToplevel then altRemoveModal:SetToplevel(true) end
         Theme:ApplyBackdrop(altRemoveModal, "window")
         Theme:StyleButton(altRemoveModal.topCloseBtn, "default")
         Theme:StyleButton(altRemoveModal.btnConfirm, "danger")
@@ -4440,8 +5052,9 @@ local function EnsureAltRemoveModal()
     local m = CreateFrame("Frame", "SocialCentralRemoveAltModal", UIParent, "BackdropTemplate")
     m:SetSize(400, 168)
     m:SetPoint("CENTER")
-    m:SetFrameStrata("DIALOG")
-    m:SetFrameLevel(125)
+    m:SetFrameStrata("FULLSCREEN_DIALOG")
+    m:SetFrameLevel(840)
+    if m.SetToplevel then m:SetToplevel(true) end
     m:EnableMouse(true)
     Theme:MakeMovable(m, { key = "modal_alt_remove" })
     table.insert(UISpecialFrames, "SocialCentralRemoveAltModal")
@@ -4509,6 +5122,7 @@ local function OpenAltRemoveModal(altData, onRemoved)
     local disp = hex .. (altData.fullName or altData.name or altData.key) .. "|r"
     m.desc:SetText(L["Remove the saved local snapshot for %s?\n\nThis does not affect your character in-game, and it will be recorded again if you log in with it."]:format(disp))
     m:Show()
+    if m.Raise then m:Raise() end
 end
 
 local function OpenItemContextMenu(anchor, itemData, onSearchAllAlts)
@@ -4540,8 +5154,76 @@ local function OpenItemContextMenu(anchor, itemData, onSearchAllAlts)
     end
 end
 
-local function GetSortedAltsList(sortBy)
-    local raw = (Store and Store.GetAltsList and Store:GetAltsList()) or {}
+local function FormatAltWorldBadge(alt, showAlways)
+    if type(alt) ~= "table" then return "" end
+    local wt, altPool, wtLabel
+    if Compat.GetAltWorldInfo then
+        wt, altPool, wtLabel = Compat.GetAltWorldInfo(alt)
+    else
+        wt = alt.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(alt.realmName or alt.realmPool, alt.realmRaw))
+        altPool = (alt.realmName and Compat.RealmPool and Compat.RealmPool(alt.realmName))
+            or (alt.realmPool and Compat.RealmPool and Compat.RealmPool(alt.realmPool))
+            or alt.realmPool
+        wtLabel = (Compat.FormatWorldTypeLabel and Compat.FormatWorldTypeLabel(wt)) or wt or alt.realmName
+    end
+    local curWorld, myPool
+    if Compat.GetAltWorldInfo then
+        curWorld, myPool = Compat.GetAltWorldInfo(nil)
+    else
+        myPool = Compat.RealmPool and Compat.RealmPool() or nil
+        curWorld = Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm()) or nil
+    end
+    local sameWorld = (altPool and myPool and altPool == myPool) and (not curWorld or not wt or wt == curWorld)
+    if (not wtLabel or wtLabel == "") and not sameWorld and alt.realmName and alt.realmName ~= "" then
+        wtLabel = alt.realmName
+    end
+    if not wtLabel or wtLabel == "" then return "" end
+    if not showAlways and sameWorld then
+        return ""
+    end
+    local col = (wt == "PvP" or wt == "RP-PvP") and "|cffd29922" or "|cff58a6ff"
+    return " " .. col .. "[" .. wtLabel .. "]|r"
+end
+
+local function ResolveAltRestedInfo(alt)
+    if ns.Alts and ns.Alts.GetEstimatedRested then
+        return ns.Alts:GetEstimatedRested(alt)
+    end
+    local lvl = tonumber(alt and alt.level) or 0
+    if lvl >= 60 then return 0, false, 0, false, 0 end
+    local xpMax = math.max(1, tonumber(alt and alt.xpMax) or 1)
+    local r = tonumber(alt and alt.rested) or 0
+    local pct = math.min(150, math.floor((r / xpMax) * 100 + 0.5))
+    return pct, false, 0, false, pct
+end
+
+local function UnpackAltItem(raw, locLabel, slotId)
+    if ns.Alts and ns.Alts.UnpackItem then
+        return ns.Alts:UnpackItem(raw, locLabel, slotId)
+    end
+    if type(raw) ~= "table" then return nil end
+    return {
+        itemID = raw.itemID,
+        link = raw.link,
+        name = raw.name,
+        icon = raw.icon,
+        quality = raw.quality or 1,
+        count = raw.count or 1,
+        _isEquip = slotId ~= nil or nil,
+        _slotId = slotId,
+        _locLabel = locLabel,
+    }
+end
+
+local function CountTableEntries(tbl)
+    if type(tbl) ~= "table" then return 0 end
+    local n = 0
+    for _ in pairs(tbl) do n = n + 1 end
+    return n
+end
+
+local function GetSortedAltsList(sortBy, worldScope)
+    local raw = (Store and Store.GetAltsList and Store:GetAltsList(worldScope)) or {}
     local out = {}
     for i = 1, #raw do
         out[i] = raw[i]
@@ -4560,6 +5242,17 @@ local function GetSortedAltsList(sortBy)
             local ax = (tonumber(a.xp) or 0) / math.max(1, tonumber(a.xpMax) or 1)
             local bx = (tonumber(b.xp) or 0) / math.max(1, tonumber(b.xpMax) or 1)
             if ax ~= bx then return ax > bx end
+            return (a.lastActive or 0) > (b.lastActive or 0)
+        end)
+    elseif sortBy == "rested" then
+        table.sort(out, function(a, b)
+            local al, bl = tonumber(a.level) or 0, tonumber(b.level) or 0
+            local aMax, bMax = (al >= 60), (bl >= 60)
+            if aMax ~= bMax then return not aMax end
+            local ar = ResolveAltRestedInfo(a)
+            local br = ResolveAltRestedInfo(b)
+            if ar ~= br then return ar > br end
+            if al ~= bl then return al > bl end
             return (a.lastActive or 0) > (b.lastActive or 0)
         end)
     elseif sortBy == "mail" then
@@ -4610,10 +5303,19 @@ local function ShowAltTooltip(anchor, altData)
         local xpVal = tonumber(altData.xp) or 0
         local xpMaxVal = math.max(1, tonumber(altData.xpMax) or 1)
         local xpPct = math.min(100, math.floor((xpVal / xpMaxVal) * 100 + 0.5))
-        local restedVal = tonumber(altData.rested) or 0
-        local restPct = math.min(150, math.floor((restedVal / xpMaxVal) * 100 + 0.5))
-        local xpStr = restPct > 0 and ("%d%% (+%d%% %s)"):format(xpPct, restPct, L["Rested"]) or ("%d%%"):format(xpPct)
-        GameTooltip:AddDoubleLine(L["Experience"], xpStr, 0.75, 0.78, 0.85, restPct > 0 and 0.45 or 0.92, restPct > 0 and 0.76 or 0.94, 1.0)
+        local restPct, isEst, etaSec = ResolveAltRestedInfo(altData)
+        local xpStr
+        if restPct > 0 then
+            local estPref = isEst and "~" or ""
+            local estTag = isEst and (" " .. L["Rested (est.)"]) or (" " .. L["Rested"])
+            xpStr = ("%d%% (+%s%d%%%s)"):format(xpPct, estPref, restPct, estTag)
+            if etaSec and etaSec > 60 and restPct < 150 then
+                xpStr = xpStr .. " · " .. L["MAX in %s"]:format(FormatDurationCompact(etaSec))
+            end
+        else
+            xpStr = ("%d%%"):format(xpPct)
+        end
+        GameTooltip:AddDoubleLine(L["Experience"], xpStr, 0.75, 0.78, 0.85, restPct >= 148 and 0.35 or (restPct > 0 and 0.45 or 0.92), restPct >= 148 and 0.92 or (restPct > 0 and 0.76 or 0.94), restPct >= 148 and 0.55 or 1.0)
     end
 
     GameTooltip:AddDoubleLine(L["Zone"], (altData.zone and altData.zone ~= "") and altData.zone or "-", 0.75, 0.78, 0.85, 1, 1, 1)
@@ -4636,7 +5338,10 @@ local function ShowAltTooltip(anchor, altData)
     GameTooltip:AddDoubleLine(L["Bags"], ("%d / %d (%s)"):format(bagUsed, bagCap, L["%d free"]:format(bagFree)), 0.75, 0.78, 0.85, 0.92, 0.94, 0.96)
 
     if type(altData.bank) == "table" then
-        local bStr = ("%d %s"):format(#altData.bank, L["items"])
+        local bUsed = math.max(0, (altData.bankTotal or 0) - (altData.bankFree or 0))
+        local bStr = (altData.bankTotal and altData.bankTotal > 0)
+            and L["%d / %d slots"]:format(bUsed, altData.bankTotal)
+            or ("%d %s"):format(#altData.bank, L["items"])
         if altData.bankUpdatedAt and altData.bankUpdatedAt > 0 then
             bStr = bStr .. " · " .. Compat.FormatRelativeTime(altData.bankUpdatedAt, L)
         end
@@ -4666,11 +5371,31 @@ local function ShowAltTooltip(anchor, altData)
         end
     end
 
+    if ns.Alts and ns.Alts.GetCraftCooldowns then
+        local cds = ns.Alts:GetCraftCooldowns(altData)
+        if #cds > 0 then
+            local cdParts = {}
+            for i = 1, math.min(#cds, 3) do
+                local c = cds[i]
+                cdParts[#cdParts + 1] = c.isReady
+                    and (c.name .. " [" .. L["Ready"] .. "]")
+                    or (c.name .. " [" .. FormatDurationCompact(c.remaining) .. "]")
+            end
+            local anyReady = cds[1].isReady == true
+            GameTooltip:AddDoubleLine(L["Craft Cooldowns"], table.concat(cdParts, ", "), 0.75, 0.78, 0.85, anyReady and 0.35 or 1.0, anyReady and 0.92 or 0.74, anyReady and 0.55 or 0.30)
+        end
+    end
+
     if ns.Alts and ns.Alts.GetLockouts then
         local locks = ns.Alts:GetLockouts(altData)
         if #locks > 0 then
             GameTooltip:AddDoubleLine(L["Active Lockouts"], ("%d (%s)"):format(#locks, FormatDurationCompact(locks[1].reset)), 0.75, 0.78, 0.85, 1.0, 0.65, 0.30)
         end
+    end
+    if ns.Group and ns.Group.GetHourlyInstanceStatus then
+        local st = ns.Group:GetHourlyInstanceStatus()
+        local usedH, maxH = st and st.used or 0, st and st.max or 5
+        GameTooltip:AddDoubleLine(L["Instance Limit (1h)"], string.format("%d/%d", usedH, maxH), 0.75, 0.78, 0.85, usedH >= maxH and 1.0 or 0.35, usedH >= maxH and 0.35 or 0.92, usedH >= maxH and 0.35 or 0.55)
     end
 
     GameTooltip:AddLine(" ")
@@ -4678,12 +5403,13 @@ local function ShowAltTooltip(anchor, altData)
     GameTooltip:Show()
 end
 
-local function ShowGoldBreakdownTooltip(anchor)
+local function ShowGoldBreakdownTooltip(anchor, worldScope, curWorldType)
     if not GameTooltip then return end
-    local list = GetSortedAltsList("gold")
+    local scopeArg = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(worldScope)) or ((worldScope == "all") and "all" or "pool")
+    local list = GetSortedAltsList("gold", scopeArg)
     local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
-    local byFac = (Store and Store.GetTotalAltsGoldByFaction and Store:GetTotalAltsGoldByFaction(true)) or nil
-    local facTot = (byFac and myFac and byFac[myFac]) or (Store and Store.GetTotalAltsGold and Store:GetTotalAltsGold(true, true)) or 0
+    local byFac = (Store and Store.GetTotalAltsGoldByFaction and Store:GetTotalAltsGoldByFaction(scopeArg)) or nil
+    local facTot = (byFac and myFac and byFac[myFac]) or (Store and Store.GetTotalAltsGold and Store:GetTotalAltsGold(scopeArg, true)) or 0
     local allTot = (byFac and byFac.total) or facTot
     local hasDualFaction = byFac and (byFac.Alliance or 0) > 0 and (byFac.Horde or 0) > 0
 
@@ -4693,9 +5419,11 @@ local function ShowGoldBreakdownTooltip(anchor)
     if hasDualFaction then
         GameTooltip:AddDoubleLine("|cff70b5ff" .. L["Alliance"] .. "|r", Compat.FormatMoney(byFac.Alliance or 0), 0.65, 0.82, 1.0, 1, 1, 1)
         GameTooltip:AddDoubleLine("|cffff7878" .. L["Horde"] .. "|r", Compat.FormatMoney(byFac.Horde or 0), 1.0, 0.65, 0.65, 1, 1, 1)
+        GameTooltip:AddDoubleLine("|cffffd24d" .. L["Total (Account)"] .. "|r", Compat.FormatMoney(allTot), 1.0, 0.85, 0.25, 1, 1, 1)
     end
     GameTooltip:AddLine(" ")
     local denom = hasDualFaction and nil or allTot
+    local showAllBadges = (scopeArg ~= "pool")
     for _, alt in ipairs(list) do
         local hex = Compat.ClassHex(alt.classFile)
         local disp = alt.fullName or alt.name or alt.key or "?"
@@ -4703,8 +5431,14 @@ local function ShowGoldBreakdownTooltip(anchor)
         local facDenominator = denom or (alt.faction and byFac and byFac[alt.faction]) or allTot
         local pct = (facDenominator > 0) and math.floor((m / facDenominator) * 100 + 0.5) or 0
         local facTag = hasDualFaction and (alt.faction == "Alliance" and " |cff70b5ff[A]|r" or (alt.faction == "Horde" and " |cffff7878[H]|r" or "")) or ""
-        local leftTxt = hex .. disp .. "|r" .. facTag .. ((facDenominator > 0 and #list > 1) and (" |cff9da7b5(" .. pct .. "%)|r") or "")
+        local wTag = FormatAltWorldBadge(alt, showAllBadges)
+        local leftTxt = hex .. disp .. "|r" .. facTag .. wTag .. ((facDenominator > 0 and #list > 1) and (" |cff9da7b5(" .. pct .. "%)|r") or "")
         GameTooltip:AddDoubleLine(leftTxt, Compat.FormatMoney(m))
+    end
+    local recordedWorlds = (Store and Store.GetRecordedAltWorlds and Store:GetRecordedAltWorlds()) or {}
+    if scopeArg == "all" and #recordedWorlds <= 1 then
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(L["Log in once on a character in PvE, RP PvE, or RP PvP to unlock its world filter here."], 0.70, 0.82, 0.96, true)
     end
     GameTooltip:Show()
 end
@@ -4727,6 +5461,9 @@ local function ConsolidateItems(rawList, isEquip)
                     name = item.name,
                     icon = item.icon,
                     quality = item.quality,
+                    classID = item.classID,
+                    subClassID = item.subClassID,
+                    equipLoc = item.equipLoc,
                     count = qty,
                     _isEquip = item._isEquip,
                     _slotId = item._slotId,
@@ -4740,15 +5477,698 @@ local function ConsolidateItems(rawList, isEquip)
     return out
 end
 
+local function CreateRosterWorldHintBar(panel, rosterPane, goldBar)
+    local bar = CreateFrame("Frame", nil, rosterPane)
+    bar:SetPoint("BOTTOMLEFT", goldBar, "TOPLEFT", 0, 2)
+    bar:SetPoint("BOTTOMRIGHT", goldBar, "TOPRIGHT", 0, 2)
+    bar:SetHeight(34)
+    bar:Hide()
+
+    local bg = bar:CreateTexture(nil, "BACKGROUND", nil, -6)
+    bg:SetAllPoints()
+    bg:SetTexture(WHITE8X8)
+    bg:SetVertexColor(0.08, 0.12, 0.18, 0.96)
+
+    local line = bar:CreateTexture(nil, "ARTWORK", nil, 1)
+    line:SetHeight(1)
+    line:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, 0)
+    line:SetPoint("TOPRIGHT", bar, "TOPRIGHT", 0, 0)
+    line:SetTexture(WHITE8X8)
+    line:SetVertexColor(0.35, 0.62, 0.92, 0.70)
+
+    local lbl = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    lbl:SetPoint("TOPLEFT", bar, "TOPLEFT", 8, -4)
+    lbl:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", -8, 4)
+    lbl:SetJustifyH("LEFT")
+    lbl:SetJustifyV("MIDDLE")
+    lbl:SetWordWrap(true)
+    lbl:SetTextColor(0.68, 0.84, 0.98)
+    lbl:SetText(L["No other world alts saved yet — log in once on each PvE / PvP character to sync them."])
+    panel._worldHintBar = bar
+    panel._goldBar = goldBar
+end
+
+-- Modular Alt UI helpers extracted outside CreateAltsPanel to stay well below Lua 5.1 local/upvalue compiler caps.
+local AltUI = {}
+
+function AltUI.CreateOverviewScrollbar(overviewFrame, overviewScroll)
+    local track = CreateFrame("Frame", nil, overviewFrame)
+    track:SetWidth(6)
+    track:SetPoint("TOPRIGHT", overviewFrame, "TOPRIGHT", -2, -4)
+    track:SetPoint("BOTTOMRIGHT", overviewFrame, "BOTTOMRIGHT", -2, 4)
+    track:Hide()
+
+    local trackBg = track:CreateTexture(nil, "BACKGROUND")
+    trackBg:SetAllPoints()
+    trackBg:SetColorTexture(0, 0, 0, 0.28)
+
+    local thumb = CreateFrame("Button", nil, track)
+    thumb:SetWidth(6)
+    thumb:SetHeight(32)
+    thumb:SetPoint("TOP", track, "TOP", 0, 0)
+    thumb.tex = thumb:CreateTexture(nil, "ARTWORK")
+    thumb.tex:SetAllPoints()
+
+    local hovered = false
+    local function RefreshThumbColor()
+        local p = Theme:GetPalette()
+        local c = hovered and (p.scrollThumbHover or { 0.85, 0.70, 0.30, 1.0 }) or (p.scrollThumb or { 0.56, 0.45, 0.24, 0.88 })
+        thumb.tex:SetColorTexture(c[1], c[2], c[3], c[4])
+    end
+
+    local function SyncThumb(maxScroll)
+        local maxS = math.max(0, tonumber(maxScroll) or 0)
+        overviewScroll._scMaxScroll = maxS
+        if maxS <= 1 then
+            track:Hide()
+            overviewScroll:ClearAllPoints()
+            overviewScroll:SetPoint("TOPLEFT", overviewFrame, "TOPLEFT", 2, -2)
+            overviewScroll:SetPoint("BOTTOMRIGHT", overviewFrame, "BOTTOMRIGHT", -2, 2)
+            return
+        end
+        track:Show()
+        overviewScroll:ClearAllPoints()
+        overviewScroll:SetPoint("TOPLEFT", overviewFrame, "TOPLEFT", 2, -2)
+        overviewScroll:SetPoint("BOTTOMRIGHT", overviewFrame, "BOTTOMRIGHT", -10, 2)
+        local trackH = math.max(40, track:GetHeight() or 120)
+        local vpH = overviewScroll:GetHeight() or 120
+        local ratio = math.max(0.14, math.min(0.90, vpH / math.max(1, vpH + maxS)))
+        local thumbH = math.max(22, math.floor(trackH * ratio))
+        thumb:SetHeight(thumbH)
+        local cur = overviewScroll:GetVerticalScroll() or 0
+        local travel = math.max(1, trackH - thumbH)
+        local pos = math.floor((math.min(maxS, math.max(0, cur)) / maxS) * travel)
+        thumb:ClearAllPoints()
+        thumb:SetPoint("TOP", track, "TOP", 0, -pos)
+        RefreshThumbColor()
+    end
+
+    thumb:SetScript("OnEnter", function() hovered = true; RefreshThumbColor() end)
+    thumb:SetScript("OnLeave", function() hovered = false; RefreshThumbColor() end)
+
+    local dragStartY, dragStartVal
+    thumb:SetScript("OnMouseDown", function(_, button)
+        if button ~= "LeftButton" or (overviewScroll._scMaxScroll or 0) <= 0 then return end
+        local _, cy = GetCursorPosition()
+        local scale = thumb:GetEffectiveScale() or 1
+        dragStartY = cy / scale
+        dragStartVal = overviewScroll:GetVerticalScroll() or 0
+        thumb:SetScript("OnUpdate", function()
+            if not IsMouseButtonDown("LeftButton") or (overviewScroll._scMaxScroll or 0) <= 0 then
+                thumb:SetScript("OnUpdate", nil)
+                return
+            end
+            local _, curY = GetCursorPosition()
+            local sc = thumb:GetEffectiveScale() or 1
+            local dy = dragStartY - (curY / sc)
+            local trackH = math.max(40, track:GetHeight() or 120)
+            local travel = math.max(1, trackH - (thumb:GetHeight() or 22))
+            local maxS = overviewScroll._scMaxScroll or 0
+            local nxt = math.max(0, math.min(maxS, dragStartVal + (dy / travel) * maxS))
+            overviewScroll:SetVerticalScroll(nxt)
+            SyncThumb(maxS)
+        end)
+    end)
+    local function StopDrag() thumb:SetScript("OnUpdate", nil) end
+    thumb:SetScript("OnMouseUp", StopDrag)
+    thumb:SetScript("OnHide", StopDrag)
+    RefreshThumbColor()
+    return SyncThumb, RefreshThumbColor
+end
+
+function AltUI.AttachHeaderTooltip(charHeader, panel)
+    charHeader:EnableMouse(true)
+    charHeader:SetScript("OnEnter", function(selfHdr)
+        if panel._headerAltData then
+            ShowAltTooltip(selfHdr, panel._headerAltData)
+        end
+    end)
+    charHeader:SetScript("OnLeave", function(selfHdr)
+        if GameTooltip and GameTooltip:IsOwned(selfHdr) then GameTooltip:Hide() end
+    end)
+end
+
+function AltUI.ConfigureHeaderRow(row, rowData, panel, openAltActionMenuFn)
+    if not row._headerHit then
+        local hit = CreateFrame("Button", nil, row)
+        hit:SetAllPoints()
+        hit:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        local hl = hit:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetColorTexture(1.0, 0.85, 0.35, 0.08)
+        hit:SetScript("OnEnter", function(selfBtn)
+            if not (GameTooltip and selfBtn._altKey) then return end
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(selfBtn._altName or "Alt", 1.0, 0.85, 0.30)
+            GameTooltip:AddLine(L["Click to inspect this character's overview, or right-click for actions."], 0.82, 0.86, 0.94, true)
+            GameTooltip:Show()
+        end)
+        hit:SetScript("OnLeave", function(selfBtn)
+            if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
+        end)
+        hit:SetScript("OnClick", function(selfBtn, button)
+            local altKey = selfBtn._altKey
+            if not altKey then return end
+            local altRec = ns.db and ns.db.alts and ns.db.alts[altKey]
+            if button == "RightButton" and altRec and openAltActionMenuFn then
+                altRec.key = altKey
+                openAltActionMenuFn(selfBtn, altRec)
+                return
+            end
+            if panel._worldScope ~= "all" and type(altRec) == "table" then
+                local matchesCurrentScope = Store and Store.AltMatchesWorldScope and Store:AltMatchesWorldScope(altRec, panel._worldScope)
+                if not matchesCurrentScope then
+                    panel._worldScope = "all"
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.altsWorldScope = "all"
+                    end
+                end
+            end
+            panel._userPickedAlt = true
+            panel._selectedKey = altKey
+            panel._narrowTabPicked = true
+            panel._subTab = "overview"
+            panel:Refresh(true)
+        end)
+        row._headerHit = hit
+    end
+    row._headerHit._altKey = rowData.altKey
+    row._headerHit._altName = rowData.altName
+    row._headerHit:SetShown(rowData.altKey ~= nil and rowData.altKey ~= "")
+end
+
+function AltUI.MatchesItemFilter(panel, item)
+    if type(item) ~= "table" then return false end
+    local minQ = panel._minQuality or 0
+    if minQ > 0 and (tonumber(item.quality) or 1) < minQ then
+        return false
+    end
+    local cat = panel._itemCategory or "all"
+    if cat ~= "all" then
+        local c = tonumber(item.classID)
+        local eq = (type(item.equipLoc) == "string" and item.equipLoc ~= "") or item._isEquip == true
+        if cat == "equip" and not (eq or c == 2 or c == 4) then
+            return false
+        elseif cat == "consumable" and c ~= 0 then
+            return false
+        elseif cat == "trade" and c ~= 7 and c ~= 9 then
+            return false
+        elseif cat == "other" and (eq or c == 2 or c == 4 or c == 0 or c == 7 or c == 9) then
+            return false
+        end
+    end
+    return true
+end
+
+function AltUI.OpenItemFilterMenu(panel, selfBtn, getSelectedAltFn, renderItemsFn)
+    local locOpts = {
+        { id = "all", label = L["All"] },
+        { id = "equip", label = L["Equipped"] },
+        { id = "bags", label = L["Bags"] },
+        { id = "bank", label = L["Bank"] },
+    }
+    local catOpts = {
+        { id = "all", label = L["All Types"] },
+        { id = "equip", label = L["Gear / Equipment"] },
+        { id = "consumable", label = L["Consumables"] },
+        { id = "trade", label = L["Materials & Recipes"] },
+        { id = "other", label = L["Quest / Misc"] },
+    }
+    local qualOpts = {
+        { id = 0, label = L["Any Rarity"] },
+        { id = 2, label = "|cff1eff00" .. L["Uncommon+"] .. "|r" },
+        { id = 3, label = "|cff0070dd" .. L["Rare+"] .. "|r" },
+        { id = 4, label = "|cffa335ee" .. L["Epic+"] .. "|r" },
+    }
+    if MenuUtil and MenuUtil.CreateContextMenu then
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["Location"])
+            for _, o in ipairs(locOpts) do
+                root:CreateRadio(o.label, function() return panel._bagSource == o.id end, function()
+                    panel._bagSource = o.id
+                    renderItemsFn(getSelectedAltFn(), true)
+                end)
+            end
+            root:CreateDivider()
+            root:CreateTitle(L["Item Category"])
+            for _, o in ipairs(catOpts) do
+                root:CreateRadio(o.label, function() return (panel._itemCategory or "all") == o.id end, function()
+                    panel._itemCategory = o.id
+                    renderItemsFn(getSelectedAltFn(), true)
+                end)
+            end
+            root:CreateDivider()
+            root:CreateTitle(L["Minimum Rarity"])
+            for _, o in ipairs(qualOpts) do
+                root:CreateRadio(o.label, function() return (panel._minQuality or 0) == o.id end, function()
+                    panel._minQuality = o.id
+                    renderItemsFn(getSelectedAltFn(), true)
+                end)
+            end
+            if panel._bagSource ~= "all" or (panel._itemCategory and panel._itemCategory ~= "all") or (panel._minQuality or 0) > 0 then
+                root:CreateDivider()
+                root:CreateButton(L["Reset Filters"], function()
+                    panel._bagSource = "all"
+                    panel._itemCategory = "all"
+                    panel._minQuality = 0
+                    renderItemsFn(getSelectedAltFn(), true)
+                end)
+            end
+        end)
+    else
+        local idx = 1
+        for i, o in ipairs(locOpts) do
+            if o.id == panel._bagSource then idx = (i % #locOpts) + 1; break end
+        end
+        panel._bagSource = locOpts[idx].id
+        renderItemsFn(getSelectedAltFn(), true)
+    end
+end
+
+AltUI.MAX_GRID_COLS = 14
+
+function AltUI.NormalizeWorldScope(scopeMode)
+    if Compat.NormalizeWorldScope then
+        return Compat.NormalizeWorldScope(scopeMode)
+    end
+    return (scopeMode == "all") and "all" or "pool"
+end
+
+function AltUI.GetWorldScopeLabel(scopeMode)
+    local norm = AltUI.NormalizeWorldScope(scopeMode)
+    if norm == "all" then
+        return L["All Worlds"]
+    elseif norm:sub(1, 6) == "world:" then
+        local rawWt = norm:sub(7)
+        return (Compat.FormatWorldTypeLabel and Compat.FormatWorldTypeLabel(rawWt)) or rawWt
+    elseif norm:sub(1, 5) == "pool:" then
+        local wantPool = norm:sub(6)
+        local recorded = (Store and Store.GetRecordedAltWorlds and Store:GetRecordedAltWorlds()) or {}
+        for _, w in ipairs(recorded) do
+            if w.scopeKey == norm or w.realmPool == wantPool then
+                return w.displayLabel
+            end
+        end
+        return wantPool
+    end
+    local _, _, curLabel = Compat.GetAltWorldInfo(nil)
+    return curLabel or L["This World Only"]
+end
+
+function AltUI.PopulateWorldScopeMenu(root, panel)
+    local _, _, curLabel = Compat.GetAltWorldInfo(nil)
+    local recordedWorlds = (Store and Store.GetRecordedAltWorlds and Store:GetRecordedAltWorlds()) or {}
+    local curScope = AltUI.NormalizeWorldScope(panel._worldScope)
+
+    local function SetScope(nextScope)
+        panel._worldScope = nextScope
+        if ns.db and ns.db.settings then
+            ns.db.settings.altsWorldScope = nextScope
+        end
+        panel:Refresh(true)
+    end
+
+    local thisWorldLbl = (curLabel and curLabel ~= "")
+        and L["This World (%s)"]:format(curLabel)
+        or L["This World Only"]
+    root:CreateRadio(thisWorldLbl, function()
+        return curScope == "pool"
+    end, function()
+        SetScope("pool")
+    end)
+
+    -- Add each distinct world/ruleset dynamically ONLY when at least 1 character record exists for it.
+    if #recordedWorlds > 1 then
+        for _, w in ipairs(recordedWorlds) do
+            if (w.count or 0) > 0 then
+                local wKey = w.scopeKey
+                local wLbl = string.format("%s (%d)", w.displayLabel, w.count)
+                root:CreateRadio(wLbl, function()
+                    return curScope == wKey
+                end, function()
+                    SetScope(wKey)
+                end)
+            end
+        end
+    end
+
+    local worldNames = {}
+    for _, w in ipairs(recordedWorlds) do
+        worldNames[#worldNames + 1] = w.displayLabel
+    end
+    local allWorldsLbl = (#worldNames > 1)
+        and L["All Recorded Worlds (%s)"]:format(table.concat(worldNames, " + "))
+        or L["All Worlds"]
+    root:CreateRadio(allWorldsLbl, function()
+        return curScope == "all"
+    end, function()
+        SetScope("all")
+    end)
+
+    if #recordedWorlds <= 1 then
+        root:CreateTitle("|cff8b949e" .. L["Log in once on a character in PvE, RP PvE, or RP PvP to unlock its world filter here."] .. "|r")
+    end
+end
+
+function AltUI.CycleWorldScope(panel)
+    local order = { "pool" }
+    local recordedWorlds = (Store and Store.GetRecordedAltWorlds and Store:GetRecordedAltWorlds()) or {}
+    if #recordedWorlds > 1 then
+        for _, w in ipairs(recordedWorlds) do
+            if (w.count or 0) > 0 then
+                order[#order + 1] = w.scopeKey
+            end
+        end
+    end
+    order[#order + 1] = "all"
+    local cur = AltUI.NormalizeWorldScope(panel._worldScope)
+    local nextIdx = 1
+    for i, s in ipairs(order) do
+        if s == cur then
+            nextIdx = (i % #order) + 1
+            break
+        end
+    end
+    panel._worldScope = order[nextIdx]
+    if ns.db and ns.db.settings then
+        ns.db.settings.altsWorldScope = panel._worldScope
+    end
+    panel:Refresh(true)
+end
+
+function AltUI.AcquireGridCell(row, colIdx, onEnterFn, onLeaveFn, onClickFn)
+    row._cells = row._cells or {}
+    local cell = row._cells[colIdx]
+    if cell then
+        return cell
+    end
+    cell = CreateFrame("Button", nil, row, "BackdropTemplate")
+    cell:SetSize(34, 34)
+    cell._scNoStone = true
+    cell:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    Theme:ApplyBackdrop(cell, "inset")
+
+    local tex = cell:CreateTexture(nil, "ARTWORK")
+    tex:SetPoint("TOPLEFT", 2, -2)
+    tex:SetPoint("BOTTOMRIGHT", -2, 2)
+    tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    cell.icon = tex
+
+    local hl = cell:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetPoint("TOPLEFT", 2, -2)
+    hl:SetPoint("BOTTOMRIGHT", -2, 2)
+    hl:SetColorTexture(1, 0.92, 0.65, 0.16)
+    hl:SetBlendMode("ADD")
+
+    local eqLbl = cell:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    eqLbl:SetPoint("TOPLEFT", 3, -2)
+    eqLbl:SetText("|cffffd200E|r")
+    eqLbl:Hide()
+    cell.eqLbl = eqLbl
+
+    local countLbl = cell:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+    countLbl:SetPoint("BOTTOMRIGHT", -2, 2)
+    countLbl:SetJustifyH("RIGHT")
+    cell.countLbl = countLbl
+
+    cell:SetScript("OnEnter", onEnterFn)
+    cell:SetScript("OnLeave", onLeaveFn)
+    cell:SetScript("OnClick", onClickFn)
+    cell:Hide()
+    row._cells[colIdx] = cell
+    return cell
+end
+
+function AltUI.OpenScopeMenu(panel, selfBtn, getSelectedAltFn, renderItemsFn)
+    local recordedWorlds = (Store and Store.GetRecordedAltWorlds and Store:GetRecordedAltWorlds()) or {}
+    if MenuUtil and MenuUtil.CreateContextMenu then
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["All Alts"])
+            root:CreateRadio(L["This Alt"], function()
+                return not panel._allAltsScope
+            end, function()
+                panel._allAltsScope = false
+                renderItemsFn(getSelectedAltFn(), true)
+            end)
+            root:CreateRadio(L["All Alts (This World)"], function()
+                return panel._allAltsScope == true and AltUI.NormalizeWorldScope(panel._itemsWorldScope) == "pool"
+            end, function()
+                panel._allAltsScope = true
+                panel._itemsWorldScope = "pool"
+                renderItemsFn(getSelectedAltFn(), true)
+            end)
+            if #recordedWorlds > 1 then
+                for _, w in ipairs(recordedWorlds) do
+                    if (w.count or 0) > 0 then
+                        local wKey = w.scopeKey
+                        local wLbl = L["All Alts (%s)"]:format(w.displayLabel)
+                        root:CreateRadio(wLbl, function()
+                            return panel._allAltsScope == true and AltUI.NormalizeWorldScope(panel._itemsWorldScope) == wKey
+                        end, function()
+                            panel._allAltsScope = true
+                            panel._itemsWorldScope = wKey
+                            renderItemsFn(getSelectedAltFn(), true)
+                        end)
+                    end
+                end
+            end
+            root:CreateRadio(L["All Alts (All Worlds)"], function()
+                return panel._allAltsScope == true and panel._itemsWorldScope == "all"
+            end, function()
+                panel._allAltsScope = true
+                panel._itemsWorldScope = "all"
+                renderItemsFn(getSelectedAltFn(), true)
+            end)
+            root:CreateDivider()
+            root:CreateCheckbox(L["Include Opposite Faction"], function()
+                return panel._includeOppositeFaction == true
+            end, function()
+                panel._includeOppositeFaction = not panel._includeOppositeFaction
+                panel._allAltsScope = true
+                renderItemsFn(getSelectedAltFn(), true)
+            end)
+        end)
+    else
+        if not panel._allAltsScope then
+            panel._allAltsScope = true
+            panel._itemsWorldScope = "pool"
+        elseif panel._itemsWorldScope ~= "all" then
+            panel._itemsWorldScope = "all"
+        else
+            panel._allAltsScope = false
+            panel._itemsWorldScope = "pool"
+        end
+        renderItemsFn(getSelectedAltFn(), true)
+    end
+end
+
+function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionMenuFn)
+    local frame = CreateFrame("Frame", nil, subArea)
+    frame:SetAllPoints()
+    frame:Hide()
+
+    local topBar = CreateFrame("Frame", nil, frame)
+    topBar:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -2)
+    topBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
+    topBar:SetHeight(28)
+
+    local backBtn = Theme:CreateButton(topBar, 66, 22, "< " .. L["Alts"], "default")
+    Theme:AutoFitButton(backBtn, 56, 10, 96)
+    backBtn:SetPoint("LEFT", topBar, "LEFT", 0, 0)
+    backBtn:SetScript("OnClick", function()
+        panel._narrowTabPicked = true
+        panel._subTab = "alts"
+        panel:Refresh(true)
+    end)
+    backBtn:Hide()
+
+    local helpBtn = AddHelpFn(
+        topBar, topBar,
+        L["Help: Account Summary Matrix"],
+        L["Compares every character across level, live estimated rested XP, professions, ready craft cooldowns, free bag slots, pending mail, and gold at a glance."],
+        L["Click any character row to jump straight to their profile, or right-click to copy Armory / remove old entries."],
+        "RIGHT", "RIGHT", -2, 0
+    )
+
+    local summaryLbl = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    summaryLbl:SetPoint("LEFT", topBar, "LEFT", 4, 0)
+    summaryLbl:SetPoint("RIGHT", helpBtn or topBar, helpBtn and "LEFT" or "RIGHT", -6, 0)
+    summaryLbl:SetJustifyH("LEFT")
+    summaryLbl:SetWordWrap(false)
+
+    local scroll = Theme:CreateScrollList(frame, 46, function(rowParent, _, rowHeight)
+        local row = CreateFrame("Button", nil, rowParent, "BackdropTemplate")
+        row:SetHeight(rowHeight)
+        row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+        row.classIcon = row:CreateTexture(nil, "ARTWORK", nil, 2)
+        row.classIcon:SetSize(22, 22)
+        row.classIcon:SetPoint("LEFT", row, "LEFT", 8, 0)
+        row.classIcon:SetTexture("Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES")
+
+        row.rightTop = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.rightTop:SetPoint("TOPRIGHT", row, "TOPRIGHT", -8, -5)
+        row.rightTop:SetJustifyH("RIGHT")
+        row.rightTop:SetWordWrap(false)
+
+        row.leftTop = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        row.leftTop:SetPoint("TOPLEFT", row.classIcon, "TOPRIGHT", 7, 1)
+        row.leftTop:SetPoint("RIGHT", row.rightTop, "LEFT", -6, 0)
+        row.leftTop:SetJustifyH("LEFT")
+        row.leftTop:SetWordWrap(false)
+
+        row.rightBot = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.rightBot:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -8, 5)
+        row.rightBot:SetJustifyH("RIGHT")
+        row.rightBot:SetWordWrap(false)
+
+        row.leftBot = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.leftBot:SetPoint("BOTTOMLEFT", row.classIcon, "BOTTOMRIGHT", 7, -1)
+        row.leftBot:SetPoint("RIGHT", row.rightBot, "LEFT", -6, 0)
+        row.leftBot:SetJustifyH("LEFT")
+        row.leftBot:SetWordWrap(false)
+
+        row:SetScript("OnEnter", function(selfRow) ShowAltTooltip(selfRow, selfRow._alt) end)
+        row:SetScript("OnLeave", function(selfRow)
+            if GameTooltip and GameTooltip:IsOwned(selfRow) then GameTooltip:Hide() end
+        end)
+        row:SetScript("OnClick", function(selfRow, button)
+            local alt = selfRow._alt
+            if not alt then return end
+            if button == "RightButton" then
+                openAltActionMenuFn(selfRow, alt)
+                return
+            end
+            panel._userPickedAlt = true
+            panel._selectedKey = alt.key
+            panel._narrowTabPicked = true
+            panel._subTab = "overview"
+            panel:Refresh(true)
+        end)
+        return row
+    end, function(row, alt)
+        row._alt = alt
+        local coords = alt.classFile and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[alt.classFile]
+        if coords then
+            row.classIcon:SetTexCoord(coords[1] + 0.02, coords[2] - 0.02, coords[3] + 0.02, coords[4] - 0.02)
+            row.classIcon:Show()
+        else
+            row.classIcon:Hide()
+        end
+        local fac = alt.faction or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(alt.fullName or alt.name or alt.key))
+        local facIco = (fac and Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
+        local hex = Compat.ClassHex(alt.classFile)
+        local disp = alt.fullName or alt.name or alt.key or "?"
+        local lvl = tonumber(alt.level) or 0
+        local wBadge = FormatAltWorldBadge(alt, panel._worldScope == "all")
+        row.leftTop:SetText(("%s%s%s|r |cffc6ceda%s|r%s"):format(facIco, hex, disp, L["Lv %d"]:format(lvl), wBadge))
+
+        local topRightParts = { Compat.FormatMoney(alt.money or 0) }
+        if ns.Alts and ns.Alts.HasReadyCraftCooldown and ns.Alts:HasReadyCraftCooldown(alt) then
+            topRightParts[#topRightParts + 1] = "|cff3fb950[" .. L["Craft Ready"] .. "]|r"
+        end
+        if ns.Alts and ns.Alts.GetMailStatus then
+            local hasMail, ageDays = ns.Alts:GetMailStatus(alt)
+            if hasMail then
+                topRightParts[#topRightParts + 1] = (ageDays >= 15)
+                    and ("|cfff54747[" .. L["Mailbox"] .. " " .. ageDays .. "d]|r")
+                    or ("|cffffd24d[" .. L["Mailbox"] .. "]|r")
+            end
+        end
+        row.rightTop:SetText(table.concat(topRightParts, " "))
+
+        local botParts = {}
+        if lvl >= 60 then
+            botParts[#botParts + 1] = "|cff3fb950" .. L["Max Level"] .. "|r"
+        else
+            local restPct, isEst = ResolveAltRestedInfo(alt)
+            if restPct >= 148 then
+                botParts[#botParts + 1] = "|cff58a6ff" .. L["150% MAX"] .. "|r"
+            elseif restPct > 0 then
+                botParts[#botParts + 1] = ("|cff58a6ff+%s%d%% %s|r"):format(isEst and "~" or "", restPct, L["Rested"])
+            else
+                botParts[#botParts + 1] = "|cff8d98a6" .. L["0% Rested"] .. "|r"
+            end
+        end
+        if type(alt.professions) == "table" then
+            for _, pr in ipairs(alt.professions) do
+                if pr and pr.name and pr.isPrimary then
+                    botParts[#botParts + 1] = ("%s %d"):format(pr.name, pr.rank or 0)
+                end
+            end
+        end
+        row.leftBot:SetText(table.concat(botParts, " · "))
+
+        local bagFree = tonumber(alt.bagFree) or 0
+        local bagCol = (bagFree <= 1 and (alt.bagTotal or 0) > 0) and "|cfff54747" or "|cff9da7b5"
+        local seenStr = (alt.key == CurrentAltKey()) and ("|cff3fb950" .. L["Current"] .. "|r") or Compat.FormatRelativeTime(alt.lastActive, L)
+        row.rightBot:SetText(("%s%s|r · %s"):format(bagCol, L["%d free"]:format(bagFree), seenStr))
+    end)
+    scroll.container:ClearAllPoints()
+    scroll.container:SetPoint("TOPLEFT", topBar, "BOTTOMLEFT", 0, -2)
+    scroll.container:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+
+    return {
+        frame = frame,
+        scroll = scroll,
+        summaryLbl = summaryLbl,
+        backBtn = backBtn,
+        helpBtn = helpBtn,
+        RefreshTheme = function()
+            Theme:StyleButton(backBtn, "default")
+            if helpBtn and helpBtn.RefreshTheme then helpBtn:RefreshTheme() end
+            scroll:RefreshTheme()
+        end,
+        Render = function(list, isNarrow, resetScroll)
+            backBtn:SetShown(isNarrow)
+            summaryLbl:ClearAllPoints()
+            if isNarrow then
+                summaryLbl:SetPoint("LEFT", backBtn, "RIGHT", 6, 0)
+            else
+                summaryLbl:SetPoint("LEFT", topBar, "LEFT", 4, 0)
+            end
+            summaryLbl:SetPoint("RIGHT", helpBtn or topBar, helpBtn and "LEFT" or "RIGHT", -6, 0)
+            local totFree, maxRestedCnt, readyCraftCnt = 0, 0, 0
+            for _, alt in ipairs(list) do
+                totFree = totFree + (tonumber(alt.bagFree) or 0)
+                if (tonumber(alt.level) or 0) < 60 and ResolveAltRestedInfo(alt) >= 100 then
+                    maxRestedCnt = maxRestedCnt + 1
+                end
+                if ns.Alts and ns.Alts.HasReadyCraftCooldown and ns.Alts:HasReadyCraftCooldown(alt) then
+                    readyCraftCnt = readyCraftCnt + 1
+                end
+            end
+            local sumParts = {
+                L["Alts"] .. ": " .. #list,
+                L["Bags Free: %d"]:format(totFree),
+            }
+            if maxRestedCnt > 0 then
+                sumParts[#sumParts + 1] = "|cff58a6ff" .. L["Rested 100%%+: %d"]:format(maxRestedCnt) .. "|r"
+            end
+            if readyCraftCnt > 0 then
+                sumParts[#sumParts + 1] = "|cff3fb950" .. L["Crafts Ready: %d"]:format(readyCraftCnt) .. "|r"
+            end
+            summaryLbl:SetText(table.concat(sumParts, "  ·  "))
+            scroll:SetData(list, L["No characters recorded yet."], resetScroll)
+        end,
+    }
+end
+
 function SocialPanels:CreateAltsPanel(parent)
     local panel = CreateFrame("Frame", nil, parent)
     panel:SetAllPoints()
     panel:Hide()
     panel._bagSource = "all" -- "all" | "equip" | "bags" | "bank"
+    panel._itemCategory = "all" -- "all" | "equip" | "consumable" | "trade" | "other"
+    panel._minQuality = 0
     panel._allAltsScope = false
+    panel._includeOppositeFaction = false
+    panel._itemsWorldScope = AltUI.NormalizeWorldScope(ns.db and ns.db.settings and ns.db.settings.altsWorldScope)
+    panel._worldScope = AltUI.NormalizeWorldScope(ns.db and ns.db.settings and ns.db.settings.altsWorldScope)
     panel._viewMode = "grid" -- "grid" | "list"
-    panel._sortBy = "recent" -- "recent" | "gold" | "level" | "mail" | "name"
-    panel._subTab = "overview" -- "alts" (narrow only) | "overview" | "items" | "gear"
+    panel._sortBy = "recent" -- "recent" | "gold" | "level" | "rested" | "mail" | "name"
+    panel._subTab = "overview" -- "alts" (narrow only) | "overview" | "items" | "gear" | "account"
     panel._narrowTabPicked = false
     panel._selectedKey = CurrentAltKey()
     panel._userPickedAlt = false
@@ -4757,6 +6177,7 @@ function SocialPanels:CreateAltsPanel(parent)
         { id = "recent", label = L["Sort: Recent"] },
         { id = "gold", label = L["Sort: Gold"] },
         { id = "level", label = L["Sort: Level"] },
+        { id = "rested", label = L["Sort: Rested"] },
         { id = "mail", label = L["Sort: Mail"] },
         { id = "name", label = L["Sort: Name"] },
     }
@@ -4770,7 +6191,7 @@ function SocialPanels:CreateAltsPanel(parent)
 
     local function GetSelectedAlt()
         local myKey = CurrentAltKey()
-        local list = GetSortedAltsList(panel._sortBy)
+        local list = GetSortedAltsList(panel._sortBy, panel._worldScope)
         local preferred, fallback
         for _, rec in ipairs(list) do
             if rec.key == panel._selectedKey then
@@ -4816,6 +6237,11 @@ function SocialPanels:CreateAltsPanel(parent)
                 root:CreateButton(L["Inspect Character"], function() SelectSubTab("overview") end)
                 root:CreateButton(L["Items"], function() SelectSubTab("items") end)
                 root:CreateButton(L["Gear"], function() SelectSubTab("gear") end)
+                root:CreateButton(L["Account Matrix"], function()
+                    panel._narrowTabPicked = true
+                    panel._subTab = "account"
+                    panel:Refresh(true)
+                end)
                 root:CreateDivider()
                 root:CreateButton(L["Web Armory Link"], CopyArmory)
                 if altData.key ~= CurrentAltKey() then
@@ -4863,6 +6289,32 @@ function SocialPanels:CreateAltsPanel(parent)
         4,
         0
     )
+
+    panel._worldBtn = Theme:CreateButton(topBar, 118, 22, L["World / Ruleset"], "default")
+    panel._worldBtn:SetPoint("LEFT", charHelpBtn or charBtn, "RIGHT", 6, 0)
+    panel._worldBtn:SetScript("OnClick", function(selfBtn)
+        if MenuUtil and MenuUtil.CreateContextMenu then
+            MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+                root:CreateTitle(L["World / Ruleset"])
+                AltUI.PopulateWorldScopeMenu(root, panel)
+            end)
+        else
+            AltUI.CycleWorldScope(panel)
+        end
+    end)
+    panel._worldBtn:SetScript("OnEnter", function(selfBtn)
+        if not GameTooltip then return end
+        local curW = AltUI.GetWorldScopeLabel(panel._worldScope)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["World / Ruleset"], 1, 0.9, 0.55, true)
+        GameTooltip:AddLine(L["Show characters from this realm ruleset only or include other WoW Forever worlds (PvP / PvE)."] .. " (" .. tostring(curW) .. ")", 0.85, 0.88, 0.94, true)
+        GameTooltip:AddLine(L["Log in once on a character in PvE, RP PvE, or RP PvP to unlock its world filter here."], 0.68, 0.82, 0.96, true)
+        GameTooltip:Show()
+    end)
+    panel._worldBtn:SetScript("OnLeave", function(selfBtn)
+        if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
+    end)
 
     -- Narrow Sub-Tab Strip (Alts | Overview | Items | Gear)
     local narrowTabBar = CreateFrame("Frame", nil, panel)
@@ -4913,6 +6365,12 @@ function SocialPanels:CreateAltsPanel(parent)
     rosterSortBtn:SetHeight(20)
     rosterSortBtn:SetPoint("RIGHT", rosterHelpBtn or rosterHeader, rosterHelpBtn and "LEFT" or "RIGHT", -4, 0)
 
+    local rosterAccountBtn = Theme:CreateButton(rosterHeader, 62, 20, L["Account"], "default")
+    Theme:AutoFitButton(rosterAccountBtn, 52, 10, 82)
+    rosterAccountBtn:SetHeight(20)
+    rosterAccountBtn:SetPoint("RIGHT", rosterSortBtn, "LEFT", -4, 0)
+    rosterAccountBtn:Hide()
+
     local rosterTitleLbl = rosterHeader:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     rosterTitleLbl:SetPoint("LEFT", rosterHeader, "LEFT", 8, 0)
     rosterTitleLbl:SetPoint("RIGHT", rosterSortBtn, "LEFT", -6, 0)
@@ -4949,8 +6407,10 @@ function SocialPanels:CreateAltsPanel(parent)
     goldVaultVal:SetWordWrap(false)
     goldVaultLbl:SetPoint("RIGHT", goldVaultVal, "LEFT", -6, 0)
 
+    CreateRosterWorldHintBar(panel, rosterPane, goldBar)
+
     goldBar:SetScript("OnEnter", function(selfBar)
-        ShowGoldBreakdownTooltip(selfBar)
+        ShowGoldBreakdownTooltip(selfBar, panel._worldScope)
     end)
     goldBar:SetScript("OnLeave", function(selfBar)
         if GameTooltip and GameTooltip:IsOwned(selfBar) then GameTooltip:Hide() end
@@ -5070,14 +6530,16 @@ function SocialPanels:CreateAltsPanel(parent)
                 end
             end
         end
+        if ns.Alts and ns.Alts.HasReadyCraftCooldown and ns.Alts:HasReadyCraftCooldown(alt) then
+            badgeParts[#badgeParts + 1] = "|cff3fb950[" .. L["Craft Ready"] .. "]|r"
+        end
         if lvl < 60 then
-            local xpMax = math.max(1, tonumber(alt.xpMax) or 1)
-            local rested = tonumber(alt.rested) or 0
-            if rested > 0 then
-                local rPct = math.min(150, math.floor((rested / xpMax) * 100 + 0.5))
+            local rPct, isEst = ResolveAltRestedInfo(alt)
+            if rPct > 0 then
+                local pref = isEst and "~" or ""
                 badgeParts[#badgeParts + 1] = (rPct >= 148)
                     and ("|cff58a6ff[" .. L["150% MAX"] .. "]|r")
-                    or ("|cff58a6ff[" .. rPct .. "%]|r")
+                    or ("|cff58a6ff[" .. pref .. rPct .. "%]|r")
             end
         end
         local bagCap = alt.bagTotal or 0
@@ -5089,6 +6551,10 @@ function SocialPanels:CreateAltsPanel(parent)
         row.badgesText:SetText(table.concat(badgeParts, " "))
 
         local zoneStr = (alt.zone and alt.zone ~= "") and alt.zone or ((alt.guild and alt.guild ~= "") and ("<" .. alt.guild .. ">") or "-")
+        local wBadge = FormatAltWorldBadge(alt, AltUI.NormalizeWorldScope(panel._worldScope) ~= "pool")
+        if wBadge ~= "" then
+            zoneStr = wBadge:gsub("^%s+", "") .. " " .. zoneStr
+        end
         row.zoneText:SetText(zoneStr)
         row.zoneText:SetTextColor(pal.textMuted[1], pal.textMuted[2], pal.textMuted[3])
 
@@ -5182,27 +6648,32 @@ function SocialPanels:CreateAltsPanel(parent)
     charSubLbl:SetPoint("RIGHT", btnArmory, "LEFT", -8, 0)
     charSubLbl:SetJustifyH("LEFT")
     charSubLbl:SetWordWrap(false)
+    AltUI.AttachHeaderTooltip(charHeader, panel)
 
-    -- Wide Sub-Tabs Bar (Overview | Items | Gear)
+    -- Wide Sub-Tabs Bar (Overview | Items | Gear | Account)
     local wideTabBar = CreateFrame("Frame", nil, inspectorPane)
     wideTabBar:SetPoint("TOPLEFT", charHeader, "BOTTOMLEFT", 4, -4)
     wideTabBar:SetPoint("TOPRIGHT", charHeader, "BOTTOMRIGHT", -4, -4)
     wideTabBar:SetHeight(26)
 
-    local btnWideOverview = Theme:CreateButton(wideTabBar, 88, 22, L["Overview"], "tab")
-    Theme:AutoFitButton(btnWideOverview, 74, 14, 120)
+    local btnWideOverview = Theme:CreateButton(wideTabBar, 82, 22, L["Overview"], "tab")
+    Theme:AutoFitButton(btnWideOverview, 68, 12, 108)
     btnWideOverview:SetPoint("LEFT", wideTabBar, "LEFT", 2, 0)
 
-    local btnWideItems = Theme:CreateButton(wideTabBar, 82, 22, L["Items"], "tab")
-    Theme:AutoFitButton(btnWideItems, 68, 14, 110)
+    local btnWideItems = Theme:CreateButton(wideTabBar, 74, 22, L["Items"], "tab")
+    Theme:AutoFitButton(btnWideItems, 60, 12, 98)
     btnWideItems:SetPoint("LEFT", btnWideOverview, "RIGHT", 4, 0)
 
-    local btnWideGear = Theme:CreateButton(wideTabBar, 88, 22, L["Gear"], "tab")
-    Theme:AutoFitButton(btnWideGear, 72, 14, 120)
+    local btnWideGear = Theme:CreateButton(wideTabBar, 80, 22, L["Gear"], "tab")
+    Theme:AutoFitButton(btnWideGear, 64, 12, 108)
     btnWideGear:SetPoint("LEFT", btnWideItems, "RIGHT", 4, 0)
 
+    local btnWideAccount = Theme:CreateButton(wideTabBar, 74, 22, L["Account"], "tab")
+    Theme:AutoFitButton(btnWideAccount, 60, 12, 98)
+    btnWideAccount:SetPoint("LEFT", btnWideGear, "RIGHT", 4, 0)
+
     local wideSummaryLbl = wideTabBar:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    wideSummaryLbl:SetPoint("LEFT", btnWideGear, "RIGHT", 8, 0)
+    wideSummaryLbl:SetPoint("LEFT", btnWideAccount, "RIGHT", 8, 0)
     wideSummaryLbl:SetPoint("RIGHT", wideTabBar, "RIGHT", -4, 0)
     wideSummaryLbl:SetJustifyH("RIGHT")
     wideSummaryLbl:SetWordWrap(false)
@@ -5230,6 +6701,8 @@ function SocialPanels:CreateAltsPanel(parent)
 
     local overviewRows, overviewBars, overviewIconRows, overviewSeps = {}, {}, {}, {}
     local overviewMaxScroll = 0
+    local syncOverviewScrollUI, refreshOverviewThumb = AltUI.CreateOverviewScrollbar(overviewFrame, overviewScroll)
+    local accountMatrix = AltUI.CreateAccountMatrixPane(panel, subArea, AddHelp, OpenAltActionMenu)
 
     local function UpdateOverviewScrollBounds()
         local vpH = overviewScroll:GetHeight() or 0
@@ -5239,6 +6712,7 @@ function SocialPanels:CreateAltsPanel(parent)
         if cur > overviewMaxScroll then
             overviewScroll:SetVerticalScroll(overviewMaxScroll)
         end
+        syncOverviewScrollUI(overviewMaxScroll)
         local vpW = overviewScroll:GetWidth() or 300
         if vpW > 60 then
             overviewContent:SetWidth(vpW)
@@ -5250,6 +6724,7 @@ function SocialPanels:CreateAltsPanel(parent)
         local cur = selfScroll:GetVerticalScroll() or 0
         local nxt = math.max(0, math.min(overviewMaxScroll, cur - delta * 24))
         selfScroll:SetVerticalScroll(nxt)
+        syncOverviewScrollUI(overviewMaxScroll)
     end)
     overviewScroll:SetScript("OnSizeChanged", UpdateOverviewScrollBounds)
 
@@ -5464,7 +6939,7 @@ function SocialPanels:CreateAltsPanel(parent)
             yOff = yOff + 8
         end
 
-        -- 1. Experience / Rested Progress + Item Level
+        -- 1. Experience / Live Estimated Rested Progress + Item Level
         local lvl = tonumber(altData.level) or 0
         if lvl >= 60 then
             local rightLvl = (altData.itemLevel and altData.itemLevel > 0) and ("Item Level " .. math.floor(altData.itemLevel)) or ""
@@ -5474,17 +6949,27 @@ function SocialPanels:CreateAltsPanel(parent)
             local xpMaxVal = math.max(1, tonumber(altData.xpMax) or 1)
             local xpFrac = math.max(0, math.min(1, xpVal / xpMaxVal))
             local xpPct = math.floor(xpFrac * 100 + 0.5)
-            local restedVal = tonumber(altData.rested) or 0
-            local restPct = math.min(150, math.floor((restedVal / xpMaxVal) * 100 + 0.5))
+            local restPct, isEst, etaSec, wasResting = ResolveAltRestedInfo(altData)
             local restTag = ""
             if restPct > 0 then
-                restTag = (restPct >= 148)
-                    and (" · |cff58a6ff" .. L["150% MAX"] .. "|r")
-                    or (" · |cff58a6ff+" .. L["Rested: %d%%"]:format(restPct) .. "|r")
+                if restPct >= 148 then
+                    restTag = " · |cff58a6ff" .. L["150% MAX"] .. "|r"
+                elseif isEst then
+                    restTag = " · |cff58a6ff+~" .. L["Rested: %d%%"]:format(restPct) .. "|r"
+                else
+                    restTag = " · |cff58a6ff+" .. L["Rested: %d%%"]:format(restPct) .. "|r"
+                end
             end
             local barText = ("%s %d · %d%%%s"):format(L["Level"], lvl, xpPct, restTag)
-            local subFrac = (restedVal > 0) and math.min(1, xpFrac + (restedVal / xpMaxVal)) or nil
+            local subFrac = (restPct > 0) and math.min(1, xpFrac + (restPct / 100)) or nil
             AddBar(xpFrac, 0.58, 0.34, 0.88, barText, subFrac, 0.25, 0.56, 0.96)
+            if isEst or (etaSec and etaSec > 60 and restPct < 150) then
+                local restDesc = wasResting and L["Inn/City Rest Estimate"] or L["Outdoors Rest Estimate"]
+                local restRight = (etaSec and etaSec > 60 and restPct < 150)
+                    and L["MAX in %s"]:format(FormatDurationCompact(etaSec))
+                    or ("|cff3fb950" .. L["150% MAX"] .. "|r")
+                AddLine(restDesc, restRight, 0.65, 0.72, 0.84, 0.58, 0.82, 1.0, 18)
+            end
             if altData.itemLevel and altData.itemLevel > 0 then
                 AddLine("Item Level", tostring(math.floor(altData.itemLevel)), 0.75, 0.78, 0.85, 1.0, 0.85, 0.35, 18)
             end
@@ -5506,7 +6991,7 @@ function SocialPanels:CreateAltsPanel(parent)
         if type(altData.bank) == "table" then
             local bankUsed = math.max(0, (altData.bankTotal or 0) - (altData.bankFree or 0))
             local bankStr = (altData.bankTotal and altData.bankTotal > 0)
-                and (L["%d / %d slots"]:format(bankUsed, altData.bankTotal) .. " (" .. #altData.bank .. " " .. L["items"] .. ")")
+                and L["%d / %d slots"]:format(bankUsed, altData.bankTotal)
                 or ("%d %s"):format(#altData.bank, L["items"])
             if altData.bankUpdatedAt and altData.bankUpdatedAt > 0 then
                 bankStr = bankStr .. " · " .. Compat.FormatRelativeTime(altData.bankUpdatedAt, L)
@@ -5518,7 +7003,7 @@ function SocialPanels:CreateAltsPanel(parent)
 
         AddSep()
 
-        -- 3. Location, Hearthstone, Mail & Gold
+        -- 3. Location, Hearthstone, Supplies, Mail & Gold
         local zoneTxt = (altData.zone and altData.zone ~= "") and altData.zone or "-"
         AddLine(L["Zone"], zoneTxt, 0.75, 0.78, 0.85, 1.0, 1.0, 1.0, 18)
 
@@ -5534,6 +7019,13 @@ function SocialPanels:CreateAltsPanel(parent)
             end
         end
         AddLine(L["Hearthstone"], bindTxt, 0.75, 0.78, 0.85, 0.65, 0.88, 1.0, 18)
+
+        if ns.Alts and ns.Alts.GetClassSuppliesSummary then
+            local supStr = ns.Alts:GetClassSuppliesSummary(altData)
+            if supStr and supStr ~= "" then
+                AddLine(L["Class Supplies"], supStr, 0.75, 0.78, 0.85, 0.78, 0.86, 0.98, 18)
+            end
+        end
 
         if ns.Alts and ns.Alts.GetMailStatus then
             local hasMail, ageDays, _, senders = ns.Alts:GetMailStatus(altData)
@@ -5555,9 +7047,10 @@ function SocialPanels:CreateAltsPanel(parent)
         local charGold = Compat.FormatMoney(myMoney)
         AddLine(L["Gold (%s)"]:format(charGoldLabel), charGold, 1.0, 0.84, 0.25, 1.0, 1.0, 1.0, 18)
         local altFac = altData.faction or true
-        local facGoldNum = (Store and Store.GetTotalAltsGold and Store:GetTotalAltsGold(true, altFac)) or myMoney
+        local scopeArg = AltUI.NormalizeWorldScope(panel._worldScope)
+        local facGoldNum = (Store and Store.GetTotalAltsGold and Store:GetTotalAltsGold(scopeArg, altFac)) or myMoney
         local sameFacCount = 0
-        for _, rec in ipairs((Store and Store.GetAltsList and Store:GetAltsList()) or {}) do
+        for _, rec in ipairs((Store and Store.GetAltsList and Store:GetAltsList(scopeArg)) or {}) do
             if type(rec) == "table" and (altData.faction == nil or rec.faction == altData.faction) then
                 sameFacCount = sameFacCount + 1
             end
@@ -5566,12 +7059,20 @@ function SocialPanels:CreateAltsPanel(parent)
             local facSuffix = (altData.faction == "Alliance" and (" (" .. L["Alliance"] .. ")"))
                 or (altData.faction == "Horde" and (" (" .. L["Horde"] .. ")"))
                 or ""
-            AddLine(L["Total Server Gold"] .. facSuffix, Compat.FormatMoney(facGoldNum), 1.0, 0.84, 0.25, 1.0, 1.0, 1.0, 18)
+            local totHeading
+            if scopeArg == "all" then
+                totHeading = L["Total Gold (All Worlds)"]
+            elseif scopeArg == "pool" then
+                totHeading = L["Total Server Gold"]
+            else
+                totHeading = L["Total Gold (%s)"]:format(AltUI.GetWorldScopeLabel(scopeArg))
+            end
+            AddLine(totHeading .. facSuffix, Compat.FormatMoney(facGoldNum), 1.0, 0.84, 0.25, 1.0, 1.0, 1.0, 18)
         end
 
         AddSep()
 
-        -- 4. Professions with icons & zero truncation
+        -- 4. Professions & Tracked Craft Cooldowns
         AddLine(L["Professions"], "", 1.0, 0.82, 0.0, 1.0, 0.82, 0.0, 18)
         local profs = altData.professions
         if type(profs) == "table" and #profs > 0 then
@@ -5610,9 +7111,36 @@ function SocialPanels:CreateAltsPanel(parent)
             AddLine("  " .. L["No professions learned"], "", 0.62, 0.65, 0.70, 0.62, 0.65, 0.70, 18)
         end
 
+        if ns.Alts and ns.Alts.GetCraftCooldowns then
+            local cds = ns.Alts:GetCraftCooldowns(altData)
+            if #cds > 0 then
+                AddLine(L["Craft Cooldowns"], "", 1.0, 0.82, 0.0, 1.0, 0.82, 0.0, 18)
+                for _, cd in ipairs(cds) do
+                    local lbl = (cd.prof and cd.prof ~= "") and (cd.prof .. ": " .. cd.name) or cd.name
+                    if cd.isReady then
+                        AddLine("  " .. lbl, "[" .. L["Ready"] .. "]", 0.92, 0.96, 1.0, 0.35, 0.92, 0.55, 18)
+                    else
+                        AddLine("  " .. lbl, L["Ready in %s"]:format(FormatDurationCompact(cd.remaining)), 0.88, 0.90, 0.95, 1.0, 0.74, 0.36, 18)
+                    end
+                end
+            end
+        end
+
         AddSep()
 
-        -- 5. Active Dungeon / Raid Lockouts
+        -- 5. Account Hourly Instance Cap + Active Dungeon / Raid Lockouts
+        if ns.Group and ns.Group.GetHourlyInstanceStatus then
+            local st = ns.Group:GetHourlyInstanceStatus()
+            local usedH, maxH = st and st.used or 0, st and st.max or 5
+            local valTxt = string.format("%d/%d", usedH, maxH)
+            if usedH > 0 and (st.nextSlotSecs or 0) > 0 and ns.Clan and ns.Clan.FormatResetDuration then
+                valTxt = valTxt .. " · " .. ns.Clan:FormatResetDuration(st.nextSlotSecs)
+            end
+            local ir = (usedH >= maxH) and 1.0 or ((usedH >= maxH - 1) and 1.0 or 0.35)
+            local ig = (usedH >= maxH) and 0.35 or ((usedH >= maxH - 1) and 0.72 or 0.92)
+            local ib = (usedH >= maxH) and 0.35 or ((usedH >= maxH - 1) and 0.25 or 0.55)
+            AddLine(L["Instance Limit (1h)"], valTxt, 0.75, 0.78, 0.85, ir, ig, ib, 18)
+        end
         AddLine(L["Active Lockouts"], "", 1.0, 0.82, 0.0, 1.0, 0.82, 0.0, 18)
         local locks = (ns.Alts and ns.Alts.GetLockouts) and ns.Alts:GetLockouts(altData) or {}
         if #locks > 0 then
@@ -5706,8 +7234,13 @@ function SocialPanels:CreateAltsPanel(parent)
     )
 
     local infoLbl = itemsToolbar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    infoLbl:SetHeight(16)
     infoLbl:SetJustifyH("RIGHT")
+    infoLbl:SetJustifyV("MIDDLE")
     infoLbl:SetWordWrap(false)
+
+    -- Forward-declared so RenderItems resolves it lexically instead of global nil.
+    local RelayoutItemsToolbar
 
     local itemsCard = CreateFrame("Frame", nil, itemsFrame, "BackdropTemplate")
     itemsCard:SetPoint("TOPLEFT", itemsToolbar, "BOTTOMLEFT", 0, -4)
@@ -5722,6 +7255,25 @@ function SocialPanels:CreateAltsPanel(parent)
         panel._narrowTabPicked = true
         bagSearch:SetText(itemName)
         panel:Refresh(true)
+    end
+
+    local function OnGridCellEnter(selfCell)
+        if selfCell._item then
+            ShowItemTooltip(selfCell, selfCell._item, selfCell._item._slotId)
+        end
+    end
+    local function OnGridCellLeave()
+        if GameTooltip then GameTooltip:Hide() end
+    end
+    local function OnGridCellClick(selfCell, button)
+        if not selfCell._item then return end
+        if button == "RightButton" then
+            OpenItemContextMenu(selfCell, selfCell._item, TriggerSearchAllAlts)
+            return
+        end
+        if selfCell._item.link and IsModifiedClick and IsModifiedClick("CHATLINK") and ChatEdit_InsertLink then
+            ChatEdit_InsertLink(selfCell._item.link)
+        end
     end
 
     local bagGridScroll = Theme:CreateScrollList(itemsCard, 40, function(rowParent, _, rowHeight)
@@ -5746,84 +7298,40 @@ function SocialPanels:CreateAltsPanel(parent)
         row._headerLine = headerLine
 
         row._cells = {}
-        for c = 1, 18 do
-            local cell = CreateFrame("Button", nil, row, "BackdropTemplate")
-            cell:SetSize(34, 34)
-            cell._scNoStone = true
-            cell:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-            Theme:ApplyBackdrop(cell, "inset")
-
-            local tex = cell:CreateTexture(nil, "ARTWORK")
-            tex:SetPoint("TOPLEFT", 2, -2)
-            tex:SetPoint("BOTTOMRIGHT", -2, 2)
-            tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-            cell.icon = tex
-
-            local hl = cell:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetPoint("TOPLEFT", 2, -2)
-            hl:SetPoint("BOTTOMRIGHT", -2, 2)
-            hl:SetColorTexture(1, 0.92, 0.65, 0.16)
-            hl:SetBlendMode("ADD")
-
-            local eqLbl = cell:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            eqLbl:SetPoint("TOPLEFT", 3, -2)
-            eqLbl:SetText("|cffffd200E|r")
-            eqLbl:Hide()
-            cell.eqLbl = eqLbl
-
-            local countLbl = cell:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
-            countLbl:SetPoint("BOTTOMRIGHT", -2, 2)
-            countLbl:SetJustifyH("RIGHT")
-            cell.countLbl = countLbl
-
-            cell:SetScript("OnEnter", function(selfCell)
-                if selfCell._item then
-                    ShowItemTooltip(selfCell, selfCell._item, selfCell._item._slotId)
-                end
-            end)
-            cell:SetScript("OnLeave", function()
-                if GameTooltip then GameTooltip:Hide() end
-            end)
-            cell:SetScript("OnClick", function(selfCell, button)
-                if not selfCell._item then return end
-                if button == "RightButton" then
-                    OpenItemContextMenu(selfCell, selfCell._item, TriggerSearchAllAlts)
-                    return
-                end
-                if selfCell._item.link and IsModifiedClick and IsModifiedClick("CHATLINK") and ChatEdit_InsertLink then
-                    ChatEdit_InsertLink(selfCell._item.link)
-                end
-            end)
-            cell:Hide()
-            row._cells[c] = cell
-        end
         return row
     end, function(row, rowData)
+        row._cells = row._cells or {}
         if rowData.isHeader then
             row._headerTitle:SetText(rowData.title or "")
             row._headerTitle:Show()
             row._headerLine:Show()
-            for c = 1, 18 do
+            AltUI.ConfigureHeaderRow(row, rowData, panel, OpenAltActionMenu)
+            for c = 1, #row._cells do
                 local cell = row._cells[c]
-                cell._item = nil
-                cell:Hide()
+                if cell then
+                    cell._item = nil
+                    cell:Hide()
+                end
             end
             return
         end
 
+        if row._headerHit then row._headerHit:Hide() end
         row._headerTitle:Hide()
         row._headerLine:Hide()
 
-        local cols = rowData.cols or 7
-        for c = 1, 18 do
-            local cell = row._cells[c]
+        local cols = math.max(1, math.min(AltUI.MAX_GRID_COLS or 14, rowData.cols or 7))
+        for c = 1, cols do
             local item = rowData.items and rowData.items[c]
-            if c <= cols and item then
+            if item then
+                local cell = AltUI.AcquireGridCell(row, c, OnGridCellEnter, OnGridCellLeave, OnGridCellClick)
                 cell:ClearAllPoints()
                 cell:SetPoint("LEFT", row, "LEFT", 4 + (c - 1) * 38, 0)
                 cell.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
                 local r, g, b = GetQualityRGB(item.quality)
-                cell:SetBackdropBorderColor(r, g, b, 1.0)
+                if cell.SetBackdropBorderColor then
+                    pcall(cell.SetBackdropBorderColor, cell, r, g, b, 1.0)
+                end
                 if item._isEquip then
                     cell.eqLbl:Show()
                 else
@@ -5832,9 +7340,16 @@ function SocialPanels:CreateAltsPanel(parent)
                 cell.countLbl:SetText((item.count and item.count > 1) and tostring(item.count) or "")
                 cell._item = item
                 cell:Show()
-            else
-                cell._item = nil
-                cell:Hide()
+            elseif row._cells[c] then
+                row._cells[c]._item = nil
+                row._cells[c]:Hide()
+            end
+        end
+        for c = cols + 1, #row._cells do
+            local extra = row._cells[c]
+            if extra then
+                extra._item = nil
+                extra:Hide()
             end
         end
     end)
@@ -5917,9 +7432,11 @@ function SocialPanels:CreateAltsPanel(parent)
             row._headerTitle:SetText(rowData.title or "")
             row._headerTitle:Show()
             row._headerLine:Show()
+            AltUI.ConfigureHeaderRow(row, rowData, panel, OpenAltActionMenu)
             return
         end
 
+        if row._headerHit then row._headerHit:Hide() end
         row._headerTitle:Hide()
         row._headerLine:Hide()
         local item = rowData.item
@@ -5947,7 +7464,9 @@ function SocialPanels:CreateAltsPanel(parent)
             locParts[#locParts + 1] = item._locLabel
         end
         if item.itemID and ns.Alts and ns.Alts.GetAccountItemTotal then
-            local acctTot = ns.Alts:GetAccountItemTotal(item.itemID, panel._inspectedFaction)
+            local facArg = panel._includeOppositeFaction and "ALL" or panel._inspectedFaction
+            local wScope = panel._allAltsScope and AltUI.NormalizeWorldScope(panel._itemsWorldScope) or AltUI.NormalizeWorldScope(panel._worldScope)
+            local acctTot = ns.Alts:GetAccountItemTotal(item.itemID, facArg, wScope)
             if acctTot > (item.count or 1) then
                 locParts[#locParts + 1] = "|cffffd24d" .. L["Account: %d"]:format(acctTot) .. "|r"
             end
@@ -6099,35 +7618,49 @@ function SocialPanels:CreateAltsPanel(parent)
     -- Data Collection & Rendering
     -- ========================================================================
     local function GetFilterButtonLabel(altData)
+        local extra = ((panel._itemCategory and panel._itemCategory ~= "all") or (panel._minQuality or 0) > 0) and " *" or ""
         if panel._bagSource == "equip" then
-            return L["Equipped"] .. "  v"
+            return L["Equipped"] .. extra .. "  v"
         elseif panel._bagSource == "bags" then
             if not panel._allAltsScope and altData then
                 local used = math.max(0, (altData.bagTotal or 0) - (altData.bagFree or 0))
-                return (L["Bags"] .. " (%d/%d)  v"):format(used, altData.bagTotal or 0)
+                return (L["Bags"] .. " (%d/%d)" .. extra .. "  v"):format(used, altData.bagTotal or 0)
             end
-            return L["Bags"] .. "  v"
+            return L["Bags"] .. extra .. "  v"
         elseif panel._bagSource == "bank" then
             if not panel._allAltsScope and altData then
                 local used = math.max(0, (altData.bankTotal or 0) - (altData.bankFree or 0))
-                return (L["Bank"] .. " (%d/%d)  v"):format(used, altData.bankTotal or 0)
+                return (L["Bank"] .. " (%d/%d)" .. extra .. "  v"):format(used, altData.bankTotal or 0)
             end
-            return L["Bank"] .. "  v"
+            return L["Bank"] .. extra .. "  v"
         end
-        return L["All"] .. "  v"
+        return L["All"] .. extra .. "  v"
     end
 
-    local function AppendGlobalSearchSections(sections, queryText, excludeAltKey, headingPrefix, srcFilter, factionFilter)
+    local function AppendGlobalSearchSections(sections, queryText, excludeAltKey, headingPrefix, srcFilter, factionFilter, worldScope)
         if not (ns.Alts and ns.Alts.SearchAllItems) then return end
-        local groups = ns.Alts:SearchAllItems(queryText, excludeAltKey, srcFilter, factionFilter)
+        local opts = {
+            itemCat = panel._itemCategory or "all",
+            minQuality = panel._minQuality or 0,
+        }
+        local groups = ns.Alts:SearchAllItems(queryText, excludeAltKey, srcFilter, factionFilter, worldScope, opts)
+        local dualFac = (factionFilter == "ALL")
+        local showWorldBadge = AltUI.NormalizeWorldScope(worldScope) ~= "pool"
         for _, g in ipairs(groups) do
             local consolidated = ConsolidateItems(g.items, false)
             local hex = Compat.ClassHex(g.classFile)
+            local facTag = ""
+            if dualFac then
+                facTag = (g.faction == "Alliance" and " |cff70b5ff[A]|r") or (g.faction == "Horde" and " |cffff7878[H]|r") or ""
+            end
+            local wBadge = FormatAltWorldBadge(g, showWorldBadge)
             local lbl = headingPrefix
-                and ("|cff8ab4f8" .. headingPrefix .. "|r " .. hex .. (g.displayName or "?") .. "|r |cffc6ceda(" .. #consolidated .. ")|r")
-                or (hex .. (g.displayName or "?") .. "|r |cffc6ceda(" .. #consolidated .. ")|r")
+                and ("|cff8ab4f8" .. headingPrefix .. "|r " .. hex .. (g.displayName or "?") .. "|r" .. facTag .. wBadge .. " |cffc6ceda(" .. #consolidated .. ")|r")
+                or (hex .. (g.displayName or "?") .. "|r" .. facTag .. wBadge .. " |cffc6ceda(" .. #consolidated .. ")|r")
             sections[#sections + 1] = {
                 title = lbl,
+                altKey = g.altKey,
+                altName = g.displayName,
                 items = consolidated,
             }
         end
@@ -6136,13 +7669,15 @@ function SocialPanels:CreateAltsPanel(parent)
     local function CollectFilteredItems(altData)
         local src = panel._bagSource or "all"
         local query = Compat.Trim(bagSearch:GetText() or ""):lower()
+        local hasExtraFilters = (panel._itemCategory and panel._itemCategory ~= "all") or (panel._minQuality or 0) > 0
 
         if panel._allAltsScope then
             local sections = {}
-            local facFilter = (altData and altData.faction) or (Compat.PlayerFaction and Compat.PlayerFaction())
-            AppendGlobalSearchSections(sections, query, nil, nil, src, facFilter)
+            local facFilter = panel._includeOppositeFaction and "ALL" or ((altData and altData.faction) or (Compat.PlayerFaction and Compat.PlayerFaction()))
+            local wScope = AltUI.NormalizeWorldScope(panel._itemsWorldScope)
+            AppendGlobalSearchSections(sections, query, nil, nil, src, facFilter, wScope)
             if #sections == 0 then
-                return {}, (query ~= "" and L["No matching items found across any character."] or L["No items recorded yet."])
+                return {}, ((query ~= "" or hasExtraFilters) and L["No matching items found across any character."] or L["No items recorded yet."])
             end
             return sections, ""
         end
@@ -6150,6 +7685,7 @@ function SocialPanels:CreateAltsPanel(parent)
         if not altData then return {}, "" end
 
         local function MatchesQuery(item)
+            if not AltUI.MatchesItemFilter(panel, item) then return false end
             if query == "" then return true end
             local iName = ResolveItemDisplayName(item):lower()
             local slotLabel = (item._slotId and GetSlotLabel(item._slotId) or ""):lower()
@@ -6159,24 +7695,11 @@ function SocialPanels:CreateAltsPanel(parent)
         local sections = {}
 
         if (src == "all" or src == "equip") and type(altData.equipment) == "table" then
-            panel._equipItemWrappers = panel._equipItemWrappers or {}
             local equipItems = {}
             for _, slotId in ipairs(EQUIP_DISPLAY_ORDER) do
-                local entry = altData.equipment[slotId]
-                if entry and (entry.icon or entry.itemID or entry.link) then
-                    local obj = panel._equipItemWrappers[slotId]
-                    if not obj then
-                        obj = { count = 1, _isEquip = true, _slotId = slotId, _locLabel = L["Equipped"] }
-                        panel._equipItemWrappers[slotId] = obj
-                    end
-                    obj.icon = entry.icon
-                    obj.link = entry.link
-                    obj.name = entry.name
-                    obj.itemID = entry.itemID
-                    obj.quality = entry.quality
-                    if MatchesQuery(obj) then
-                        equipItems[#equipItems + 1] = obj
-                    end
+                local obj = UnpackAltItem(altData.equipment[slotId], L["Equipped"], slotId)
+                if obj and MatchesQuery(obj) then
+                    equipItems[#equipItems + 1] = obj
                 end
             end
             if #equipItems > 0 then
@@ -6189,17 +7712,10 @@ function SocialPanels:CreateAltsPanel(parent)
 
         if (src == "all" or src == "bags") and type(altData.bags) == "table" then
             local bagItems = {}
-            for _, item in ipairs(altData.bags) do
-                if MatchesQuery(item) then
-                    bagItems[#bagItems + 1] = {
-                        itemID = item.itemID,
-                        link = item.link,
-                        name = item.name,
-                        icon = item.icon,
-                        quality = item.quality,
-                        count = item.count or 1,
-                        _locLabel = L["Bags"],
-                    }
+            for _, rawItem in ipairs(altData.bags) do
+                local obj = UnpackAltItem(rawItem, L["Bags"])
+                if obj and MatchesQuery(obj) then
+                    bagItems[#bagItems + 1] = obj
                 end
             end
             bagItems = ConsolidateItems(bagItems, false)
@@ -6215,17 +7731,10 @@ function SocialPanels:CreateAltsPanel(parent)
 
         if (src == "all" or src == "bank") and type(altData.bank) == "table" then
             local bankItems = {}
-            for _, item in ipairs(altData.bank) do
-                if MatchesQuery(item) then
-                    bankItems[#bankItems + 1] = {
-                        itemID = item.itemID,
-                        link = item.link,
-                        name = item.name,
-                        icon = item.icon,
-                        quality = item.quality,
-                        count = item.count or 1,
-                        _locLabel = L["Bank"],
-                    }
+            for _, rawItem in ipairs(altData.bank) do
+                local obj = UnpackAltItem(rawItem, L["Bank"])
+                if obj and MatchesQuery(obj) then
+                    bankItems[#bankItems + 1] = obj
                 end
             end
             bankItems = ConsolidateItems(bankItems, false)
@@ -6238,8 +7747,11 @@ function SocialPanels:CreateAltsPanel(parent)
         end
 
         if #sections == 0 then
-            if query ~= "" then
-                AppendGlobalSearchSections(sections, query, altData.key, L["Other Alt:"], src, altData.faction or (Compat.PlayerFaction and Compat.PlayerFaction()))
+            if query ~= "" or hasExtraFilters then
+                local fallbackFac = panel._includeOppositeFaction and "ALL" or (altData.faction or (Compat.PlayerFaction and Compat.PlayerFaction()))
+                local iScope = AltUI.NormalizeWorldScope(panel._itemsWorldScope)
+                local wScope = (iScope ~= "pool") and iScope or AltUI.NormalizeWorldScope(panel._worldScope)
+                AppendGlobalSearchSections(sections, query, altData.key, L["Other Alt:"], src, fallbackFac, wScope)
                 if #sections > 0 then
                     return sections, ""
                 end
@@ -6256,10 +7768,24 @@ function SocialPanels:CreateAltsPanel(parent)
     local function RenderItems(altData, resetScroll)
         panel._inspectedFaction = (altData and altData.faction) or (Compat.PlayerFaction and Compat.PlayerFaction())
         Theme:SetButtonText(filterBtn, GetFilterButtonLabel(altData))
-        Theme:AutoFitButton(filterBtn, 72, 14, 138)
+        Theme:AutoFitButton(filterBtn, 72, 14, 148)
 
-        Theme:SetButtonText(scopeBtn, panel._allAltsScope and L["All Alts"] or L["This Alt"])
-        Theme:AutoFitButton(scopeBtn, 76, 14, 128)
+        local scopeText = L["This Alt"]
+        if panel._allAltsScope then
+            local iScope = AltUI.NormalizeWorldScope(panel._itemsWorldScope)
+            if iScope == "all" then
+                scopeText = L["All Alts (All Worlds)"]
+            elseif iScope == "pool" then
+                scopeText = L["All Alts (This World)"]
+            else
+                scopeText = L["All Alts (%s)"]:format(AltUI.GetWorldScopeLabel(iScope))
+            end
+            if panel._includeOppositeFaction then
+                scopeText = scopeText .. " +"
+            end
+        end
+        Theme:SetButtonText(scopeBtn, scopeText)
+        Theme:AutoFitButton(scopeBtn, 76, 14, 184)
         Theme:SetButtonActive(scopeBtn, panel._allAltsScope == true, "default")
 
         Theme:SetButtonText(viewModeBtn, (panel._viewMode == "list") and L["List"] or L["Grid"])
@@ -6278,9 +7804,10 @@ function SocialPanels:CreateAltsPanel(parent)
         bagListScroll.container:SetShown(isList)
 
         if isList then
+            panel._lastGridCols = nil
             local rows = {}
             for _, sec in ipairs(sections) do
-                rows[#rows + 1] = { isHeader = true, title = sec.title }
+                rows[#rows + 1] = { isHeader = true, title = sec.title, altKey = sec.altKey, altName = sec.altName }
                 for _, it in ipairs(sec.items) do
                     rows[#rows + 1] = { item = it }
                 end
@@ -6291,12 +7818,14 @@ function SocialPanels:CreateAltsPanel(parent)
             if vpW < 80 then
                 local isNarrow, pw = IsNarrowLayout()
                 local rosterW = isNarrow and 0 or math.max(236, math.min(278, math.floor(pw * 0.34)))
-                vpW = math.max(120, pw - rosterW - 36)
+                vpW = math.max(180, pw - rosterW - 36)
             end
-            local cols = math.max(1, math.min(18, math.floor((vpW - 8) / 38)))
+            local maxGridCols = AltUI.MAX_GRID_COLS or 14
+            local cols = math.max(1, math.min(maxGridCols, math.floor((vpW - 8) / 38)))
+            panel._lastGridCols = cols
             local rows = {}
             for _, sec in ipairs(sections) do
-                rows[#rows + 1] = { isHeader = true, title = sec.title }
+                rows[#rows + 1] = { isHeader = true, title = sec.title, altKey = sec.altKey, altName = sec.altName }
                 for i = 1, #sec.items, cols do
                     local chunk = {}
                     for j = 0, cols - 1 do
@@ -6321,9 +7850,11 @@ function SocialPanels:CreateAltsPanel(parent)
         local eq = type(altData.equipment) == "table" and altData.equipment or {}
         local equippedCount = 0
         for _, slotId in ipairs(EQUIP_DISPLAY_ORDER) do
-            local e = eq[slotId]
-            if e and (e.icon or e.itemID or e.link) then
-                equippedCount = equippedCount + 1
+            if eq[slotId] then
+                local parsedId = (type(eq[slotId]) == "string") or (type(eq[slotId]) == "table" and (eq[slotId].icon or eq[slotId].itemID or eq[slotId].link))
+                if parsedId then
+                    equippedCount = equippedCount + 1
+                end
             end
         end
         local sumStr = L["Equipped (%d/%d)"]:format(equippedCount, #EQUIP_DISPLAY_ORDER)
@@ -6346,20 +7877,7 @@ function SocialPanels:CreateAltsPanel(parent)
                 local sid = EQUIP_DISPLAY_ORDER[i + j]
                 if sid then
                     local raw = eq[sid]
-                    local itemObj = nil
-                    if raw and (raw.icon or raw.itemID or raw.link) then
-                        itemObj = {
-                            itemID = raw.itemID,
-                            link = raw.link,
-                            name = raw.name,
-                            icon = raw.icon,
-                            quality = raw.quality,
-                            count = 1,
-                            _isEquip = true,
-                            _slotId = sid,
-                            _locLabel = L["Equipped"],
-                        }
-                    end
+                    local itemObj = raw and UnpackAltItem(raw, L["Equipped"], sid) or nil
                     slots[j + 1] = { slotId = sid, item = itemObj }
                 end
             end
@@ -6369,6 +7887,7 @@ function SocialPanels:CreateAltsPanel(parent)
     end
 
     local function RenderCharHeader(altData)
+        panel._headerAltData = altData
         if not altData then
             charIcon:Hide()
             charTitleLbl:SetText(L["No characters recorded yet."])
@@ -6397,18 +7916,20 @@ function SocialPanels:CreateAltsPanel(parent)
         local classLoc = altData.className or (altData.classFile and LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[altData.classFile]) or altData.classFile or ""
         local raceLoc = altData.raceName or ""
         local rc = (raceLoc ~= "" and classLoc ~= "") and (raceLoc .. " " .. classLoc) or (classLoc ~= "" and classLoc or raceLoc)
-        charTitleLbl:SetText(("%s%s%s|r |cffc6ceda· %s %d · %s|r"):format(facIco, hex, disp, L["Level"], lvl, rc))
+        local wBadge = FormatAltWorldBadge(altData, AltUI.NormalizeWorldScope(panel._worldScope) ~= "pool")
+        charTitleLbl:SetText(("%s%s%s|r |cffc6ceda· %s|r"):format(facIco, hex, disp, L["Lv %d"]:format(lvl)))
 
         local subParts = {}
+        if wBadge ~= "" then
+            subParts[#subParts + 1] = wBadge:gsub("^%s+", "")
+        end
+        if rc ~= "" then
+            subParts[#subParts + 1] = rc
+        end
         if altData.guild and altData.guild ~= "" then
             subParts[#subParts + 1] = "<" .. altData.guild .. ">"
         else
             subParts[#subParts + 1] = L["No guild"]
-        end
-        if altData.faction == "Alliance" then
-            subParts[#subParts + 1] = "|cff70b5ff" .. L["Alliance"] .. "|r"
-        elseif altData.faction == "Horde" then
-            subParts[#subParts + 1] = "|cffff7878" .. L["Horde"] .. "|r"
         end
         if altData.zone and altData.zone ~= "" then
             subParts[#subParts + 1] = altData.zone
@@ -6420,16 +7941,20 @@ function SocialPanels:CreateAltsPanel(parent)
         end
         charSubLbl:SetText(table.concat(subParts, " · "))
 
-        local eqCount = 0
-        if type(altData.equipment) == "table" then
-            for _, sid in ipairs(EQUIP_DISPLAY_ORDER) do
-                local e = altData.equipment[sid]
-                if e and (e.icon or e.itemID or e.link) then eqCount = eqCount + 1 end
+        local _, panelW = IsNarrowLayout()
+        if panelW >= 690 then
+            local eqCount = 0
+            if type(altData.equipment) == "table" then
+                for _, sid in ipairs(EQUIP_DISPLAY_ORDER) do
+                    if altData.equipment[sid] then eqCount = eqCount + 1 end
+                end
             end
+            local bagCap = altData.bagTotal or 0
+            local bagUsed = math.max(0, bagCap - (tonumber(altData.bagFree) or 0))
+            wideSummaryLbl:SetText(("%d/19 · %d/%d"):format(eqCount, bagUsed, bagCap))
+        else
+            wideSummaryLbl:SetText("")
         end
-        local bagCap = altData.bagTotal or 0
-        local bagUsed = math.max(0, bagCap - (tonumber(altData.bagFree) or 0))
-        wideSummaryLbl:SetText(("%d/19 %s · %d/%d %s"):format(eqCount, L["Equipped"], bagUsed, bagCap, L["Bags"]))
     end
 
     local function SyncSubTabs(altCount)
@@ -6440,6 +7965,11 @@ function SocialPanels:CreateAltsPanel(parent)
             panel._subTab = "overview"
         end
 
+        rosterAccountBtn:SetShown(isNarrow)
+        rosterTitleLbl:ClearAllPoints()
+        rosterTitleLbl:SetPoint("LEFT", rosterHeader, "LEFT", 8, 0)
+        rosterTitleLbl:SetPoint("RIGHT", isNarrow and rosterAccountBtn or rosterSortBtn, "LEFT", -6, 0)
+
         Theme:SetButtonText(btnNarrowAlts, ("%s (%d)"):format(L["Alts"], altCount or 0))
         Theme:SetButtonActive(btnNarrowAlts, activeSub == "alts", "tab")
         Theme:SetButtonActive(btnNarrowOverview, activeSub == "overview", "tab")
@@ -6449,17 +7979,32 @@ function SocialPanels:CreateAltsPanel(parent)
         Theme:SetButtonActive(btnWideOverview, activeSub == "overview", "tab")
         Theme:SetButtonActive(btnWideItems, activeSub == "items", "tab")
         Theme:SetButtonActive(btnWideGear, activeSub == "gear", "tab")
+        Theme:SetButtonActive(btnWideAccount, activeSub == "account", "tab")
 
         rosterPane:SetShown((not isNarrow) or (activeSub == "alts"))
         inspectorPane:SetShown((not isNarrow) or (activeSub ~= "alts"))
+        charHeader:SetShown(activeSub ~= "account")
+        wideTabBar:ClearAllPoints()
+        if activeSub == "account" then
+            wideTabBar:SetPoint("TOPLEFT", inspectorPane, "TOPLEFT", 4, -6)
+            wideTabBar:SetPoint("TOPRIGHT", inspectorPane, "TOPRIGHT", -4, -6)
+        else
+            wideTabBar:SetPoint("TOPLEFT", charHeader, "BOTTOMLEFT", 4, -4)
+            wideTabBar:SetPoint("TOPRIGHT", charHeader, "BOTTOMRIGHT", -4, -4)
+        end
         overviewFrame:SetShown(activeSub == "overview")
         itemsFrame:SetShown(activeSub == "items")
         gearFrame:SetShown(activeSub == "gear")
+        accountMatrix.frame:SetShown(activeSub == "account")
     end
 
-    local function RelayoutItemsToolbar()
-        local tw = math.floor((itemsToolbar:GetWidth() or 320) + 0.5)
-        if tw < 120 then return end
+    RelayoutItemsToolbar = function()
+        local tw = math.floor((itemsToolbar:GetWidth() or 0) + 0.5)
+        if tw < 120 then
+            local isNarrow, pw = IsNarrowLayout()
+            local rosterW = isNarrow and 0 or math.max(240, math.min(278, math.floor(pw * 0.34)))
+            tw = math.max(220, pw - rosterW - 24)
+        end
         local btnsNeed = math.ceil(filterBtn:GetWidth() or 88) + 4 + math.ceil(scopeBtn:GetWidth() or 92) + 4 + math.ceil(viewModeBtn:GetWidth() or 64)
         local singleRow = tw >= (144 + btnsNeed + 92)
 
@@ -6536,8 +8081,13 @@ function SocialPanels:CreateAltsPanel(parent)
             topBar:SetPoint("TOPLEFT", panel, "TOPLEFT", portraitPad, topY)
             topBar:SetPoint("TOPRIGHT", panel, "TOPRIGHT", rightPad, topY)
             local topAvail = math.max(120, w - portraitPad + rightPad)
-            local charW = math.max(104, math.min(240, topAvail - 28))
+            local showTopWorld = topAvail >= 300 and panel._worldBtn ~= nil
+            local worldReserve = showTopWorld and (math.ceil(panel._worldBtn:GetWidth() or 116) + 8) or 0
+            local charW = math.max(104, math.min(220, topAvail - 28 - worldReserve))
             charBtn:SetWidth(charW)
+            if panel._worldBtn then
+                panel._worldBtn:SetShown(showTopWorld)
+            end
         end
 
         if isNarrow then
@@ -6649,10 +8199,15 @@ function SocialPanels:CreateAltsPanel(parent)
     btnWideOverview:SetScript("OnClick", function() SwitchSubTab("overview") end)
     btnWideItems:SetScript("OnClick", function() SwitchSubTab("items") end)
     btnWideGear:SetScript("OnClick", function() SwitchSubTab("gear") end)
+    btnWideAccount:SetScript("OnClick", function() SwitchSubTab("account") end)
+    rosterAccountBtn:SetScript("OnClick", function() SwitchSubTab("account") end)
 
     rosterSortBtn:SetScript("OnClick", function(selfBtn)
         if MenuUtil and MenuUtil.CreateContextMenu then
             MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+                root:CreateTitle(L["World / Ruleset"])
+                AltUI.PopulateWorldScopeMenu(root, panel)
+                root:CreateDivider()
                 root:CreateTitle(L["Sort Alts"])
                 for _, m in ipairs(SORT_MODES) do
                     local id = m.id
@@ -6691,31 +8246,37 @@ function SocialPanels:CreateAltsPanel(parent)
 
     charBtn:SetScript("OnClick", function(selfBtn)
         local selectedAlt, list = GetSelectedAlt()
-        if #list == 0 then return end
         if MenuUtil and MenuUtil.CreateContextMenu then
             MenuUtil.CreateContextMenu(selfBtn, function(_, root)
-                root:CreateTitle(L["Select Character"])
-                for _, rec in ipairs(list) do
-                    local hex = Compat.ClassHex(rec.classFile)
-                    local mailTag = rec.hasMail and (" |cffffd24d[" .. L["Mailbox"] .. "]|r") or ""
-                    local lbl = ("%s%s|r |cffc6ceda(%s)|r · %s%s"):format(
-                        hex,
-                        rec.fullName or rec.name or rec.key,
-                        L["Lv %d"]:format(tonumber(rec.level) or 0),
-                        Compat.FormatMoney(rec.money or 0),
-                        mailTag
-                    )
-                    root:CreateRadio(lbl, function()
-                        return panel._selectedKey == rec.key
-                    end, function()
-                        panel._userPickedAlt = true
-                        panel._selectedKey = rec.key
-                        if panel._subTab == "alts" then
-                            panel._narrowTabPicked = true
-                            panel._subTab = "overview"
-                        end
-                        panel:Refresh(true)
-                    end)
+                root:CreateTitle(L["World / Ruleset"])
+                AltUI.PopulateWorldScopeMenu(root, panel)
+                if #list > 0 then
+                    root:CreateDivider()
+                    root:CreateTitle(L["Select Character"])
+                    for _, rec in ipairs(list) do
+                        local hex = Compat.ClassHex(rec.classFile)
+                        local mailTag = rec.hasMail and (" |cffffd24d[" .. L["Mailbox"] .. "]|r") or ""
+                        local wBadge = FormatAltWorldBadge(rec, AltUI.NormalizeWorldScope(panel._worldScope) ~= "pool")
+                        local lbl = ("%s%s|r%s |cffc6ceda(%s)|r · %s%s"):format(
+                            hex,
+                            rec.fullName or rec.name or rec.key,
+                            wBadge,
+                            L["Lv %d"]:format(tonumber(rec.level) or 0),
+                            Compat.FormatMoney(rec.money or 0),
+                            mailTag
+                        )
+                        root:CreateRadio(lbl, function()
+                            return panel._selectedKey == rec.key
+                        end, function()
+                            panel._userPickedAlt = true
+                            panel._selectedKey = rec.key
+                            if panel._subTab == "alts" then
+                                panel._narrowTabPicked = true
+                                panel._subTab = "overview"
+                            end
+                            panel:Refresh(true)
+                        end)
+                    end
                 end
                 if selectedAlt then
                     root:CreateDivider()
@@ -6764,39 +8325,11 @@ function SocialPanels:CreateAltsPanel(parent)
     end)
 
     filterBtn:SetScript("OnClick", function(selfBtn)
-        local opts = {
-            { id = "all", label = L["All"] },
-            { id = "equip", label = L["Equipped"] },
-            { id = "bags", label = L["Bags"] },
-            { id = "bank", label = L["Bank"] },
-        }
-        if MenuUtil and MenuUtil.CreateContextMenu then
-            MenuUtil.CreateContextMenu(selfBtn, function(_, root)
-                for _, o in ipairs(opts) do
-                    root:CreateRadio(o.label, function()
-                        return panel._bagSource == o.id
-                    end, function()
-                        panel._bagSource = o.id
-                        local altData = GetSelectedAlt()
-                        RenderItems(altData, true)
-                    end)
-                end
-            end)
-        else
-            local idx = 1
-            for i, o in ipairs(opts) do
-                if o.id == panel._bagSource then idx = (i % #opts) + 1; break end
-            end
-            panel._bagSource = opts[idx].id
-            local altData = GetSelectedAlt()
-            RenderItems(altData, true)
-        end
+        AltUI.OpenItemFilterMenu(panel, selfBtn, GetSelectedAlt, RenderItems)
     end)
 
-    scopeBtn:SetScript("OnClick", function()
-        panel._allAltsScope = not panel._allAltsScope
-        local altData = GetSelectedAlt()
-        RenderItems(altData, true)
+    scopeBtn:SetScript("OnClick", function(selfBtn)
+        AltUI.OpenScopeMenu(panel, selfBtn, GetSelectedAlt, RenderItems)
     end)
 
     viewModeBtn:SetScript("OnClick", function()
@@ -6809,6 +8342,7 @@ function SocialPanels:CreateAltsPanel(parent)
         local buttonsToStyle = {
             { charBtn, "default" },
             { rosterSortBtn, "default" },
+            { rosterAccountBtn, "default" },
             { btnArmory, "default" },
             { btnActions, "default" },
             { filterBtn, "default" },
@@ -6821,13 +8355,22 @@ function SocialPanels:CreateAltsPanel(parent)
             { btnWideOverview, "tab" },
             { btnWideItems, "tab" },
             { btnWideGear, "tab" },
+            { btnWideAccount, "tab" },
         }
         for _, pair in ipairs(buttonsToStyle) do
             Theme:StyleButton(pair[1], pair[2])
         end
-        Theme:AutoFitButton(filterBtn, 72, 14, 138)
-        Theme:AutoFitButton(scopeBtn, 76, 14, 128)
+        Theme:AutoFitButton(filterBtn, 72, 14, 148)
+        Theme:AutoFitButton(scopeBtn, 76, 14, 184)
         Theme:AutoFitButton(viewModeBtn, 56, 14, 88)
+        if panel._worldBtn then
+            Theme:StyleButton(panel._worldBtn, "default")
+            Theme:AutoFitButton(panel._worldBtn, 86, 14, 152)
+            local wScope = AltUI.NormalizeWorldScope(panel._worldScope)
+            Theme:SetButtonActive(panel._worldBtn, wScope ~= "pool", "primary")
+        end
+        Theme:AutoFitButton(rosterAccountBtn, 52, 10, 82)
+        rosterAccountBtn:SetHeight(20)
         Theme:AutoFitButton(rosterSortBtn, 72, 12, 126)
         rosterSortBtn:SetHeight(20)
         Theme:AutoFitButton(btnArmory, 56, 12, 92)
@@ -6836,6 +8379,8 @@ function SocialPanels:CreateAltsPanel(parent)
         for _, hb in ipairs({ charHelpBtn, rosterHelpBtn, headerHelpBtn, itemsHelpBtn, gearHelpBtn }) do
             if hb and hb.RefreshTheme then hb:RefreshTheme() end
         end
+        accountMatrix.RefreshTheme()
+        refreshOverviewThumb()
         Theme:ApplyBackdrop(rosterPane, "inset")
         Theme:ApplyBackdrop(inspectorPane, "inset")
         Theme:ApplyBackdrop(itemsCard, "inset")
@@ -6855,30 +8400,61 @@ function SocialPanels:CreateAltsPanel(parent)
         if not isNarrow and activeSub == "alts" then
             activeSub = "overview"
         end
+        local scopeArg = AltUI.NormalizeWorldScope(panel._worldScope)
+        if panel._worldBtn then
+            local wBtnLabel = (scopeArg == "all") and L["All Worlds"] or L["World: %s"]:format(AltUI.GetWorldScopeLabel(scopeArg))
+            Theme:SetButtonText(panel._worldBtn, wBtnLabel)
+            Theme:AutoFitButton(panel._worldBtn, 86, 14, 152)
+            Theme:SetButtonActive(panel._worldBtn, scopeArg ~= "pool", "primary")
+        end
         if (not isNarrow) or activeSub == "alts" then
             rosterTitleLbl:SetText(("%s (%d)"):format(L["My Alts"], #list))
             Theme:SetButtonText(rosterSortBtn, GetSortLabel(panel._sortBy) .. "  v")
             Theme:AutoFitButton(rosterSortBtn, 72, 12, 126)
             rosterSortBtn:SetHeight(20)
-            local totGold = (Store and Store.GetTotalAltsGold and Store:GetTotalAltsGold(true, true)) or 0
+            local totGold = (Store and Store.GetTotalAltsGold and Store:GetTotalAltsGold(scopeArg, true)) or 0
             local curFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
-            local byFac = (Store and Store.GetTotalAltsGoldByFaction and Store:GetTotalAltsGoldByFaction(true)) or nil
+            local byFac = (Store and Store.GetTotalAltsGoldByFaction and Store:GetTotalAltsGoldByFaction(scopeArg)) or nil
             local dualFac = byFac and (byFac.Alliance or 0) > 0 and (byFac.Horde or 0) > 0
             local facSuffix = (dualFac and curFac == "Alliance" and (" (" .. L["Alliance"] .. ")"))
                 or (dualFac and curFac == "Horde" and (" (" .. L["Horde"] .. ")"))
                 or ""
-            goldVaultLbl:SetText("|cffffd200" .. L["Total Server Gold"] .. facSuffix .. "|r")
+            local goldHeading
+            if scopeArg == "all" then
+                goldHeading = L["Total Gold (All Worlds)"]
+            elseif scopeArg == "pool" then
+                goldHeading = L["Total Server Gold"]
+            else
+                goldHeading = L["Total Gold (%s)"]:format(AltUI.GetWorldScopeLabel(scopeArg))
+            end
+            goldVaultLbl:SetText("|cffffd200" .. goldHeading .. facSuffix .. "|r")
             goldVaultVal:SetText(Compat.FormatMoney(totGold))
-            rosterScroll:SetData(list, L["No characters recorded yet."], resetScroll)
+            if panel._worldHintBar and panel._goldBar then
+                local showOtherHint = false
+                if scopeArg == "all" then
+                    local recordedWorlds = (Store and Store.GetRecordedAltWorlds and Store:GetRecordedAltWorlds()) or {}
+                    showOtherHint = (#recordedWorlds <= 1)
+                end
+                panel._worldHintBar:SetShown(showOtherHint)
+                rosterScroll.container:ClearAllPoints()
+                rosterScroll.container:SetPoint("TOPLEFT", rosterHeader, "BOTTOMLEFT", 2, -2)
+                rosterScroll.container:SetPoint("BOTTOMRIGHT", showOtherHint and panel._worldHintBar or panel._goldBar, "TOPRIGHT", -2, 2)
+            end
+            local rosterEmpty = (scopeArg == "pool" or scopeArg == "all") and L["No characters recorded yet."] or L["No alts recorded in this world yet."]
+            rosterScroll:SetData(list, rosterEmpty, resetScroll)
         end
         if (not isNarrow) or activeSub ~= "alts" then
-            RenderCharHeader(altData)
+            if activeSub ~= "account" then
+                RenderCharHeader(altData)
+            end
             if activeSub == "overview" then
                 RenderOverview(altData, resetScroll)
             elseif activeSub == "items" then
                 RenderItems(altData, resetScroll)
             elseif activeSub == "gear" then
                 RenderGear(altData, resetScroll)
+            elseif activeSub == "account" then
+                accountMatrix.Render(list, isNarrow, resetScroll)
             end
         end
     end
@@ -6887,7 +8463,17 @@ function SocialPanels:CreateAltsPanel(parent)
         if not self:IsShown() then return end
         RelayoutAltsPanel()
         local curW = math.floor((self:GetWidth() or 0) + 0.5)
-        if not self._lastRenderedW or math.abs(curW - self._lastRenderedW) >= 2 then
+        local needColsSync = false
+        if panel._subTab == "items" and itemsFrame:IsShown() and panel._viewMode ~= "list" then
+            local liveVpW = (bagGridScroll.viewport and bagGridScroll.viewport.GetWidth and bagGridScroll.viewport:GetWidth()) or 0
+            if liveVpW >= 80 then
+                local liveCols = math.max(1, math.min(AltUI.MAX_GRID_COLS or 14, math.floor((liveVpW - 8) / 38)))
+                if panel._lastGridCols ~= liveCols then
+                    needColsSync = true
+                end
+            end
+        end
+        if needColsSync or not self._lastRenderedW or math.abs(curW - self._lastRenderedW) >= 2 then
             self._lastRenderedW = curW
             local altData, list = GetSelectedAlt()
             SyncSubTabs(#list)
@@ -6895,15 +8481,7 @@ function SocialPanels:CreateAltsPanel(parent)
         end
     end
 
-    function panel:Refresh(resetScroll)
-        if isRefreshing then return end
-        if not self:IsShown() then
-            self._dirty = true
-            return
-        end
-        self._dirty = false
-        isRefreshing = true
-
+    local function ExecutePanelRefreshBody()
         local myKey = CurrentAltKey()
         if not panel._userPickedAlt then
             panel._selectedKey = myKey
@@ -6926,13 +8504,29 @@ function SocialPanels:CreateAltsPanel(parent)
             Theme:SetButtonText(charBtn, L["Select Character"])
         end
 
-        RenderActiveSubView(altData, list, resetScroll)
-        self:RefreshTheme(true)
+        RenderActiveSubView(altData, list, panel._pendingResetScroll)
+        panel:RefreshTheme(true)
         SyncSubTabs(#list)
+    end
+
+    function panel:Refresh(resetScroll)
+        if isRefreshing then return end
+        if not self:IsShown() then
+            self._dirty = true
+            return
+        end
+        self._dirty = false
+        self._pendingResetScroll = resetScroll
+        isRefreshing = true
+        local errFn = (type(geterrorhandler) == "function" and geterrorhandler()) or tostring
+        xpcall(ExecutePanelRefreshBody, errFn)
+        -- Always release lock so no subview error can permanently freeze character inspection.
         isRefreshing = false
+        self._pendingResetScroll = nil
     end
 
     panel:SetScript("OnShow", function()
+        isRefreshing = false
         if ns.Alts and ns.Alts.Snapshot and panel._selectedKey == CurrentAltKey() then
             pcall(ns.Alts.Snapshot, ns.Alts, false)
         end
@@ -6952,8 +8546,13 @@ function SocialPanels:CreateAltsPanel(parent)
     end)
 
     panel:SetScript("OnHide", function()
+        isRefreshing = false
+        panel._lastLayoutSig = nil
+        panel._lastRenderedW = nil
+        panel._lastGridCols = nil
         panel._userPickedAlt = false
         panel._narrowTabPicked = false
+        panel._subTab = "overview"
     end)
 
     panel:SetScript("OnSizeChanged", function()
