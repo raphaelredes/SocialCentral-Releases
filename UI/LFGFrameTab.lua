@@ -21,7 +21,7 @@ local LFGFrameTab = {
     listingMode = "LFG",         -- "LFG" | "LFM"
     playstyle = "NONE",          -- "NONE" | "NORMAL" | "FAST" | "FULL"
     showAllLevels = false,
-    broadcastMode = "OFFICIAL",  -- "OFFICIAL" | "GCHAT" | "ALL" | "CLAN"
+    broadcastMode = "ALL",       -- "ALL" | "CLAN" | "GCHAT" | "OFFICIAL"
     _suppressNativeTakeoverUntil = 0,
     selectedActivities = {},     -- activityId -> true
     commentText = "",
@@ -174,10 +174,16 @@ local PLAYSTYLE_OPTIONS = {
 }
 
 local BROADCAST_OPTIONS = {
-    { id = "OFFICIAL", labelKey = "Official LFG + Clan & Allies" },
-    { id = "GCHAT", labelKey = "Official LFG + Guild Chat (/g)" },
     { id = "ALL", labelKey = "Clan & Allies Only (Private)" },
     { id = "CLAN", labelKey = "My Clan Only (Private)" },
+    { id = "GCHAT", labelKey = "Private + Guild Chat (/g)" },
+    { id = "OFFICIAL", labelKey = "Official LFG + Clan & Allies (Official Tab)" },
+}
+
+local OFFICIAL_MIRROR_OPTIONS = {
+    { id = "GUILD_ALLIES", labelKey = "Mirror: Guild & Allies" },
+    { id = "GUILD_ONLY", labelKey = "Mirror: My Guild Only" },
+    { id = "OFF", labelKey = "Official Only (No Mirror)" },
 }
 
 local SOURCE_FILTERS = {
@@ -231,7 +237,16 @@ local function GetBroadcastLabel(modeId)
             return L[opt.labelKey]
         end
     end
-    return L["Official LFG + Clan & Allies"]
+    return L["Clan & Allies Only (Private)"]
+end
+
+local function GetOfficialMirrorLabel(modeId)
+    for _, opt in ipairs(OFFICIAL_MIRROR_OPTIONS) do
+        if opt.id == modeId then
+            return L[opt.labelKey]
+        end
+    end
+    return L["Mirror: Guild & Allies"]
 end
 
 local function RoleShortLabel(roleId)
@@ -404,7 +419,7 @@ local function GetBrowseActivityOptions(catId)
                     minL, maxL = ns.Clan:ResolveActivityLevelRange(nil, o.label, catId)
                 end
                 local hasRange = (minL ~= nil and minL > 0 and maxL ~= nil and maxL >= minL)
-                local suitable = (not hasRange) or (myLvl >= (minL - 2) and myLvl <= (maxL + 4))
+                local suitable = (not hasRange) or (myLvl >= minL and myLvl <= maxL)
                 merged[#merged + 1] = {
                     key = "off_" .. tostring(o.officialId),
                     officialId = o.officialId,
@@ -434,7 +449,7 @@ local function GetBrowseActivityOptions(catId)
                 minL, maxL = ns.Clan:ResolveActivityLevelRange(nil, lbl, catId)
             end
             local hasRange = (minL ~= nil and minL > 0 and maxL ~= nil and maxL >= minL and not (minL <= 1 and maxL >= 60))
-            local suitable = (not hasRange) or (myLvl >= (minL - 2) and myLvl <= (maxL + 4))
+            local suitable = (not hasRange) or (myLvl >= minL and myLvl <= maxL)
             merged[#merged + 1] = {
                 key = c.id,
                 officialId = nil,
@@ -646,7 +661,9 @@ function LFGFrameTab:HandleOwnListingRemoved()
     end
     self.selectedKey = nil
     self.selectedItem = nil
-    self:TriggerOfficialBrowseSearch(true)
+    if ns.Clan and ns.Clan.ScanOfficialLfgResults then
+        ns.Clan:ScanOfficialLfgResults(true)
+    end
     self:RefreshData()
 end
 
@@ -979,13 +996,6 @@ local function UpdateSideTabVisual(tab, isSelected)
     if not tab then return end
     if tab.selectedTex then
         tab.selectedTex:SetShown(isSelected == true)
-    end
-    if tab._useCommonSideTab and tab.bgTex then
-        if isSelected and HasAtlas("common-sidetab-selected") then
-            tab.bgTex:SetAtlas("common-sidetab-selected", true)
-        elseif HasAtlas("common-sidetab") then
-            tab.bgTex:SetAtlas("common-sidetab", true)
-        end
     end
     if tab.SetChecked then
         pcall(tab.SetChecked, tab, isSelected == true)
@@ -1741,20 +1751,42 @@ function LFGFrameTab:ApplyRecommendedRoles(preserveGuide)
     return nil
 end
 
+local function ReadOfficialSoloRoles()
+    if (Compat.IsInGroup and Compat.IsInGroup()) or not C_LFGListRoles then
+        return nil
+    end
+    local fn = C_LFGListRoles.GetRoles or C_LFGListRoles.GetSavedRoles
+    if not fn then return nil end
+    local r1, r2, r3 = Safe.Call(fn)
+    local isT, isH, isD
+    if type(r1) == "table" then
+        isT = (Safe.Value(r1.tank) == true)
+        isH = (Safe.Value(r1.healer) == true)
+        isD = (Safe.Value(r1.dps) == true)
+    elseif r1 ~= nil or r2 ~= nil or r3 ~= nil then
+        isT = (r1 == true)
+        isH = (r2 == true)
+        isD = (r3 == true)
+    else
+        return nil
+    end
+    if isT or isH or isD then
+        return { TANK = (isT == true), HEALER = (isH == true), DPS = (isD == true) }
+    end
+    return nil
+end
+
 function LFGFrameTab:InitDefaultRoles()
     if self.rolesInitialized then return end
     self.rolesInitialized = true
-    if not (Compat.IsInGroup and Compat.IsInGroup()) and C_LFGListRoles then
-        local r = (C_LFGListRoles.GetRoles and Safe.Call(C_LFGListRoles.GetRoles))
-            or (C_LFGListRoles.GetSavedRoles and Safe.Call(C_LFGListRoles.GetSavedRoles))
-        if type(r) == "table" and (r.tank or r.healer or r.dps) then
-            self.roles.TANK = (r.tank == true)
-            self.roles.HEALER = (r.healer == true)
-            self.roles.DPS = (r.dps == true)
-            self.roles.GUIDE = false
-            self.composerRole = self:GetPrimaryListingRole()
-            return
-        end
+    local offRoles = ReadOfficialSoloRoles()
+    if offRoles then
+        self.roles.TANK = offRoles.TANK
+        self.roles.HEALER = offRoles.HEALER
+        self.roles.DPS = offRoles.DPS
+        self.roles.GUIDE = false
+        self.composerRole = self:GetPrimaryListingRole()
+        return
     end
     self:ApplyRecommendedRoles(false)
 end
@@ -2054,6 +2086,11 @@ function LFGFrameTab:StartEditListing(item)
         and Safe.Call(C_LFGList.GetActiveEntryInfo)
         or nil
 
+    if type(activeEntry) == "table" and ((not target) or target.isOfficial == true) then
+        self:SwitchToOfficialListingTab(nil)
+        return
+    end
+
     if not target and type(activeEntry) ~= "table" then
         self.listingMode = inGroup and "LFM" or "LFG"
         self.viewMode = "categories"
@@ -2063,17 +2100,19 @@ function LFGFrameTab:StartEditListing(item)
     self.listingMode = (target and target.mode == "LFM") and "LFM" or (inGroup and "LFM" or "LFG")
 
     local syncedRolesFromOfficial = false
-    if not inGroup and C_LFGListRoles and C_LFGListRoles.GetRoles then
-        local r = Safe.Call(C_LFGListRoles.GetRoles)
-        if type(r) == "table" and (r.tank or r.healer or r.dps) then
-            self.roles.TANK = (r.tank == true)
-            self.roles.HEALER = (r.healer == true)
-            self.roles.DPS = (r.dps == true)
-            syncedRolesFromOfficial = true
-        end
+    local offRoles = ReadOfficialSoloRoles()
+    if offRoles then
+        self.roles.TANK = offRoles.TANK
+        self.roles.HEALER = offRoles.HEALER
+        self.roles.DPS = offRoles.DPS
+        syncedRolesFromOfficial = true
     end
     if not syncedRolesFromOfficial then
-        if target and (target.role == "TANK" or target.role == "HEALER" or target.role == "DPS") then
+        if target and type(target.soloRoles) == "table" and (target.soloRoles.TANK or target.soloRoles.HEALER or target.soloRoles.DPS) then
+            self.roles.TANK = (target.soloRoles.TANK == true)
+            self.roles.HEALER = (target.soloRoles.HEALER == true)
+            self.roles.DPS = (target.soloRoles.DPS == true)
+        elseif target and (target.role == "TANK" or target.role == "HEALER" or target.role == "DPS") then
             self.roles.TANK = (target.role == "TANK")
             self.roles.HEALER = (target.role == "HEALER")
             self.roles.DPS = (target.role == "DPS")
@@ -2367,13 +2406,13 @@ function LFGFrameTab:UpdateViewLayout()
     local listTop = -100
     if isBrowse then
         if hasActBar then
-            hdrHeight = 81
-            topOffset = -103
-            listTop = -105
+            hdrHeight = 84
+            topOffset = -106
+            listTop = -109
         else
-            hdrHeight = 54
-            topOffset = -76
-            listTop = -78
+            hdrHeight = 57
+            topOffset = -79
+            listTop = -82
         end
     end
 
@@ -2418,21 +2457,30 @@ function LFGFrameTab:UpdateViewLayout()
     end
     local selfListing = self:GetSelfActiveListing()
     local hasListing = (selfListing ~= nil)
+    if c.officialListCtaBtn then
+        c.officialListCtaBtn:SetShown(isCats and canManage)
+        if c.officialListCtaBtn.SetEnabled then
+            c.officialListCtaBtn:SetEnabled(canManage and not IsCombatLocked())
+        end
+    end
+    if c.officialListHelpBtn then
+        c.officialListHelpBtn:SetShown(isCats and canManage)
+    end
     if c.categoryGuideLbl then
         c.categoryGuideLbl:SetShown(isCats and canManage)
         if isCats and canManage then
-            local inGroup = Compat.IsInGroup and Compat.IsInGroup()
+            c.categoryGuideLbl:ClearAllPoints()
+            c.categoryGuideLbl:SetPoint("TOPLEFT", c.categoryView, "TOPLEFT", 12, -31)
+            c.categoryGuideLbl:SetPoint("TOPRIGHT", c.categoryView, "TOPRIGHT", -12, -31)
             if hasListing then
                 c.categoryGuideLbl:SetText("|cff3fb950" .. L["Your listing is active — edit, delete, or pick a category below."] .. "|r")
-            elseif inGroup then
-                c.categoryGuideLbl:SetText("|cffffd24d" .. L["1. Select roles above  •  2. Pick a category below to list your group (LFM)."] .. "|r")
             else
-                c.categoryGuideLbl:SetText("|cffffd24d" .. L["1. Select your roles above  •  2. Pick a category below to list yourself (LFG)."] .. "|r")
+                c.categoryGuideLbl:SetText("|cffffd24d" .. L["Or create a PRIVATE listing (Guild, Allies & Friends only — hidden from public LFG):"] .. "|r")
             end
         end
     end
     if c.categoryButtons then
-        local catStartY = (isCats and canManage) and -24 or -8
+        local catStartY = (isCats and canManage) and -48 or -8
         for idx, catBtn in ipairs(c.categoryButtons) do
             if catBtn then
                 if catBtn.SetShown then
@@ -2440,9 +2488,9 @@ function LFGFrameTab:UpdateViewLayout()
                 end
                 if canManage then
                     catBtn:ClearAllPoints()
-                    catBtn:SetPoint("TOPLEFT", c.categoryView, "TOPLEFT", 10, catStartY - ((idx - 1) * 47))
-                    catBtn:SetPoint("TOPRIGHT", c.categoryView, "TOPRIGHT", -10, catStartY - ((idx - 1) * 47))
-                    catBtn:SetHeight(42)
+                    catBtn:SetPoint("TOPLEFT", c.categoryView, "TOPLEFT", 10, catStartY - ((idx - 1) * 40))
+                    catBtn:SetPoint("TOPRIGHT", c.categoryView, "TOPRIGHT", -10, catStartY - ((idx - 1) * 40))
+                    catBtn:SetHeight(37)
                 end
             end
         end
@@ -2535,7 +2583,7 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
         else
             c.sendMsgBtn:SetText(L["Send Message"])
             AutoFitNativeButton(c.sendMsgBtn, 96, 16, 152)
-            local canAct = (sel ~= nil) and (sel.isSelf ~= true) and not combat
+            local canAct = (sel ~= nil) and (sel.isSelf ~= true) and (sel.secretLeaderName == nil) and (sel.isUnknownLeader ~= true) and not combat
             if c.sendMsgBtn.SetEnabled then
                 c.sendMsgBtn:SetEnabled(canAct)
             end
@@ -2554,7 +2602,7 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
         else
             c.inviteBtn:SetText(L["Invite"])
             AutoFitNativeButton(c.inviteBtn, 78, 14, 112)
-            local canAct = (sel ~= nil) and (sel.isSelf ~= true) and not combat
+            local canAct = (sel ~= nil) and (sel.isSelf ~= true) and (sel.secretLeaderName == nil) and (sel.isUnknownLeader ~= true) and not combat
             local canInviteSel = canAct and canInviteGroup and ResolveLfgInviteTarget(sel)
             c.inviteBtn._scNonLeaderInvite = not canInviteGroup
             c.inviteBtn._scLeaderName = leaderName
@@ -2583,10 +2631,13 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
 
     local hasRole = self:HasAnySelectedRole()
     local hasAct = self:HasAnySelectedActivity()
-    local canList = canManage and (self.viewMode == "activities") and hasRole and hasAct and not combat
+    local isOfficialBroadcast = (self.broadcastMode == "OFFICIAL")
+    local canList = canManage and (self.viewMode == "activities") and (isOfficialBroadcast or (hasRole and hasAct)) and not combat
     if c.listSelfBtn then
         local postLabel
-        if hasListing then
+        if isOfficialBroadcast then
+            postLabel = L["Open Official Tab"]
+        elseif hasListing then
             postLabel = L["Update Listing"]
         elseif self.listingMode == "LFM" then
             postLabel = L["List Group"]
@@ -2594,10 +2645,10 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
             postLabel = L["List Self"]
         end
         c.listSelfBtn:SetText(postLabel)
-        AutoFitNativeButton(c.listSelfBtn, 100, 18, 146)
+        AutoFitNativeButton(c.listSelfBtn, 100, 18, 158)
         c.listSelfBtn._scNonLeader = not canManage
         c.listSelfBtn._scLeaderName = leaderName
-        c.listSelfBtn._scNeedsSelection = canManage and (self.viewMode == "activities") and (not hasRole or not hasAct)
+        c.listSelfBtn._scNeedsSelection = (not isOfficialBroadcast) and canManage and (self.viewMode == "activities") and (not hasRole or not hasAct)
         if c.listSelfBtn.SetEnabled then
             c.listSelfBtn:SetEnabled(canList)
         end
@@ -2879,7 +2930,22 @@ function LFGFrameTab:ShowSubPanel(customHost)
     if ns.Clan and ns.Clan.ScanOfficialLfgResults then
         ns.Clan:ScanOfficialLfgResults(true)
     end
-    self:TriggerOfficialBrowseSearch(false)
+    local hasFreshOfficial = false
+    if ns.Clan and type(ns.Clan.officialLfgCache) == "table" then
+        local nowSec = time()
+        for _, rec in pairs(ns.Clan.officialLfgCache) do
+            if type(rec) == "table" and (nowSec - (rec.updatedAt or 0)) <= 15 then
+                local isOwn = Compat and Compat.IsMe and Compat.IsMe(rec.displayName or rec.lookupKey)
+                if not isOwn then
+                    hasFreshOfficial = true
+                    break
+                end
+            end
+        end
+    end
+    if not hasFreshOfficial then
+        self:TriggerOfficialBrowseSearch(false)
+    end
     if self._hasSearchedThisSession and ns.Clan and ns.Clan.RequestExternalLFGCatchup then
         ns.Clan:RequestExternalLFGCatchup()
     end
@@ -2922,15 +2988,23 @@ function LFGFrameTab:HideSubPanel(restoreNative)
     self:UpdateTabSelectionVisual()
 
     local lfgHost = _G.LFGParentFrame
-    if restoreNative and lfgHost and lfgHost:IsShown() and not self.active then
+    if lfgHost and not self.active and not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(lfgHost)) then
         local selectedTab = lfgHost.selectedTab or 1
         local subs = GetNativeLfgSubFrames()
+        local shownOne = false
         for i, sub in ipairs(subs) do
             if sub and IsSafeUiObj(sub) and sub.SetShown then
-                sub:SetShown(i == selectedTab)
+                local shouldShow = (i == selectedTab)
+                pcall(sub.SetShown, sub, shouldShow)
+                if shouldShow then
+                    shownOne = true
+                end
             end
         end
-        if lfgHost.UpdateTabs then
+        if not shownOne and _G.LFGListingFrame and IsSafeUiObj(_G.LFGListingFrame) and _G.LFGListingFrame.Show then
+            pcall(_G.LFGListingFrame.Show, _G.LFGListingFrame)
+        end
+        if (restoreNative or lfgHost:IsShown()) and lfgHost.UpdateTabs then
             pcall(lfgHost.UpdateTabs, lfgHost)
         end
     end
@@ -2938,6 +3012,73 @@ function LFGFrameTab:HideSubPanel(restoreNative)
     if ns.RequestIdleGcStep then
         ns:RequestIdleGcStep(220, 0.8)
     end
+end
+
+function LFGFrameTab:SwitchToOfficialListingTab(preferredSyncMode)
+    if IsCombatLocked() then
+        ns:Print("%s", L["Unavailable during combat."])
+        return false
+    end
+    if preferredSyncMode == "GUILD_ALLIES" or preferredSyncMode == "GUILD_ONLY" or preferredSyncMode == "OFF" then
+        if ns.Clan and ns.Clan.SetOfficialLfgSyncMode then
+            ns.Clan:SetOfficialLfgSyncMode(preferredSyncMode)
+        elseif ns.db and ns.db.settings then
+            ns.db.settings.officialLfgSyncMode = preferredSyncMode
+        end
+    end
+    if not (Compat.IsInGroup and Compat.IsInGroup()) and C_LFGListRoles and C_LFGListRoles.SetRoles and self:HasAnySelectedRole() then
+        pcall(C_LFGListRoles.SetRoles, {
+            tank = self.roles.TANK == true,
+            healer = self.roles.HEALER == true,
+            dps = self.roles.DPS == true,
+        })
+    end
+    self._officialRedirectTipUntil = (GetTime and GetTime() or 0) + 14
+
+    local lfgHost = _G.LFGParentFrame
+    if lfgHost and lfgHost.IsShown and lfgHost:IsShown() then
+        self._transitionSeq = (self._transitionSeq or 0) + 1
+        self.active = false
+        if self.subPanel then
+            self.subPanel:Hide()
+        end
+        if self.standaloneHost and self.standaloneHost:IsShown() then
+            self.standaloneHost:Hide()
+        end
+        local listingTab = lfgHost.ListingTab or _G.LFGParentFrameTab1
+        if listingTab and listingTab.Click then
+            pcall(listingTab.Click, listingTab)
+        end
+        if not (_G.LFGListingFrame and _G.LFGListingFrame.IsShown and _G.LFGListingFrame:IsShown()) then
+            lfgHost.selectedTab = 1
+            local subs = GetNativeLfgSubFrames()
+            for i, sub in ipairs(subs) do
+                if sub and IsSafeUiObj(sub) and sub.SetShown then
+                    pcall(sub.SetShown, sub, i == 1)
+                end
+            end
+            if lfgHost.UpdateTabs then
+                pcall(lfgHost.UpdateTabs, lfgHost)
+            end
+        end
+        self:UpdateTabSelectionVisual()
+        self:SyncAllEmbeddedTabStates()
+        self:UpdateNativeBridgeBar()
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0, function()
+                if _G.LFGParentFrame and _G.LFGParentFrame:IsShown() then
+                    LFGFrameTab:UpdateTabSelectionVisual()
+                    LFGFrameTab:SyncAllEmbeddedTabStates()
+                    LFGFrameTab:UpdateNativeBridgeBar()
+                end
+            end)
+        end
+        ns:Print("%s", L["Official LFG tab opened: select your activities and click Blizzard's List button — SocialCentral will mirror it automatically."])
+        return true
+    end
+
+    ns:Print("%s", L["Press 'I' to open Blizzard's Group Finder (Listing tab) — SocialCentral will mirror your Official listing automatically."])
+    return false
 end
 
 function LFGFrameTab:ToggleSubPanel()
@@ -3169,6 +3310,13 @@ local function OpenLfgRowContextMenu(anchor, item)
             end)
             return
         end
+        if item.secretLeaderName ~= nil or item.isUnknownLeader == true then
+            root:CreateTitle(item.activity or L["Official LFG"])
+            root:CreateButton(L["Native LFG"], function()
+                LFGFrameTab:HideSubPanel(true)
+            end)
+            return
+        end
         root:CreateTitle(targetName or L["Clan & Allied LFG"])
         if targetName then
             local canInviteLfg, invTarget, invBnetId, isCrossFac, bnetName = ResolveLfgInviteTarget(item)
@@ -3227,6 +3375,12 @@ local function OpenLfgRowContextMenu(anchor, item)
                     Store:SetSocialFlag(item.lookupKey or targetName, "AVOID")
                 end)
             end
+            if item.isOfficial or item.sourceType == "OFFICIAL_LFG" then
+                root:CreateDivider()
+                root:CreateButton(L["Native LFG"], function()
+                    LFGFrameTab:HideSubPanel(true)
+                end)
+            end
         end
     end)
 end
@@ -3242,6 +3396,57 @@ local function SyncRowSelectionVisuals()
         end
     end
     LFGFrameTab:UpdateBottomButtons()
+end
+
+local function AppendLfgMembersTooltip(tooltip, it)
+    if not (tooltip and type(it) == "table") then return end
+    if it.guildMemberNames and it.guildMemberNames ~= "" then
+        tooltip:AddLine(L["Guild in group"] .. ": " .. it.guildMemberNames, 1.0, 0.82, 0.25, true)
+    elseif (it.numGuildMates or 0) > 0 then
+        tooltip:AddLine(L["Guild in group"] .. ": " .. tostring(it.numGuildMates), 1.0, 0.82, 0.25)
+    end
+    if it.alliedMemberNames and it.alliedMemberNames ~= "" then
+        tooltip:AddLine(L["Allies in group"] .. ": " .. it.alliedMemberNames, 0.30, 0.92, 0.52, true)
+    end
+    if it.friendMemberNames and it.friendMemberNames ~= "" then
+        tooltip:AddLine(L["Friends in group"] .. ": " .. it.friendMemberNames, 0.45, 0.82, 1.0, true)
+    elseif ((it.numBNetFriends or 0) + (it.numCharFriends or 0)) > 0 then
+        tooltip:AddLine(L["Friends in group"] .. ": " .. tostring((it.numBNetFriends or 0) + (it.numCharFriends or 0)), 0.45, 0.82, 1.0)
+    end
+    local wNames = (it.watchlistMemberNames and it.watchlistMemberNames ~= "") and it.watchlistMemberNames or it.friendOrWatchlistNames
+    if wNames and wNames ~= "" then
+        tooltip:AddLine(L["In group"] .. ": " .. wNames, 1.0, 0.72, 0.30, true)
+    end
+    if it.hasGoodPartnerSignup and it.goodPartnerNames and it.goodPartnerNames ~= "" then
+        tooltip:AddLine(L["Good Partner (+)"] .. ": " .. it.goodPartnerNames, 0.25, 0.92, 0.50, true)
+    end
+    if it.hasAvoidSignup and it.avoidSignupNames and it.avoidSignupNames ~= "" then
+        tooltip:AddLine(L["Avoid in group"] .. ": " .. it.avoidSignupNames, 1.0, 0.35, 0.35, true)
+    end
+    if it.enemyGuildNames and it.enemyGuildNames ~= "" then
+        tooltip:AddLine(L["Enemy guild in group"] .. ": " .. it.enemyGuildNames, 1.0, 0.32, 0.32, true)
+    end
+    if it.newPlayerFriendly then
+        tooltip:AddLine(L["New Player Friendly"], 0.28, 0.95, 0.42)
+    end
+    if type(it.members) == "table" and #it.members > 0 then
+        tooltip:AddLine(" ")
+        tooltip:AddLine(L["Group Members"] .. ":", 0.86, 0.78, 0.52)
+        for mi = 1, math.min(#it.members, 12) do
+            local m = it.members[mi]
+            if type(m) == "table" and m.name then
+                local hex = (Compat.ClassHex and m.classFile and Compat.ClassHex(m.classFile)) or "|cffe8ecf2"
+                local leadStr = m.isLeader and "|cffffd200*|r " or ""
+                local lvlStr = (m.level and m.level > 0) and (" " .. L["Lv %d"]:format(m.level)) or ""
+                local rTag = ""
+                if m.role == "TANK" then rTag = " [T]"
+                elseif m.role == "HEALER" then rTag = " [H]"
+                elseif m.role == "DAMAGER" or m.role == "DPS" then rTag = " [D]" end
+                local sTag = m.tag and (" |cffffd24d[" .. m.tag .. "]|r") or ""
+                tooltip:AddLine(string.format("  %s%s%s|r|cff9aa6b8%s%s|r%s", leadStr, hex, m.name, lvlStr, rTag, sTag), 0.92, 0.94, 0.98)
+            end
+        end
+    end
 end
 
 local ROLE_ATLAS_CANDIDATES = {
@@ -3290,6 +3495,17 @@ local function CreateLfgRow(parent)
         bgTex:SetAtlas("common-button-list-large", false)
         row.nativeBgTex = bgTex
     end
+
+    row.SelfTex = row:CreateTexture(nil, "BACKGROUND", nil, 2)
+    row.SelfTex:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -3)
+    row.SelfTex:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -3, 1)
+    if HasAtlas("groupfinder-highlightbar-green") then
+        row.SelfTex:SetAtlas("groupfinder-highlightbar-green", false)
+        row.SelfTex:SetAlpha(0.32)
+    else
+        row.SelfTex:SetColorTexture(0.18, 0.72, 0.36, 0.14)
+    end
+    row.SelfTex:Hide()
 
     row.SelectedTex = row:CreateTexture(nil, "OVERLAY", nil, 2)
     row.SelectedTex:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -3)
@@ -3427,6 +3643,10 @@ local function CreateLfgRow(parent)
             LFGFrameTab:StartEditListing(it)
             return
         end
+        if it.secretLeaderName ~= nil or it.isUnknownLeader == true then
+            LFGFrameTab:HideSubPanel(true)
+            return
+        end
         OpenPlayerWhisper(it)
     end)
 
@@ -3435,7 +3655,13 @@ local function CreateLfgRow(parent)
         if not it then return end
         GameTooltip:SetOwner(selfRow, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
-        GameTooltip:AddLine(it.displayName or "?", 1, 1, 1)
+        if it.secretLeaderName ~= nil then
+            GameTooltip:AddLine(it.secretLeaderName, 1, 1, 1)
+        else
+            local cHex = (Compat.ClassHex and it.classFile and Compat.ClassHex(it.classFile)) or "|cffffd200"
+            local lvlSuffix = (it.level and it.level > 0) and (" |cffb8c0cc" .. L["Lv %d"]:format(it.level) .. "|r") or ""
+            GameTooltip:AddLine(cHex .. (it.displayName or "?") .. "|r" .. lvlSuffix, 1, 1, 1)
+        end
         if it.guild and it.guild ~= "" then
             GameTooltip:AddLine("<" .. it.guild .. ">", 0.55, 0.85, 1.0)
         end
@@ -3459,15 +3685,24 @@ local function CreateLfgRow(parent)
                 and string.format(L["Members: %d/%d"], it.numMembers, it.maxMembers)
                 or string.format(L["Members: %d"], it.numMembers)
             if it.needT ~= nil or it.needH ~= nil or it.needD ~= nil then
-                mTxt = mTxt .. string.format("  (Need T:%d H:%d D:%d)", it.needT or 0, it.needH or 0, it.needD or 0)
+                local needParts = {}
+                if (it.needT or 0) > 0 then needParts[#needParts + 1] = string.format("%d %s", it.needT, L["Tank"]) end
+                if (it.needH or 0) > 0 then needParts[#needParts + 1] = string.format("%d %s", it.needH, L["Healer"]) end
+                if (it.needD or 0) > 0 then needParts[#needParts + 1] = string.format("%d %s", it.needD, L["DPS"]) end
+                if #needParts > 0 then
+                    mTxt = mTxt .. "  ·  " .. table.concat(needParts, ", ")
+                end
             end
             GameTooltip:AddLine(mTxt, 0.85, 0.90, 0.98)
         end
         if it.note and it.note ~= "" then
             GameTooltip:AddLine(it.note, 0.85, 0.85, 0.85, true)
         end
+        if it.voiceChat and it.voiceChat ~= "" then
+            GameTooltip:AddLine(string.format("%s: %s", _G.VOICE_CHAT or L["Voice Chat"], it.voiceChat), 0.85, 0.88, 0.94, true)
+        end
         if it.ilvl and it.ilvl > 0 then
-            GameTooltip:AddLine(string.format("Item Level: %d", it.ilvl), 1.0, 0.85, 0.35)
+            GameTooltip:AddLine(L["Item Level: %d"]:format(it.ilvl), 1.0, 0.85, 0.35)
         end
         AppendLfgMembersTooltip(GameTooltip, it)
         if it._idealLevel then
@@ -3491,57 +3726,6 @@ local function CreateLfgRow(parent)
     end)
 
     return row
-end
-
-local function AppendLfgMembersTooltip(tooltip, it)
-    if not (tooltip and type(it) == "table") then return end
-    if it.guildMemberNames and it.guildMemberNames ~= "" then
-        tooltip:AddLine(L["Guild in group"] .. ": " .. it.guildMemberNames, 1.0, 0.82, 0.25, true)
-    elseif (it.numGuildMates or 0) > 0 then
-        tooltip:AddLine(L["Guild in group"] .. ": " .. tostring(it.numGuildMates), 1.0, 0.82, 0.25)
-    end
-    if it.alliedMemberNames and it.alliedMemberNames ~= "" then
-        tooltip:AddLine(L["Allies in group"] .. ": " .. it.alliedMemberNames, 0.30, 0.92, 0.52, true)
-    end
-    if it.friendMemberNames and it.friendMemberNames ~= "" then
-        tooltip:AddLine(L["Friends in group"] .. ": " .. it.friendMemberNames, 0.45, 0.82, 1.0, true)
-    elseif ((it.numBNetFriends or 0) + (it.numCharFriends or 0)) > 0 then
-        tooltip:AddLine(L["Friends in group"] .. ": " .. tostring((it.numBNetFriends or 0) + (it.numCharFriends or 0)), 0.45, 0.82, 1.0)
-    end
-    local wNames = (it.watchlistMemberNames and it.watchlistMemberNames ~= "") and it.watchlistMemberNames or it.friendOrWatchlistNames
-    if wNames and wNames ~= "" then
-        tooltip:AddLine(L["In group"] .. ": " .. wNames, 1.0, 0.72, 0.30, true)
-    end
-    if it.hasGoodPartnerSignup and it.goodPartnerNames and it.goodPartnerNames ~= "" then
-        tooltip:AddLine(L["Good Partner (+)"] .. ": " .. it.goodPartnerNames, 0.25, 0.92, 0.50, true)
-    end
-    if it.hasAvoidSignup and it.avoidSignupNames and it.avoidSignupNames ~= "" then
-        tooltip:AddLine(L["Avoid in group"] .. ": " .. it.avoidSignupNames, 1.0, 0.35, 0.35, true)
-    end
-    if it.enemyGuildNames and it.enemyGuildNames ~= "" then
-        tooltip:AddLine(L["Enemy guild in group"] .. ": " .. it.enemyGuildNames, 1.0, 0.32, 0.32, true)
-    end
-    if it.newPlayerFriendly then
-        tooltip:AddLine(L["New Player Friendly"], 0.28, 0.95, 0.42)
-    end
-    if type(it.members) == "table" and #it.members > 0 then
-        tooltip:AddLine(" ")
-        tooltip:AddLine(L["Group Members"] .. ":", 0.86, 0.78, 0.52)
-        for mi = 1, math.min(#it.members, 12) do
-            local m = it.members[mi]
-            if type(m) == "table" and m.name then
-                local hex = (Compat.ClassHex and m.classFile and Compat.ClassHex(m.classFile)) or "|cffe8ecf2"
-                local leadStr = m.isLeader and "|cffffd200*|r " or ""
-                local lvlStr = (m.level and m.level > 0) and (" Nv " .. tostring(m.level)) or ""
-                local rTag = ""
-                if m.role == "TANK" then rTag = " [T]"
-                elseif m.role == "HEALER" then rTag = " [H]"
-                elseif m.role == "DAMAGER" or m.role == "DPS" then rTag = " [D]" end
-                local sTag = m.tag and (" |cffffd24d[" .. m.tag .. "]|r") or ""
-                tooltip:AddLine(string.format("  %s%s%s|r|cff9aa6b8%s%s|r%s", leadStr, hex, m.name, lvlStr, rTag, sTag), 0.92, 0.94, 0.98)
-            end
-        end
-    end
 end
 
 local function BuildLfgRowBadgeSpecs(item, sMeta)
@@ -3654,6 +3838,9 @@ local function UpdateLfgRow(row, item, _, palette)
     else
         Theme:ApplyBackdrop(row, "row", palette)
     end
+    if row.SelfTex then
+        row.SelfTex:SetShown(item.isSelf == true)
+    end
 
     local isLeaderOrGroup = (item.mode == "LFM" or item.sourceType == "EVENT")
     if row._lastLeaderMode ~= isLeaderOrGroup then
@@ -3667,130 +3854,42 @@ local function UpdateLfgRow(row, item, _, palette)
         end
     end
 
-    local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or item.displayName) or Store:GetSocialMeta(item.lookupKey or item.displayName))
-    local flagPrefix = ""
-    if sMeta and sMeta.flag == "AVOID" then
-        flagPrefix = "|cffff4d4d[!]|r "
-    elseif sMeta and sMeta.flag == "GOOD" then
-        flagPrefix = "|cff3fb950[+]|r "
-    end
-
-    local classHex = Compat.ClassHex and Compat.ClassHex(item.classFile) or "|cffffd200"
-    local keyTag = (item.keyLvl and item.keyLvl > 0) and (" |cffd2a8ff+" .. item.keyLvl .. "|r") or ""
-    local selfTag = item.isSelf and (" |cff3fb950(" .. L["You"] .. ")|r") or ""
-    row.nameFs:SetText(string.format("%s%s%s|r%s%s", flagPrefix, classHex, item.displayName or "?", keyTag, selfTag))
-    row.nameFs:SetWidth(math.min(168, math.max(44, row.nameFs:GetStringWidth() or 102)))
-
-    local lvlPart = (item.level and item.level > 0) and ("Nv " .. item.level) or ""
-    if item._idealLevel and lvlPart ~= "" then
-        lvlPart = "|cff3fb950" .. lvlPart .. "|r"
-    end
-    row.levelFs:SetText(lvlPart)
-
-    local lastAnchor = (lvlPart ~= "") and row.levelFs or row.nameFs
-    local classSlug = type(item.classFile) == "string" and item.classFile:lower() or nil
-    local classAtlas = classSlug and ("groupfinder-icon-class-" .. classSlug) or nil
-    row.classIcon:ClearAllPoints()
-    if classAtlas and HasAtlas(classAtlas) then
-        row.classIcon:SetAtlas(classAtlas, false)
-        row.classIcon:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
-        row.classIcon:Show()
-        lastAnchor = row.classIcon
-    else
-        row.classIcon:Hide()
-    end
-
-    local badgeSpecs = BuildLfgRowBadgeSpecs(item, sMeta)
-
-    for bi = 1, 6 do
-        local bf = row.infoBadges[bi]
-        local sp = badgeSpecs[bi]
-        if bf and sp then
-            bf:ClearAllPoints()
-            bf:SetPoint("LEFT", lastAnchor, "RIGHT", (bi == 1) and 4 or 2, 0)
-            if sp.atlas and HasAtlas(sp.atlas) then
-                bf.tex:SetTexCoord(0, 1, 0, 1)
-                bf.tex:SetAtlas(sp.atlas, false)
-            else
-                bf.tex:SetTexture(sp.tex)
-                bf.tex:SetTexCoord(sp.tc[1], sp.tc[2], sp.tc[3], sp.tc[4])
-            end
-            bf.tex:SetVertexColor(sp.tint[1], sp.tint[2], sp.tint[3], 1.0)
-            bf._tipTitle = sp.title
-            bf._tipDesc = sp.desc
-            bf._tipColor = sp.tipColor
-            bf:Show()
-            lastAnchor = bf
-        elseif bf then
-            bf._tipTitle = nil
-            bf:Hide()
-        end
-    end
-
+    -- Configure right-side Role Icons first so line-1 width bounds never collide with role icons.
+    local isSoloLfg = (item.mode == "LFG" and item.sourceType ~= "EVENT")
     local isRaidLike = (item.categoryKind == "RAIDS")
         or ((item.maxMembers or 0) > 5)
         or (item.categoryKind == "PVP")
-
-    local roleCount = isRaidLike and 3 or 5
     local anchorRoleIcon = row.roleIcons[isRaidLike and 3 or 1]
+    local roleBlockW = ((isRaidLike and 3 or 5) * 20) + 12
 
-    row.badgeFs:ClearAllPoints()
-    row.badgeFs:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
-    row.badgeFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
-    row.activityFs:ClearAllPoints()
-    row.activityFs:SetPoint("TOPLEFT", row.nameFs, "BOTTOMLEFT", 0, -4)
-    row.activityFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
-
-    local badges = ""
-    if item.numMembers and item.numMembers > 0 then
-        local mFmt = (item.maxMembers and item.maxMembers > 0)
-            and string.format("|cffd8dde6(%d/%d)|r ", item.numMembers, item.maxMembers)
-            or string.format("|cffd8dde6(%d)|r ", item.numMembers)
-        badges = badges .. mFmt
-    end
-    if sMeta and sMeta.flag == "AVOID" then
-        badges = badges .. "|cffff4d4d[" .. L["AVOID"] .. "]|r "
-    end
-    if item.hasAvoidSignup then
-        badges = badges .. "|cffff4d4d[!" .. L["AVOID"] .. "]|r "
-    end
-    if item.hasGoodPartnerSignup then
-        badges = badges .. "|cff3fb950[+" .. L["PARTNER"] .. "]|r "
-    end
-    if item._lockoutInfo then
-        local lk = item._lockoutInfo
-        local lockProg = (lk.numEncounters and lk.numEncounters > 0)
-            and string.format("%s %d/%d", L["LOCKED"], lk.encounterProgress or 0, lk.numEncounters)
-            or L["LOCKED"]
-        badges = badges .. "|cffff9b3d[" .. lockProg .. "]|r "
-    end
-    if item.sourceType == "PUBLIC_CHAT" then
-        local rawKw = ns.db and ns.db.settings and ns.db.settings.clanLfgAlertFilter
-        if type(rawKw) == "string" and rawKw ~= "" then
-            local haystack = ((item.activity or "") .. " " .. (item.note or "")):lower()
-            for kw in rawKw:gmatch("([^,]+)") do
-                local trimmed = kw:match("^%s*(.-)%s*$"):lower()
-                if trimmed ~= "" and haystack:find(trimmed, 1, true) then
-                    badges = badges .. "|cff3fb950[" .. L["MATCH"] .. "]|r "
-                    break
-                end
-            end
+    if isSoloLfg then
+        local soloList = {}
+        if type(item.soloRoles) == "table" and (item.soloRoles.TANK or item.soloRoles.HEALER or item.soloRoles.DPS) then
+            if item.soloRoles.TANK then soloList[#soloList + 1] = "TANK" end
+            if item.soloRoles.HEALER then soloList[#soloList + 1] = "HEALER" end
+            if item.soloRoles.DPS then soloList[#soloList + 1] = "DPS" end
+        elseif item.role == "TANK" or item.role == "HEALER" or item.role == "DPS" then
+            soloList[1] = item.role
+        else
+            soloList[1] = "TANK"
+            soloList[2] = "HEALER"
+            soloList[3] = "DPS"
         end
-    end
-    if item.isCompanion then
-        badges = badges .. "|cff6ec1e4[" .. L["PARTNER"] .. "]|r"
-    end
-    row.badgeFs:SetText(badges)
-
-    local actTxt = item._displayActivity or item.activity or L["Dungeon"]
-    local modeTag = (item.mode == "LFM") and "|cff3fb950[LFM]|r " or "|cff58a6ff[LFG]|r "
-    local notePart = (item.note and item.note ~= "") and (" — " .. item.note) or ""
-    local friendNote = (item.hasFriendOrWatchlistSignup and item.friendOrWatchlistNames and item.friendOrWatchlistNames ~= "")
-        and (" |cffffa633(" .. L["In group"] .. ": " .. item.friendOrWatchlistNames .. ")|r") or ""
-    row.activityFs:SetText(modeTag .. "|cffe0d4b0" .. actTxt .. "|r|cffb8c0cc" .. notePart .. "|r" .. friendNote)
-
-    if isRaidLike then
-        -- Raids / >5-player: strictly 3 role icons (Tank, Healer, DPS) at right
+        local soloCount = #soloList
+        local startSlot = 6 - soloCount
+        for ri = 1, startSlot - 1 do
+            if row.roleIcons[ri] then row.roleIcons[ri]:Hide() end
+        end
+        for offset = 1, soloCount do
+            local ico = row.roleIcons[startSlot + offset - 1]
+            SetRoleSlotTexture(ico, soloList[offset])
+            ico:SetDesaturated(false)
+            ico:SetAlpha(1.0)
+            ico:Show()
+        end
+        anchorRoleIcon = row.roleIcons[startSlot] or row.roleIcons[5]
+        roleBlockW = (soloCount * 20) + 12
+    elseif isRaidLike then
         for ri = 1, 2 do
             if row.roleIcons[ri] then row.roleIcons[ri]:Hide() end
         end
@@ -3800,9 +3899,7 @@ local function UpdateLfgRow(row, item, _, palette)
             local rType = raidSlots[offset]
             SetRoleSlotTexture(ico, rType)
             local openSlot = true
-            if item.mode == "LFG" and type(item.soloRoles) == "table" and (item.soloRoles.TANK or item.soloRoles.HEALER or item.soloRoles.DPS) then
-                openSlot = (item.soloRoles[rType] == true)
-            elseif item.needT ~= nil or item.needH ~= nil or item.needD ~= nil then
+            if item.needT ~= nil or item.needH ~= nil or item.needD ~= nil then
                 if rType == "TANK" then openSlot = (item.needT or 0) > 0
                 elseif rType == "HEALER" then openSlot = (item.needH or 0) > 0
                 else openSlot = (item.needD or 0) > 0 end
@@ -3815,31 +3912,10 @@ local function UpdateLfgRow(row, item, _, palette)
             ico:Show()
         end
     else
-        -- 5-player Dungeon slots: [1: TANK, 2: HEALER, 3: DPS, 4: DPS, 5: DPS]
-        -- Filled slots = gray/desaturated, Open slots = full color
         local slotRoles = { "TANK", "HEALER", "DPS", "DPS", "DPS" }
         local slotFilled = { false, false, false, false, false }
         local totalNum = item.numMembers or 0
-        if item.mode == "LFG" then
-            if type(item.soloRoles) == "table" and (item.soloRoles.TANK or item.soloRoles.HEALER or item.soloRoles.DPS) then
-                slotFilled = {
-                    not item.soloRoles.TANK,
-                    not item.soloRoles.HEALER,
-                    not item.soloRoles.DPS,
-                    true,
-                    true,
-                }
-            else
-                local role = item.role or "ANY"
-                if role == "TANK" then
-                    slotFilled = { false, true, true, true, true }
-                elseif role == "HEALER" then
-                    slotFilled = { true, false, true, true, true }
-                elseif role == "DPS" then
-                    slotFilled = { true, true, false, false, false }
-                end
-            end
-        elseif totalNum >= 5 or (item.needT == 0 and item.needH == 0 and item.needD == 0) then
+        if totalNum >= 5 or (item.needT == 0 and item.needH == 0 and item.needD == 0) then
             for s = 1, 5 do slotFilled[s] = true end
         elseif item.filledT ~= nil or item.filledH ~= nil or item.filledD ~= nil or item.filledNoRole ~= nil then
             local curT = item.filledT or 0
@@ -3875,7 +3951,7 @@ local function UpdateLfgRow(row, item, _, palette)
             end
         end
 
-        for s = 1, roleCount do
+        for s = 1, 5 do
             local ico = row.roleIcons[s]
             SetRoleSlotTexture(ico, slotRoles[s])
             local isFilled = slotFilled[s] == true
@@ -3885,16 +3961,157 @@ local function UpdateLfgRow(row, item, _, palette)
         end
     end
 
+    local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or item.displayName) or Store:GetSocialMeta(item.lookupKey or item.displayName))
+    local flagPrefix = ""
+    if sMeta and sMeta.flag == "AVOID" then
+        flagPrefix = "|cffff4d4d[!]|r "
+    elseif sMeta and sMeta.flag == "GOOD" then
+        flagPrefix = "|cff3fb950[+]|r "
+    end
+
+    if item.secretLeaderName ~= nil then
+        local cc = item.classFile and (_G.RAID_CLASS_COLORS and _G.RAID_CLASS_COLORS[item.classFile])
+        if cc then
+            row.nameFs:SetTextColor(cc.r or 1, cc.g or 0.82, cc.b or 0, 1)
+        else
+            row.nameFs:SetTextColor(1, 0.82, 0, 1)
+        end
+        row.nameFs:SetText(item.secretLeaderName)
+    else
+        row.nameFs:SetTextColor(1, 1, 1, 1)
+        local classHex = Compat.ClassHex and Compat.ClassHex(item.classFile) or "|cffffd200"
+        local keyTag = (item.keyLvl and item.keyLvl > 0) and (" |cffd2a8ff+" .. item.keyLvl .. "|r") or ""
+        local selfTag = item.isSelf and (" |cff3fb950(" .. L["You"] .. ")|r") or ""
+        row.nameFs:SetText(string.format("%s%s%s|r%s%s", flagPrefix, classHex, item.displayName or "?", keyTag, selfTag))
+    end
+
+    local lvlPart = (item.level and item.level > 0) and L["Lv %d"]:format(item.level) or ""
+    if item._idealLevel and lvlPart ~= "" then
+        lvlPart = "|cff3fb950" .. lvlPart .. "|r"
+    end
+    row.levelFs:SetText(lvlPart)
+
+    local classSlug = type(item.classFile) == "string" and item.classFile:lower() or nil
+    local classAtlas = classSlug and ("groupfinder-icon-class-" .. classSlug) or nil
+    local hasClassIcon = (classAtlas and HasAtlas(classAtlas)) and true or false
+    local badgeSpecs = BuildLfgRowBadgeSpecs(item, sMeta)
+    local numBadges = math.min(6, #badgeSpecs)
+
+    local rowW = (row.GetWidth and row:GetWidth()) or 0
+    if rowW < 180 then rowW = 314 end
+    local leftStart = isLeaderOrGroup and 28 or 12
+    local lvlW = (lvlPart ~= "") and ((row.levelFs:GetStringWidth() or 32) + 6) or 0
+    local clsW = hasClassIcon and 20 or 0
+    local badgesW = (numBadges > 0) and (numBadges * 17 + 6) or 0
+    local extraTagW = ((sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup or item._lockoutInfo) and 48 or 0
+    local maxNameW = math.max(48, math.min(164, rowW - leftStart - roleBlockW - lvlW - clsW - badgesW - extraTagW - 8))
+    row.nameFs:SetWidth(math.min(maxNameW, math.max(42, row.nameFs:GetStringWidth() or 96)))
+
+    local lastAnchor = (lvlPart ~= "") and row.levelFs or row.nameFs
+    row.classIcon:ClearAllPoints()
+    if hasClassIcon then
+        row.classIcon:SetAtlas(classAtlas, false)
+        row.classIcon:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
+        row.classIcon:Show()
+        lastAnchor = row.classIcon
+    else
+        row.classIcon:Hide()
+    end
+
+    for bi = 1, 6 do
+        local bf = row.infoBadges[bi]
+        local sp = badgeSpecs[bi]
+        if bf and sp then
+            bf:ClearAllPoints()
+            bf:SetPoint("LEFT", lastAnchor, "RIGHT", (bi == 1) and 4 or 2, 0)
+            if sp.atlas and HasAtlas(sp.atlas) then
+                bf.tex:SetTexCoord(0, 1, 0, 1)
+                bf.tex:SetAtlas(sp.atlas, false)
+            else
+                bf.tex:SetTexture(sp.tex)
+                bf.tex:SetTexCoord(sp.tc[1], sp.tc[2], sp.tc[3], sp.tc[4])
+            end
+            bf.tex:SetVertexColor(sp.tint[1], sp.tint[2], sp.tint[3], 1.0)
+            bf._tipTitle = sp.title
+            bf._tipDesc = sp.desc
+            bf._tipColor = sp.tipColor
+            bf:Show()
+            lastAnchor = bf
+        elseif bf then
+            bf._tipTitle = nil
+            bf:Hide()
+        end
+    end
+
+    row.badgeFs:ClearAllPoints()
+    row.badgeFs:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
+    row.badgeFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
+    row.activityFs:ClearAllPoints()
+    row.activityFs:SetPoint("TOPLEFT", row.nameFs, "BOTTOMLEFT", 0, -4)
+    row.activityFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
+
+    local badges = ""
+    if sMeta and sMeta.flag == "AVOID" then
+        badges = badges .. "|cffff4d4d[" .. L["AVOID"] .. "]|r "
+    end
+    if item.hasAvoidSignup then
+        badges = badges .. "|cffff4d4d[!" .. L["AVOID"] .. "]|r "
+    end
+    if item.hasGoodPartnerSignup then
+        badges = badges .. "|cff3fb950[+" .. L["PARTNER"] .. "]|r "
+    end
+    if item._lockoutInfo then
+        local lk = item._lockoutInfo
+        local lockProg = (lk.numEncounters and lk.numEncounters > 0)
+            and string.format("%s %d/%d", L["LOCKED"], lk.encounterProgress or 0, lk.numEncounters)
+            or L["LOCKED"]
+        badges = badges .. "|cffff9b3d[" .. lockProg .. "]|r "
+    end
+    if item.sourceType == "PUBLIC_CHAT" then
+        local rawKw = ns.db and ns.db.settings and ns.db.settings.clanLfgAlertFilter
+        if type(rawKw) == "string" and rawKw ~= "" then
+            local haystack = ((item.activity or "") .. " " .. (item.note or "")):lower()
+            for kw in rawKw:gmatch("([^,]+)") do
+                local trimmed = kw:match("^%s*(.-)%s*$"):lower()
+                if trimmed ~= "" and haystack:find(trimmed, 1, true) then
+                    badges = badges .. "|cff3fb950[" .. L["MATCH"] .. "]|r "
+                    break
+                end
+            end
+        end
+    end
+    if item.isCompanion then
+        badges = badges .. "|cff6ec1e4[" .. L["PARTNER"] .. "]|r"
+    end
+    row.badgeFs:SetText(badges)
+
+    local actTxt = item._displayActivity or item.activity or L["Dungeon"]
+    local modeTag
+    if isSoloLfg then
+        modeTag = "|cff58a6ff[" .. L["LFG"] .. " · " .. L["Solo"] .. "]|r "
+    elseif item.numMembers and item.numMembers > 0 then
+        local capStr = (item.maxMembers and item.maxMembers > 0)
+            and string.format("%d/%d", item.numMembers, item.maxMembers)
+            or tostring(item.numMembers)
+        modeTag = "|cff3fb950[" .. L["LFM"] .. " " .. capStr .. "]|r "
+    else
+        modeTag = "|cff3fb950[" .. L["LFM"] .. "]|r "
+    end
+    local notePart = (item.note and item.note ~= "") and (" — " .. item.note) or ""
+    local friendNote = (item.hasFriendOrWatchlistSignup and item.friendOrWatchlistNames and item.friendOrWatchlistNames ~= "")
+        and (" |cffffa633(" .. L["In group"] .. ": " .. item.friendOrWatchlistNames .. ")|r") or ""
+    row.activityFs:SetText(modeTag .. "|cffe0d4b0" .. actTxt .. "|r|cffb8c0cc" .. notePart .. "|r" .. friendNote)
+
     local selKey = LFGFrameTab.selectedKey
     local isSel = (selKey ~= nil) and (GetItemIdentityKey(item) == selKey)
     row.SelectedTex:SetShown(isSel)
 end
 
 local ROLE_CIRCLE_DEFS = {
-    { id = "TANK",   labelKey = "Tank",          x = 44,  glass = { 0.08, 0.24, 0.50 }, glow = { 0.16, 0.48, 0.98 }, badge = false },
-    { id = "HEALER", labelKey = "Healer",        x = 106, glass = { 0.07, 0.34, 0.26 }, glow = { 0.18, 0.88, 0.42 }, badge = false },
-    { id = "DPS",    labelKey = "DPS",           x = 168, glass = { 0.42, 0.10, 0.10 }, glow = { 0.92, 0.22, 0.18 }, badge = false },
-    { id = "GUIDE",  labelKey = "Dungeon Guide", x = 246, glass = { 0.09, 0.22, 0.18 }, glow = { 0.20, 0.82, 0.46 }, badge = true  },
+    { id = "TANK",   labelKey = "Tank",          x = 56,  glass = { 0.08, 0.24, 0.50 }, glow = { 0.16, 0.48, 0.98 }, badge = false },
+    { id = "HEALER", labelKey = "Healer",        x = 114, glass = { 0.07, 0.34, 0.26 }, glow = { 0.18, 0.88, 0.42 }, badge = false },
+    { id = "DPS",    labelKey = "DPS",           x = 172, glass = { 0.42, 0.10, 0.10 }, glow = { 0.92, 0.22, 0.18 }, badge = false },
+    { id = "GUIDE",  labelKey = "Dungeon Guide", x = 248, glass = { 0.09, 0.22, 0.18 }, glow = { 0.20, 0.82, 0.46 }, badge = true  },
 }
 
 local function CreateRoleCircleButton(parent, def, artInfo)
@@ -4159,9 +4376,18 @@ local function CreateCategoryBannerButton(parent, catDef, index, artInfo)
     end
     hl:SetBlendMode("ADD")
 
+    local countFs = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    countFs:SetPoint("RIGHT", btn, "RIGHT", -14, 0)
+    countFs:SetJustifyH("RIGHT")
+    countFs:SetWordWrap(false)
+    countFs:SetShadowOffset(1, -1)
+    countFs:SetShadowColor(0, 0, 0, 0.95)
+    btn.countFs = countFs
+    btn._catId = catDef.id
+
     local label = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     label:SetPoint("LEFT", btn, "LEFT", 16, 0)
-    label:SetPoint("RIGHT", btn, "RIGHT", -16, 0)
+    label:SetPoint("RIGHT", countFs, "LEFT", -8, 0)
     label:SetJustifyH("LEFT")
     label:SetWordWrap(false)
     label:SetText(L[catDef.labelKey])
@@ -4239,17 +4465,41 @@ end
 local function UpdateActivityRow(row, act)
     row._act = act
     row.check:SetChecked(LFGFrameTab.selectedActivities[act.id] == true)
+    local actTitle
     if act.isQuestEntry then
-        row.nameLabel:SetText(act.directLabel or "")
+        actTitle = act.directLabel or ""
         row.nameLabel:SetTextColor(0.45, 0.88, 1.0)
     elseif act.directLabel then
-        row.nameLabel:SetText(act.directLabel)
+        actTitle = act.directLabel
         row.nameLabel:SetTextColor(1.0, 0.82, 0.0)
     else
-        row.nameLabel:SetText((act.labelKey and L[act.labelKey]) or "")
+        actTitle = (act.labelKey and L[act.labelKey]) or ""
         row.nameLabel:SetTextColor(1.0, 0.82, 0.0)
     end
-    row.lvlLabel:SetText("(" .. tostring(act.minLvl or 1) .. " - " .. tostring(act.maxLvl or 60) .. ")")
+    local locks = LFGFrameTab._cachedActivityLockouts
+    if locks and #locks > 0 then
+        local lk = GetActivityLockout({
+            activity = actTitle,
+            activityIds = act.officialId and { act.officialId } or nil,
+        }, locks)
+        if lk then
+            actTitle = actTitle .. " |cffff9b3d[" .. L["Saved"] .. "]|r"
+        end
+    end
+    row.nameLabel:SetText(actTitle)
+
+    local minL = tonumber(act.minLvl) or 1
+    local maxL = tonumber(act.maxLvl) or 60
+    local myLvl = (ns.Safe and ns.Safe.Number(UnitLevel and UnitLevel("player"))) or 60
+    if myLvl <= 0 then myLvl = 60 end
+    if myLvl >= minL and myLvl <= maxL then
+        row.lvlLabel:SetTextColor(0.30, 0.92, 0.50)
+    elseif minL > myLvl then
+        row.lvlLabel:SetTextColor(1.0, 0.60, 0.24)
+    else
+        row.lvlLabel:SetTextColor(0.58, 0.62, 0.68)
+    end
+    row.lvlLabel:SetText("(" .. tostring(minL) .. " - " .. tostring(maxL) .. ")")
 end
 
 local function KeepAddonTabOverNativeRedirect(seq)
@@ -4276,6 +4526,10 @@ function LFGFrameTab:SubmitListing()
         ns:Print("%s", FormatLeaderOnlyMessage(leaderName))
         self.viewMode = "categories"
         self:RefreshData()
+        return
+    end
+    if self.broadcastMode == "OFFICIAL" then
+        self:SwitchToOfficialListingTab("GUILD_ALLIES")
         return
     end
     if not (self:HasAnySelectedRole() and self:HasAnySelectedActivity()) then
@@ -4315,12 +4569,12 @@ function LFGFrameTab:SubmitListing()
         note = note:sub(1, 77) .. "..."
     end
 
-    local shouldPublishOfficial = (self.broadcastMode == "OFFICIAL" or self.broadcastMode == "GCHAT")
     local postOk, postRes = false, nil
     if ns.Clan and ns.Clan.PostLFG then
         postOk, postRes = ns.Clan:PostLFG(mode, role, activity, 0, note, self.broadcastMode == "CLAN", self.activeCategory == "DUNGEONS")
     end
     if postOk and type(postRes) == "table" then
+        postRes.isOfficial = nil
         postRes.activityIds = (#actMeta.officialIds > 0) and actMeta.officialIds or nil
         postRes.activityAllNames = (#actMeta.names > 0) and table.concat(actMeta.names, ", ") or activity
         postRes.categoryKind = self.activeCategory
@@ -4338,55 +4592,16 @@ function LFGFrameTab:SubmitListing()
         self.pendingSelectKey = "LFG:" .. tostring(postRes.lookupKey or postRes.displayName or "")
     end
 
-    local offOk = false
-    local publishedIds = nil
-    if shouldPublishOfficial and ns.Clan and ns.Clan.PublishOfficialLfgListing then
-        self._suppressNativeTakeoverUntil = (GetTime and GetTime() or 0) + 1.8
-        offOk, _, publishedIds = ns.Clan:PublishOfficialLfgListing({
-            isHardwareEvent = true,
-            catKind = self.activeCategory,
-            activityIds = actMeta.officialIds,
-            selectedItems = actMeta.selectedItems,
-            roles = self.roles,
-            playstyle = self.playstyle,
-            newPlayerFriendly = (self.roles.GUIDE == true),
-        })
-        if offOk then
-            if type(postRes) == "table" then
-                postRes.isOfficial = true
-                if type(publishedIds) == "table" and #publishedIds > 0 then
-                    postRes.activityIds = publishedIds
-                end
-            end
-            local seq = self._transitionSeq
-            if C_Timer and C_Timer.After then
-                C_Timer.After(0, function() KeepAddonTabOverNativeRedirect(seq) end)
-                C_Timer.After(0.15, function() KeepAddonTabOverNativeRedirect(seq) end)
-            end
-        end
-    end
-
     if self.broadcastMode == "GCHAT" and ns.Clan and ns.Clan.OpenGuildChatLFG then
         ns.Clan:OpenGuildChatLFG(mode, role, activity, 0, note)
     end
 
     if postOk then
-        if shouldPublishOfficial then
-            if offOk then
-                ns:Print(L["Your listing (%s) is now active in Official LFG and SocialCentral."]:format(activity))
-            elseif self.activeCategory == "CUSTOM" then
-                ns:Print("%s", L["Saved in SocialCentral; for Custom groups, Official LFG requires typing the description directly in the Official tab."])
-            else
-                ns:Print(L["Your listing (%s) is now active in SocialCentral."]:format(activity))
-            end
-        else
-            ns:Print(L["Your listing (%s) is now active."]:format(activity))
-        end
+        ns:Print(L["Your private listing (%s) is now active in SocialCentral."]:format(activity))
     end
 
-    local targetIds = (type(publishedIds) == "table" and #publishedIds > 0) and publishedIds or actMeta.officialIds
-    if type(targetIds) == "table" and #targetIds > 0 then
-        self:SyncBrowseFilterToActiveListing(true, targetIds, self.activeCategory)
+    if type(actMeta.officialIds) == "table" and #actMeta.officialIds > 0 then
+        self:SyncBrowseFilterToActiveListing(true, actMeta.officialIds, self.activeCategory)
         self:SaveBrowseFilters()
     else
         self._syncedActiveListingSig = nil
@@ -4397,9 +4612,6 @@ function LFGFrameTab:SubmitListing()
     end
     self._hasSearchedThisSession = true
     self.viewMode = "browse"
-    if shouldPublishOfficial then
-        self:TriggerOfficialBrowseSearch(true)
-    end
     self:RefreshData()
 end
 
@@ -4412,9 +4624,33 @@ function LFGFrameTab:RefreshData()
 
     if mode == "categories" then
         self:UpdateViewLayout()
+        if c and c.categoryButtons then
+            local allRows = (ns.Clan and ns.Clan.GetClanLFGList) and ns.Clan:GetClanLFGList(nil, false, "ALL", "ALL") or {}
+            local gQuests = (ns.Clan and ns.Clan.GetActiveGroupQuests) and ns.Clan:GetActiveGroupQuests() or {}
+            for _, catBtn in ipairs(c.categoryButtons) do
+                if catBtn and catBtn.countFs and catBtn._catId then
+                    local cnt = 0
+                    for ri = 1, #allRows do
+                        if MatchesCategoryFilter(allRows[ri], catBtn._catId) then
+                            cnt = cnt + 1
+                        end
+                    end
+                    local parts = {}
+                    if catBtn._catId == "QUESTS" and #gQuests > 0 then
+                        parts[#parts + 1] = "|cff72c6ff" .. L["Group Quests (%d)"]:format(#gQuests) .. "|r"
+                    end
+                    if cnt > 0 then
+                        local gLbl = (cnt == 1) and L["%d group"]:format(cnt) or L["%d groups"]:format(cnt)
+                        parts[#parts + 1] = "|cff3fb950" .. gLbl .. "|r"
+                    end
+                    catBtn.countFs:SetText(table.concat(parts, "  ·  "))
+                end
+            end
+        end
         self:SyncAllEmbeddedTabStates()
         return
     elseif mode == "activities" then
+        self._cachedActivityLockouts = (ns.Clan and ns.Clan.GetSavedLockouts) and ns.Clan:GetSavedLockouts(true) or {}
         if c.modeDropdown and c.modeDropdown.RefreshDropdownLabel then
             c.modeDropdown:RefreshDropdownLabel()
         end
@@ -4428,7 +4664,9 @@ function LFGFrameTab:RefreshData()
             c.allLevelsCheck:SetChecked(self.showAllLevels == true)
         end
         if c.masterCatLabel then
-            c.masterCatLabel:SetText(GetCategoryLabel(self.activeCategory))
+            local _, selCount = self:HasAnySelectedActivity()
+            local baseLbl = GetCategoryLabel(self.activeCategory)
+            c.masterCatLabel:SetText((selCount and selCount > 0) and (baseLbl .. " |cff3fb950(" .. tostring(selCount) .. ")|r") or baseLbl)
         end
 
         local items = self:GetFilteredCategoryActivities(self.activeCategory, self.showAllLevels)
@@ -5102,7 +5340,7 @@ local function CreateBrowseHeaderControls(selfObj, body)
             GameTooltip:AddLine(" ")
             for i = 1, math.min(#gQuests, 8) do
                 local q = gQuests[i]
-                local grp = (q.suggestedGroup and q.suggestedGroup >= 2) and (" · Grupo " .. q.suggestedGroup) or (q.tagName and q.tagName ~= "" and (" · " .. q.tagName) or "")
+                local grp = (q.suggestedGroup and q.suggestedGroup >= 2) and (" · " .. L["Group %d"]:format(q.suggestedGroup)) or (q.tagName and q.tagName ~= "" and (" · " .. q.tagName) or "")
                 local zn = (q.zone and q.zone ~= "") and (" (" .. q.zone .. ")") or ""
                 GameTooltip:AddLine(("[%d%s] %s%s"):format(q.level or 0, grp, q.title or "", zn), 0.45, 0.88, 1.0, true)
             end
@@ -5154,7 +5392,7 @@ local function CreateBrowseHeaderControls(selfObj, body)
                             wipe(LFGFrameTab.selectedActivities)
                             local qActId = "qlog_" .. tostring((q.questID and q.questID > 0) and q.questID or idx)
                             LFGFrameTab.selectedActivities[qActId] = true
-                            local preNote = (q.zone and q.zone ~= "") and (q.zone .. ((q.suggestedGroup and q.suggestedGroup >= 2) and (" (Grupo " .. q.suggestedGroup .. ")") or "")) or ""
+                            local preNote = (q.zone and q.zone ~= "") and (q.zone .. ((q.suggestedGroup and q.suggestedGroup >= 2) and (" (" .. L["Group %d"]:format(q.suggestedGroup) .. ")") or "")) or ""
                             LFGFrameTab.commentText = preNote
                             if LFGFrameTab.controls and LFGFrameTab.controls.commentBox then
                                 LFGFrameTab.controls.commentBox:SetText(preNote)
@@ -5406,7 +5644,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
 
     local divider = roleHeader:CreateTexture(nil, "ARTWORK", nil, 2)
     divider:SetSize(2, 74)
-    divider:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 231, -22)
+    divider:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 235, -22)
     divider:SetColorTexture(0.24, 0.18, 0.12, 0.95)
 
     local roleButtons = {}
@@ -5434,7 +5672,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     self.controls.autoRoleBtn = autoRoleBtn
 
     local roleSuggestLbl = roleHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    roleSuggestLbl:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 14, -81)
+    roleSuggestLbl:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 54, -81)
     roleSuggestLbl:SetPoint("TOPRIGHT", autoRoleBtn, "TOPLEFT", -6, -2)
     roleSuggestLbl:SetHeight(14)
     roleSuggestLbl:SetJustifyH("LEFT")
@@ -5448,9 +5686,27 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     categoryView:Hide()
     self.controls.categoryView = categoryView
 
+    local officialListCtaBtn = CreateNativeButton(categoryView, nil, 256, 24, L["List in Official LFG (+ Guild & Allies)"])
+    officialListCtaBtn:SetPoint("TOPLEFT", categoryView, "TOPLEFT", 10, -3)
+    officialListCtaBtn:SetPoint("TOPRIGHT", categoryView, "TOPRIGHT", -32, -3)
+    officialListCtaBtn:SetScript("OnClick", function()
+        LFGFrameTab:SwitchToOfficialListingTab("GUILD_ALLIES")
+    end)
+    StyleNativeButton(officialListCtaBtn, true)
+    self.controls.officialListCtaBtn = officialListCtaBtn
+
+    local officialListHelpBtn = Theme:CreateHelpButton(
+        categoryView,
+        L["Help: Official LFG + SocialCentral Mirror"],
+        L["Blizzard restricts public Group Finder creation to the native Official tab (Tab 1). Clicking here switches you there with your roles ready."],
+        L["Once you click Blizzard's List button on Tab 1, SocialCentral automatically mirrors your Official listing to Guild, Allies & Friends."]
+    )
+    officialListHelpBtn:SetPoint("LEFT", officialListCtaBtn, "RIGHT", 4, 0)
+    self.controls.officialListHelpBtn = officialListHelpBtn
+
     local categoryGuideLbl = categoryView:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    categoryGuideLbl:SetPoint("TOPLEFT", categoryView, "TOPLEFT", 12, -4)
-    categoryGuideLbl:SetPoint("TOPRIGHT", categoryView, "TOPRIGHT", -12, -4)
+    categoryGuideLbl:SetPoint("TOPLEFT", categoryView, "TOPLEFT", 12, -31)
+    categoryGuideLbl:SetPoint("TOPRIGHT", categoryView, "TOPRIGHT", -12, -31)
     categoryGuideLbl:SetJustifyH("CENTER")
     categoryGuideLbl:SetWordWrap(false)
     self.controls.categoryGuideLbl = categoryGuideLbl
@@ -5645,7 +5901,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     self.controls.broadcastDropdown = broadcastDropdown
 
     local broadcastLbl = activityView:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    broadcastLbl:SetPoint("LEFT", activityView, "LEFT", 4, 0)
+    broadcastLbl:SetPoint("LEFT", activityView, "BOTTOMLEFT", 6, 16)
     broadcastLbl:SetPoint("RIGHT", broadcastDropdown, "LEFT", -6, 0)
     broadcastLbl:SetJustifyH("RIGHT")
     broadcastLbl:SetWordWrap(false)
@@ -5727,8 +5983,13 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
         if sel and sel.isSelf then
             if ns.Clan and ns.Clan.ClearMyLFG then
                 ns.Clan:ClearMyLFG(true)
-                ns:Print("%s", L["Your listing has been removed."])
             end
+            if C_LFGList and C_LFGList.HasActiveEntryInfo and Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true then
+                ns:Print("%s", L["Click Blizzard's Remove button on the Official Listing tab to end your public listing."])
+                LFGFrameTab:SwitchToOfficialListingTab(nil)
+                return
+            end
+            ns:Print("%s", L["Your listing has been removed."])
             LFGFrameTab:HandleOwnListingRemoved()
             return
         end
@@ -5799,8 +6060,13 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     unlistBtn:SetScript("OnClick", function()
         if ns.Clan and ns.Clan.ClearMyLFG then
             ns.Clan:ClearMyLFG(true)
-            ns:Print("%s", L["Your listing has been removed."])
         end
+        if C_LFGList and C_LFGList.HasActiveEntryInfo and Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true then
+            ns:Print("%s", L["Click Blizzard's Remove button on the Official Listing tab to end your public listing."])
+            LFGFrameTab:SwitchToOfficialListingTab(nil)
+            return
+        end
+        ns:Print("%s", L["Your listing has been removed."])
         LFGFrameTab:HandleOwnListingRemoved()
     end)
     unlistBtn:Hide()
@@ -5834,7 +6100,7 @@ function LFGFrameTab:EnsureNativeBridgeBar()
     end
 
     local bar = CreateFrame("Frame", "SocialCentralLFGNativeBridgeBar", parent, "BackdropTemplate")
-    bar:SetHeight(48)
+    bar:SetHeight(54)
     bar:SetPoint("TOPLEFT", parent, "BOTTOMLEFT", 6, -2)
     bar:SetPoint("TOPRIGHT", parent, "BOTTOMRIGHT", -6, -2)
     bar:SetFrameLevel(math.max(10, ((parent.GetFrameLevel and parent:GetFrameLevel()) or 1) + 4))
@@ -5849,9 +6115,9 @@ function LFGFrameTab:EnsureNativeBridgeBar()
 
     local helpBtn = Theme:CreateHelpButton(
         bar,
-        L["Help: Integrated Clan & Allies LFG"],
-        L["Searches groups across your Clan, Allied Guilds (Clan Diplomacy), Friends, and Watchlist inside Blizzard's Looking for Group window."],
-        L["Filter by All, Same Clan, Allied Clans, or Friends / Watchlist (including groups they signed up for). Right-click any listing to whisper, invite, or Track on Radar."]
+        L["Help: Official LFG + SocialCentral Mirror"],
+        L["Blizzard restricts public Group Finder creation to the native Official tab (Tab 1). Clicking here switches you there with your roles ready."],
+        L["Once you click Blizzard's List button on Tab 1, SocialCentral automatically mirrors your Official listing to Guild, Allies & Friends."]
     )
     helpBtn:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -7, -5)
     bar.helpBtn = helpBtn
@@ -5863,8 +6129,37 @@ function LFGFrameTab:EnsureNativeBridgeBar()
     statusLbl:SetWordWrap(false)
     bar.statusLbl = statusLbl
 
-    local viewBtn = CreateNativeButton(bar, nil, 150, 20, L["View Groups (%d)"]:format(0))
-    viewBtn:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 8, 5)
+    local mirrorDropdown = CreateNativeDropdown(
+        bar,
+        "SocialCentralOfficialMirrorDropdown",
+        136,
+        22,
+        function()
+            local m = (ns.Clan and ns.Clan.GetOfficialLfgSyncMode) and ns.Clan:GetOfficialLfgSyncMode() or "GUILD_ALLIES"
+            return GetOfficialMirrorLabel(m)
+        end,
+        function(root)
+            local showGuildOpts = (not ns.Compat or not ns.Compat.ShouldShowGuildFeatures) or ns.Compat.ShouldShowGuildFeatures()
+            for _, opt in ipairs(OFFICIAL_MIRROR_OPTIONS) do
+                if opt.id ~= "GUILD_ONLY" or showGuildOpts then
+                    AddDropdownMenuChoice(root, L[opt.labelKey], function()
+                        local cur = (ns.Clan and ns.Clan.GetOfficialLfgSyncMode) and ns.Clan:GetOfficialLfgSyncMode() or "GUILD_ALLIES"
+                        return cur == opt.id
+                    end, function()
+                        if ns.Clan and ns.Clan.SetOfficialLfgSyncMode then
+                            ns.Clan:SetOfficialLfgSyncMode(opt.id)
+                        end
+                        LFGFrameTab:UpdateNativeBridgeBar()
+                    end)
+                end
+            end
+        end
+    )
+    mirrorDropdown:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 6, 5)
+    bar.mirrorDropdown = mirrorDropdown
+
+    local viewBtn = CreateNativeButton(bar, nil, 100, 20, L["View Groups (%d)"]:format(0))
+    viewBtn:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", -6, 5)
     viewBtn:SetScript("OnClick", function()
         if IsCombatLocked() then
             ns:Print("%s", L["Unavailable during combat."])
@@ -5882,34 +6177,66 @@ function LFGFrameTab:EnsureNativeBridgeBar()
     end)
     bar.viewBtn = viewBtn
 
-    local postGroupBtn = CreateNativeButton(bar, nil, 150, 20, L["Broadcast Group"])
+    local shareGchatBtn = CreateNativeButton(bar, nil, 76, 20, L["Chat (/g)"])
+    shareGchatBtn:SetPoint("LEFT", mirrorDropdown, "RIGHT", 4, 0)
+    shareGchatBtn:SetPoint("RIGHT", viewBtn, "LEFT", -4, 0)
+    shareGchatBtn:SetScript("OnClick", function()
+        if ns.Clan and ns.Clan.ShareActiveOfficialToGuildChat then
+            ns.Clan:ShareActiveOfficialToGuildChat()
+        end
+    end)
+    shareGchatBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(L["Share in Guild Chat (/g)"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Pre-fills Guild Chat (/g) with your active Official LFG activity and details."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    shareGchatBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    shareGchatBtn:Hide()
+    bar.shareGchatBtn = shareGchatBtn
+
+    local privateListBtn = CreateNativeButton(bar, nil, 76, 20, L["Private [SC]"])
+    privateListBtn:SetPoint("LEFT", mirrorDropdown, "RIGHT", 4, 0)
+    privateListBtn:SetPoint("RIGHT", viewBtn, "LEFT", -4, 0)
+    privateListBtn:SetScript("OnClick", function()
+        if IsCombatLocked() then
+            ns:Print("%s", L["Unavailable during combat."])
+            return
+        end
+        local inGroup = Compat.IsInGroup and Compat.IsInGroup()
+        LFGFrameTab.listingMode = inGroup and "LFM" or "LFG"
+        if LFGFrameTab.broadcastMode == "OFFICIAL" then
+            LFGFrameTab.broadcastMode = "ALL"
+        end
+        LFGFrameTab.viewMode = "categories"
+        LFGFrameTab:ShowSubPanel()
+    end)
+    privateListBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(L["Private [SC]"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Create a private group listing visible only to your Guild, Allied Guilds & Friends (hidden from public LFG)."], 0.88, 0.90, 0.94, true)
+        if selfBtn._scNonLeader then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine(FormatLeaderOnlyMessage(selfBtn._scLeaderName), 1.0, 0.45, 0.35, true)
+        end
+        GameTooltip:Show()
+    end)
+    privateListBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    bar.privateListBtn = privateListBtn
+
+    local postGroupBtn = CreateNativeButton(bar, nil, 136, 20, L["List Official"])
     postGroupBtn:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", -8, 5)
     postGroupBtn:SetScript("OnClick", function()
         if IsCombatLocked() then
             ns:Print("%s", L["Unavailable during combat."])
             return
         end
-        local okPost, reason = false, nil
-        if ns.Clan and ns.Clan.PostSmartGroupFormation then
-            okPost, reason = ns.Clan:PostSmartGroupFormation()
-        end
-        if not okPost and reason == "needs_activity" then
-            local inGroup = Compat.IsInGroup and Compat.IsInGroup()
-            LFGFrameTab.listingMode = inGroup and "LFM" or "LFG"
-            LFGFrameTab.viewMode = "categories"
-            LFGFrameTab:ShowSubPanel()
-            ns:Print("%s", L["Select the dungeon or activity you want to broadcast to Guild & Allies."])
-            return
-        end
-        LFGFrameTab._hasSearchedThisSession = true
-        LFGFrameTab.viewMode = "browse"
-        LFGFrameTab.sourceFilter = "ALL"
-        LFGFrameTab:ShowSubPanel()
+        LFGFrameTab:SwitchToOfficialListingTab(nil)
     end)
     postGroupBtn:SetScript("OnEnter", function(selfBtn)
         GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
-        GameTooltip:AddLine(L["Broadcast Group"], 1.0, 0.82, 0.0)
-        GameTooltip:AddLine(L["Publishes your current party composition or role attempt to Guildmates, Allied Guilds, Friends, and SocialCentral [SC] users."], 0.88, 0.90, 0.94, true)
+        GameTooltip:AddLine(L["List Official"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Switches to Blizzard's Official Listing tab so you can publish your group cleanly while SocialCentral mirrors it to Guild & Allies."], 0.88, 0.90, 0.94, true)
         if selfBtn._scNonLeader then
             GameTooltip:AddLine(" ")
             GameTooltip:AddLine(FormatLeaderOnlyMessage(selfBtn._scLeaderName), 1.0, 0.45, 0.35, true)
@@ -5949,6 +6276,13 @@ function LFGFrameTab:UpdateNativeBridgeBar()
         end
         return
     end
+    local parent = _G.LFGParentFrame
+    if self.active == true or not (parent and parent.IsShown and parent:IsShown()) then
+        if self.nativeBridgeBar then
+            self.nativeBridgeBar:Hide()
+        end
+        return
+    end
     local bar = self:EnsureNativeBridgeBar()
     if not bar then return end
     bar:Show()
@@ -5958,38 +6292,91 @@ function LFGFrameTab:UpdateNativeBridgeBar()
     local tot = bd.total or 0
     local usedH = instStat.used or 0
     local maxH = instStat.max or 5
-
-    local lfgPart = L["Clan, Allies & Friends LFG: %d"]:format(tot)
-    local instPart = L["Instances (1h): %d/%d"]:format(usedH, maxH)
-    local lfgColor = (tot > 0) and "|cff3fb950" or "|cffd8dde6"
-    local instColor = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff9da7b5")
-    bar.statusLbl:SetText(lfgColor .. lfgPart .. "|r  ·  " .. instColor .. instPart .. "|r")
-
-    if self.active then
-        bar.viewBtn:SetText(L["Native LFG"])
-        StyleNativeButton(bar.viewBtn, true)
-    else
-        bar.viewBtn:SetText(L["View Groups (%d)"]:format(tot))
-        StyleNativeButton(bar.viewBtn, tot > 0)
-    end
-    local inGroup = Compat.IsInGroup and Compat.IsInGroup()
     local canManage = (not Compat.CanManageGroupListing) or Compat.CanManageGroupListing()
     local combat = IsCombatLocked()
-    if bar.postGroupBtn then
-        if self.active then
-            bar.postGroupBtn:Hide()
+    local isOfficialListingTab = (_G.LFGListingFrame and _G.LFGListingFrame.IsShown and _G.LFGListingFrame:IsShown()) == true
+    local hasOfficialActive = C_LFGList and C_LFGList.HasActiveEntryInfo and (Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true)
+    local inGuild = IsInGuild and IsInGuild()
+    local redirectTipActive = (GetTime and GetTime() or 0) < (self._officialRedirectTipUntil or 0)
+
+    if isOfficialListingTab then
+        if redirectTipActive then
+            bar.statusLbl:SetText("|cffffd24d" .. L["Select roles & dungeons above, then click Blizzard's List button!"] .. "|r")
         else
+            local lfgPart = L["Official + SC: %d groups"]:format(tot)
+            local instPart = L["Inst (1h): %d/%d"]:format(usedH, maxH)
+            local lfgColor = (tot > 0) and "|cff3fb950" or "|cffd8dde6"
+            local instColor = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff9da7b5")
+            bar.statusLbl:SetText(lfgColor .. lfgPart .. "|r  ·  " .. instColor .. instPart .. "|r")
+        end
+        bar.viewBtn:SetText(L["View Groups (%d)"]:format(tot))
+        StyleNativeButton(bar.viewBtn, tot > 0)
+        AutoFitNativeButton(bar.viewBtn, 72, 10, 98)
+        local barW = (bar.GetWidth and bar:GetWidth()) or 326
+        local vbW = (bar.viewBtn.GetWidth and bar.viewBtn:GetWidth()) or 90
+        local ddW = math.max(106, math.min(138, barW - 12 - vbW - 82))
+        bar.viewBtn:ClearAllPoints()
+        bar.viewBtn:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", -6, 5)
+
+        if bar.mirrorDropdown then
+            bar.mirrorDropdown:Show()
+            bar.mirrorDropdown:SetWidth(ddW)
+            if bar.mirrorDropdown.RefreshDropdownLabel then
+                bar.mirrorDropdown:RefreshDropdownLabel()
+            end
+        end
+        if bar.postGroupBtn then
+            bar.postGroupBtn:Hide()
+        end
+        if hasOfficialActive and inGuild then
+            if bar.shareGchatBtn then
+                bar.shareGchatBtn:Show()
+                if bar.shareGchatBtn.SetEnabled then
+                    bar.shareGchatBtn:SetEnabled(not combat)
+                end
+            end
+            if bar.privateListBtn then bar.privateListBtn:Hide() end
+        else
+            if bar.shareGchatBtn then bar.shareGchatBtn:Hide() end
+            if bar.privateListBtn then
+                bar.privateListBtn:Show()
+                bar.privateListBtn._scNonLeader = not canManage
+                bar.privateListBtn._scLeaderName = (not canManage and Compat.GetGroupLeaderName) and Compat.GetGroupLeaderName() or nil
+                if bar.privateListBtn.SetEnabled then
+                    bar.privateListBtn:SetEnabled(canManage and not combat)
+                end
+            end
+        end
+    else
+        local lfgPart = L["Clan, Allies & Friends LFG: %d"]:format(tot)
+        local instPart = L["Instances (1h): %d/%d"]:format(usedH, maxH)
+        local lfgColor = (tot > 0) and "|cff3fb950" or "|cffd8dde6"
+        local instColor = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff9da7b5")
+        bar.statusLbl:SetText(lfgColor .. lfgPart .. "|r  ·  " .. instColor .. instPart .. "|r")
+
+        if bar.mirrorDropdown then bar.mirrorDropdown:Hide() end
+        if bar.shareGchatBtn then bar.shareGchatBtn:Hide() end
+        if bar.privateListBtn then bar.privateListBtn:Hide() end
+
+        bar.viewBtn:SetText(L["View Groups (%d)"]:format(tot))
+        StyleNativeButton(bar.viewBtn, tot > 0)
+        AutoFitNativeButton(bar.viewBtn, 108, 14, 166)
+        bar.viewBtn:ClearAllPoints()
+        bar.viewBtn:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 8, 5)
+
+        if bar.postGroupBtn then
             bar.postGroupBtn:Show()
-            bar.postGroupBtn:SetText(inGroup and L["Broadcast Group"] or L["List Self [SC]"])
+            bar.postGroupBtn:SetText(L["List Official"])
+            bar.postGroupBtn:ClearAllPoints()
+            bar.postGroupBtn:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", -8, 5)
             bar.postGroupBtn._scNonLeader = not canManage
             bar.postGroupBtn._scLeaderName = (not canManage and Compat.GetGroupLeaderName) and Compat.GetGroupLeaderName() or nil
             if bar.postGroupBtn.SetEnabled then
                 bar.postGroupBtn:SetEnabled(canManage and not combat)
             end
-            AutoFitNativeButton(bar.postGroupBtn, 118, 20, 182)
+            AutoFitNativeButton(bar.postGroupBtn, 102, 14, 152)
         end
     end
-    AutoFitNativeButton(bar.viewBtn, 118, 20, 182)
 end
 
 function LFGFrameTab:EnsureSideTab()
@@ -6106,17 +6493,26 @@ function LFGFrameTab:AttachHooks()
         if LFGFrameTab.standaloneHost and LFGFrameTab.standaloneHost:IsShown() then
             LFGFrameTab.standaloneHost:Hide()
         end
-        if LFGFrameTab.active and IsAnyNativeSubFrameShown() then
+        if not LFGFrameTab.active and not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent)) then
+            if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                ns.UI:CloseEmbeddedIfHost(parent)
+            end
+            if not IsAnyNativeSubFrameShown() and ns.UI and ns.UI.RestoreEmbeddedHostUI then
+                ns.UI:RestoreEmbeddedHostUI(parent)
+            end
+        elseif LFGFrameTab.active and IsAnyNativeSubFrameShown() then
             LFGFrameTab:HideSubPanel(false)
         end
         if C_Timer and C_Timer.After then
             C_Timer.After(0, function()
                 if parent and parent:IsShown() then
                     LFGFrameTab:EnsureSideTab()
+                    LFGFrameTab:HandleOfficialShortcutOpen("I", parent)
                 end
             end)
         else
             LFGFrameTab:EnsureSideTab()
+            LFGFrameTab:HandleOfficialShortcutOpen("I", parent)
         end
     end)
 
@@ -6166,6 +6562,25 @@ function LFGFrameTab:AttachHooks()
                         end
                     end)
                 end
+            elseif C_Timer and C_Timer.After then
+                C_Timer.After(0, function()
+                    if _G.LFGParentFrame and _G.LFGParentFrame:IsShown() then
+                        LFGFrameTab:UpdateNativeBridgeBar()
+                    end
+                end)
+            end
+        end)
+    end
+
+    if _G.LFGWhoListFrame and _G.LFGWhoListFrame.HookScript and not _G.LFGWhoListFrame._scBridgeHooked then
+        _G.LFGWhoListFrame._scBridgeHooked = true
+        _G.LFGWhoListFrame:HookScript("OnShow", function()
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0, function()
+                    if _G.LFGParentFrame and _G.LFGParentFrame:IsShown() then
+                        LFGFrameTab:UpdateNativeBridgeBar()
+                    end
+                end)
             end
         end)
     end
@@ -6175,6 +6590,9 @@ function LFGFrameTab:AttachHooks()
         _G.LFGListingFrame:HookScript("OnShow", function()
             if C_Timer and C_Timer.After then
                 C_Timer.After(0, function()
+                    if _G.LFGParentFrame and _G.LFGParentFrame:IsShown() then
+                        LFGFrameTab:UpdateNativeBridgeBar()
+                    end
                     local refreshedArt = HarvestLfgListingArt(true)
                     if LFGFrameTab.controls and LFGFrameTab.controls.categoryButtons then
                         for _, catBtn in ipairs(LFGFrameTab.controls.categoryButtons) do
@@ -6313,14 +6731,21 @@ function LFGFrameTab:AttachSocialUI()
     self.socialHooked = true
 
     parent:HookScript("OnShow", function()
+        if not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent)) then
+            if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                ns.UI:CloseEmbeddedIfHost(parent)
+            end
+        end
         if C_Timer and C_Timer.After then
             C_Timer.After(0, function()
                 if parent and parent:IsShown() then
                     LFGFrameTab:EnsureSocialSideTab()
+                    LFGFrameTab:HandleOfficialShortcutOpen("O", parent)
                 end
             end)
         else
             LFGFrameTab:EnsureSocialSideTab()
+            LFGFrameTab:HandleOfficialShortcutOpen("O", parent)
         end
     end)
 
@@ -6426,14 +6851,28 @@ function LFGFrameTab:AttachCommunitiesUI()
     self.guildHooked = true
 
     parent:HookScript("OnShow", function()
+        if not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent)) then
+            if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                ns.UI:CloseEmbeddedIfHost(parent)
+            end
+            if ns.UI and ns.UI.RestoreEmbeddedHostUI then
+                ns.UI:RestoreEmbeddedHostUI(parent)
+            end
+        end
         if C_Timer and C_Timer.After then
             C_Timer.After(0, function()
                 if parent and parent:IsShown() then
                     LFGFrameTab:EnsureGuildSideTab()
+                    C_Timer.After(0.03, function()
+                        if parent and parent:IsShown() then
+                            LFGFrameTab:HandleOfficialShortcutOpen("J", parent)
+                        end
+                    end)
                 end
             end)
         else
             LFGFrameTab:EnsureGuildSideTab()
+            LFGFrameTab:HandleOfficialShortcutOpen("J", parent)
         end
     end)
 
@@ -6527,6 +6966,12 @@ function LFGFrameTab:AttachCharacterUI()
 
     parent:HookScript("OnShow", function()
         if not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent)) then
+            if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                ns.UI:CloseEmbeddedIfHost(parent)
+            end
+            if ns.UI and ns.UI.RestoreEmbeddedHostUI then
+                ns.UI:RestoreEmbeddedHostUI(parent)
+            end
             local anyNativeShown = false
             for _, nName in ipairs({ "PaperDollFrame", "ReputationFrame", "TokenFrame", "PetPaperDollFrame", "SkillFrame", "PVPFrame", "HonorFrame", "StatisticsFrame", "CharacterStatisticsFrame" }) do
                 local nf = _G[nName]
@@ -6548,10 +6993,12 @@ function LFGFrameTab:AttachCharacterUI()
             C_Timer.After(0, function()
                 if parent and parent:IsShown() then
                     LFGFrameTab:EnsureCharacterSideTab()
+                    LFGFrameTab:HandleOfficialShortcutOpen("C", parent)
                 end
             end)
         else
             LFGFrameTab:EnsureCharacterSideTab()
+            LFGFrameTab:HandleOfficialShortcutOpen("C", parent)
         end
     end)
 
@@ -7361,7 +7808,14 @@ function LFGFrameTab:AttachWorldMapButton()
     end
 
     if mapFrame.HookScript then
-        mapFrame:HookScript("OnShow", ScheduleMapBuffRefresh)
+        mapFrame:HookScript("OnShow", function()
+            if not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(mapFrame)) then
+                if ns.UI and ns.UI.CloseEmbeddedIfHost then
+                    ns.UI:CloseEmbeddedIfHost(mapFrame)
+                end
+            end
+            ScheduleMapBuffRefresh()
+        end)
         mapFrame:HookScript("OnHide", function()
             if LFGFrameTab.mapPins then
                 for _, p in ipairs(LFGFrameTab.mapPins) do
@@ -7467,12 +7921,10 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(socialHost)
         local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
         local socialUnread = (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false)))) or 0
-        if shown or active then
-            UpdateSideTabVisual(self.socialTab, active)
-            UpdateSideTabBadge(self.socialTab, socialUnread)
-            if shown then
-                SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
-            end
+        UpdateSideTabVisual(self.socialTab, active)
+        UpdateSideTabBadge(self.socialTab, socialUnread)
+        if shown or not active then
+            SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
         end
     end
     if self.guildTab then
@@ -7480,28 +7932,400 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local shown = guildHost and guildHost.IsShown and guildHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(guildHost)
         local guildUnread = (ns.Clan and ns.Clan.GetNotificationCount and ns.Clan:GetNotificationCount()) or 0
-        if shown or active then
-            UpdateSideTabVisual(self.guildTab, active)
-            UpdateSideTabBadge(self.guildTab, active and 0 or guildUnread)
-            if shown then
-                SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
-            end
+        UpdateSideTabVisual(self.guildTab, active)
+        UpdateSideTabBadge(self.guildTab, active and 0 or guildUnread)
+        if shown or not active then
+            SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
         end
     end
     if self.charTab then
         local charHost = _G.CharacterFrame
         local shown = charHost and charHost.IsShown and charHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(charHost)
-        if shown or active then
-            UpdateSideTabVisual(self.charTab, active)
-            if shown then
-                SyncHostNativeTabs(charHost, self.charTab, active, { "Tab1", "Tab2", "Tab3", "Tab4" })
-            end
+        UpdateSideTabVisual(self.charTab, active)
+        if shown or not active then
+            SyncHostNativeTabs(charHost, self.charTab, active, { "Tab1", "Tab2", "Tab3", "Tab4" })
         end
     end
     if self.mapPill and _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
         self:RefreshWorldMapBuffs()
     end
+end
+
+function LFGFrameTab:GetShortcutWindowMeta(winKey)
+    if winKey == "O" then
+        return { key = "O", name = L["Social & Friends"] }
+    elseif winKey == "I" then
+        return { key = "I", name = L["Group Finder"] }
+    elseif winKey == "J" then
+        return { key = "J", name = L["Guild & Communities"] }
+    elseif winKey == "C" then
+        return { key = "C", name = L["Character & My Alts"] }
+    end
+    return nil
+end
+
+function LFGFrameTab:IsShortcutEligible(winKey)
+    if not self:GetShortcutWindowMeta(winKey) then
+        return false
+    end
+    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled(winKey) then
+        return false
+    end
+    if winKey == "O" and ns.Compat and ns.Compat.IsModuleEnabled then
+        for _, cand in ipairs({ "watchlist", "social", "nearby", "chat" }) do
+            if ns.Compat.IsModuleEnabled(cand) then
+                return true
+            end
+        end
+        return false
+    end
+    return true
+end
+
+function LFGFrameTab:ActivateAddonTabForShortcut(winKey, hostFrame)
+    if IsCombatLocked() or not self:IsShortcutEligible(winKey) then
+        return false
+    end
+    if not (hostFrame and hostFrame.IsShown and hostFrame:IsShown()) then
+        return false
+    end
+    if winKey == "I" then
+        if self.active then
+            return true
+        end
+        if ns.Clan and ns.Clan.RequestClanSync and IsInGuild and IsInGuild() then
+            ns.Clan:RequestClanSync()
+        end
+        self.viewMode = "browse"
+        self:ShowSubPanel()
+        return true
+    elseif winKey == "O" then
+        if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(hostFrame) then
+            return true
+        end
+        local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
+        local socialUnread = (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false)))) or 0
+        local targetTab
+        if socialUnread > 0 and chatModOn then
+            targetTab = "chat"
+        else
+            for _, cand in ipairs({ "watchlist", "social", "nearby", "chat" }) do
+                if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled(cand) then
+                    targetTab = cand
+                    break
+                end
+            end
+        end
+        if targetTab and ns.UI and ns.UI.OpenEmbedded then
+            ns.UI:OpenEmbedded(hostFrame, { "watchlist", "social", "nearby", "chat" }, targetTab, true)
+            return true
+        end
+    elseif winKey == "J" then
+        if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(hostFrame) then
+            return true
+        end
+        if ns.UI and ns.UI.OpenEmbedded then
+            ns.UI:OpenEmbedded(hostFrame, { "clan" }, "clan", true)
+            return true
+        end
+    elseif winKey == "C" then
+        if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(hostFrame) then
+            return true
+        end
+        if ns.UI and ns.UI.OpenEmbedded then
+            ns.UI:OpenEmbedded(hostFrame, { "alts" }, "alts", true)
+            return true
+        end
+    end
+    return false
+end
+
+function LFGFrameTab:ApplyShortcutAutoOpenChoice(winKey, openAddonDirectly, applyAll, hostFrame)
+    if not (ns.db and ns.db.settings) then
+        return
+    end
+    local s = ns.db.settings
+    if type(s.shortcutAutoOpenAddon) ~= "table" then
+        s.shortcutAutoOpenAddon = {}
+    end
+    if type(s.shortcutPromptAnswered) ~= "table" then
+        s.shortcutPromptAnswered = {}
+    end
+    self._shortcutPromptDismissed = self._shortcutPromptDismissed or {}
+
+    local function IsSettingEnabledForKey(k)
+        if k == "O" then return s.embedSocialWindow ~= false end
+        if k == "I" then return s.embedLfgWindow ~= false end
+        if k == "J" then return s.embedGuildWindow ~= false end
+        if k == "C" then return s.embedCharacterWindow ~= false end
+        return false
+    end
+
+    local targets = {}
+    if applyAll then
+        for _, k in ipairs({ "O", "I", "J", "C" }) do
+            if IsSettingEnabledForKey(k) or k == winKey then
+                targets[#targets + 1] = k
+            end
+        end
+    elseif winKey then
+        targets[#targets + 1] = winKey
+    end
+
+    local openFlag = (openAddonDirectly == true)
+    for _, k in ipairs(targets) do
+        s.shortcutAutoOpenAddon[k] = openFlag
+        s.shortcutPromptAnswered[k] = true
+        self._shortcutPromptDismissed[k] = nil
+    end
+
+    local meta = self:GetShortcutWindowMeta(winKey)
+    local winLabel = (meta and (meta.name .. " (" .. meta.key .. ")")) or tostring(winKey or "?")
+    if applyAll then
+        if openFlag then
+            ns:Print(L["Saved for all enabled shortcuts (%s): windows will open directly on the SocialCentral tab."]:format(table.concat(targets, ", ")))
+        else
+            ns:Print(L["Saved for all enabled shortcuts (%s): windows will keep opening on Blizzard's default tab."]:format(table.concat(targets, ", ")))
+        end
+    else
+        if openFlag then
+            ns:Print(L["Saved for %s: shortcut will open directly on the SocialCentral tab."]:format(winLabel))
+        else
+            ns:Print(L["Saved for %s: shortcut will keep opening on Blizzard's default tab."]:format(winLabel))
+        end
+    end
+
+    ns:Emit("SETTINGS_UPDATED")
+    if ns.Settings and ns.Settings.Refresh then
+        ns.Settings:Refresh()
+    end
+
+    if openFlag and winKey and hostFrame and hostFrame.IsShown and hostFrame:IsShown() and not IsCombatLocked() then
+        self:ActivateAddonTabForShortcut(winKey, hostFrame)
+    end
+end
+
+function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
+    local meta = self:GetShortcutWindowMeta(winKey)
+    if not meta then return end
+
+    local m = self._shortcutPromptModal
+    if not m then
+        m = CreateFrame("Frame", "SocialCentralShortcutPromptModal", UIParent, "BackdropTemplate")
+        m:SetSize(486, 278)
+        m:SetPoint("CENTER")
+        m:SetFrameStrata("FULLSCREEN_DIALOG")
+        m:SetFrameLevel(860)
+        m:SetToplevel(true)
+        m:EnableMouse(true)
+        if m.SetClipsChildren then m:SetClipsChildren(false) end
+        Theme:MakeMovable(m, { key = "modal_shortcut_prompt" })
+        if type(UISpecialFrames) == "table" then
+            table.insert(UISpecialFrames, "SocialCentralShortcutPromptModal")
+        end
+
+        local solidBg = m:CreateTexture(nil, "BACKGROUND", nil, -8)
+        solidBg:SetAllPoints(m)
+        solidBg:SetTexture(WHITE8X8)
+        solidBg:SetVertexColor(0.08, 0.08, 0.09, 1.0)
+        m._solidOpaqueBg = solidBg
+
+        local icon = m:CreateTexture(nil, "OVERLAY")
+        icon:SetSize(18, 18)
+        icon:SetPoint("TOPLEFT", 14, -12)
+        icon:SetTexture(ICON_TEX)
+
+        local closeBtn = Theme:CreateButton(m, 22, 20, "X", "default")
+        closeBtn:SetPoint("TOPRIGHT", -10, -10)
+        closeBtn:SetScript("OnClick", function()
+            if m._winKey then
+                LFGFrameTab._shortcutPromptDismissed = LFGFrameTab._shortcutPromptDismissed or {}
+                LFGFrameTab._shortcutPromptDismissed[m._winKey] = true
+            end
+            m:Hide()
+        end)
+        m.closeBtn = closeBtn
+
+        local helpBtn = Theme:CreateHelpButton(
+            m,
+            L["Help: Shortcut Auto-Open"],
+            L["Lets you choose whether pressing an official game window shortcut (O, I, J, C) jumps straight to the SocialCentral tab or opens Blizzard's default tab."],
+            L["Choose whether to apply this preference to only the current shortcut or to all enabled shortcuts, and change it anytime in Settings."]
+        )
+        helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -4, 0)
+        m.helpBtn = helpBtn
+
+        local titleFs = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        titleFs:SetPoint("LEFT", icon, "RIGHT", 8, 0)
+        titleFs:SetPoint("RIGHT", helpBtn, "LEFT", -6, 0)
+        titleFs:SetJustifyH("LEFT")
+        titleFs:SetWordWrap(false)
+        m.titleFs = titleFs
+
+        local bodyFs = m:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        bodyFs:SetPoint("TOPLEFT", 16, -42)
+        bodyFs:SetPoint("TOPRIGHT", -16, -42)
+        bodyFs:SetJustifyH("LEFT")
+        bodyFs:SetWordWrap(true)
+        m.bodyFs = bodyFs
+
+        local scopeBox = CreateFrame("Frame", nil, m, "BackdropTemplate")
+        scopeBox:SetPoint("TOPLEFT", 16, -106)
+        scopeBox:SetPoint("TOPRIGHT", -16, -106)
+        scopeBox:SetHeight(68)
+        m.scopeBox = scopeBox
+
+        local singleCb = CreateFrame("CheckButton", nil, scopeBox, "UICheckButtonTemplate")
+        singleCb:SetSize(22, 22)
+        singleCb:SetPoint("TOPLEFT", 8, -8)
+        local singleLbl = singleCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        singleLbl:SetPoint("LEFT", singleCb, "RIGHT", 4, 0)
+        singleLbl:SetPoint("RIGHT", scopeBox, "RIGHT", -10, 0)
+        singleLbl:SetJustifyH("LEFT")
+        singleLbl:SetWordWrap(true)
+        m.singleCb = singleCb
+        m.singleLbl = singleLbl
+
+        local allCb = CreateFrame("CheckButton", nil, scopeBox, "UICheckButtonTemplate")
+        allCb:SetSize(22, 22)
+        allCb:SetPoint("TOPLEFT", singleCb, "BOTTOMLEFT", 0, -6)
+        local allLbl = allCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        allLbl:SetPoint("LEFT", allCb, "RIGHT", 4, 0)
+        allLbl:SetPoint("RIGHT", scopeBox, "RIGHT", -10, 0)
+        allLbl:SetJustifyH("LEFT")
+        allLbl:SetWordWrap(true)
+        m.allCb = allCb
+        m.allLbl = allLbl
+
+        local function SyncScopeChecks()
+            local isAll = (m._scope == "ALL")
+            singleCb:SetChecked(not isAll)
+            allCb:SetChecked(isAll)
+        end
+        singleCb:SetScript("OnClick", function()
+            m._scope = "SINGLE"
+            SyncScopeChecks()
+        end)
+        allCb:SetScript("OnClick", function()
+            m._scope = "ALL"
+            SyncScopeChecks()
+        end)
+        m.SyncScopeChecks = SyncScopeChecks
+
+        local btnAddon = Theme:CreateButton(m, 198, 26, L["Open SocialCentral Tab"], "primary")
+        Theme:AutoFitButton(btnAddon, 150, 20, 218)
+        btnAddon:SetPoint("BOTTOMRIGHT", -16, 32)
+        btnAddon:SetScript("OnClick", function()
+            local wKey = m._winKey
+            local hFrame = m._hostFrame
+            local applyAll = (m._scope == "ALL")
+            m:Hide()
+            LFGFrameTab:ApplyShortcutAutoOpenChoice(wKey, true, applyAll, hFrame)
+        end)
+        m.btnAddon = btnAddon
+
+        local btnOfficial = Theme:CreateButton(m, 198, 26, L["Keep Blizzard Official Tab"], "default")
+        Theme:AutoFitButton(btnOfficial, 150, 20, 218)
+        btnOfficial:SetPoint("RIGHT", btnAddon, "LEFT", -10, 0)
+        btnOfficial:SetScript("OnClick", function()
+            local wKey = m._winKey
+            local hFrame = m._hostFrame
+            local applyAll = (m._scope == "ALL")
+            m:Hide()
+            LFGFrameTab:ApplyShortcutAutoOpenChoice(wKey, false, applyAll, hFrame)
+        end)
+        m.btnOfficial = btnOfficial
+
+        local tipFs = m:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        tipFs:SetPoint("BOTTOMLEFT", 16, 12)
+        tipFs:SetPoint("BOTTOMRIGHT", -16, 12)
+        tipFs:SetJustifyH("LEFT")
+        tipFs:SetWordWrap(false)
+        tipFs:SetText(L["You can change this anytime in Settings -> Summary & Windows."])
+        m.tipFs = tipFs
+
+        self._shortcutPromptModal = m
+    end
+
+    if m:IsShown() and m._winKey == winKey then
+        m._hostFrame = hostFrame
+        if m.Raise then m:Raise() end
+        return
+    end
+
+    m._winKey = winKey
+    m._hostFrame = hostFrame
+    m._scope = "SINGLE"
+    if m.SyncScopeChecks then m.SyncScopeChecks() end
+
+    local p = Theme:GetPalette()
+    m:SetParent(UIParent)
+    m:SetFrameStrata("FULLSCREEN_DIALOG")
+    m:SetFrameLevel(860)
+    m:SetToplevel(true)
+    if m._solidOpaqueBg then
+        local wBg = (p and p.windowBg) or { 0.08, 0.08, 0.09, 1.0 }
+        m._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
+    end
+    Theme:ApplyBackdrop(m, "window", p)
+    if m.scopeBox then
+        Theme:ApplyBackdrop(m.scopeBox, "surface", p)
+    end
+    Theme:StyleButton(m.closeBtn, "default")
+    Theme:StyleButton(m.btnAddon, "primary")
+    Theme:StyleButton(m.btnOfficial, "default")
+
+    local eligibleKeys = {}
+    for _, k in ipairs({ "O", "I", "J", "C" }) do
+        if self:IsShortcutEligible(k) or k == winKey then
+            eligibleKeys[#eligibleKeys + 1] = k
+        end
+    end
+
+    m.titleFs:SetText(string.format(L["Shortcut Behavior — %s (%s)"], meta.name, meta.key))
+    m.bodyFs:SetText(string.format(L["You opened %s (%s) with SocialCentral integration enabled.\nWould you like this shortcut to open directly on the SocialCentral tab instead of Blizzard's default tab?"], meta.name, meta.key))
+    m.singleLbl:SetText(string.format(L["Apply only to this shortcut (%s)"], meta.key))
+    m.allLbl:SetText(string.format(L["Apply to all applicable shortcuts (%s)"], table.concat(eligibleKeys, ", ")))
+
+    m:Show()
+    if m.Raise then m:Raise() end
+end
+
+function LFGFrameTab:HandleOfficialShortcutOpen(winKey, hostFrame)
+    if IsCombatLocked() or not (hostFrame and hostFrame.IsShown and hostFrame:IsShown()) then
+        return
+    end
+    if not self:IsShortcutEligible(winKey) then
+        return
+    end
+    if winKey == "I" and self.active then
+        return
+    end
+    if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(hostFrame) then
+        return
+    end
+    if winKey == "C" and _G.PaperDollFrame and _G.PaperDollFrame.IsShown and not _G.PaperDollFrame:IsShown() then
+        return
+    end
+    if winKey == "I" and _G.LFGWhoListFrame and _G.LFGWhoListFrame.IsShown and _G.LFGWhoListFrame:IsShown() then
+        return
+    end
+
+    local s = ns.db and ns.db.settings
+    local answered = s and type(s.shortcutPromptAnswered) == "table" and s.shortcutPromptAnswered[winKey] == true
+    local autoOpen = s and type(s.shortcutAutoOpenAddon) == "table" and s.shortcutAutoOpenAddon[winKey] == true
+    if answered then
+        if autoOpen then
+            self:ActivateAddonTabForShortcut(winKey, hostFrame)
+        end
+        return
+    end
+
+    if self._shortcutPromptDismissed and self._shortcutPromptDismissed[winKey] then
+        return
+    end
+    self:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
 end
 
 function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
@@ -7653,6 +8477,7 @@ function LFGFrameTab:Init()
     ns:On("GROUP_UPDATED", RefreshIfOpen)
     ns.RegisterEvent(self, "GROUP_ROSTER_UPDATE", RefreshIfOpen)
     ns.RegisterEvent(self, "PARTY_LEADER_CHANGED", RefreshIfOpen)
+    ns.RegisterEvent(self, "LFG_LIST_ACTIVE_ENTRY_UPDATE", RefreshIfOpen)
     local syncEmbeddedQueued = false
     local function SyncEmbeddedIfAnyHostShown()
         local lfgHost = _G.LFGParentFrame

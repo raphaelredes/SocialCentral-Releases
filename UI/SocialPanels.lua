@@ -71,8 +71,7 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
         local m = CreateFrame("Frame", "SocialCentralMetaModal", UIParent, "BackdropTemplate")
         m:SetSize(454, 412)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(110)
+        Theme:PrepareTopOverlayModal(m, 850)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
         m:EnableMouse(true)
         Theme:MakeMovable(m, { key = "modal_social_meta" })
@@ -278,9 +277,10 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
         for i, cb in ipairs(metaModal.chipBtns) do
             local fn = chipList[i]
             if fn then
-                cb._folderVal = fn
+                local chipLabel = (fn == "Dungeons" or fn == "Raid" or fn == "PvP" or fn == "Craft") and (L[fn] or fn) or fn
+                cb._folderVal = chipLabel
                 Theme:StyleButton(cb, "default")
-                Theme:SetButtonText(cb, fn)
+                Theme:SetButtonText(cb, chipLabel)
                 Theme:AutoFitButton(cb, 42, 12, 108)
                 local cw = cb:GetWidth() or 60
                 if (cx + cw) <= 438 then
@@ -434,10 +434,12 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
         metaModal:Hide()
     end
 
+    Theme:PrepareTopOverlayModal(metaModal, 850)
     metaModal.btnSave:SetScript("OnClick", Commit)
     metaModal.noteIn:SetScript("OnEnterPressed", Commit)
     metaModal.nativeNoteIn:SetScript("OnEnterPressed", Commit)
     metaModal:Show()
+    if metaModal.Raise then metaModal:Raise() end
     if allowSocialCard then
         metaModal.folderIn:SetFocus()
     else
@@ -446,15 +448,13 @@ function SocialPanels:OpenSocialMetaModal(displayName, rawKey, contextItem)
 end
 
 function SocialPanels:OpenProfessionModal()
-    local parentFrame = ns.UI and ns.UI.GetFrame and ns.UI:GetFrame() or UIParent
     local profs = ns.Clan and ns.Clan.PROFESSIONS or {}
 
     if not profModal then
-        local m = CreateFrame("Frame", "SocialCentralProfModal", parentFrame, "BackdropTemplate")
+        local m = CreateFrame("Frame", "SocialCentralProfModal", UIParent, "BackdropTemplate")
         m:SetSize(504, 372)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(110)
+        Theme:PrepareTopOverlayModal(m, 850)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
         m:EnableMouse(true)
         Theme:MakeMovable(m, { key = "modal_professions" })
@@ -660,6 +660,7 @@ function SocialPanels:OpenProfessionModal()
     if profModal.btnPubNote then
         profModal.btnPubNote:SetEnabled(canPub)
     end
+    Theme:PrepareTopOverlayModal(profModal, 850)
     Theme:ApplyBackdrop(profModal, "window")
     Theme:StyleButton(profModal.topCloseBtn, "default")
     Theme:StyleButton(profModal.btnAuto, "default")
@@ -674,6 +675,7 @@ function SocialPanels:OpenProfessionModal()
     profModal.RefreshSlots()
     profModal.noteIn:SetText(bucket.myCraftNote or "")
     profModal:Show()
+    if profModal.Raise then profModal:Raise() end
 end
 
 local function OpenCreateRoomModal()
@@ -681,8 +683,7 @@ local function OpenCreateRoomModal()
         local m = CreateFrame("Frame", "SocialCentralCreateRoomModal", UIParent, "BackdropTemplate")
         m:SetSize(420, 154)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(110)
+        Theme:PrepareTopOverlayModal(m, 850)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
         m:EnableMouse(true)
         Theme:MakeMovable(m, { key = "modal_create_room" })
@@ -743,12 +744,14 @@ local function OpenCreateRoomModal()
         createRoomModal = m
     end
 
+    Theme:PrepareTopOverlayModal(createRoomModal, 850)
     Theme:ApplyBackdrop(createRoomModal, "window")
     Theme:StyleButton(createRoomModal.topCloseBtn, "default")
     Theme:StyleButton(createRoomModal.btnSave, "primary")
     Theme:StyleButton(createRoomModal.btnCancel, "default")
     createRoomModal.input:SetText("")
     createRoomModal:Show()
+    if createRoomModal.Raise then createRoomModal:Raise() end
     createRoomModal.input:SetFocus()
 end
 
@@ -757,8 +760,7 @@ local function OpenTempChannelModal()
         local m = CreateFrame("Frame", "SocialCentralTempChanModal", UIParent, "BackdropTemplate")
         m:SetSize(442, 162)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(110)
+        Theme:PrepareTopOverlayModal(m, 850)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
         m:EnableMouse(true)
         Theme:MakeMovable(m, { key = "modal_temp_channel" })
@@ -826,6 +828,7 @@ local function OpenTempChannelModal()
         tempChannelModal = m
     end
 
+    Theme:PrepareTopOverlayModal(tempChannelModal, 850)
     Theme:ApplyBackdrop(tempChannelModal, "window")
     Theme:StyleButton(tempChannelModal.topCloseBtn, "default")
     Theme:StyleButton(tempChannelModal.btnJoin, "primary")
@@ -833,6 +836,7 @@ local function OpenTempChannelModal()
     Theme:StyleButton(tempChannelModal.btnCancel, "default")
     tempChannelModal.input:SetText((ns.Chat and ns.Chat.activeTempChannel) or "SocialCentral")
     tempChannelModal:Show()
+    if tempChannelModal.Raise then tempChannelModal:Raise() end
     tempChannelModal.input:SetFocus()
     tempChannelModal.input:HighlightText()
 end
@@ -843,8 +847,7 @@ local function OpenRoomInviteModal(roomId)
         local m = CreateFrame("Frame", "SocialCentralRoomInvModal", UIParent, "BackdropTemplate")
         m:SetSize(442, 310)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(110)
+        Theme:PrepareTopOverlayModal(m, 850)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
         m:EnableMouse(true)
         Theme:MakeMovable(m, { key = "modal_room_invite" })
@@ -969,6 +972,7 @@ local function OpenRoomInviteModal(roomId)
     end
 
     roomInviteModal._roomId = roomId
+    Theme:PrepareTopOverlayModal(roomInviteModal, 850)
     Theme:ApplyBackdrop(roomInviteModal, "window")
     Theme:StyleButton(roomInviteModal.topCloseBtn, "default")
     Theme:ApplyBackdrop(roomInviteModal.listWrap, "surface")
@@ -983,6 +987,7 @@ local function OpenRoomInviteModal(roomId)
         roomInviteModal.scroll:SetData(onlineList, L["No online friends found right now."], true)
     end
     roomInviteModal:Show()
+    if roomInviteModal.Raise then roomInviteModal:Raise() end
 end
 
 --------------------------------------------------------------------------------
@@ -1154,17 +1159,17 @@ local function AppendGroupSynergyTooltip(tt, comp, instStat)
 
     local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
     local buffList = {
-        { label = "Fortitude", ok = (u.fortitude or 0) > 0 },
-        { label = "Intellect", ok = (u.intellect or 0) > 0 },
-        { label = "MotW", ok = (u.mark or 0) > 0 },
-        { label = "Battle Shout", ok = (u.shout or 0) > 0 },
-        { label = "HS / Summon", ok = (u.warlock or 0) > 0 },
+        { label = L["Fortitude"], ok = (u.fortitude or 0) > 0 },
+        { label = L["Intellect"], ok = (u.intellect or 0) > 0 },
+        { label = L["MotW"], ok = (u.mark or 0) > 0 },
+        { label = L["Battle Shout"], ok = (u.shout or 0) > 0 },
+        { label = L["HS / Summon"], ok = (u.warlock or 0) > 0 },
     }
     if myFac ~= "Horde" then
-        buffList[#buffList + 1] = { label = "Blessings", ok = (u.blessings or 0) > 0 }
+        buffList[#buffList + 1] = { label = L["Blessings"], ok = (u.blessings or 0) > 0 }
     end
     if myFac ~= "Alliance" then
-        buffList[#buffList + 1] = { label = "Totems", ok = (u.totems or 0) > 0 }
+        buffList[#buffList + 1] = { label = L["Totems"], ok = (u.totems or 0) > 0 }
     end
     local bParts = {}
     for _, bf in ipairs(buffList) do
@@ -1350,7 +1355,7 @@ local function CreateRaidGridFrame(listCard, panel)
                 GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
                 GameTooltip:ClearLines()
                 local hex = Compat.ClassHex and Compat.ClassHex(m.classFile) or "|cffffffff"
-                GameTooltip:AddLine(hex .. (m.displayName or "?") .. "|r" .. (m.level and (" Lv." .. m.level) or ""))
+                GameTooltip:AddLine(hex .. (m.displayName or "?") .. "|r" .. (m.level and (" " .. L["Lv %d"]:format(m.level)) or ""))
                 if m.zone and m.zone ~= "" then
                     GameTooltip:AddLine(m.zone, 0.78, 0.84, 0.92)
                 end
@@ -2057,8 +2062,7 @@ local function OpenNewDirectChatModal()
         local m = CreateFrame("Frame", "SocialCentralNewChatModal", UIParent, "BackdropTemplate")
         m:SetSize(446, 342)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(125)
+        Theme:PrepareTopOverlayModal(m, 855)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
         m:EnableMouse(true)
         Theme:MakeMovable(m, { key = "modal_new_chat" })
@@ -2319,6 +2323,7 @@ local function OpenNewDirectChatModal()
         return (a.displayName or "") < (b.displayName or "")
     end)
 
+    Theme:PrepareTopOverlayModal(newChatModal, 855)
     Theme:ApplyBackdrop(newChatModal, "window")
     Theme:ApplyBackdrop(newChatModal.listWrap, "surface")
     Theme:StyleButton(newChatModal.topCloseBtn, "default")
@@ -2335,6 +2340,7 @@ local function OpenNewDirectChatModal()
     newChatModal.input:SetText("")
     newChatModal._applyFilter()
     newChatModal:Show()
+    if newChatModal.Raise then newChatModal:Raise() end
     newChatModal.input:SetFocus()
 end
 
@@ -5297,7 +5303,7 @@ local function ShowAltTooltip(anchor, altData)
         GameTooltip:AddDoubleLine(L["Guild"], "<" .. altData.guild .. ">", 0.75, 0.78, 0.85, 0.35, 0.92, 0.55)
     end
     if altData.itemLevel and altData.itemLevel > 0 then
-        GameTooltip:AddDoubleLine("Item Level", tostring(math.floor(altData.itemLevel)), 0.75, 0.78, 0.85, 1.0, 0.85, 0.35)
+        GameTooltip:AddDoubleLine(L["Item Level"], tostring(math.floor(altData.itemLevel)), 0.75, 0.78, 0.85, 1.0, 0.85, 0.35)
     end
     if lvl < 60 then
         local xpVal = tonumber(altData.xp) or 0
@@ -5963,7 +5969,55 @@ function AltUI.OpenScopeMenu(panel, selfBtn, getSelectedAltFn, renderItemsFn)
     end
 end
 
-function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionMenuFn)
+function AltUI.OpenWorldSortMenu(panel, selfBtn, sortModes, fallbackStep)
+    if MenuUtil and MenuUtil.CreateContextMenu then
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["World / Ruleset"])
+            AltUI.PopulateWorldScopeMenu(root, panel)
+            root:CreateDivider()
+            root:CreateTitle(L["Sort Alts"])
+            for _, m in ipairs(sortModes) do
+                local id = m.id
+                root:CreateRadio(m.label, function()
+                    return panel._sortBy == id
+                end, function()
+                    panel._sortBy = id
+                    panel:Refresh(true)
+                end)
+            end
+        end)
+    elseif type(fallbackStep) == "function" then
+        fallbackStep()
+    end
+end
+
+local function FormatShortProfList(alt, compactMode)
+    if type(alt and alt.professions) ~= "table" then return "-" end
+    local parts = {}
+    for _, pr in ipairs(alt.professions) do
+        if pr and pr.name and pr.isPrimary then
+            local pName = tostring(pr.name)
+            if compactMode and #pName > 5 then
+                pName = pName:sub(1, 4) .. "."
+            end
+            parts[#parts + 1] = ("%s %d"):format(pName, tonumber(pr.rank) or 0)
+        end
+    end
+    return #parts > 0 and table.concat(parts, compactMode and "/" or " · ") or "-"
+end
+
+local function ComputeMatrixColBounds(rw, compact)
+    local p1 = compact and 0.34 or 0.33
+    local p2 = compact and 0.22 or 0.24
+    local p3 = compact and 0.22 or 0.26
+    local w1 = math.floor(rw * p1 + 0.5)
+    local w2 = math.floor(rw * p2 + 0.5)
+    local w3 = math.floor(rw * p3 + 0.5)
+    local w4 = math.max(54, rw - w1 - w2 - w3)
+    return { 0, w1, w1 + w2, w1 + w2 + w3, rw }, { w1, w2, w3, w4 }
+end
+
+function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionMenuFn, sortModes)
     local frame = CreateFrame("Frame", nil, subArea)
     frame:SetAllPoints()
     frame:Hide()
@@ -5971,7 +6025,7 @@ function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionM
     local topBar = CreateFrame("Frame", nil, frame)
     topBar:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -2)
     topBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
-    topBar:SetHeight(28)
+    topBar:SetHeight(26)
 
     local backBtn = Theme:CreateButton(topBar, 66, 22, "< " .. L["Alts"], "default")
     Theme:AutoFitButton(backBtn, 56, 10, 96)
@@ -5991,43 +6045,214 @@ function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionM
         "RIGHT", "RIGHT", -2, 0
     )
 
-    local summaryLbl = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    summaryLbl:SetPoint("LEFT", topBar, "LEFT", 4, 0)
-    summaryLbl:SetPoint("RIGHT", helpBtn or topBar, helpBtn and "LEFT" or "RIGHT", -6, 0)
-    summaryLbl:SetJustifyH("LEFT")
-    summaryLbl:SetWordWrap(false)
+    local sortBtn = Theme:CreateButton(topBar, 96, 20, L["Sort: Recent"] .. "  v", "default")
+    Theme:AutoFitButton(sortBtn, 72, 12, 130)
+    sortBtn:SetHeight(20)
+    sortBtn:SetPoint("RIGHT", helpBtn or topBar, helpBtn and "LEFT" or "RIGHT", -4, 0)
+    sortBtn:SetScript("OnClick", function(selfBtn)
+        AltUI.OpenWorldSortMenu(panel, selfBtn, sortModes or {})
+    end)
 
-    local scroll = Theme:CreateScrollList(frame, 46, function(rowParent, _, rowHeight)
+    local titleLbl = topBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    titleLbl:SetPoint("LEFT", topBar, "LEFT", 4, 0)
+    titleLbl:SetPoint("RIGHT", sortBtn, "LEFT", -6, 0)
+    titleLbl:SetJustifyH("LEFT")
+    titleLbl:SetWordWrap(false)
+    titleLbl:SetTextColor(1.0, 0.82, 0.0)
+
+    local kpiBar = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    kpiBar:SetPoint("TOPLEFT", topBar, "BOTTOMLEFT", 0, -2)
+    kpiBar:SetPoint("TOPRIGHT", topBar, "BOTTOMRIGHT", 0, -2)
+    kpiBar:SetHeight(24)
+    kpiBar._scNoStone = true
+    Theme:ApplyBackdrop(kpiBar, "surface")
+    kpiBar:EnableMouse(true)
+    kpiBar:SetScript("OnEnter", function(selfBar)
+        ShowGoldBreakdownTooltip(selfBar, panel._worldScope)
+    end)
+    kpiBar:SetScript("OnLeave", function(selfBar)
+        if GameTooltip and GameTooltip:IsOwned(selfBar) then GameTooltip:Hide() end
+    end)
+
+    local kpiLeft = kpiBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    kpiLeft:SetPoint("LEFT", kpiBar, "LEFT", 8, 0)
+    kpiLeft:SetJustifyH("LEFT")
+    kpiLeft:SetWordWrap(false)
+
+    local kpiRight = kpiBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    kpiRight:SetPoint("RIGHT", kpiBar, "RIGHT", -8, 0)
+    kpiRight:SetPoint("LEFT", kpiLeft, "RIGHT", 6, 0)
+    kpiRight:SetJustifyH("RIGHT")
+    kpiRight:SetWordWrap(false)
+
+    local colHeader = CreateFrame("Frame", nil, frame)
+    colHeader:SetHeight(20)
+    local colHdrBg = colHeader:CreateTexture(nil, "BACKGROUND", nil, -4)
+    colHdrBg:SetAllPoints()
+    colHdrBg:SetTexture(WHITE8X8)
+    colHdrBg:SetVertexColor(0.14, 0.11, 0.08, 1.0)
+    local colHdrLine = colHeader:CreateTexture(nil, "ARTWORK", nil, 1)
+    colHdrLine:SetHeight(1)
+    colHdrLine:SetPoint("BOTTOMLEFT", colHeader, "BOTTOMLEFT", 0, 0)
+    colHdrLine:SetPoint("BOTTOMRIGHT", colHeader, "BOTTOMRIGHT", 0, 0)
+    colHdrLine:SetTexture(WHITE8X8)
+    colHdrLine:SetVertexColor(0.68, 0.54, 0.24, 0.85)
+
+    local colSpecs = {
+        { id = "char", title = L["Character"],   align = "LEFT",  sortId = "level", altSortId = "name" },
+        { id = "xp",   title = L["Experience"],  align = "LEFT",  sortId = "rested" },
+        { id = "prof", title = L["Professions"], align = "LEFT",  sortId = "mail",  altSortId = "recent" },
+        { id = "gold", title = L["Gold"],        align = "RIGHT", sortId = "gold" },
+    }
+    local colBtns, colHdrDivs = {}, {}
+    for ci, sp in ipairs(colSpecs) do
+        local cb = CreateFrame("Button", nil, colHeader)
+        cb:SetHeight(20)
+        local hl = cb:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetColorTexture(1.0, 0.82, 0.25, 0.12)
+        cb.lbl = cb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        cb.lbl:SetPoint("LEFT", cb, "LEFT", 5, 0)
+        cb.lbl:SetPoint("RIGHT", cb, "RIGHT", -5, 0)
+        cb.lbl:SetJustifyH(sp.align)
+        cb.lbl:SetWordWrap(false)
+        cb._spec = sp
+        cb:SetScript("OnClick", function()
+            if sp.altSortId and panel._sortBy == sp.sortId then
+                panel._sortBy = sp.altSortId
+            else
+                panel._sortBy = sp.sortId
+            end
+            panel:Refresh(true)
+        end)
+        colBtns[ci] = cb
+        if ci > 1 then
+            local dv = colHeader:CreateTexture(nil, "ARTWORK", nil, 2)
+            dv:SetSize(1, 14)
+            colHdrDivs[ci - 1] = dv
+        end
+    end
+
+    local matrixState = { totalMoney = 0, compact = false, listW = 308 }
+
+    local function LayoutRowCols(row, rw)
+        local compact = (rw < 450)
+        if row._lastColW == rw and row._lastColCompact == compact then
+            return
+        end
+        row._lastColW = rw
+        row._lastColCompact = compact
+        local bounds = ComputeMatrixColBounds(rw, compact)
+        for di = 1, 3 do
+            local dv = row.colDivs[di]
+            if dv then
+                dv:ClearAllPoints()
+                dv:SetPoint("TOPLEFT", row, "TOPLEFT", bounds[di + 1], -5)
+                dv:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", bounds[di + 1], 5)
+            end
+        end
+        row.classIcon:ClearAllPoints()
+        row.classIcon:SetPoint("LEFT", row, "LEFT", 6, 0)
+        row.col1Top:ClearAllPoints()
+        row.col1Top:SetPoint("TOPLEFT", row.classIcon, "TOPRIGHT", 5, 2)
+        row.col1Top:SetPoint("RIGHT", row, "LEFT", bounds[2] - 4, 0)
+        row.col1Bot:ClearAllPoints()
+        row.col1Bot:SetPoint("BOTTOMLEFT", row.classIcon, "BOTTOMRIGHT", 5, -2)
+        row.col1Bot:SetPoint("RIGHT", row, "LEFT", bounds[2] - 4, 0)
+
+        row.xpBarBg:ClearAllPoints()
+        row.xpBarBg:SetPoint("TOPLEFT", row, "TOPLEFT", bounds[2] + 5, -8)
+        row.xpBarBg:SetPoint("RIGHT", row, "LEFT", bounds[3] - 5, 0)
+        row.xpBarBg:SetHeight(12)
+        row.col2Bot:ClearAllPoints()
+        row.col2Bot:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", bounds[2] + 5, 6)
+        row.col2Bot:SetPoint("RIGHT", row, "LEFT", bounds[3] - 4, 0)
+
+        row.col3Top:ClearAllPoints()
+        row.col3Top:SetPoint("TOPLEFT", row, "TOPLEFT", bounds[3] + 5, -7)
+        row.col3Top:SetPoint("RIGHT", row, "LEFT", bounds[4] - 4, 0)
+        row.col3Bot:ClearAllPoints()
+        row.col3Bot:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", bounds[3] + 5, 6)
+        row.col3Bot:SetPoint("RIGHT", row, "LEFT", bounds[4] - 4, 0)
+
+        row.col4Top:ClearAllPoints()
+        row.col4Top:SetPoint("TOPLEFT", row, "TOPLEFT", bounds[4] + 3, -7)
+        row.col4Top:SetPoint("RIGHT", row, "RIGHT", -6, 0)
+        row.col4Bot:ClearAllPoints()
+        row.col4Bot:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", bounds[4] + 3, 6)
+        row.col4Bot:SetPoint("RIGHT", row, "RIGHT", -6, 0)
+    end
+
+    local scroll = Theme:CreateScrollList(frame, 48, function(rowParent, _, rowHeight)
         local row = CreateFrame("Button", nil, rowParent, "BackdropTemplate")
         row:SetHeight(rowHeight)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
+        local hl = row:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetColorTexture(1.0, 0.82, 0.25, 0.12)
+
+        row.statusBar = row:CreateTexture(nil, "ARTWORK", nil, 2)
+        row.statusBar:SetWidth(3)
+        row.statusBar:SetPoint("TOPLEFT", row, "TOPLEFT", 1, -4)
+        row.statusBar:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 1, 4)
+
+        row.colDivs = {}
+        for di = 1, 3 do
+            local dv = row:CreateTexture(nil, "ARTWORK", nil, 1)
+            dv:SetWidth(1)
+            dv:SetColorTexture(0.65, 0.54, 0.30, 0.16)
+            row.colDivs[di] = dv
+        end
+
         row.classIcon = row:CreateTexture(nil, "ARTWORK", nil, 2)
-        row.classIcon:SetSize(22, 22)
-        row.classIcon:SetPoint("LEFT", row, "LEFT", 8, 0)
+        row.classIcon:SetSize(18, 18)
         row.classIcon:SetTexture("Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES")
 
-        row.rightTop = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        row.rightTop:SetPoint("TOPRIGHT", row, "TOPRIGHT", -8, -5)
-        row.rightTop:SetJustifyH("RIGHT")
-        row.rightTop:SetWordWrap(false)
+        row.col1Top = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.col1Top:SetJustifyH("LEFT")
+        row.col1Top:SetWordWrap(false)
 
-        row.leftTop = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        row.leftTop:SetPoint("TOPLEFT", row.classIcon, "TOPRIGHT", 7, 1)
-        row.leftTop:SetPoint("RIGHT", row.rightTop, "LEFT", -6, 0)
-        row.leftTop:SetJustifyH("LEFT")
-        row.leftTop:SetWordWrap(false)
+        row.col1Bot = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.col1Bot:SetJustifyH("LEFT")
+        row.col1Bot:SetWordWrap(false)
 
-        row.rightBot = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        row.rightBot:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -8, 5)
-        row.rightBot:SetJustifyH("RIGHT")
-        row.rightBot:SetWordWrap(false)
+        row.xpBarBg = CreateFrame("Frame", nil, row)
+        row.xpBarBg.tex = row.xpBarBg:CreateTexture(nil, "BACKGROUND", nil, 1)
+        row.xpBarBg.tex:SetAllPoints()
+        row.xpBarBg.tex:SetColorTexture(0.04, 0.04, 0.05, 0.90)
+        row.xpBarRest = row.xpBarBg:CreateTexture(nil, "BORDER", nil, 1)
+        row.xpBarRest:SetPoint("TOPLEFT", 0, 0)
+        row.xpBarRest:SetPoint("BOTTOMLEFT", 0, 0)
+        row.xpBarRest:SetColorTexture(0.24, 0.56, 0.96, 0.52)
+        row.xpBarFill = row.xpBarBg:CreateTexture(nil, "ARTWORK", nil, 1)
+        row.xpBarFill:SetPoint("TOPLEFT", 0, 0)
+        row.xpBarFill:SetPoint("BOTTOMLEFT", 0, 0)
+        row.col2Top = row.xpBarBg:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.col2Top:SetAllPoints()
+        row.col2Top:SetJustifyH("CENTER")
+        row.col2Top:SetJustifyV("MIDDLE")
+        row.col2Top:SetWordWrap(false)
 
-        row.leftBot = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        row.leftBot:SetPoint("BOTTOMLEFT", row.classIcon, "BOTTOMRIGHT", 7, -1)
-        row.leftBot:SetPoint("RIGHT", row.rightBot, "LEFT", -6, 0)
-        row.leftBot:SetJustifyH("LEFT")
-        row.leftBot:SetWordWrap(false)
+        row.col2Bot = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.col2Bot:SetJustifyH("LEFT")
+        row.col2Bot:SetWordWrap(false)
+
+        row.col3Top = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.col3Top:SetJustifyH("LEFT")
+        row.col3Top:SetWordWrap(false)
+
+        row.col3Bot = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.col3Bot:SetJustifyH("LEFT")
+        row.col3Bot:SetWordWrap(false)
+
+        row.col4Top = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.col4Top:SetJustifyH("RIGHT")
+        row.col4Top:SetWordWrap(false)
+
+        row.col4Bot = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.col4Bot:SetJustifyH("RIGHT")
+        row.col4Bot:SetWordWrap(false)
 
         row:SetScript("OnEnter", function(selfRow) ShowAltTooltip(selfRow, selfRow._alt) end)
         row:SetScript("OnLeave", function(selfRow)
@@ -6047,8 +6272,25 @@ function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionM
             panel:Refresh(true)
         end)
         return row
-    end, function(row, alt)
+    end, function(row, alt, _, pal)
         row._alt = alt
+        local rw = math.floor((row.GetWidth and row:GetWidth()) or 0)
+        if rw < 180 then rw = matrixState.listW or 308 end
+        LayoutRowCols(row, rw)
+        local compact = (rw < 450)
+        local curKey = CurrentAltKey()
+        local isCurrent = (alt.key == curKey)
+        local isSelected = (alt.key == panel._selectedKey)
+
+        if isSelected then
+            Theme:ApplyBackdrop(row, "surface", pal)
+            row.statusBar:SetColorTexture(1.0, 0.82, 0.12, 1.0)
+        elseif isCurrent then
+            row.statusBar:SetColorTexture(0.24, 0.86, 0.46, 0.95)
+        else
+            row.statusBar:SetColorTexture(0.55, 0.44, 0.22, 0.35)
+        end
+
         local coords = alt.classFile and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[alt.classFile]
         if coords then
             row.classIcon:SetTexCoord(coords[1] + 0.02, coords[2] - 0.02, coords[3] + 0.02, coords[4] - 0.02)
@@ -6057,80 +6299,158 @@ function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionM
             row.classIcon:Hide()
         end
         local fac = alt.faction or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(alt.fullName or alt.name or alt.key))
-        local facIco = (fac and Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
+        local facIco = (fac and Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 11)) or ""
         local hex = Compat.ClassHex(alt.classFile)
         local disp = alt.fullName or alt.name or alt.key or "?"
         local lvl = tonumber(alt.level) or 0
         local wBadge = FormatAltWorldBadge(alt, panel._worldScope == "all")
-        row.leftTop:SetText(("%s%s%s|r |cffc6ceda%s|r%s"):format(facIco, hex, disp, L["Lv %d"]:format(lvl), wBadge))
+        row.col1Top:SetText(("%s%s%s|r"):format(facIco, hex, disp))
 
-        local topRightParts = { Compat.FormatMoney(alt.money or 0) }
-        if ns.Alts and ns.Alts.HasReadyCraftCooldown and ns.Alts:HasReadyCraftCooldown(alt) then
-            topRightParts[#topRightParts + 1] = "|cff3fb950[" .. L["Craft Ready"] .. "]|r"
+        local lvlCol = (lvl >= 60) and "|cff3fb950" or "|cffd8dde6"
+        local ilvlTag = (not compact and alt.itemLevel and alt.itemLevel > 0) and (" · iLvl " .. math.floor(alt.itemLevel)) or ""
+        local curTag = isCurrent and (" |cff3fb950[" .. L["Current"] .. "]|r") or wBadge
+        row.col1Bot:SetText(lvlCol .. L["Lv %d"]:format(lvl) .. "|r" .. ilvlTag .. curTag)
+
+        -- Col 2: Visual Mini XP/Rested Progress Bar + Lockouts or Activity
+        local barW = math.max(36, math.floor((row.xpBarBg:GetWidth() or 60) + 0.5))
+        if lvl >= 60 then
+            row.xpBarFill:SetColorTexture(0.22, 0.72, 0.38, 0.85)
+            row.xpBarFill:SetWidth(barW)
+            row.xpBarRest:Hide()
+            row.col2Top:SetText(compact and L["Lv %d"]:format(60) or L["Max Level"])
+        else
+            local xpVal = tonumber(alt.xp) or 0
+            local xpMax = math.max(1, tonumber(alt.xpMax) or 1)
+            local xpFrac = math.max(0.02, math.min(1, xpVal / xpMax))
+            local xpPct = math.floor(xpFrac * 100 + 0.5)
+            local restPct = ResolveAltRestedInfo(alt)
+            row.xpBarFill:SetColorTexture(0.56, 0.32, 0.86, 0.90)
+            row.xpBarFill:SetWidth(math.max(2, math.floor(barW * xpFrac)))
+            if restPct > 0 then
+                local combFrac = math.min(1, xpFrac + (restPct / 100))
+                row.xpBarRest:SetWidth(math.max(2, math.floor(barW * combFrac)))
+                row.xpBarRest:Show()
+                row.col2Top:SetText(("%d%% +%d%%"):format(xpPct, restPct))
+            else
+                row.xpBarRest:Hide()
+                row.col2Top:SetText(("%d%%"):format(xpPct))
+            end
         end
+        local lockCount = (ns.Alts and ns.Alts.GetLockouts) and #ns.Alts:GetLockouts(alt) or 0
+        if lockCount > 0 then
+            row.col2Bot:SetText("|cffff9b3d" .. L["%d lockouts"]:format(lockCount) .. "|r")
+        else
+            local seenStr = isCurrent and ("|cff3fb950" .. L["Current"] .. "|r") or Compat.FormatRelativeTime(alt.lastActive, L)
+            local locOrTime = (not compact and alt.zone and alt.zone ~= "") and alt.zone or seenStr
+            row.col2Bot:SetText("|cff8d98a6" .. locOrTime .. "|r")
+        end
+
+        -- Col 3: Professions + Craft Cooldown + Free Bags + Mail
+        local profStr = FormatShortProfList(alt, compact)
+        if ns.Alts and ns.Alts.HasReadyCraftCooldown and ns.Alts:HasReadyCraftCooldown(alt) then
+            profStr = (profStr ~= "-" and (profStr .. " ") or "") .. "|cff3fb950[" .. L["Ready"] .. "]|r"
+        end
+        row.col3Top:SetText(profStr)
+
+        local bagFree = tonumber(alt.bagFree) or 0
+        local bagCol = (bagFree <= 1 and (alt.bagTotal or 0) > 0) and "|cfff54747" or ((bagFree <= 5 and (alt.bagTotal or 0) > 0) and "|cffffb833" or "|cff9da7b5")
+        local bagPart = bagCol .. L["%d free"]:format(bagFree) .. "|r"
         if ns.Alts and ns.Alts.GetMailStatus then
             local hasMail, ageDays = ns.Alts:GetMailStatus(alt)
             if hasMail then
-                topRightParts[#topRightParts + 1] = (ageDays >= 15)
-                    and ("|cfff54747[" .. L["Mailbox"] .. " " .. ageDays .. "d]|r")
-                    or ("|cffffd24d[" .. L["Mailbox"] .. "]|r")
+                local mCol = (ageDays >= 15) and "|cfff54747" or "|cffffd24d"
+                bagPart = bagPart .. " " .. mCol .. "[" .. L["Mailbox"] .. (ageDays >= 15 and (" " .. ageDays .. "d") or "") .. "]|r"
             end
         end
-        row.rightTop:SetText(table.concat(topRightParts, " "))
+        row.col3Bot:SetText(bagPart)
 
-        local botParts = {}
-        if lvl >= 60 then
-            botParts[#botParts + 1] = "|cff3fb950" .. L["Max Level"] .. "|r"
-        else
-            local restPct, isEst = ResolveAltRestedInfo(alt)
-            if restPct >= 148 then
-                botParts[#botParts + 1] = "|cff58a6ff" .. L["150% MAX"] .. "|r"
-            elseif restPct > 0 then
-                botParts[#botParts + 1] = ("|cff58a6ff+%s%d%% %s|r"):format(isEst and "~" or "", restPct, L["Rested"])
-            else
-                botParts[#botParts + 1] = "|cff8d98a6" .. L["0% Rested"] .. "|r"
-            end
-        end
-        if type(alt.professions) == "table" then
-            for _, pr in ipairs(alt.professions) do
-                if pr and pr.name and pr.isPrimary then
-                    botParts[#botParts + 1] = ("%s %d"):format(pr.name, pr.rank or 0)
-                end
-            end
-        end
-        row.leftBot:SetText(table.concat(botParts, " · "))
-
-        local bagFree = tonumber(alt.bagFree) or 0
-        local bagCol = (bagFree <= 1 and (alt.bagTotal or 0) > 0) and "|cfff54747" or "|cff9da7b5"
-        local seenStr = (alt.key == CurrentAltKey()) and ("|cff3fb950" .. L["Current"] .. "|r") or Compat.FormatRelativeTime(alt.lastActive, L)
-        row.rightBot:SetText(("%s%s|r · %s"):format(bagCol, L["%d free"]:format(bagFree), seenStr))
+        -- Col 4: Gold + % share
+        row.col4Top:SetText(Compat.FormatMoney(alt.money or 0))
+        local pct = (matrixState.totalMoney > 0) and math.floor(((tonumber(alt.money) or 0) / matrixState.totalMoney) * 100 + 0.5) or 0
+        row.col4Bot:SetText((matrixState.totalMoney > 0) and ("|cffffd24d" .. pct .. "%|r") or "")
     end)
+
+    colHeader:SetPoint("TOPLEFT", kpiBar, "BOTTOMLEFT", 3, -3)
+    colHeader:SetPoint("TOPRIGHT", kpiBar, "BOTTOMRIGHT", -13, -3)
     scroll.container:ClearAllPoints()
-    scroll.container:SetPoint("TOPLEFT", topBar, "BOTTOMLEFT", 0, -2)
+    scroll.container:SetPoint("TOPLEFT", kpiBar, "BOTTOMLEFT", 0, -24)
     scroll.container:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+
+    local function UpdateColHeadersAndTheme()
+        local p = Theme:GetPalette()
+        local isBlizz = Theme:IsBlizzard(p) or (p and p.key == "native")
+        if isBlizz then
+            colHdrBg:SetVertexColor(0.16, 0.12, 0.08, 1.0)
+            colHdrLine:SetVertexColor(0.74, 0.58, 0.24, 0.90)
+        else
+            colHdrBg:SetVertexColor(0.11, 0.13, 0.17, 1.0)
+            colHdrLine:SetVertexColor(0.30, 0.62, 0.95, 0.65)
+        end
+        local hdrW = math.max(260, math.floor((colHeader:GetWidth() or (frame:GetWidth() or 320) - 16) + 0.5))
+        local compact = (hdrW < 450)
+        matrixState.listW = hdrW
+        matrixState.compact = compact
+        local bounds, widths = ComputeMatrixColBounds(hdrW, compact)
+        for ci, cb in ipairs(colBtns) do
+            cb:ClearAllPoints()
+            cb:SetPoint("TOPLEFT", colHeader, "TOPLEFT", bounds[ci], 0)
+            cb:SetWidth(widths[ci])
+            local sp = cb._spec
+            local isActive = (panel._sortBy == sp.sortId) or (sp.altSortId and panel._sortBy == sp.altSortId)
+            local arrow = isActive and " v" or ""
+            cb.lbl:SetText(sp.title .. arrow)
+            if isActive then
+                cb.lbl:SetTextColor(1.0, 0.85, 0.22)
+            else
+                cb.lbl:SetTextColor(0.84, 0.80, 0.72)
+            end
+            if ci > 1 and colHdrDivs[ci - 1] then
+                colHdrDivs[ci - 1]:ClearAllPoints()
+                colHdrDivs[ci - 1]:SetPoint("LEFT", colHeader, "LEFT", bounds[ci], 0)
+                colHdrDivs[ci - 1]:SetColorTexture(0.70, 0.56, 0.28, 0.35)
+            end
+        end
+    end
 
     return {
         frame = frame,
         scroll = scroll,
-        summaryLbl = summaryLbl,
+        summaryLbl = titleLbl,
         backBtn = backBtn,
         helpBtn = helpBtn,
         RefreshTheme = function()
             Theme:StyleButton(backBtn, "default")
+            Theme:StyleButton(sortBtn, "default")
+            Theme:ApplyBackdrop(kpiBar, "surface")
             if helpBtn and helpBtn.RefreshTheme then helpBtn:RefreshTheme() end
+            UpdateColHeadersAndTheme()
             scroll:RefreshTheme()
         end,
         Render = function(list, isNarrow, resetScroll)
             backBtn:SetShown(isNarrow)
-            summaryLbl:ClearAllPoints()
+            titleLbl:ClearAllPoints()
             if isNarrow then
-                summaryLbl:SetPoint("LEFT", backBtn, "RIGHT", 6, 0)
+                titleLbl:SetPoint("LEFT", backBtn, "RIGHT", 6, 0)
             else
-                summaryLbl:SetPoint("LEFT", topBar, "LEFT", 4, 0)
+                titleLbl:SetPoint("LEFT", topBar, "LEFT", 4, 0)
             end
-            summaryLbl:SetPoint("RIGHT", helpBtn or topBar, helpBtn and "LEFT" or "RIGHT", -6, 0)
-            local totFree, maxRestedCnt, readyCraftCnt = 0, 0, 0
+            titleLbl:SetPoint("RIGHT", sortBtn, "LEFT", -6, 0)
+            titleLbl:SetText(("%s (%d)"):format(L["Account Matrix"], #list))
+
+            local sortLbl = L["Sort: Recent"]
+            for _, sm in ipairs(sortModes or {}) do
+                if sm.id == panel._sortBy then
+                    sortLbl = sm.label
+                    break
+                end
+            end
+            Theme:SetButtonText(sortBtn, sortLbl .. "  v")
+            Theme:AutoFitButton(sortBtn, 72, 12, 130)
+            sortBtn:SetHeight(20)
+
+            local totMoney, totFree, maxRestedCnt, readyCraftCnt = 0, 0, 0, 0
             for _, alt in ipairs(list) do
+                totMoney = totMoney + (tonumber(alt.money) or 0)
                 totFree = totFree + (tonumber(alt.bagFree) or 0)
                 if (tonumber(alt.level) or 0) < 60 and ResolveAltRestedInfo(alt) >= 100 then
                     maxRestedCnt = maxRestedCnt + 1
@@ -6139,17 +6459,19 @@ function AltUI.CreateAccountMatrixPane(panel, subArea, AddHelpFn, openAltActionM
                     readyCraftCnt = readyCraftCnt + 1
                 end
             end
-            local sumParts = {
-                L["Alts"] .. ": " .. #list,
-                L["Bags Free: %d"]:format(totFree),
-            }
+            matrixState.totalMoney = totMoney
+            kpiLeft:SetText("|cffffd200" .. Compat.FormatMoney(totMoney) .. "|r")
+
+            local rParts = { L["Bags Free: %d"]:format(totFree) }
             if maxRestedCnt > 0 then
-                sumParts[#sumParts + 1] = "|cff58a6ff" .. L["Rested 100%%+: %d"]:format(maxRestedCnt) .. "|r"
+                rParts[#rParts + 1] = "|cff58a6ff" .. L["Rested 100%%+: %d"]:format(maxRestedCnt) .. "|r"
             end
             if readyCraftCnt > 0 then
-                sumParts[#sumParts + 1] = "|cff3fb950" .. L["Crafts Ready: %d"]:format(readyCraftCnt) .. "|r"
+                rParts[#rParts + 1] = "|cff3fb950" .. L["Crafts Ready: %d"]:format(readyCraftCnt) .. "|r"
             end
-            summaryLbl:SetText(table.concat(sumParts, "  ·  "))
+            kpiRight:SetText(table.concat(rParts, " · "))
+
+            UpdateColHeadersAndTheme()
             scroll:SetData(list, L["No characters recorded yet."], resetScroll)
         end,
     }
@@ -6316,15 +6638,16 @@ function SocialPanels:CreateAltsPanel(parent)
         if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
     end)
 
-    -- Narrow Sub-Tab Strip (Alts | Overview | Items | Gear)
+    -- Narrow Sub-Tab Strip (Alts | Overview | Items | Gear | Account)
     local narrowTabBar = CreateFrame("Frame", nil, panel)
     narrowTabBar:SetHeight(24)
     narrowTabBar:Hide()
 
-    local btnNarrowAlts = Theme:CreateButton(narrowTabBar, 76, 22, L["Alts"], "tab")
-    local btnNarrowOverview = Theme:CreateButton(narrowTabBar, 76, 22, L["Overview"], "tab")
-    local btnNarrowItems = Theme:CreateButton(narrowTabBar, 76, 22, L["Items"], "tab")
-    local btnNarrowGear = Theme:CreateButton(narrowTabBar, 76, 22, L["Gear"], "tab")
+    local btnNarrowAlts = Theme:CreateButton(narrowTabBar, 70, 22, L["Alts"], "tab")
+    local btnNarrowOverview = Theme:CreateButton(narrowTabBar, 68, 22, L["Overview"], "tab")
+    local btnNarrowItems = Theme:CreateButton(narrowTabBar, 58, 22, L["Items"], "tab")
+    local btnNarrowGear = Theme:CreateButton(narrowTabBar, 68, 22, L["Gear"], "tab")
+    local btnNarrowAccount = Theme:CreateButton(narrowTabBar, 58, 22, L["Account"], "tab")
 
     -- Left Column: All Account Alts Roster + Gold Vault Footer
     local rosterPane = CreateFrame("Frame", nil, panel, "BackdropTemplate")
@@ -6702,7 +7025,7 @@ function SocialPanels:CreateAltsPanel(parent)
     local overviewRows, overviewBars, overviewIconRows, overviewSeps = {}, {}, {}, {}
     local overviewMaxScroll = 0
     local syncOverviewScrollUI, refreshOverviewThumb = AltUI.CreateOverviewScrollbar(overviewFrame, overviewScroll)
-    local accountMatrix = AltUI.CreateAccountMatrixPane(panel, subArea, AddHelp, OpenAltActionMenu)
+    local accountMatrix = AltUI.CreateAccountMatrixPane(panel, subArea, AddHelp, OpenAltActionMenu, SORT_MODES)
 
     local function UpdateOverviewScrollBounds()
         local vpH = overviewScroll:GetHeight() or 0
@@ -6942,7 +7265,7 @@ function SocialPanels:CreateAltsPanel(parent)
         -- 1. Experience / Live Estimated Rested Progress + Item Level
         local lvl = tonumber(altData.level) or 0
         if lvl >= 60 then
-            local rightLvl = (altData.itemLevel and altData.itemLevel > 0) and ("Item Level " .. math.floor(altData.itemLevel)) or ""
+            local rightLvl = (altData.itemLevel and altData.itemLevel > 0) and L["Item Level: %d"]:format(math.floor(altData.itemLevel)) or ""
             AddLine(L["Experience"] .. ": |cff3fb950" .. L["Max Level"] .. "|r", rightLvl, 0.85, 0.88, 0.94, 1.0, 0.85, 0.35, 19)
         else
             local xpVal = tonumber(altData.xp) or 0
@@ -6971,7 +7294,7 @@ function SocialPanels:CreateAltsPanel(parent)
                 AddLine(restDesc, restRight, 0.65, 0.72, 0.84, 0.58, 0.82, 1.0, 18)
             end
             if altData.itemLevel and altData.itemLevel > 0 then
-                AddLine("Item Level", tostring(math.floor(altData.itemLevel)), 0.75, 0.78, 0.85, 1.0, 0.85, 0.35, 18)
+                AddLine(L["Item Level"], tostring(math.floor(altData.itemLevel)), 0.75, 0.78, 0.85, 1.0, 0.85, 0.35, 18)
             end
         end
 
@@ -7965,37 +8288,49 @@ function SocialPanels:CreateAltsPanel(parent)
             panel._subTab = "overview"
         end
 
-        rosterAccountBtn:SetShown(isNarrow)
+        rosterAccountBtn:SetShown(false)
         rosterTitleLbl:ClearAllPoints()
         rosterTitleLbl:SetPoint("LEFT", rosterHeader, "LEFT", 8, 0)
-        rosterTitleLbl:SetPoint("RIGHT", isNarrow and rosterAccountBtn or rosterSortBtn, "LEFT", -6, 0)
+        rosterTitleLbl:SetPoint("RIGHT", rosterSortBtn, "LEFT", -6, 0)
 
         Theme:SetButtonText(btnNarrowAlts, ("%s (%d)"):format(L["Alts"], altCount or 0))
         Theme:SetButtonActive(btnNarrowAlts, activeSub == "alts", "tab")
         Theme:SetButtonActive(btnNarrowOverview, activeSub == "overview", "tab")
         Theme:SetButtonActive(btnNarrowItems, activeSub == "items", "tab")
         Theme:SetButtonActive(btnNarrowGear, activeSub == "gear", "tab")
+        Theme:SetButtonActive(btnNarrowAccount, activeSub == "account", "tab")
 
         Theme:SetButtonActive(btnWideOverview, activeSub == "overview", "tab")
         Theme:SetButtonActive(btnWideItems, activeSub == "items", "tab")
         Theme:SetButtonActive(btnWideGear, activeSub == "gear", "tab")
         Theme:SetButtonActive(btnWideAccount, activeSub == "account", "tab")
 
-        rosterPane:SetShown((not isNarrow) or (activeSub == "alts"))
+        local isAcct = (activeSub == "account")
+        rosterPane:SetShown((not isNarrow and not isAcct) or (isNarrow and activeSub == "alts"))
         inspectorPane:SetShown((not isNarrow) or (activeSub ~= "alts"))
-        charHeader:SetShown(activeSub ~= "account")
-        wideTabBar:ClearAllPoints()
-        if activeSub == "account" then
-            wideTabBar:SetPoint("TOPLEFT", inspectorPane, "TOPLEFT", 4, -6)
-            wideTabBar:SetPoint("TOPRIGHT", inspectorPane, "TOPRIGHT", -4, -6)
+        charHeader:SetShown(not isAcct)
+        if isNarrow then
+            subArea:ClearAllPoints()
+            if isAcct then
+                subArea:SetPoint("TOPLEFT", inspectorPane, "TOPLEFT", 2, -2)
+            else
+                subArea:SetPoint("TOPLEFT", charHeader, "BOTTOMLEFT", 2, -4)
+            end
+            subArea:SetPoint("BOTTOMRIGHT", inspectorPane, "BOTTOMRIGHT", -4, 4)
         else
-            wideTabBar:SetPoint("TOPLEFT", charHeader, "BOTTOMLEFT", 4, -4)
-            wideTabBar:SetPoint("TOPRIGHT", charHeader, "BOTTOMRIGHT", -4, -4)
+            wideTabBar:ClearAllPoints()
+            if isAcct then
+                wideTabBar:SetPoint("TOPLEFT", inspectorPane, "TOPLEFT", 4, -6)
+                wideTabBar:SetPoint("TOPRIGHT", inspectorPane, "TOPRIGHT", -4, -6)
+            else
+                wideTabBar:SetPoint("TOPLEFT", charHeader, "BOTTOMLEFT", 4, -4)
+                wideTabBar:SetPoint("TOPRIGHT", charHeader, "BOTTOMRIGHT", -4, -4)
+            end
         end
         overviewFrame:SetShown(activeSub == "overview")
         itemsFrame:SetShown(activeSub == "items")
         gearFrame:SetShown(activeSub == "gear")
-        accountMatrix.frame:SetShown(activeSub == "account")
+        accountMatrix.frame:SetShown(isAcct)
     end
 
     RelayoutItemsToolbar = function()
@@ -8094,13 +8429,14 @@ function SocialPanels:CreateAltsPanel(parent)
             narrowTabBar:ClearAllPoints()
             narrowTabBar:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, -31)
             narrowTabBar:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -2, -31)
-            local narrowBtns = { btnNarrowAlts, btnNarrowOverview, btnNarrowItems, btnNarrowGear }
-            local availW = math.max(240, w - 4 - 12)
+            local narrowBtns = { btnNarrowAlts, btnNarrowOverview, btnNarrowItems, btnNarrowGear, btnNarrowAccount }
+            local gapPx = 3
+            local availW = math.max(240, w - 4 - ((#narrowBtns - 1) * gapPx))
             local widths = {}
             local totalNeed = 0
             for idx, b in ipairs(narrowBtns) do
-                Theme:AutoFitButton(b, 50, 12, math.floor(availW * 0.42))
-                local bw = math.ceil(b:GetWidth() or 58)
+                Theme:AutoFitButton(b, 42, 8, math.floor(availW * 0.36))
+                local bw = math.ceil(b:GetWidth() or 52)
                 widths[idx] = bw
                 totalNeed = totalNeed + bw
             end
@@ -8113,7 +8449,7 @@ function SocialPanels:CreateAltsPanel(parent)
             elseif totalNeed > 0 then
                 local scale = availW / totalNeed
                 for idx = 1, #narrowBtns do
-                    widths[idx] = math.max(44, math.floor(widths[idx] * scale))
+                    widths[idx] = math.max(38, math.floor(widths[idx] * scale))
                 end
             end
             for idx, b in ipairs(narrowBtns) do
@@ -8122,7 +8458,7 @@ function SocialPanels:CreateAltsPanel(parent)
                 if idx == 1 then
                     b:SetPoint("LEFT", narrowTabBar, "LEFT", 0, 0)
                 else
-                    b:SetPoint("LEFT", narrowBtns[idx - 1], "RIGHT", 4, 0)
+                    b:SetPoint("LEFT", narrowBtns[idx - 1], "RIGHT", gapPx, 0)
                 end
             end
 
@@ -8135,7 +8471,11 @@ function SocialPanels:CreateAltsPanel(parent)
             inspectorPane:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -2, 2)
 
             subArea:ClearAllPoints()
-            subArea:SetPoint("TOPLEFT", charHeader, "BOTTOMLEFT", 2, -4)
+            if panel._subTab == "account" then
+                subArea:SetPoint("TOPLEFT", inspectorPane, "TOPLEFT", 2, -2)
+            else
+                subArea:SetPoint("TOPLEFT", charHeader, "BOTTOMLEFT", 2, -4)
+            end
             subArea:SetPoint("BOTTOMRIGHT", inspectorPane, "BOTTOMRIGHT", -4, 4)
         else
             local topPad = isEmbeddedChar and -32 or -2
@@ -8146,7 +8486,11 @@ function SocialPanels:CreateAltsPanel(parent)
             rosterPane:SetWidth(rosterW)
 
             inspectorPane:ClearAllPoints()
-            inspectorPane:SetPoint("TOPLEFT", rosterPane, "TOPRIGHT", 6, 0)
+            if panel._subTab == "account" then
+                inspectorPane:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, topPad)
+            else
+                inspectorPane:SetPoint("TOPLEFT", rosterPane, "TOPRIGHT", 6, 0)
+            end
             inspectorPane:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -2, 2)
 
             subArea:ClearAllPoints()
@@ -8196,6 +8540,7 @@ function SocialPanels:CreateAltsPanel(parent)
     btnNarrowOverview:SetScript("OnClick", function() SwitchSubTab("overview") end)
     btnNarrowItems:SetScript("OnClick", function() SwitchSubTab("items") end)
     btnNarrowGear:SetScript("OnClick", function() SwitchSubTab("gear") end)
+    btnNarrowAccount:SetScript("OnClick", function() SwitchSubTab("account") end)
     btnWideOverview:SetScript("OnClick", function() SwitchSubTab("overview") end)
     btnWideItems:SetScript("OnClick", function() SwitchSubTab("items") end)
     btnWideGear:SetScript("OnClick", function() SwitchSubTab("gear") end)
@@ -8203,30 +8548,14 @@ function SocialPanels:CreateAltsPanel(parent)
     rosterAccountBtn:SetScript("OnClick", function() SwitchSubTab("account") end)
 
     rosterSortBtn:SetScript("OnClick", function(selfBtn)
-        if MenuUtil and MenuUtil.CreateContextMenu then
-            MenuUtil.CreateContextMenu(selfBtn, function(_, root)
-                root:CreateTitle(L["World / Ruleset"])
-                AltUI.PopulateWorldScopeMenu(root, panel)
-                root:CreateDivider()
-                root:CreateTitle(L["Sort Alts"])
-                for _, m in ipairs(SORT_MODES) do
-                    local id = m.id
-                    root:CreateRadio(m.label, function()
-                        return panel._sortBy == id
-                    end, function()
-                        panel._sortBy = id
-                        panel:Refresh(true)
-                    end)
-                end
-            end)
-        else
+        AltUI.OpenWorldSortMenu(panel, selfBtn, SORT_MODES, function()
             local idx = 1
             for i, m in ipairs(SORT_MODES) do
                 if m.id == panel._sortBy then idx = (i % #SORT_MODES) + 1; break end
             end
             panel._sortBy = SORT_MODES[idx].id
             panel:Refresh(true)
-        end
+        end)
     end)
 
     btnArmory:SetScript("OnClick", function()
@@ -8352,6 +8681,7 @@ function SocialPanels:CreateAltsPanel(parent)
             { btnNarrowOverview, "tab" },
             { btnNarrowItems, "tab" },
             { btnNarrowGear, "tab" },
+            { btnNarrowAccount, "tab" },
             { btnWideOverview, "tab" },
             { btnWideItems, "tab" },
             { btnWideGear, "tab" },
@@ -8397,6 +8727,7 @@ function SocialPanels:CreateAltsPanel(parent)
     local function RenderActiveSubView(altData, list, resetScroll)
         local isNarrow = IsNarrowLayout()
         local activeSub = panel._subTab or "overview"
+        local isAcct = (activeSub == "account")
         if not isNarrow and activeSub == "alts" then
             activeSub = "overview"
         end
@@ -8407,7 +8738,7 @@ function SocialPanels:CreateAltsPanel(parent)
             Theme:AutoFitButton(panel._worldBtn, 86, 14, 152)
             Theme:SetButtonActive(panel._worldBtn, scopeArg ~= "pool", "primary")
         end
-        if (not isNarrow) or activeSub == "alts" then
+        if (not isNarrow and not isAcct) or activeSub == "alts" then
             rosterTitleLbl:SetText(("%s (%d)"):format(L["My Alts"], #list))
             Theme:SetButtonText(rosterSortBtn, GetSortLabel(panel._sortBy) .. "  v")
             Theme:AutoFitButton(rosterSortBtn, 72, 12, 126)

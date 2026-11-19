@@ -567,6 +567,10 @@ function UI:ConfirmResetInstances()
 end
 
 local function PrepareTopOverlayModal(m, minLevel)
+    if Theme and Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(m, minLevel)
+        return
+    end
     if not m then return end
     if m.GetParent and m:GetParent() ~= UIParent then
         m:SetParent(UIParent)
@@ -993,7 +997,7 @@ end
 local function OpenEventModal(prefillTitle, prefillWhen, prefillCat)
     if not eventModalFrame then
         local m = CreateFrame("Frame", "SocialCentralEventModal", UIParent, "BackdropTemplate")
-        m:SetSize(536, 444)
+        m:SetSize(536, 472)
         m:SetPoint("CENTER")
         PrepareTopOverlayModal(m, 840)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
@@ -1170,6 +1174,22 @@ local function OpenEventModal(prefillTitle, prefillWhen, prefillCat)
         gchatLbl:SetText(L["Also pre-fill Guild Chat (/g) on Save"])
         m.gchatCheck = gchatCb
 
+        local allyCb = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
+        allyCb:SetSize(22, 22)
+        allyCb:SetPoint("TOPLEFT", gchatCb, "BOTTOMLEFT", 0, -2)
+        local allyLbl = allyCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        allyLbl:SetPoint("LEFT", allyCb, "RIGHT", 4, 0)
+        allyLbl:SetText(L["Also share with mutually authorized Allied Guilds"])
+        m.allyShareCheck = allyCb
+        m.allyShareLbl = allyLbl
+        AddHelp(
+            m,
+            allyLbl,
+            L["Help: Shared Allied Guild Events"],
+            L["Shares this Event Call and its Tank/Healer/DPS signups with Allied Guilds that have mutually authorized event sharing."],
+            L["Requires both your guild leadership (or delegated Alliance Manager) and the Allied Guild's leadership to enable event sharing in Diplomacy."]
+        )
+
         local syncTip = m:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
         syncTip:SetPoint("BOTTOMLEFT", 16, 18)
         syncTip:SetJustifyH("LEFT")
@@ -1199,6 +1219,7 @@ local function OpenEventModal(prefillTitle, prefillWhen, prefillCat)
             if ns.Clan then
                 local titleStr = titleInput:GetText() or ""
                 local whenStr = whenInput:GetText() or ""
+                local allowAllies = (not m.allyShareCheck or m.allyShareCheck:GetChecked()) and true or false
                 local ok, createdEvt = ns.Clan:CreateEventCall(
                     m._cat,
                     titleStr,
@@ -1207,12 +1228,21 @@ local function OpenEventModal(prefillTitle, prefillWhen, prefillCat)
                     m.healIn:GetText(),
                     m.dpsIn:GetText(),
                     m.lvlIn:GetText(),
-                    m._myRole
+                    m._myRole,
+                    allowAllies
                 )
                 if ok then
                     if m.calCheck and m.calCheck:GetChecked() then
-                        local calHour = m._calHour or tonumber(whenStr:match("^(%d+)%s*:")) or 20
-                        local calOk, calErr = ns.Clan:PublishGameCalendarEvent(m._cat, titleStr, whenStr, 0, calHour, 0)
+                        local dayOff, calH, calM = 0, (m._calHour or 20), 0
+                        if ns.Clan.ParseEventWhenDateTime then
+                            local parsedOff, parsedH, parsedM = ns.Clan:ParseEventWhenDateTime(whenStr)
+                            dayOff = parsedOff or 0
+                            calH = parsedH or calH
+                            calM = parsedM or 0
+                        else
+                            calH = tonumber(whenStr:match("^(%d+)%s*:")) or calH
+                        end
+                        local calOk, calErr = ns.Clan:PublishGameCalendarEvent(m._cat, titleStr, whenStr, dayOff, calH, calM)
                         if calOk then
                             ns:Print(L["Posted event to both SocialCentral Clan and WoW Guild Calendar."])
                         elseif calErr then
@@ -1299,6 +1329,13 @@ local function OpenEventModal(prefillTitle, prefillWhen, prefillCat)
     eventModalFrame.calCheck:SetEnabled((sum and sum.canEditCalendar) and true or false)
     if eventModalFrame.gchatCheck then
         eventModalFrame.gchatCheck:SetChecked(false)
+    end
+    local mutualList = (ns.Clan and ns.Clan.GetMutuallyAuthorizedAlliedGuilds) and ns.Clan:GetMutuallyAuthorizedAlliedGuilds() or {}
+    if eventModalFrame.allyShareCheck then
+        eventModalFrame.allyShareCheck:SetChecked(true)
+    end
+    if eventModalFrame.allyShareLbl then
+        eventModalFrame.allyShareLbl:SetText(string.format(L["Also share with mutually authorized Allied Guilds (%d active)"], #mutualList))
     end
     if eventModalFrame.syncTip then
         local syncOn = ns.db and ns.db.settings and ns.db.settings.clanSync == true
@@ -1514,7 +1551,7 @@ end
 local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
     if not diplomacyModalFrame then
         local m = CreateFrame("Frame", "SocialCentralDiplomacyModal", UIParent, "BackdropTemplate")
-        m:SetSize(486, 296)
+        m:SetSize(486, 326)
         m:SetPoint("CENTER")
         PrepareTopOverlayModal(m, 840)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
@@ -1584,6 +1621,16 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
                 for _, item in ipairs(m._stanceBtns) do
                     Theme:SetButtonActive(item.btn, m._stance == item.id, item.id == "ENEMY" and "danger" or "default")
                 end
+                if m.shareEventsCheck then
+                    local canToggleShare = (m._stance == "ALLY") and (m._canShareEvents == true)
+                    m.shareEventsCheck:SetEnabled(canToggleShare)
+                    if m.shareEventsLbl then
+                        m.shareEventsLbl:SetAlpha(canToggleShare and 1.0 or 0.45)
+                    end
+                end
+                if m.btnSave then
+                    m.btnSave:SetEnabled((m._canDip == true) or (m._canShareOnly == true and m._stance == "ALLY"))
+                end
             end)
             table.insert(m._stanceBtns, { id = def.id, btn = sb })
             prevS = sb
@@ -1598,9 +1645,28 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
         reasonIn:SetPoint("TOPRIGHT", -16, -180)
         m.reasonIn = reasonIn
 
+        local shareCb = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
+        shareCb:SetSize(22, 22)
+        shareCb:SetPoint("TOPLEFT", 14, -210)
+        local shareLbl = shareCb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        shareLbl:SetPoint("LEFT", shareCb, "RIGHT", 4, 0)
+        shareLbl:SetWidth(392)
+        shareLbl:SetJustifyH("LEFT")
+        shareLbl:SetWordWrap(true)
+        shareLbl:SetText(L["Authorize shared Calendar & Events with this Allied Guild (requires both guilds)"])
+        m.shareEventsCheck = shareCb
+        m.shareEventsLbl = shareLbl
+        AddHelp(
+            m,
+            shareLbl,
+            L["Help: Allied Event Sharing Authorization"],
+            L["Authorizes your guild to exchange Event Calls and calendar signups with this Allied Guild."],
+            L["Sharing only becomes active after leadership or an appointed manager in BOTH guilds enables this authorization."]
+        )
+
         local tipFs = m:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        tipFs:SetPoint("TOPLEFT", 16, -214)
-        tipFs:SetPoint("TOPRIGHT", -16, -214)
+        tipFs:SetPoint("TOPLEFT", 16, -242)
+        tipFs:SetPoint("TOPRIGHT", -16, -242)
         tipFs:SetJustifyH("LEFT")
         tipFs:SetWordWrap(true)
         tipFs:SetText(L["Players from Enemy or Ally clans appearing on your screen will trigger Spotter alerts & Target Radar."])
@@ -1615,7 +1681,8 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
         Theme:AutoFitButton(btnSave, 108, 16, 175)
         btnSave:SetPoint("RIGHT", btnCancel, "LEFT", -8, 0)
         local function CommitDip()
-            if ns.Clan and ns.Clan:SetGuildStance(m.guildIn:GetText(), m._stance, m.reasonIn:GetText(), m._prefillFaction) then
+            local allowEvtShare = (m._stance == "ALLY" and m.shareEventsCheck and m.shareEventsCheck:GetChecked()) and true or false
+            if ns.Clan and ns.Clan:SetGuildStance(m.guildIn:GetText(), m._stance, m.reasonIn:GetText(), m._prefillFaction, allowEvtShare) then
                 m:Hide()
             end
         end
@@ -1630,9 +1697,23 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
     if ns.Clan and ns.Clan.CanManageDiplomacy then
         canDip, authSummary = ns.Clan:CanManageDiplomacy()
     end
+    local canShare, shareSummary = canDip, authSummary
+    if ns.Clan and ns.Clan.CanManageAlliedEventSharing then
+        canShare, shareSummary = ns.Clan:CanManageAlliedEventSharing()
+    end
 
     diplomacyModalFrame._prefillFaction = prefillFaction
     diplomacyModalFrame._stance = (prefillStance == "ALLY" or prefillStance == "NEUTRAL") and prefillStance or "ENEMY"
+    local existingEntry = nil
+    if prefillGuild and ns.Clan and ns.Clan.LookupGuildStance then
+        local _, entry = ns.Clan:LookupGuildStance(prefillGuild)
+        existingEntry = entry
+    end
+    local canShareOnly = (not canDip) and (canShare == true) and (existingEntry ~= nil and existingEntry.stance == "ALLY")
+    diplomacyModalFrame._canDip = (canDip == true)
+    diplomacyModalFrame._canShareOnly = canShareOnly
+    diplomacyModalFrame._canShareEvents = (canDip == true) or (canShare == true)
+
     PrepareTopOverlayModal(diplomacyModalFrame, 840)
     Theme:ApplyBackdrop(diplomacyModalFrame, "window")
     Theme:StyleButton(diplomacyModalFrame.topCloseBtn, "default")
@@ -1644,18 +1725,24 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
         if item.btn.SetEnabled then item.btn:SetEnabled(canDip) end
     end
     diplomacyModalFrame.guildIn:SetText(prefillGuild or "")
-    local existingReason = ""
-    if prefillGuild and ns.Clan and ns.Clan.LookupGuildStance then
-        local _, entry = ns.Clan:LookupGuildStance(prefillGuild)
-        if entry and entry.reason then existingReason = entry.reason end
-    end
+    local existingReason = (existingEntry and existingEntry.reason) or ""
     diplomacyModalFrame.reasonIn:SetText(existingReason)
     diplomacyModalFrame.guildIn:SetEnabled(canDip)
     diplomacyModalFrame.reasonIn:SetEnabled(canDip)
     diplomacyModalFrame.tgtGuildBtn:SetEnabled(canDip)
-    diplomacyModalFrame.btnSave:SetEnabled(canDip)
+    if diplomacyModalFrame.shareEventsCheck then
+        diplomacyModalFrame.shareEventsCheck:SetChecked((existingEntry and existingEntry.shareEvents == true) and true or false)
+        local shareEnabled = (diplomacyModalFrame._stance == "ALLY") and (diplomacyModalFrame._canShareEvents == true)
+        diplomacyModalFrame.shareEventsCheck:SetEnabled(shareEnabled)
+        if diplomacyModalFrame.shareEventsLbl then
+            diplomacyModalFrame.shareEventsLbl:SetAlpha(shareEnabled and 1.0 or 0.45)
+        end
+    end
+    diplomacyModalFrame.btnSave:SetEnabled(canDip or (canShareOnly and diplomacyModalFrame._stance == "ALLY"))
     if canDip then
         diplomacyModalFrame.tipFs:SetText("|cff3fb950" .. L["Diplomacy Authority: %s"]:format(authSummary) .. "|r  ·  " .. L["Players from Enemy or Ally clans appearing on your screen will trigger Spotter alerts & Target Radar."])
+    elseif canShareOnly then
+        diplomacyModalFrame.tipFs:SetText("|cff58a6ff" .. L["Authorized to toggle shared Allied Events only (%s)."]:format(shareSummary) .. "|r")
     else
         diplomacyModalFrame.tipFs:SetText("|cffff6666" .. L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authSummary) .. "|r")
     end
@@ -1833,7 +1920,7 @@ local function OpenAllianceManagementModal()
             row.nameFs:SetText(item.displayName or "?")
 
             local rankTag = (item.rank and item.rank ~= "") and (" · " .. item.rank) or ""
-            local lvlTag = item.level and item.level > 0 and ("Lv " .. item.level) or ""
+            local lvlTag = item.level and item.level > 0 and L["Lv %d"]:format(item.level) or ""
             row.metaFs:SetText(lvlTag .. rankTag)
 
             local isAuth = (m._accessMode == "ALL") or item.authorized
@@ -3191,13 +3278,19 @@ local function OpenEventMenu(anchor, evt)
         local myParsed = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
         local isCreator = (myParsed and evt.creatorKey and myParsed.lookupKey == evt.creatorKey)
             or (myParsed and evt.creator and (myParsed.displayName == evt.creator or myParsed.firstName:lower() == evt.creator:lower()))
-        local canManage = (isCreator or (ns.Clan and ns.Clan.CanModerateEvents and ns.Clan:CanModerateEvents())) == true
+        local canManage = (isCreator or ((not evt.isAlliedEvent) and ns.Clan and ns.Clan.CanModerateEvents and ns.Clan:CanModerateEvents())) == true
 
         root:CreateDivider()
         if canManage then
             root:CreateButton(evt.isOpen == false and L["Reopen Event"] or L["Close Event"], function()
                 ns.Clan:ToggleEventOpen(evt.id)
             end)
+            if not evt.isAlliedEvent and ns.Clan and ns.Clan.SetEventAlliedSharing then
+                local isShared = evt.shareAllies ~= false
+                root:CreateButton(isShared and L["Stop Sharing with Allied Guilds"] or L["Share with Authorized Allied Guilds"], function()
+                    ns.Clan:SetEventAlliedSharing(evt.id, not isShared)
+                end)
+            end
             root:CreateButton(L["Reannounce Event"], function()
                 ns.Clan:ReannounceEvent(evt.id)
             end)
@@ -3360,7 +3453,24 @@ local function CreateEventRow(parent, _, rowHeight)
         end
         local isCal = evt._isCalendarEvent or (clanEventFilter == "calendar")
         if isCal then
-            if mouseButton == "LeftButton" then
+            if MenuUtil and MenuUtil.CreateContextMenu then
+                MenuUtil.CreateContextMenu(self, function(_, root)
+                    root:CreateTitle(evt.title or L["Calendar"])
+                    root:CreateButton(L["Promote to Shared Event Call (+ Signups)"], function()
+                        local nowTm = date("*t", time())
+                        local mo = evt.month or (nowTm and nowTm.month) or 1
+                        local whenPrefill = string.format("%02d/%02d %02d:%02d", evt.monthDay or 1, mo, evt.hour or 20, evt.minute or 0)
+                        OpenEventModal(evt.title, whenPrefill, evt.isGuild and "GUILD" or "RAID")
+                    end)
+                    root:CreateButton(L["WoW Calendar"], function()
+                        OpenCopyModal(
+                            "/calendar",
+                            L["Copy /calendar Command (Ctrl+C)"],
+                            L["Blizzard protects direct opening of the Calendar panel from addons. Copy '/calendar' below or click the Calendar icon on your Minimap."]
+                        )
+                    end)
+                end)
+            elseif mouseButton == "LeftButton" then
                 OpenCopyModal(
                     "/calendar",
                     L["Copy /calendar Command (Ctrl+C)"],
@@ -3392,11 +3502,15 @@ local function CreateEventRow(parent, _, rowHeight)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:ClearLines()
             GameTooltip:AddLine(ev.title or "", 1.0, 0.85, 0.25, true)
-            GameTooltip:AddLine(string.format("%02d  ·  %02d:%02d", ev.monthDay or 0, ev.hour or 0, ev.minute or 0), 0.78, 0.86, 0.96)
+            if ev.month then
+                GameTooltip:AddLine(string.format("%02d/%02d  ·  %02d:%02d", ev.monthDay or 0, ev.month or 0, ev.hour or 0, ev.minute or 0), 0.78, 0.86, 0.96)
+            else
+                GameTooltip:AddLine(string.format("%02d  ·  %02d:%02d", ev.monthDay or 0, ev.hour or 0, ev.minute or 0), 0.78, 0.86, 0.96)
+            end
             if ev.invitedBy and ev.invitedBy ~= "" then
                 GameTooltip:AddLine(L["Host"] .. ": " .. ev.invitedBy, 0.85, 0.88, 0.94)
             end
-            GameTooltip:AddLine(L["Click to open Blizzard Game Calendar"], 0.45, 0.85, 0.55)
+            GameTooltip:AddLine(L["Click to promote to Shared Event Call or open WoW Calendar"], 0.45, 0.85, 0.55, true)
             GameTooltip:Show()
             return
         end
@@ -3407,11 +3521,26 @@ local function CreateEventRow(parent, _, rowHeight)
             GameTooltip:ClearLines()
             GameTooltip:AddLine((CAT_LABELS[evt.category] or evt.category) .. ": " .. (evt.title or ""), 0.35, 0.72, 1.0, true)
             GameTooltip:AddLine((evt.whenText or L["Now"]) .. "  ·  " .. (evt.creator or ""), 0.90, 0.85, 0.55)
+            if evt.isAlliedEvent then
+                GameTooltip:AddLine(string.format(L["Origin Guild: <%s>"], evt.originGuild or L["Allied Clans"]), 0.25, 0.85, 0.45)
+            else
+                local mutualAllies = ns.Clan.GetMutuallyAuthorizedAlliedGuilds and ns.Clan:GetMutuallyAuthorizedAlliedGuilds() or {}
+                if evt.shareAllies == false then
+                    GameTooltip:AddLine(L["Guild-internal event (Allied sharing disabled)"], 0.65, 0.68, 0.75)
+                elseif #mutualAllies > 0 then
+                    GameTooltip:AddLine(L["Shared with mutually authorized Allied Guilds"], 0.25, 0.85, 0.45)
+                end
+            end
             GameTooltip:AddLine(" ")
             GameTooltip:AddLine(L["Signed Up (%d)"]:format(#sum.signups), 1, 1, 1)
+            local myGuildName = (ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name) or ""
             for _, s in ipairs(sum.signups) do
                 local r, g, b = Compat.ClassColor(s.classFile)
-                GameTooltip:AddDoubleLine(s.name or "", ROLE_LABELS[s.role] or s.role, r, g, b, 0.78, 0.84, 0.92)
+                local dispName = s.name or ""
+                if s.guild and s.guild ~= "" and (evt.isAlliedEvent or (myGuildName ~= "" and s.guild ~= myGuildName)) then
+                    dispName = dispName .. " <" .. s.guild .. ">"
+                end
+                GameTooltip:AddDoubleLine(dispName, ROLE_LABELS[s.role] or s.role, r, g, b, 0.78, 0.84, 0.92)
             end
             GameTooltip:Show()
         end
@@ -3447,6 +3576,19 @@ local function UpdateEventRow(row, evt, idx, palette)
 
     local isMotd = evt._isMotdSuggestion == true
     local isCal = evt._isCalendarEvent or (clanEventFilter == "calendar")
+    local barKey = isMotd and "motd" or (isCal and "cal" or (evt.isAlliedEvent and "allied" or ((evt.isOpen == false) and "closed" or "own")))
+    if row.evtBar and row._lastBarColorKey ~= barKey then
+        row._lastBarColorKey = barKey
+        if barKey == "allied" then
+            row.evtBar:SetColorTexture(0.25, 0.85, 0.45, 0.92)
+        elseif barKey == "cal" then
+            row.evtBar:SetColorTexture(0.35, 0.75, 1.0, 0.88)
+        elseif barKey == "closed" then
+            row.evtBar:SetColorTexture(0.96, 0.28, 0.28, 0.82)
+        else
+            row.evtBar:SetColorTexture(0.95, 0.76, 0.24, 0.85)
+        end
+    end
     local calKey = isMotd and "motd" or (isCal and "cal" or "evt")
     if isMotd then
         if row._lastCalMode ~= calKey then
@@ -3457,10 +3599,10 @@ local function UpdateEventRow(row, evt, idx, palette)
             row.btnDps:Hide()
             row.btnDel:Hide()
             row.titleText:ClearAllPoints()
-            row.titleText:SetPoint("TOPLEFT", 8, -7)
+            row.titleText:SetPoint("TOPLEFT", 10, -7)
             row.titleText:SetPoint("RIGHT", row, "RIGHT", -8, 0)
             row.subText:ClearAllPoints()
-            row.subText:SetPoint("BOTTOMLEFT", 8, 7)
+            row.subText:SetPoint("BOTTOMLEFT", 10, 7)
             row.subText:SetPoint("RIGHT", row, "RIGHT", -8, 0)
         end
         row.titleText:SetText("|cfff2c94c[" .. L["MOTD"] .. "]|r " .. (evt.title or ""))
@@ -3476,10 +3618,10 @@ local function UpdateEventRow(row, evt, idx, palette)
             row.btnDps:Hide()
             row.btnDel:Hide()
             row.titleText:ClearAllPoints()
-            row.titleText:SetPoint("TOPLEFT", 8, -7)
+            row.titleText:SetPoint("TOPLEFT", 10, -7)
             row.titleText:SetPoint("RIGHT", row, "RIGHT", -8, 0)
             row.subText:ClearAllPoints()
-            row.subText:SetPoint("BOTTOMLEFT", 8, 7)
+            row.subText:SetPoint("BOTTOMLEFT", 10, 7)
             row.subText:SetPoint("RIGHT", row, "RIGHT", -8, 0)
         end
 
@@ -3500,16 +3642,24 @@ local function UpdateEventRow(row, evt, idx, palette)
         row.btnHeal:Show()
         row.btnDps:Show()
         row.titleText:ClearAllPoints()
-        row.titleText:SetPoint("TOPLEFT", 8, -7)
+        row.titleText:SetPoint("TOPLEFT", 10, -7)
         row.titleText:SetPoint("RIGHT", row.btnTank, "LEFT", -6, 0)
         row.subText:ClearAllPoints()
-        row.subText:SetPoint("BOTTOMLEFT", 8, 7)
+        row.subText:SetPoint("BOTTOMLEFT", 10, 7)
         row.subText:SetPoint("RIGHT", row.btnTank, "LEFT", -6, 0)
     end
 
     local catLabel = CAT_LABELS[evt.category] or evt.category or ""
     local closedTag = (evt.isOpen == false) and ("|cffff6b6b[" .. L["Closed"] .. "]|r ") or ""
-    row.titleText:SetText(closedTag .. "|cff58a6ff[" .. catLabel .. "]|r " .. (evt.title or ""))
+    local allyPrefix = evt.isAlliedEvent and ("|cff40d973[" .. string.format(L["ALLY: %s"], evt.originGuild or L["Ally Clan"]) .. "]|r ") or ""
+    local sharedBadge = ""
+    if not evt.isAlliedEvent and evt.shareAllies ~= false and ns.Clan and ns.Clan.GetMutuallyAuthorizedAlliedGuilds then
+        local mutualAllies = ns.Clan:GetMutuallyAuthorizedAlliedGuilds()
+        if mutualAllies and #mutualAllies > 0 then
+            sharedBadge = "  |cff40d973[" .. L["+Allies"] .. "]|r"
+        end
+    end
+    row.titleText:SetText(closedTag .. allyPrefix .. "|cff58a6ff[" .. catLabel .. "]|r " .. (evt.title or "") .. sharedBadge)
 
     local sum = ns.Clan and ns.Clan:GetSignupSummary(evt) or { TANK = 0, HEALER = 0, DPS = 0 }
     local slots = string.format(
@@ -3532,7 +3682,7 @@ local function UpdateEventRow(row, evt, idx, palette)
 
     local isCreator = (myParsed and evt.creatorKey and myParsed.lookupKey == evt.creatorKey)
         or (myParsed and evt.creator and (myParsed.displayName == evt.creator or myParsed.firstName:lower() == evt.creator:lower()))
-    local canManage = (isCreator or (ns.Clan and ns.Clan.CanModerateEvents and ns.Clan:CanModerateEvents())) == true
+    local canManage = (isCreator or ((not evt.isAlliedEvent) and ns.Clan and ns.Clan.CanModerateEvents and ns.Clan:CanModerateEvents())) == true
 
     if row._lastCanManage ~= canManage then
         row._lastCanManage = canManage
@@ -3639,8 +3789,26 @@ local function CreatePeerRow(parent, _, rowHeight)
                     if ns.Clan and ns.Clan.CanManageDiplomacy then
                         canDip, authSummary = ns.Clan:CanManageDiplomacy()
                     end
+                    local canShare, shareSummary = canDip, authSummary
+                    if ns.Clan and ns.Clan.CanManageAlliedEventSharing then
+                        canShare, shareSummary = ns.Clan:CanManageAlliedEventSharing()
+                    end
                     MenuUtil.CreateContextMenu(self, function(_, root)
                         root:CreateTitle(entry.name or "?")
+                        if entry.stance == "ALLY" and canShare then
+                            local st = (ns.Clan and ns.Clan.GetAlliedEventShareState) and ns.Clan:GetAlliedEventShareState(entry.name) or { myApproved = false }
+                            root:CreateButton(st.myApproved and L["Revoke Shared Events with Ally"] or L["Authorize Shared Events with Ally"], function()
+                                if ns.Clan and ns.Clan.SetAlliedEventSharing then
+                                    ns.Clan:SetAlliedEventSharing(entry.name, not st.myApproved)
+                                end
+                            end)
+                            root:CreateButton(L["Send / Refresh Authorization Handshake"], function()
+                                if ns.Clan and ns.Clan.SendAlliedEventHandshake then
+                                    ns.Clan:SendAlliedEventHandshake(entry.name, true)
+                                end
+                            end)
+                            root:CreateDivider()
+                        end
                         if canDip then
                             root:CreateButton(L["Edit Diplomacy Entry"], function()
                                 OpenDiplomacyModal(entry.name, entry.stance, entry.faction)
@@ -3661,6 +3829,8 @@ local function CreatePeerRow(parent, _, rowHeight)
                                     end,
                                 })
                             end)
+                        elseif canShare and entry.stance == "ALLY" then
+                            root:CreateTitle("|cff58a6ff" .. L["Authorized to toggle shared Allied Events only (%s)."]:format(shareSummary) .. "|r")
                         else
                             root:CreateTitle("|cff8b949e" .. L["View Only (Leadership Controlled)"] .. "|r")
                             root:CreateTitle("|cff9da7b5" .. L["Diplomacy Authority: %s"]:format(authSummary) .. "|r")
@@ -3997,9 +4167,26 @@ local function UpdatePeerRow(row, item, idx, palette)
         local timeTxt = "|cff8b949e" .. Compat.FormatRelativeTime(item.updatedAt, L) .. "|r"
         SyncPeerRowLayout(row, false, timeTxt)
         local facStr = (item.faction and item.faction ~= "") and ("  |cff8b949e(" .. item.faction .. ")|r") or ""
-        row.nameText:SetText(string.format("%s[%s]|r  |cffffffff<%s>|r%s", tagHex, stanceLbl, item.name or "?", facStr))
+        local evtShareBadge = ""
+        local peerByStr = ""
+        if item.stance == "ALLY" and ns.Clan and ns.Clan.GetAlliedEventShareState then
+            local st = ns.Clan:GetAlliedEventShareState(item.name)
+            if st.mutual then
+                evtShareBadge = "  |cff40d973[" .. L["Events: Mutual"] .. "]|r"
+            elseif st.myApproved and not st.peerApproved then
+                evtShareBadge = "  |cffffd24d[" .. L["Events: Awaiting Ally"] .. "]|r"
+            elseif not st.myApproved and st.peerApproved then
+                evtShareBadge = "  |cff58a6ff[" .. L["Events: Ally Requested!"] .. "]|r"
+            else
+                evtShareBadge = "  |cff8b949e[" .. L["Events: Internal Only"] .. "]|r"
+            end
+            if st.peerApproved and st.peerApprovedBy and st.peerApprovedBy ~= "" then
+                peerByStr = "  ·  " .. string.format(L["Ally auth: %s"], st.peerApprovedBy)
+            end
+        end
+        row.nameText:SetText(string.format("%s[%s]|r  |cffffffff<%s>|r%s%s", tagHex, stanceLbl, item.name or "?", facStr, evtShareBadge))
         local reasonText = (item.reason and item.reason ~= "") and item.reason or L["No note"]
-        row.subText:SetText(string.format("%s  ·  %s: %s", reasonText, L["Updated by"], item.addedBy or "?"))
+        row.subText:SetText(string.format("%s  ·  %s: %s%s", reasonText, L["Updated by"], item.addedBy or "?", peerByStr))
         return
     elseif view == "hierarchy" then
         local rIdx = item.rankIndex or 0
@@ -4246,6 +4433,7 @@ do
         clanPanel.guildInviteBtn,
         clanPanel.clanFilterBtn,
         clanPanel.evtFilterBtn,
+        clanPanel.evtAllyBtn,
         clanPanel.newEventBtn,
         clanPanel.dipFilterBtn,
         clanPanel.dipAddBtn,
@@ -4296,6 +4484,8 @@ do
         if clanPanel.evtFilterBtn then
             local evtLabels = {
                 all = L["All"],
+                guild = L["My Guild Only"],
+                allied = L["Allied Guilds Only"],
                 open = L["Open Only"],
                 need_tank = L["Need T"],
                 need_heal = L["Need H"],
@@ -4303,7 +4493,14 @@ do
             }
             Theme:SetButtonText(clanPanel.evtFilterBtn, (evtLabels[clanEventFilter] or L["All"]) .. "  v")
             Theme:SetButtonActive(clanPanel.evtFilterBtn, clanEventFilter ~= "all", "default")
-            Theme:AutoFitButton(clanPanel.evtFilterBtn, 86, 14, 150)
+            Theme:AutoFitButton(clanPanel.evtFilterBtn, 86, 14, 165)
+        end
+        if clanPanel.evtAllyBtn and ns.Clan then
+            local allAllies = (ns.Clan.GetDiplomacyList and ns.Clan:GetDiplomacyList("ALLY")) or {}
+            local mutAllies = (ns.Clan.GetMutuallyAuthorizedAlliedGuilds and ns.Clan:GetMutuallyAuthorizedAlliedGuilds()) or {}
+            Theme:SetButtonText(clanPanel.evtAllyBtn, string.format(L["Allies (%d/%d)"], #mutAllies, #allAllies) .. "  v")
+            Theme:SetButtonActive(clanPanel.evtAllyBtn, #mutAllies > 0, "default")
+            Theme:AutoFitButton(clanPanel.evtAllyBtn, 86, 14, 155)
         end
     end
     if clanPanel.profToolBar then
@@ -5341,10 +5538,12 @@ local function CreateClanPanel(parent)
     eventsToolBar:Hide()
 
     local evtFilterBtn = Theme:CreateButton(eventsToolBar, 118, 22, L["All"] .. "  v", "default")
-    Theme:AutoFitButton(evtFilterBtn, 86, 14, 150)
+    Theme:AutoFitButton(evtFilterBtn, 86, 14, 165)
     evtFilterBtn:SetScript("OnClick", function(self)
         local evtFilters = {
             { id = "all", label = L["All"] },
+            { id = "guild", label = L["My Guild Only"] },
+            { id = "allied", label = L["Allied Guilds Only"] },
             { id = "open", label = L["Open Only"] },
             { id = "need_tank", label = L["Need T"] },
             { id = "need_heal", label = L["Need H"] },
@@ -5380,6 +5579,65 @@ local function CreateClanPanel(parent)
     end)
     themeTargets[#themeTargets + 1] = { btn = evtFilterBtn, variant = "default" }
 
+    local evtAllyBtn = Theme:CreateButton(eventsToolBar, 118, 22, L["Allies (%d/%d)"]:format(0, 0) .. "  v", "default")
+    Theme:AutoFitButton(evtAllyBtn, 86, 14, 155)
+    evtAllyBtn:SetScript("OnClick", function(self)
+        if not (MenuUtil and MenuUtil.CreateContextMenu and ns.Clan) then
+            clanRightView = "diplomacy"
+            UpdateClanPanel()
+            return
+        end
+        local allies = (ns.Clan.GetDiplomacyList and ns.Clan:GetDiplomacyList("ALLY")) or {}
+        local canShare, authSum = false, L["Guild Leader Only"]
+        if ns.Clan.CanManageAlliedEventSharing then
+            canShare, authSum = ns.Clan:CanManageAlliedEventSharing()
+        end
+        MenuUtil.CreateContextMenu(self, function(_, root)
+            root:CreateTitle(L["Allied Guild Shared Events"])
+            root:CreateTitle("|cff9da7b5" .. L["Requires approval in BOTH guilds (%s)"]:format(authSum) .. "|r")
+            root:CreateDivider()
+            if #allies == 0 then
+                root:CreateTitle("|cff8b949e" .. L["No Allied Guilds registered yet."] .. "|r")
+            else
+                for _, ally in ipairs(allies) do
+                    local aName = ally.name or ally.key or "?"
+                    local st = ns.Clan:GetAlliedEventShareState(aName)
+                    local statusTag = st.mutual and ("|cff40d973[" .. L["Mutual"] .. "]|r")
+                        or (st.myApproved and ("|cffffd24d[" .. L["Awaiting Ally"] .. "]|r")
+                        or (st.peerApproved and ("|cff58a6ff[" .. L["Ally Requested"] .. "]|r")
+                        or ("|cff8b949e[" .. L["Off"] .. "]|r")))
+                    local rowLabel = "<" .. aName .. ">  " .. statusTag
+                    if canShare then
+                        root:CreateCheckbox(rowLabel, function()
+                            return ns.Clan:GetAlliedEventShareState(aName).myApproved == true
+                        end, function()
+                            local cur = ns.Clan:GetAlliedEventShareState(aName).myApproved == true
+                            ns.Clan:SetAlliedEventSharing(aName, not cur)
+                        end)
+                    else
+                        root:CreateTitle(rowLabel)
+                    end
+                end
+            end
+            root:CreateDivider()
+            root:CreateButton(L["Sync Allied Events Now"], function()
+                if ns.Clan and ns.Clan.RequestAlliedEventsSync then
+                    ns.Clan:RequestAlliedEventsSync()
+                end
+                UpdateClanPanel()
+            end)
+            root:CreateButton(L["Open Guild Diplomacy"], function()
+                clanRightView = "diplomacy"
+                UpdateClanPanel()
+            end)
+            root:CreateButton(L["Hierarchy & Ranks"], function()
+                clanRightView = "hierarchy"
+                UpdateClanPanel()
+            end)
+        end)
+    end)
+    themeTargets[#themeTargets + 1] = { btn = evtAllyBtn, variant = "default" }
+
     local evtRefreshBtn = Theme:CreateButton(eventsToolBar, 82, 22, L["Refresh"], "default")
     Theme:AutoFitButton(evtRefreshBtn, 68, 14, 120)
     evtRefreshBtn:SetScript("OnClick", function()
@@ -5387,8 +5645,13 @@ local function CreateClanPanel(parent)
             if ns.Clan.RefreshGameCalendar then
                 ns.Clan:RefreshGameCalendar(true)
             end
-            if ns.db and ns.db.settings and ns.db.settings.clanSync and ns.Clan.RequestClanSync then
-                ns.Clan:RequestClanSync()
+            if ns.db and ns.db.settings and ns.db.settings.clanSync then
+                if ns.Clan.RequestClanSync then
+                    ns.Clan:RequestClanSync()
+                end
+                if ns.Clan.RequestAlliedEventsSync then
+                    ns.Clan:RequestAlliedEventsSync()
+                end
             end
         end
         UpdateClanPanel()
@@ -5873,7 +6136,7 @@ local function CreateClanPanel(parent)
     eventsScroll.container:SetAllPoints()
     eventsScroll.container:Hide()
 
-    local evtItems = { evtFilterBtn, evtRefreshBtn, newEventBtn }
+    local evtItems = { evtFilterBtn, evtAllyBtn, evtRefreshBtn, newEventBtn }
     local profItems = { profViewBtn, profFilterBtn, profSourceBtn, profBtn, locksRefreshBtn, profSearch }
     local dipItems = { dipFilterBtn, dipAddBtn, dipAuthBtn }
     local hierItems = { hierDipBtn, hierRulesBtn, hierAllyBtn }
@@ -6007,6 +6270,7 @@ local function CreateClanPanel(parent)
     panel.peersToolBar = peersToolBar
     panel.eventsToolBar = eventsToolBar
     panel.evtFilterBtn = evtFilterBtn
+    panel.evtAllyBtn = evtAllyBtn
     panel.profToolBar = profToolBar
     panel.profViewBtn = profViewBtn
     panel.dipToolBar = dipToolBar
@@ -6470,6 +6734,12 @@ local function BuildSingleEmbedContainer(tabKey)
     content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
     f.content = content
 
+    f:HookScript("OnShow", function(selfFrm)
+        if not selfFrm._active or not selfFrm._host then
+            selfFrm:Hide()
+        end
+    end)
+
     f:HookScript("OnSizeChanged", function()
         if spec.reflowPanel then
             spec.reflowPanel()
@@ -6487,6 +6757,9 @@ local function BuildSingleEmbedContainer(tabKey)
         local prevHost = f._host
         f._active = false
         f._host = nil
+        if f:IsShown() then
+            f:Hide()
+        end
         local panel = spec.getPanel and spec.getPanel()
         if panel and frame and frame.content then
             panel:SetParent(frame.content)
@@ -6498,11 +6771,17 @@ local function BuildSingleEmbedContainer(tabKey)
             if prevHost and UI.RestoreEmbeddedHostUI then
                 UI:RestoreEmbeddedHostUI(prevHost)
             end
-            if prevHost and prevHost ~= UIParent and C_Timer and C_Timer.After then
+            local inCombatNow = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+            if not inCombatNow and f:GetParent() ~= UIParent then
+                f:SetParent(UIParent)
+            elseif prevHost and prevHost ~= UIParent and C_Timer and C_Timer.After then
                 C_Timer.After(0, function()
                     if f._embedSeq ~= seq then return end
-                    local inCombatNow = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-                    if f and not f._active and not f:IsShown() and not inCombatNow and f:GetParent() == prevHost then
+                    local inCombatTimer = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+                    if f and not f._active and not inCombatTimer and f:GetParent() == prevHost then
+                        if f:IsShown() then
+                            f:Hide()
+                        end
                         f:SetParent(UIParent)
                     end
                 end)
@@ -8175,6 +8454,9 @@ local function BuildMainFrame()
 
     -- Use HookScript so Theme:MakeMovable OnShow/OnHide drag & position hooks stay intact.
     frame:HookScript("OnShow", function()
+        if not embeddedState.active and UIParent and frame:GetParent() ~= UIParent then
+            RestoreStandalonePlacement()
+        end
         ApplyTheme()
         if ns.Social then ns.Social:RequestRosters(false) end
         if ticker then ticker:Cancel() end
@@ -8269,6 +8551,7 @@ local function BuildMainFrame()
                     local inCombatNow = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
                     if frame and not embeddedState.active and not frame:IsShown() and not inCombatNow and frame:GetParent() == prevHost then
                         frame:SetParent(UIParent)
+                        RestoreStandalonePlacement()
                     end
                 end)
             end
@@ -8884,6 +9167,7 @@ local hiddenWorldMapSubframes = {}
 
 local function IsHostChromeOrTabChild(hostFrame, child)
     if not child then return true end
+    local hostName = hostFrame.GetName and hostFrame:GetName() or nil
     if child == frame
         or IsAnyEmbedContainer(child)
         or child == _G.SocialCentralLFGSubPanel
@@ -8892,7 +9176,12 @@ local function IsHostChromeOrTabChild(hostFrame, child)
         or child == hostFrame.PortraitContainer
         or child == hostFrame.PortraitOverlay
         or child == hostFrame.TitleContainer
+        or child == hostFrame.TitleBg
+        or child == hostFrame.TopTileStreaks
+        or child == hostFrame.Bg
         or child == hostFrame.CloseButton
+        or (hostName and child == _G[hostName .. "CloseButton"])
+        or (hostName and child == _G[hostName .. "PortraitFrame"])
         or child == hostFrame.MaximizeMinimizeFrame
         or child == hostFrame.ChatTab
         or child == hostFrame.RosterTab
@@ -8904,7 +9193,22 @@ local function IsHostChromeOrTabChild(hostFrame, child)
         return true
     end
     local cName = child.GetName and child:GetName() or ""
-    if cName:find("Portrait") or cName:find("SocialCentral") or cName:find("SideTab") or cName:find("^CharacterFrameTab%d+$") then
+    if cName:find("Portrait")
+        or cName:find("SocialCentral")
+        or cName:find("SideTab")
+        or cName:find("^CharacterFrameTab%d+$")
+        or cName:find("Tab%d+$")
+        or cName:find("CloseButton$")
+        or cName:find("Close$")
+        or cName:find("TitleBg$")
+        or cName:find("TopTileStreaks$")
+    then
+        return true
+    end
+    local hTop = hostFrame.GetTop and hostFrame:GetTop() or nil
+    local cTop = child.GetTop and child:GetTop()
+    local cH = (child.GetHeight and child:GetHeight()) or 0
+    if hTop and cTop and cTop >= (hTop - 26) and cH > 0 and cH <= 32 then
         return true
     end
     local hRight = hostFrame.GetRight and hostFrame:GetRight() or nil
@@ -8925,30 +9229,62 @@ local function AppendUniqueItem(list, item)
     list[#list + 1] = item
 end
 
-local function HideCharacterHostSubframes(hostFrame, appendOnly)
+local function HideCharacterHostSubframes(hostFrame, _)
     if not hostFrame then return end
     if hostFrame == _G.CharacterFrame then
-        if not appendOnly then
-            for k in pairs(hiddenCharSubframes) do
-                hiddenCharSubframes[k] = nil
+        embeddedState.alphaHiddenCharFrames = embeddedState.alphaHiddenCharFrames or {}
+        embeddedState.hiddenCharModels = embeddedState.hiddenCharModels or {}
+        local alphaHidden = embeddedState.alphaHiddenCharFrames
+        local hiddenModels = embeddedState.hiddenCharModels
+        local function HideModelIfShown(modelObj)
+            if modelObj and IsSafeHostObj(modelObj) and modelObj.IsShown and modelObj:IsShown() and modelObj.Hide then
+                AppendUniqueItem(hiddenModels, modelObj)
+                pcall(modelObj.Hide, modelObj)
             end
-            for i = #hiddenCharChildren, 1, -1 do
-                hiddenCharChildren[i] = nil
+        end
+        local exclusiveCharMap = {
+            PaperDollFrame = true,
+            ReputationFrame = true,
+            TokenFrame = true,
+            PetPaperDollFrame = true,
+            SkillFrame = true,
+            PVPFrame = true,
+            HonorFrame = true,
+            StatisticsFrame = true,
+            CharacterStatisticsFrame = true,
+        }
+        -- Keep CharacterFrame subframes shown at alpha 0 so ToggleCharacter("PaperDollFrame") closes on 2nd press of 'C'.
+        for name in pairs(exclusiveCharMap) do
+            local sub = _G[name]
+            if sub and IsSafeHostObj(sub) and sub.IsShown and sub:IsShown() then
+                if alphaHidden[sub] == nil then
+                    alphaHidden[sub] = (sub.GetAlpha and sub:GetAlpha()) or 1
+                end
+                if sub.SetAlpha then
+                    pcall(sub.SetAlpha, sub, 0)
+                end
+                if name == "PaperDollFrame" then
+                    HideModelIfShown(_G.CharacterModelFrame)
+                    HideModelIfShown(_G.CharacterModelScene)
+                end
+                HideModelIfShown(sub.ModelScene)
+                HideModelIfShown(sub.CharacterModelFrame)
+                if sub.GetChildren then
+                    for _, ch in ipairs({ sub:GetChildren() }) do
+                        if ch and IsSafeHostObj(ch) and ch.GetObjectType then
+                            local ot = ch:GetObjectType()
+                            if ot == "PlayerModel" or ot == "DressUpModel" or ot == "Model" or ot == "ModelScene" or ot == "CinematicModel" then
+                                HideModelIfShown(ch)
+                            end
+                        end
+                    end
+                end
             end
         end
         for _, name in ipairs({
-            "PaperDollFrame",
             "PaperDollSidebarTabs",
             "CharacterFrameInset",
             "CharacterFrameInsetRight",
-            "ReputationFrame",
-            "TokenFrame",
-            "PetPaperDollFrame",
-            "SkillFrame",
-            "PVPFrame",
-            "HonorFrame",
-            "StatisticsFrame",
-            "CharacterStatisticsFrame",
         }) do
             local sub = _G[name]
             if sub and sub.IsShown and sub:IsShown() and sub.Hide then
@@ -8958,18 +9294,19 @@ local function HideCharacterHostSubframes(hostFrame, appendOnly)
         end
         if hostFrame.GetChildren then
             for _, child in ipairs({ hostFrame:GetChildren() }) do
-                if IsSafeHostObj(child) and not IsHostChromeOrTabChild(hostFrame, child) and child.IsShown and child:IsShown() and child.Hide then
+                local cName = child.GetName and child:GetName() or ""
+                if IsSafeHostObj(child)
+                    and not IsHostChromeOrTabChild(hostFrame, child)
+                    and alphaHidden[child] == nil
+                    and not exclusiveCharMap[cName]
+                    and child.IsShown and child:IsShown() and child.Hide
+                then
                     AppendUniqueItem(hiddenCharChildren, child)
                     pcall(child.Hide, child)
                 end
             end
         end
     elseif hostFrame == (_G.CommunitiesFrame or _G.GuildFrame) then
-        if not appendOnly then
-            for i = #hiddenCommunitiesChildren, 1, -1 do
-                hiddenCommunitiesChildren[i] = nil
-            end
-        end
         if hostFrame.GetChildren then
             for _, child in ipairs({ hostFrame:GetChildren() }) do
                 if IsSafeHostObj(child) and not IsHostChromeOrTabChild(hostFrame, child) and child.IsShown and child:IsShown() and child.Hide then
@@ -8979,14 +9316,15 @@ local function HideCharacterHostSubframes(hostFrame, appendOnly)
             end
         end
     elseif hostFrame == _G.WorldMapFrame then
-        if not appendOnly then
-            for i = #hiddenWorldMapSubframes, 1, -1 do
-                hiddenWorldMapSubframes[i] = nil
-            end
-        end
         for _, sub in ipairs({ hostFrame.ScrollContainer, hostFrame.NavBar, _G.QuestMapFrame }) do
             if IsSafeHostObj(sub) and sub.IsShown and sub:IsShown() and sub.Hide then
                 AppendUniqueItem(hiddenWorldMapSubframes, sub)
+                pcall(sub.Hide, sub)
+            end
+        end
+    elseif hostFrame == _G.LFGParentFrame then
+        for _, sub in ipairs({ _G.LFGListingFrame, _G.LFGBrowseFrame, _G.LFGWhoListFrame }) do
+            if sub and IsSafeHostObj(sub) and sub.IsShown and sub:IsShown() and sub.Hide then
                 pcall(sub.Hide, sub)
             end
         end
@@ -8996,6 +9334,25 @@ end
 function UI:RestoreEmbeddedHostUI(hostFrame)
     if not hostFrame then return end
     if hostFrame == _G.CharacterFrame then
+        local wasAlphaHidden = {}
+        if type(embeddedState.alphaHiddenCharFrames) == "table" then
+            for sub, origAlpha in pairs(embeddedState.alphaHiddenCharFrames) do
+                wasAlphaHidden[sub] = true
+                if sub and IsSafeHostObj(sub) and sub.SetAlpha then
+                    pcall(sub.SetAlpha, sub, origAlpha or 1)
+                end
+            end
+            wipe(embeddedState.alphaHiddenCharFrames)
+        end
+        if type(embeddedState.hiddenCharModels) == "table" then
+            for i = #embeddedState.hiddenCharModels, 1, -1 do
+                local m = embeddedState.hiddenCharModels[i]
+                if m and IsSafeHostObj(m) and m.Show then
+                    pcall(m.Show, m)
+                end
+                embeddedState.hiddenCharModels[i] = nil
+            end
+        end
         local exclusiveCharNames = {
             PaperDollFrame = true,
             ReputationFrame = true,
@@ -9014,7 +9371,7 @@ function UI:RestoreEmbeddedHostUI(hostFrame)
         local otherNativeOpen = false
         for _, checkName in ipairs({ "ReputationFrame", "TokenFrame", "PetPaperDollFrame", "SkillFrame", "PVPFrame", "HonorFrame", "StatisticsFrame", "CharacterStatisticsFrame" }) do
             local f = _G[checkName]
-            if f and f.IsShown and f:IsShown() and not hiddenCharSubframes[checkName] then
+            if f and f.IsShown and f:IsShown() and not hiddenCharSubframes[checkName] and not wasAlphaHidden[f] then
                 otherNativeOpen = true
                 break
             end
@@ -9091,6 +9448,23 @@ function UI:RestoreEmbeddedHostUI(hostFrame)
         for i = #hiddenCommunitiesChildren, 1, -1 do
             hiddenCommunitiesChildren[i] = nil
         end
+        local restoredAnyExclusive = false
+        for _, sub in ipairs(exclusivePanes) do
+            if sub and sub.IsShown and sub:IsShown() then
+                restoredAnyExclusive = true
+                break
+            end
+        end
+        if not restoredAnyExclusive then
+            if hostFrame.CommunitiesList and IsSafeHostObj(hostFrame.CommunitiesList) and hostFrame.CommunitiesList.Show then
+                pcall(hostFrame.CommunitiesList.Show, hostFrame.CommunitiesList)
+            end
+            for _, fallbackSub in ipairs({ hostFrame.Chat, hostFrame.MemberList }) do
+                if fallbackSub and IsSafeHostObj(fallbackSub) and fallbackSub.Show then
+                    pcall(fallbackSub.Show, fallbackSub)
+                end
+            end
+        end
     elseif hostFrame == _G.WorldMapFrame then
         for _, sub in ipairs(hiddenWorldMapSubframes) do
             if sub and IsSafeHostObj(sub) and sub.Show then
@@ -9100,6 +9474,32 @@ function UI:RestoreEmbeddedHostUI(hostFrame)
         for i = #hiddenWorldMapSubframes, 1, -1 do
             hiddenWorldMapSubframes[i] = nil
         end
+        for _, sub in ipairs({ hostFrame.ScrollContainer, hostFrame.NavBar }) do
+            if sub and IsSafeHostObj(sub) and sub.Show and sub.IsShown and not sub:IsShown() then
+                pcall(sub.Show, sub)
+            end
+        end
+    elseif hostFrame == _G.LFGParentFrame then
+        if not (ns.LFGFrameTab and ns.LFGFrameTab.active) then
+            local selectedTab = hostFrame.selectedTab or 1
+            local subs = { _G.LFGListingFrame, _G.LFGBrowseFrame, _G.LFGWhoListFrame }
+            local shownOne = false
+            for i, sub in ipairs(subs) do
+                if sub and IsSafeHostObj(sub) and sub.SetShown then
+                    local shouldShow = (i == selectedTab)
+                    pcall(sub.SetShown, sub, shouldShow)
+                    if shouldShow then
+                        shownOne = true
+                    end
+                end
+            end
+            if not shownOne and _G.LFGListingFrame and IsSafeHostObj(_G.LFGListingFrame) and _G.LFGListingFrame.Show then
+                pcall(_G.LFGListingFrame.Show, _G.LFGListingFrame)
+            end
+            if hostFrame.UpdateTabs then
+                pcall(hostFrame.UpdateTabs, hostFrame)
+            end
+        end
     end
 end
 
@@ -9107,7 +9507,7 @@ local function CloseSingleContainer(container, hostFrame)
     if not container then return end
     local tabKey = container._tabKey
     local spec = tabKey and EMBED_HOST_SPECS[tabKey]
-    local matches = (not hostFrame) or (container._host == hostFrame)
+    local matches = (not hostFrame) or (container._host == hostFrame) or (container:GetParent() == hostFrame)
     if container._active and matches then
         local activeHost = container._host
         container._embedSeq = (container._embedSeq or 0) + 1
@@ -9131,7 +9531,10 @@ local function CloseSingleContainer(container, hostFrame)
         if ns.LFGFrameTab and ns.LFGFrameTab.SyncAllEmbeddedTabStates then
             ns.LFGFrameTab:SyncAllEmbeddedTabStates()
         end
-    elseif matches and hostFrame and hostFrame ~= UIParent and container:GetParent() == hostFrame then
+    elseif matches and (container:IsShown() or (hostFrame and hostFrame ~= UIParent and container:GetParent() == hostFrame)) then
+        container._embedSeq = (container._embedSeq or 0) + 1
+        container._active = false
+        container._host = nil
         if container:IsShown() then
             container:Hide()
         end
@@ -9142,9 +9545,11 @@ local function CloseSingleContainer(container, hostFrame)
             panel:SetAllPoints(frame.content)
             panel:SetShown(frame:IsShown() and activeTab == tabKey)
         end
-        UI:RestoreEmbeddedHostUI(hostFrame)
+        if hostFrame then
+            UI:RestoreEmbeddedHostUI(hostFrame)
+        end
         local inCombatNow = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-        if not inCombatNow then
+        if not inCombatNow and container:GetParent() ~= UIParent then
             container:SetParent(UIParent)
         end
         if ns.LFGFrameTab and ns.LFGFrameTab.SyncAllEmbeddedTabStates then
@@ -9170,7 +9575,7 @@ function UI:CloseEmbeddedIfHost(hostFrame)
         end
     end
     if not frame then return end
-    local matchesHost = (not hostFrame) or (embeddedState.host == hostFrame)
+    local matchesHost = (not hostFrame) or (embeddedState.host == hostFrame) or (frame:GetParent() == hostFrame)
     if embeddedState.active and matchesHost then
         local activeHost = embeddedState.host
         embeddedState._seq = (embeddedState._seq or 0) + 1

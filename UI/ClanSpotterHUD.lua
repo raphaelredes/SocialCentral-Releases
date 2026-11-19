@@ -1857,8 +1857,7 @@ function SpotterHUD:CreateTutorialDialog()
     local dlg = CreateFrame("Frame", "SocialCentralSpotterTutorialDialog", UIParent, "BackdropTemplate")
     dlg:SetSize(400, 232)
     dlg:SetPoint("CENTER", UIParent, "CENTER", 0, 90)
-    dlg:SetFrameStrata("DIALOG")
-    dlg:SetFrameLevel(115)
+    Theme:PrepareTopOverlayModal(dlg, 855)
     if dlg.SetClipsChildren then
         dlg:SetClipsChildren(false)
     end
@@ -1962,10 +1961,12 @@ function SpotterHUD:ShowNameplateTutorial(forceShow)
     end
     local dlg = self.tutorialDialog or self:CreateTutorialDialog()
     if dlg then
+        Theme:PrepareTopOverlayModal(dlg, 855)
         if dlg._dirtyTheme then
             ApplyTutorialDialogTheme(dlg, Theme:GetPalette())
         end
         dlg:Show()
+        if dlg.Raise then dlg:Raise() end
     end
 end
 
@@ -1980,8 +1981,7 @@ function SpotterHUD:CreateRadarTutorialDialog()
     local dlg = CreateFrame("Frame", "SocialCentralSpotterRadarTutorialDialog", UIParent, "BackdropTemplate")
     dlg:SetSize(410, 240)
     dlg:SetPoint("CENTER", UIParent, "CENTER", 0, 85)
-    dlg:SetFrameStrata("DIALOG")
-    dlg:SetFrameLevel(116)
+    Theme:PrepareTopOverlayModal(dlg, 856)
     if dlg.SetClipsChildren then
         dlg:SetClipsChildren(false)
     end
@@ -2082,10 +2082,12 @@ function SpotterHUD:ShowRadarTutorial(forceShow)
     end
     local dlg = self.radarTutorialDialog or self:CreateRadarTutorialDialog()
     if dlg then
+        Theme:PrepareTopOverlayModal(dlg, 856)
         if dlg._dirtyTheme then
             ApplyTutorialDialogTheme(dlg, Theme:GetPalette())
         end
         dlg:Show()
+        if dlg.Raise then dlg:Raise() end
     end
 end
 

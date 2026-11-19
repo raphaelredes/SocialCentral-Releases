@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.18"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.18" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.19"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.19" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -155,6 +155,18 @@ local DEFAULTS = {
         embedGuildWindow = true,    -- integrate Guild Hub & Diplomacy side-tab inside Communities / Guild (J)
         embedCharacterWindow = true, -- integrate My Alts side-tab inside Character window (C)
         embedWorldMap = true,       -- integrate World Buffs badge & pins inside World Map (M)
+        shortcutAutoOpenAddon = {
+            O = false, -- Social / Friends (O)
+            I = false, -- Group Finder (I)
+            J = false, -- Guild / Communities (J)
+            C = false, -- Character / My Alts (C)
+        },
+        shortcutPromptAnswered = {
+            O = false,
+            I = false,
+            J = false,
+            C = false,
+        },
         hideGuildFeaturesWhenNoGuild = true, -- automatically hide guild tabs/options when current character has no guild
         moduleWatchlistEnabled = true, -- master toggle for Watchlist module
         moduleNearbyEnabled = true,    -- master toggle for Friendly Nearby passive module
@@ -174,6 +186,7 @@ local DEFAULTS = {
         lfgBrowseRole = "MINE",     -- last chosen Browse role filter ("MINE" by default)
         lfgBrowseSuitableLevel = true, -- filter activities & groups to character level by default
         lfgBrowseSelectedActivities = {}, -- [catId] = { [actKey] = true } persisted checked activities
+        officialLfgSyncMode = "GUILD_ALLIES", -- "GUILD_ALLIES" | "GUILD_ONLY" | "OFF"
         groupAvoidAlert = true,     -- warn in chat and toast if an Avoided player enters your party or raid
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
         worldBuffsExpiryAlert = true, -- warn out of combat when an active World Buff has < 5 minutes left

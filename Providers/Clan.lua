@@ -2200,14 +2200,268 @@ function Clan:GetDiplomacyList(filterStance)
     return out
 end
 
-function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
+function Clan:CanManageAlliedEventSharing()
+    if not (IsInGuild and Safe.Value(Safe.Call(IsInGuild)) == true) then
+        return false, L["No guild"]
+    end
+    local canDip, dipSummary = self:CanManageDiplomacy()
+    local canAlly = self:CanManageAlliance()
+    local allowed = (self:IsGuildLeader() or canDip or canAlly) == true
+    return allowed, dipSummary or L["Guild Leader Only"]
+end
+
+function Clan:GetAlliedEventShareState(rawGuildName)
+    local key = NormalizeGuildKey(rawGuildName)
+    if key == "" then
+        return "NONE", false, false, nil
+    end
+    local bucket = Store:GetClanScopeData()
+    local entry = bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[key]
+    if type(entry) ~= "table" or entry.stance ~= "ALLY" then
+        return "NONE", false, false, nil
+    end
+    local ourAuth = (entry.shareEvents == true)
+    local peerAuth = (entry.peerShareEvents == true)
+    local state
+    if ourAuth and peerAuth then
+        state = "MUTUAL"
+    elseif ourAuth then
+        state = "PENDING_PEER"
+    elseif peerAuth then
+        state = "PENDING_US"
+    else
+        state = "OFF"
+    end
+    return state, ourAuth, peerAuth, entry
+end
+
+function Clan:IsAlliedEventSharingMutual(rawGuildName)
+    local st = self:GetAlliedEventShareState(rawGuildName)
+    return st == "MUTUAL"
+end
+
+function Clan:GetMutuallyAuthorizedAlliedGuilds()
+    local allies = self:GetDiplomacyList("ALLY") or {}
+    local mutualList = {}
+    local mutualCount, pendingPeerCount, pendingUsCount = 0, 0, 0
+    for i = 1, #allies do
+        local g = allies[i]
+        local st = self:GetAlliedEventShareState(g.name or g.key)
+        if st == "MUTUAL" then
+            mutualCount = mutualCount + 1
+            mutualList[#mutualList + 1] = g
+        elseif st == "PENDING_PEER" then
+            pendingPeerCount = pendingPeerCount + 1
+        elseif st == "PENDING_US" then
+            pendingUsCount = pendingUsCount + 1
+        end
+    end
+    return mutualList, mutualCount, pendingPeerCount, pendingUsCount, #allies
+end
+
+local function CollectAlliedGuildOnlineTargets(self, targetGuildName, maxCount)
+    local targetKey = NormalizeGuildKey(targetGuildName)
+    if targetKey == "" then return {} end
+    local targets = {}
+    local seen = {}
+    local limit = maxCount or 4
+    local myFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    local now = time()
+    local monoNow = GetTime and GetTime() or 0
+
+    local function PushTarget(rawName, rowGuild, row)
+        if #targets >= limit then return end
+        if NormalizeGuildKey(rowGuild) ~= targetKey then return end
+        local foreverClean = (Compat.FormatForeverTarget and Compat.FormatForeverTarget(rawName)) or rawName
+        local clean = Compat.CleanPayloadField and Compat.CleanPayloadField(foreverClean or "", 40) or Safe.String(foreverClean)
+        if not clean or clean == "" or clean:find("|", 1, true) or Compat.IsMe(clean) then return end
+        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(clean)
+        local key = (parsed and parsed.lookupKey) or clean:lower()
+        local offUntil = ns.Chat and ns.Chat.sessionOfflineChars and ns.Chat.sessionOfflineChars[key]
+        if offUntil and monoNow < offUntil then return end
+        local socRow = (row and row.faction) and row or (Store and Store.socialByLookup and Store.socialByLookup[key])
+        if socRow then
+            if socRow.samePool == false or socRow.sameFaction == false then return end
+            if myFaction and socRow.faction and socRow.faction ~= "" and socRow.faction ~= myFaction then return end
+        end
+        if seen[key] then return end
+        seen[key] = true
+        targets[#targets + 1] = clean
+    end
+
+    if type(Store.social) == "table" then
+        for _, row in pairs(Store.social) do
+            if #targets >= limit then break end
+            if type(row) == "table" and row.online and not (row.sources and row.sources.guild) then
+                PushTarget(row.characterName or row.displayName, row.guild, row)
+            end
+        end
+    end
+    if type(Store.nearby) == "table" then
+        for _, nRow in pairs(Store.nearby) do
+            if #targets >= limit then break end
+            if type(nRow) == "table" and (now - (nRow.lastSeen or 0)) <= 600 then
+                PushTarget(nRow.displayName, nRow.guild, nRow)
+            end
+        end
+    end
+    if type(self.externalLFG) == "table" then
+        for _, eRow in pairs(self.externalLFG) do
+            if #targets >= limit then break end
+            if type(eRow) == "table" and (now - (eRow.updatedAt or 0)) <= 1200 then
+                PushTarget(eRow.displayName, eRow.guild, eRow)
+            end
+        end
+    end
+    if Store and Store.GetWatchlistTable then
+        for _, wRow in pairs(Store:GetWatchlistTable()) do
+            if #targets >= limit then break end
+            if type(wRow) == "table" and wRow.status == "online" and not Compat.IsGuildMember(wRow.displayName, wRow.guid, wRow.displayName) then
+                PushTarget(wRow.displayName or wRow.id, wRow.guild, wRow)
+            end
+        end
+    end
+    return targets
+end
+
+local function CollectAuthorizedAlliedEventRecipients(self, maxCount)
+    local targets = {}
+    local seen = {}
+    local limit = maxCount or 6
+    local myGuildNorm = NormalizeGuildKey((Store.guildInfo and Store.guildInfo.name) or "")
+    local myFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    local now = time()
+
+    local function PushTarget(rawName, guildName, row)
+        if #targets >= limit then return end
+        if not guildName or guildName == "" or not self:IsAlliedEventSharingMutual(guildName) then return end
+        if myGuildNorm ~= "" and NormalizeGuildKey(guildName) == myGuildNorm then return end
+        local foreverClean = (Compat.FormatForeverTarget and Compat.FormatForeverTarget(rawName)) or rawName
+        local clean = Compat.CleanPayloadField and Compat.CleanPayloadField(foreverClean or "", 40) or Safe.String(foreverClean)
+        if not clean or clean == "" or Compat.IsMe(clean) then return end
+        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(clean)
+        local key = (parsed and parsed.lookupKey) or clean:lower()
+        local socRow = (row and row.faction) and row or (Store and Store.socialByLookup and Store.socialByLookup[key])
+        if socRow then
+            if socRow.samePool == false or socRow.sameFaction == false then return end
+            if myFaction and socRow.faction and socRow.faction ~= "" and socRow.faction ~= myFaction then return end
+        end
+        if seen[key] then return end
+        seen[key] = true
+        targets[#targets + 1] = clean
+    end
+
+    if type(Store.social) == "table" then
+        for _, row in pairs(Store.social) do
+            if #targets >= limit then break end
+            if type(row) == "table" and row.online and not (row.sources and row.sources.guild) then
+                PushTarget(row.characterName or row.displayName, row.guild, row)
+            end
+        end
+    end
+    if type(Store.nearby) == "table" then
+        for _, nRow in pairs(Store.nearby) do
+            if #targets >= limit then break end
+            if type(nRow) == "table" and (now - (nRow.lastSeen or 0)) <= 600 then
+                PushTarget(nRow.displayName, nRow.guild, nRow)
+            end
+        end
+    end
+    if type(self.externalLFG) == "table" then
+        for _, eRow in pairs(self.externalLFG) do
+            if #targets >= limit then break end
+            if type(eRow) == "table" and (now - (eRow.updatedAt or 0)) <= 1200 then
+                PushTarget(eRow.displayName, eRow.guild, eRow)
+            end
+        end
+    end
+    return targets
+end
+
+function Clan:SendAlliedEventHandshake(targetGuildName, requestCatchup)
+    if not (IsInGuild and Safe.Value(Safe.Call(IsInGuild)) == true) then return false end
+    if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return false end
+    if self.isStoppedThisSession or self:IsMessagingLocked() then return false end
+
+    local myGuild = Compat.CleanPayloadField((Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or "", 32)
+    if myGuild == "" then return false end
+    local myName = Compat.CleanPayloadField(ResolveSelfIdentity() or "", 36)
+    local bucket = Store:GetClanScopeData()
+    local allies = {}
+    if targetGuildName and targetGuildName ~= "" then
+        local k = NormalizeGuildKey(targetGuildName)
+        local ent = bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[k]
+        if type(ent) == "table" and ent.stance == "ALLY" then
+            allies[1] = ent
+        end
+    else
+        allies = self:GetDiplomacyList("ALLY") or {}
+    end
+
+    local monoNow = GetTime and GetTime() or 0
+    local sentAny = false
+    self._lastAlliedEvtReqAt = self._lastAlliedEvtReqAt or {}
+    for _, ent in ipairs(allies) do
+        local allyName = Compat.CleanPayloadField(ent.name or "", 32)
+        if allyName ~= "" then
+            local flag = (ent.shareEvents == true) and "1" or "0"
+            local payload = ("AESH~%s~%s~%s~%s"):format(myGuild, allyName, flag, myName)
+            local targets = CollectAlliedGuildOnlineTargets(self, allyName, 4)
+            for _, recipient in ipairs(targets) do
+                if SendExternalLFGPacket(self, payload, "WHISPER", recipient) then
+                    sentAny = true
+                end
+            end
+            if requestCatchup and self:IsAlliedEventSharingMutual(allyName) and #targets > 0 then
+                local rKey = NormalizeGuildKey(allyName)
+                if (monoNow - (self._lastAlliedEvtReqAt[rKey] or 0)) >= 15 then
+                    self._lastAlliedEvtReqAt[rKey] = monoNow
+                    local reqPayload = "AEVR~" .. myGuild
+                    SendExternalLFGPacket(self, reqPayload, "WHISPER", targets[1])
+                end
+            end
+        end
+    end
+    return sentAny
+end
+
+function Clan:RequestAlliedEventsSync()
+    return self:SendAlliedEventHandshake(nil, true)
+end
+
+function Clan:SetAlliedEventSharing(rawGuildName, enabled)
+    if not (IsInGuild and Safe.Value(Safe.Call(IsInGuild)) == true) then
+        ns:Print(L["No guild"])
+        return false
+    end
+    local canShare, authSummary = self:CanManageAlliedEventSharing()
+    if not canShare then
+        ns:Print(L["Only the Guild Leader or designated members (%s) can authorize Allied Event Sharing."]:format(authSummary or L["Guild Leader Only"]))
+        return false
+    end
+    local cleanGuild = Compat.CleanPayloadField(rawGuildName or "", 40)
+    local key = NormalizeGuildKey(cleanGuild)
+    if cleanGuild == "" or key == "" then
+        return false
+    end
+    local bucket = Store:GetClanScopeData()
+    local existing = bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[key]
+    local gName = (existing and existing.name) or cleanGuild
+    local gReason = (existing and existing.reason) or ""
+    local gFaction = (existing and existing.faction) or ""
+    return self:SetGuildStance(gName, "ALLY", gReason, gFaction, enabled == true)
+end
+
+function Clan:SetGuildStance(rawGuildName, stance, reason, faction, shareEvents)
     local inGuild = Safe.Value(IsInGuild and IsInGuild()) == true
     if not inGuild then
         ns:Print(L["No guild"])
         return false
     end
+    local cleanStance = (stance == "ALLY" or stance == "ENEMY") and stance or "NEUTRAL"
     local canDip, authSummary = self:CanManageDiplomacy()
-    if not canDip then
+    local canShareOnly = self:CanManageAlliedEventSharing()
+    if not canDip and not (cleanStance == "ALLY" and shareEvents ~= nil and canShareOnly) then
         ns:Print(L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authSummary or L["Guild Leader Only"]))
         return false
     end
@@ -2222,7 +2476,6 @@ function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
         ns:Print(L["Cannot mark your own guild in Diplomacy."])
         return false
     end
-    local cleanStance = (stance == "ALLY" or stance == "ENEMY") and stance or "NEUTRAL"
     local cleanReason = Compat.CleanPayloadField(reason or "", 48)
     local cleanFaction = (faction == "Alliance" or faction == "Horde") and faction or ""
     if cleanFaction == "" and Store then
@@ -2250,18 +2503,41 @@ function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
     end
     local bucket = Store:GetClanScopeData()
     local dip = bucket.diplomacy
+    local prev = dip.guilds and dip.guilds[key]
+    if not canDip and (not prev or prev.stance ~= "ALLY") then
+        ns:Print(L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authSummary or L["Guild Leader Only"]))
+        return false
+    end
     local nextRev = math.max(time(), (dip.rev or 0) + 1)
     local myName = ResolveSelfIdentity()
+    local effShareEvents = false
+    local effPeerShare = false
+    local effPeerBy = ""
+    local effPeerAt = 0
+    if cleanStance == "ALLY" then
+        if shareEvents ~= nil then
+            effShareEvents = (shareEvents == true)
+        elseif prev and prev.shareEvents ~= nil then
+            effShareEvents = (prev.shareEvents == true)
+        end
+        effPeerShare = (prev and prev.peerShareEvents == true) or false
+        effPeerBy = (prev and prev.peerApprovedBy) or ""
+        effPeerAt = (prev and prev.peerApprovedAt) or 0
+    end
 
     dip.rev = nextRev
     dip.updatedAt = time()
     dip.updatedBy = myName
     dip.guilds[key] = {
         key = key,
-        name = cleanGuild,
+        name = (prev and prev.name and not canDip) and prev.name or cleanGuild,
         stance = cleanStance,
-        reason = cleanReason,
+        reason = (not canDip and prev) and (prev.reason or cleanReason) or cleanReason,
         faction = cleanFaction,
+        shareEvents = effShareEvents,
+        peerShareEvents = effPeerShare,
+        peerApprovedBy = effPeerBy,
+        peerApprovedAt = effPeerAt,
         addedBy = myName,
         localOnly = false,
         rev = nextRev,
@@ -2270,16 +2546,21 @@ function Clan:SetGuildStance(rawGuildName, stance, reason, faction)
 
     local tok = ComputeGuildScopeToken()
     if tok ~= "" and ns.db and ns.db.settings and ns.db.settings.clanSync then
-        EnqueueIntelPacket(("CDIP~%s~%s~%d~%s~%s~%s~%s~%s"):format(
+        EnqueueIntelPacket(("CDIP~%s~%s~%d~%s~%s~%s~%s~%s~%s~%s"):format(
             tok,
             ns.version or "0.0.0",
             nextRev,
             cleanStance,
             key:sub(1, 32),
-            cleanGuild,
+            dip.guilds[key].name,
             cleanFaction,
-            cleanReason
+            dip.guilds[key].reason or "",
+            effShareEvents and "1" or "0",
+            effPeerShare and "1" or "0"
         ))
+        if cleanStance == "ALLY" then
+            self:SendAlliedEventHandshake(dip.guilds[key].name, effShareEvents == true)
+        end
     end
 
     ns:Emit("CLAN_UPDATED")
@@ -2372,11 +2653,11 @@ function Clan:BroadcastDeltaIntel(peerInfoRev, peerDipRev, peerHirRev, peerAllcR
     end
 
     local myDipRev = (bucket and bucket.diplomacy and bucket.diplomacy.rev) or 0
-    if self:CanManageDiplomacy() and (peerDipRev == nil or myDipRev > peerDipRev) then
+    if (self:CanManageDiplomacy() or self:CanManageAlliedEventSharing()) and (peerDipRev == nil or myDipRev > peerDipRev) then
         local sentCount = 0
         for _, g in ipairs(self:GetDiplomacyList("all")) do
             if not g.localOnly and sentCount < 10 and (peerDipRev == nil or (g.rev or 0) > peerDipRev) then
-                EnqueueIntelPacket(("CDIP~%s~%s~%d~%s~%s~%s~%s~%s"):format(
+                EnqueueIntelPacket(("CDIP~%s~%s~%d~%s~%s~%s~%s~%s~%s~%s"):format(
                     tok,
                     ns.version or "0.0.0",
                     g.rev or 0,
@@ -2384,7 +2665,9 @@ function Clan:BroadcastDeltaIntel(peerInfoRev, peerDipRev, peerHirRev, peerAllcR
                     (g.key or ""):sub(1, 32),
                     Compat.CleanPayloadField(g.name or "", 40),
                     Compat.CleanPayloadField(g.faction or "", 12),
-                    Compat.CleanPayloadField(g.reason or "", 48)
+                    Compat.CleanPayloadField(g.reason or "", 48),
+                    (g.stance == "ALLY" and g.shareEvents == true) and "1" or "0",
+                    (g.stance == "ALLY" and g.peerShareEvents == true) and "1" or "0"
                 ))
                 sentCount = sentCount + 1
             end
@@ -2624,7 +2907,7 @@ function Clan:GetRecommendedRolesForCharacter()
     }
 end
 
-function Clan:CreateEventCall(category, title, whenText, needT, needH, needD, minLvl, creatorRole)
+function Clan:CreateEventCall(category, title, whenText, needT, needH, needD, minLvl, creatorRole, shareAllies)
     if not IsValidCategory(category) then category = "DUNGEON" end
     local cleanTitle = Compat.CleanPayloadField(title or "", 40)
     if cleanTitle == "" then
@@ -2638,6 +2921,7 @@ function Clan:CreateEventCall(category, title, whenText, needT, needH, needD, mi
     local nH = math.max(0, math.min(10, tonumber(needH) or 0))
     local nD = math.max(0, math.min(30, tonumber(needD) or 0))
     local nMinLvl = math.max(0, math.min(100, tonumber(minLvl) or 0))
+    local allowAllies = (shareAllies ~= false)
 
     local resolvedRole = creatorRole
     if resolvedRole == "DAMAGER" then resolvedRole = "DPS" end
@@ -2654,6 +2938,7 @@ function Clan:CreateEventCall(category, title, whenText, needT, needH, needD, mi
     local bucket = Store:GetClanScopeData()
     local myParsed = parsed
     local _, myClass = Safe.Call(UnitClass, "player")
+    local myGuild = Compat.CleanPayloadField((Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or "", 28)
     bucket.events[eventId] = {
         id = eventId,
         category = category,
@@ -2664,6 +2949,8 @@ function Clan:CreateEventCall(category, title, whenText, needT, needH, needD, mi
         needD = nD,
         minLvl = nMinLvl,
         isOpen = true,
+        originGuild = myGuild,
+        shareAllies = allowAllies,
         creator = (myParsed and myParsed.displayName) or myName,
         creatorKey = (myParsed and myParsed.lookupKey) or shortTag,
         createdAt = time(),
@@ -2672,16 +2959,30 @@ function Clan:CreateEventCall(category, title, whenText, needT, needH, needD, mi
             [(myParsed and myParsed.lookupKey) or shortTag] = {
                 name = (myParsed and myParsed.displayName) or myName,
                 classFile = Safe.String(myClass),
+                guild = myGuild,
                 role = resolvedRole,
                 updatedAt = time(),
             },
         },
     }
 
-    local payload = ("EVT~%s~%s~%s~%s~%d~%d~%d~%d~1"):format(eventId, category, cleanTitle, cleanWhen, nT, nH, nD, nMinLvl)
+    local payload = ("EVT~%s~%s~%s~%s~%d~%d~%d~%d~1~%s~%s"):format(
+        eventId,
+        category,
+        cleanTitle,
+        cleanWhen,
+        nT,
+        nH,
+        nD,
+        nMinLvl,
+        myGuild,
+        allowAllies and "1" or "0"
+    )
     local sentSync = self:SendGuildSync(payload)
-    for _, recipient in ipairs(CollectExternalAllianceRecipients(self, 6)) do
-        SendExternalLFGPacket(self, payload, "WHISPER", recipient)
+    if allowAllies then
+        for _, recipient in ipairs(CollectAuthorizedAlliedEventRecipients(self, 6)) do
+            SendExternalLFGPacket(self, payload, "WHISPER", recipient)
+        end
     end
     local syncLabel = sentSync and L["shared with Guild [SC]"] or L["saved locally — Guild Sync is off"]
     ns:Print(L["Event '%s' created (%s)."]:format(cleanTitle, syncLabel))
@@ -2701,7 +3002,13 @@ function Clan:ToggleEventOpen(eventId)
     end
     evt.isOpen = evt.isOpen == false
     evt.updatedAt = time()
-    self:SendGuildSync(("EVS~%s~%s"):format(Compat.CleanPayloadField(eventId, 16), evt.isOpen and "1" or "0"))
+    local payload = ("EVS~%s~%s"):format(Compat.CleanPayloadField(eventId, 16), evt.isOpen and "1" or "0")
+    self:SendGuildSync(payload)
+    if not evt.isAlliedEvent and evt.shareAllies ~= false then
+        for _, recipient in ipairs(CollectAuthorizedAlliedEventRecipients(self, 6)) do
+            SendExternalLFGPacket(self, payload, "WHISPER", recipient)
+        end
+    end
     ns:Emit("CLAN_UPDATED")
     return true
 end
@@ -2710,7 +3017,9 @@ function Clan:ReannounceEvent(eventId)
     local bucket = Store:GetClanScopeData()
     local evt = bucket.events[eventId]
     if not evt then return false end
-    local payload = ("EVT~%s~%s~%s~%s~%d~%d~%d~%d~%s"):format(
+    local myGuild = Compat.CleanPayloadField(evt.originGuild or (Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or "", 28)
+    local allowAllies = (evt.shareAllies ~= false)
+    local payload = ("EVT~%s~%s~%s~%s~%d~%d~%d~%d~%s~%s~%s"):format(
         Compat.CleanPayloadField(evt.id, 16),
         evt.category or "DUNGEON",
         Compat.CleanPayloadField(evt.title or "", 40),
@@ -2719,17 +3028,63 @@ function Clan:ReannounceEvent(eventId)
         tonumber(evt.needH) or 0,
         tonumber(evt.needD) or 0,
         tonumber(evt.minLvl) or 0,
-        evt.isOpen ~= false and "1" or "0"
+        evt.isOpen ~= false and "1" or "0",
+        myGuild,
+        allowAllies and "1" or "0"
     )
     local sent = self:SendGuildSync(payload)
-    for _, recipient in ipairs(CollectExternalAllianceRecipients(self, 6)) do
-        SendExternalLFGPacket(self, payload, "WHISPER", recipient)
+    if allowAllies and not evt.isAlliedEvent then
+        for _, recipient in ipairs(CollectAuthorizedAlliedEventRecipients(self, 6)) do
+            SendExternalLFGPacket(self, payload, "WHISPER", recipient)
+        end
     end
     if not sent then
         ns:Print(L["Clan sync throttled or blocked during combat."])
         return false
     end
     evt.updatedAt = time()
+    ns:Emit("CLAN_UPDATED")
+    return true
+end
+
+function Clan:SetEventAlliedSharing(eventId, shareAllies)
+    local bucket = Store:GetClanScopeData()
+    local evt = bucket.events[eventId]
+    if not evt or evt.isAlliedEvent then return false end
+    local _, myKey = ResolveSelfIdentity()
+    local isCreator = (myKey ~= nil and evt.creatorKey == myKey)
+    if not isCreator and not self:CanModerateEvents() then
+        ns:Print(L["Only the group creator can open or close this Clan listing."])
+        return false
+    end
+    local allow = (shareAllies == true)
+    evt.shareAllies = allow
+    evt.updatedAt = time()
+    local myGuild = Compat.CleanPayloadField(evt.originGuild or (Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or "", 28)
+    local evtPayload = ("EVT~%s~%s~%s~%s~%d~%d~%d~%d~%s~%s~%s"):format(
+        Compat.CleanPayloadField(evt.id, 16),
+        evt.category or "DUNGEON",
+        Compat.CleanPayloadField(evt.title or "", 40),
+        Compat.CleanPayloadField(evt.whenText or L["Now"], 24),
+        tonumber(evt.needT) or 0,
+        tonumber(evt.needH) or 0,
+        tonumber(evt.needD) or 0,
+        tonumber(evt.minLvl) or 0,
+        evt.isOpen ~= false and "1" or "0",
+        myGuild,
+        allow and "1" or "0"
+    )
+    self:SendGuildSync(evtPayload)
+    if allow then
+        for _, recipient in ipairs(CollectAuthorizedAlliedEventRecipients(self, 6)) do
+            SendExternalLFGPacket(self, evtPayload, "WHISPER", recipient)
+        end
+    else
+        local delPayload = "DEL~" .. Compat.CleanPayloadField(evt.id, 16)
+        for _, recipient in ipairs(CollectAuthorizedAlliedEventRecipients(self, 6)) do
+            SendExternalLFGPacket(self, delPayload, "WHISPER", recipient)
+        end
+    end
     ns:Emit("CLAN_UPDATED")
     return true
 end
@@ -2772,6 +3127,7 @@ function Clan:SignupEvent(eventId, role)
     local myParsed = Compat.ParseCharacterName(myName)
     if not myParsed then return false end
     local _, myClass = Safe.Call(UnitClass, "player")
+    local myGuild = Compat.CleanPayloadField((Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or "", 28)
 
     if role == "DECLINE" then
         evt.signups[myParsed.lookupKey] = nil
@@ -2779,17 +3135,36 @@ function Clan:SignupEvent(eventId, role)
         evt.signups[myParsed.lookupKey] = {
             name = myParsed.displayName,
             classFile = Safe.String(myClass),
+            guild = myGuild,
             role = role,
             updatedAt = time(),
         }
     end
     evt.updatedAt = time()
 
-    local sigPayload = ("SIG~%s~%s~%s"):format(Compat.CleanPayloadField(eventId, 16), role, Safe.String(myClass) or "")
+    local sigPayload = ("SIG~%s~%s~%s~%s"):format(Compat.CleanPayloadField(eventId, 16), role, Safe.String(myClass) or "", myGuild)
     self:SendGuildSync(sigPayload)
-    if evt.isAlliedEvent and evt.creator and not Compat.IsMe(evt.creator) then
-        local target = (Compat.FormatForeverTarget and Compat.FormatForeverTarget(evt.creator)) or evt.creator
-        SendExternalLFGPacket(self, sigPayload, "WHISPER", target)
+    if evt.isAlliedEvent then
+        local sentSet = {}
+        if evt.creator and not Compat.IsMe(evt.creator) then
+            local target = (Compat.FormatForeverTarget and Compat.FormatForeverTarget(evt.creator)) or evt.creator
+            if target and target ~= "" then
+                sentSet[target:lower()] = true
+                SendExternalLFGPacket(self, sigPayload, "WHISPER", target)
+            end
+        end
+        if evt.originGuild and evt.originGuild ~= "" then
+            for _, recipient in ipairs(CollectAlliedGuildOnlineTargets(self, evt.originGuild, 2)) do
+                if not sentSet[recipient:lower()] then
+                    sentSet[recipient:lower()] = true
+                    SendExternalLFGPacket(self, sigPayload, "WHISPER", recipient)
+                end
+            end
+        end
+    elseif evt.shareAllies ~= false then
+        for _, recipient in ipairs(CollectAuthorizedAlliedEventRecipients(self, 4)) do
+            SendExternalLFGPacket(self, sigPayload, "WHISPER", recipient)
+        end
     end
     ns:Emit("CLAN_UPDATED")
     return true
@@ -2807,8 +3182,15 @@ function Clan:RemoveEvent(eventId)
         return false
     end
 
+    local wasOwnShared = (not evt.isAlliedEvent and evt.shareAllies ~= false)
     bucket.events[eventId] = nil
-    self:SendGuildSync("DEL~" .. Compat.CleanPayloadField(eventId, 16))
+    local delPayload = "DEL~" .. Compat.CleanPayloadField(eventId, 16)
+    self:SendGuildSync(delPayload)
+    if wasOwnShared then
+        for _, recipient in ipairs(CollectAuthorizedAlliedEventRecipients(self, 6)) do
+            SendExternalLFGPacket(self, delPayload, "WHISPER", recipient)
+        end
+    end
     ns:Emit("CLAN_UPDATED")
     return true
 end
@@ -2870,9 +3252,16 @@ function Clan:GetEventsList(filterId)
     local out = {}
     for _, evt in pairs(bucket.events) do
         local include = true
-        if filterId and filterId ~= "all" then
+        if evt.isAlliedEvent and evt.originGuild and evt.originGuild ~= "" and not self:IsAlliedEventSharingMutual(evt.originGuild) then
+            include = false
+        end
+        if include and filterId and filterId ~= "all" then
             if filterId == "open" then
                 include = evt.isOpen ~= false
+            elseif filterId == "guild" then
+                include = evt.isAlliedEvent ~= true
+            elseif filterId == "allied" then
+                include = evt.isAlliedEvent == true
             elseif filterId == "need_tank" then
                 local sum = self:GetSignupSummary(evt)
                 include = evt.isOpen ~= false and (tonumber(evt.needT) or 0) > sum.TANK
@@ -4082,10 +4471,13 @@ function Clan:RefreshGameCalendar(force)
                     local title = Safe.String(ev.title) or ""
                     local isRelevant = calType == "GUILD_EVENT" or calType == "GUILD_ANNOUNCEMENT" or calType == "PLAYER" or calType == "RAID_LOCKOUT"
                     if isRelevant and title ~= "" then
+                        local targetTm = date("*t", time() + ((tonumber(delta) or 0) * 86400))
                         table.insert(found, {
                             title = title,
                             calendarType = calType,
                             monthOffset = mOffset,
+                            month = (targetTm and targetTm.month) or nil,
+                            year = (targetTm and targetTm.year) or nil,
                             monthDay = dayNum,
                             dayDelta = delta,
                             hour = Safe.Number(ev.startTime and ev.startTime.hour) or 0,
@@ -4260,7 +4652,20 @@ function Clan:GetMotdEventSuggestion()
             end
         end
     end
-    local dateHit = cleanMotd:match("(%d%d?/%d%d?%s*%d?%d?:?%d?%d?)") or cleanMotd:match("(%d%d?:%d%d)")
+    local datePart, timePart = cleanMotd:match("(%d%d?/%d%d?)%s*[AaÀà]?[Ss]?%s*[Ll]?[Aa]?[Ss]?%s*@?%-?%s*(%d%d?[:Hh]%d?%d?)")
+    if not datePart then
+        local bareHour
+        datePart, bareHour = cleanMotd:match("(%d%d?/%d%d?)%s*[AaÀà]?[Ss]?%s*[Ll]?[Aa]?[Ss]?%s*@?%-?%s*(%d%d?)%s+[Hh][OoRrAaSs]*")
+        if datePart and bareHour then
+            timePart = bareHour .. ":00"
+        end
+    end
+    local dateHit
+    if datePart and timePart then
+        dateHit = datePart .. " " .. timePart
+    else
+        dateHit = cleanMotd:match("(%d%d?/%d%d?%s*%d?%d?:?%d?%d?)") or cleanMotd:match("(%d%d?:%d%d)")
+    end
     local titleSeg = cleanMotd:match("[Ee][Vv][Ee][Nn][Tt][Oo]?:?%s*(.+)") or cleanMotd
     titleSeg = Compat.CleanPayloadField(titleSeg, 38)
     if titleSeg == "" then
@@ -4367,6 +4772,91 @@ function Clan:SetGuildMOTD(rawText)
     return true
 end
 
+local function DaysInCalendarMonth(y, m)
+    y = tonumber(y) or 2026
+    m = tonumber(m) or 1
+    if m == 2 then
+        if (y % 4 == 0 and y % 100 ~= 0) or (y % 400 == 0) then
+            return 29
+        end
+        return 28
+    elseif m == 4 or m == 6 or m == 9 or m == 11 then
+        return 30
+    end
+    return 31
+end
+
+function Clan:ParseEventWhenDateTime(whenText)
+    local text = Safe.String(whenText) or ""
+    local trimmed = Compat.Trim(text)
+    local nowTm = date("*t", time())
+    local hour, minute = 20, 0
+
+    local hStr, mStr = trimmed:match("(%d%d?):(%d%d)")
+    if hStr then
+        hour = tonumber(hStr) or 20
+        minute = tonumber(mStr) or 0
+    else
+        local hh, mm = trimmed:match("(%d%d?)%s*[Hh]%s*(%d%d?)")
+        if hh then
+            hour = tonumber(hh) or 20
+            minute = tonumber(mm) or 0
+        else
+            local bareH = trimmed:match("(%d%d?)%s+[Hh][OoRrAaSs]*")
+            if bareH then
+                hour = tonumber(bareH) or 20
+                minute = 0
+            end
+        end
+    end
+    if hour < 0 then hour = 0 elseif hour > 23 then hour = 23 end
+    if minute < 0 then minute = 0 elseif minute > 59 then minute = 59 end
+
+    local dayOffset = 0
+    local low = trimmed:lower()
+    if low:find("tomorrow", 1, true) or low:find("amanh", 1, true) or low:find("mañan", 1, true) or low:find("manan", 1, true) then
+        dayOffset = 1
+    elseif not (low:find("today", 1, true) or low:find("hoje", 1, true) or low:find("hoy", 1, true) or low:find("tonight", 1, true)) then
+        local dStr, moStr, yStr = trimmed:match("(%d%d?)/(%d%d?)/?(%d*)")
+        local tDay = dStr and tonumber(dStr)
+        local tMonth = moStr and tonumber(moStr)
+        if tDay and tMonth and tDay >= 1 and tDay <= 31 and tMonth >= 1 and tMonth <= 12 and nowTm then
+            local tYear = (yStr and yStr ~= "" and tonumber(yStr)) or nil
+            if tYear and tYear < 100 then
+                tYear = 2000 + tYear
+            elseif not tYear then
+                tYear = nowTm.year
+                if tMonth < nowTm.month or (tMonth == nowTm.month and tDay < nowTm.day) then
+                    tYear = tYear + 1
+                end
+            end
+            local maxDay = DaysInCalendarMonth(tYear, tMonth)
+            if tDay > maxDay then tDay = maxDay end
+            local cy, cm, cd = nowTm.year, nowTm.month, nowTm.day
+            if (tYear > cy) or (tYear == cy and (tMonth > cm or (tMonth == cm and tDay >= cd))) then
+                local delta = 0
+                while (cy < tYear or cm < tMonth or cd < tDay) and delta < 366 do
+                    delta = delta + 1
+                    cd = cd + 1
+                    if cd > DaysInCalendarMonth(cy, cm) then
+                        cd = 1
+                        cm = cm + 1
+                        if cm > 12 then
+                            cm = 1
+                            cy = cy + 1
+                        end
+                    end
+                end
+                if cy == tYear and cm == tMonth and cd == tDay then
+                    dayOffset = delta
+                end
+            end
+        end
+    end
+
+    return dayOffset, hour, minute
+end
+
 function Clan:PublishGameCalendarEvent(category, title, note, dayOffset, hour, minute)
     if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
         return false, L["In Combat"]
@@ -4390,17 +4880,20 @@ function Clan:PublishGameCalendarEvent(category, title, note, dayOffset, hour, m
     local baseYear = tonumber(today and today.year) or 2026
 
     local monthInfo = C_Calendar.GetMonthInfo and Safe.Call(C_Calendar.GetMonthInfo, 0)
-    local daysInCur = Safe.Number(monthInfo and monthInfo.numDays) or 31
+    local daysInCur = Safe.Number(monthInfo and monthInfo.numDays) or DaysInCalendarMonth(baseYear, baseMonth)
     local targetDay = baseDay + (tonumber(dayOffset) or 0)
     local targetMonth = baseMonth
     local targetYear = baseYear
-    if targetDay > daysInCur then
+    local guard = 0
+    while targetDay > daysInCur and guard < 24 do
+        guard = guard + 1
         targetDay = targetDay - daysInCur
         targetMonth = targetMonth + 1
         if targetMonth > 12 then
             targetMonth = 1
             targetYear = targetYear + 1
         end
+        daysInCur = DaysInCalendarMonth(targetYear, targetMonth)
     end
 
     pcall(C_Calendar.CloseEvent)
@@ -4803,11 +5296,83 @@ function Clan:ClearMyLFG(isHardwareEvent)
     return true
 end
 
-function Clan:SyncOfficialActiveLfg()
+function Clan:GetOfficialLfgSyncMode()
+    local m = ns.db and ns.db.settings and ns.db.settings.officialLfgSyncMode
+    if m == "GUILD_ONLY" or m == "OFF" then
+        return m
+    end
+    return "GUILD_ALLIES"
+end
+
+function Clan:SetOfficialLfgSyncMode(mode)
+    if mode ~= "GUILD_ALLIES" and mode ~= "GUILD_ONLY" and mode ~= "OFF" then
+        mode = "GUILD_ALLIES"
+    end
+    if ns.db and ns.db.settings then
+        ns.db.settings.officialLfgSyncMode = mode
+    end
+    local hasActive = C_LFGList and C_LFGList.HasActiveEntryInfo and (Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true)
+    if hasActive then
+        if mode == "OFF" then
+            self:ClearMyLFG(false)
+            ns:Print("%s", L["Stopped mirroring your Official LFG listing to SocialCentral (your Official listing remains active)."])
+        else
+            self._lastSyncedOfficialSig = nil
+            self:SyncOfficialActiveLfg(true)
+        end
+    end
+    ns:Emit("CLAN_UPDATED")
+    return true
+end
+
+function Clan:ShareActiveOfficialToGuildChat()
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+    if inCombat then
+        ns:Print(L["Target Radar"] .. ": " .. L["Unavailable during combat."])
+        return false
+    end
+    if not (IsInGuild and IsInGuild()) then
+        ns:Print("%s", L["Your character is not currently in a guild."])
+        return false
+    end
+    local inGroup = Compat.IsInGroup and Compat.IsInGroup()
+    local mode = inGroup and "LFM" or "LFG"
+    local role = self:GetMySpecAndRole()
+    local activity, comment = nil, ""
+    if C_LFGList and C_LFGList.HasActiveEntryInfo and C_LFGList.GetActiveEntryInfo and (Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true) then
+        local aInfo = Safe.Call(C_LFGList.GetActiveEntryInfo)
+        if type(aInfo) == "table" then
+            local meta = ExtractActiveOfficialEntryMeta(aInfo)
+            activity = (meta and meta.actDisplay) or L["Group"]
+            comment = (meta and meta.comment) or ""
+        end
+    end
+    if (not activity or activity == "") then
+        local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+        local myName = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player"))
+        local myKey = myName and Compat.ParseCharacterFields and select(1, Compat.ParseCharacterFields(myName)) or nil
+        local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+        local myLfg = bucket and bucket.lfg and myKey and bucket.lfg[myKey]
+        if type(myLfg) == "table" then
+            mode = myLfg.mode or mode
+            role = myLfg.role or role
+            activity = myLfg.activity
+            comment = myLfg.note or ""
+        end
+    end
+    if not activity or activity == "" then
+        ns:Print("%s", L["Create a group listing first to share it in Guild Chat (/g)."])
+        return false
+    end
+    return self:OpenGuildChatLFG(mode, role, activity, 0, comment)
+end
+
+function Clan:SyncOfficialActiveLfg(forceResync)
     if self._syncingFromOfficial then return end
     if not (C_LFGList and C_LFGList.HasActiveEntryInfo and C_LFGList.GetActiveEntryInfo) then
         return
     end
+    self._bootedAt = self._bootedAt or (GetTime and GetTime() or 0)
     local hasActive = Safe.Value(Safe.Call(C_LFGList.HasActiveEntryInfo)) == true
     local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
     local myName = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player"))
@@ -4818,31 +5383,52 @@ function Clan:SyncOfficialActiveLfg()
             local meta = ExtractActiveOfficialEntryMeta(info)
             local officialRole = self:GetMySpecAndRole()
             local officialSoloRoles = nil
-            if not (Compat.IsInGroup and Compat.IsInGroup()) and C_LFGListRoles and C_LFGListRoles.GetRoles then
-                local r = Safe.Call(C_LFGListRoles.GetRoles)
-                if type(r) == "table" then
-                    officialSoloRoles = {
-                        TANK = (Safe.Value(r.tank) == true),
-                        HEALER = (Safe.Value(r.healer) == true),
-                        DPS = (Safe.Value(r.dps) == true),
-                    }
-                    local cnt = (r.tank and 1 or 0) + (r.healer and 1 or 0) + (r.dps and 1 or 0)
-                    if cnt == 1 then
-                        if r.tank then
-                            officialRole = "TANK"
-                        elseif r.healer then
-                            officialRole = "HEALER"
-                        elseif r.dps then
-                            officialRole = "DPS"
+            if not (Compat.IsInGroup and Compat.IsInGroup()) and C_LFGListRoles then
+                local fn = C_LFGListRoles.GetRoles or C_LFGListRoles.GetSavedRoles
+                if fn then
+                    local r1, r2, r3 = Safe.Call(fn)
+                    local isT, isH, isD
+                    if type(r1) == "table" then
+                        isT = (Safe.Value(r1.tank) == true)
+                        isH = (Safe.Value(r1.healer) == true)
+                        isD = (Safe.Value(r1.dps) == true)
+                    elseif r1 ~= nil or r2 ~= nil or r3 ~= nil then
+                        isT = (r1 == true)
+                        isH = (r2 == true)
+                        isD = (r3 == true)
+                    end
+                    if isT ~= nil or isH ~= nil or isD ~= nil then
+                        isT = (isT == true)
+                        isH = (isH == true)
+                        isD = (isD == true)
+                        if isT or isH or isD then
+                            officialSoloRoles = {
+                                TANK = isT,
+                                HEALER = isH,
+                                DPS = isD,
+                            }
+                            local cnt = (isT and 1 or 0) + (isH and 1 or 0) + (isD and 1 or 0)
+                            if cnt == 1 then
+                                if isT then officialRole = "TANK"
+                                elseif isH then officialRole = "HEALER"
+                                elseif isD then officialRole = "DPS" end
+                            elseif cnt > 1 then
+                                officialRole = "ANY"
+                            end
                         end
-                    elseif cnt > 1 then
-                        officialRole = "ANY"
                     end
                 end
             end
 
+            self._officialLfgActive = true
+            local syncMode = self:GetOfficialLfgSyncMode()
+            if syncMode == "OFF" then
+                self._lastSyncedOfficialSig = nil
+                return
+            end
+
             local nowClock = GetTime and GetTime() or 0
-            if myParsed and (nowClock - (self._lastAddonOfficialPublishAt or 0)) <= 4.0 then
+            if (not forceResync) and myParsed and (nowClock - (self._lastAddonOfficialPublishAt or 0)) <= 4.0 then
                 local bucket = Store:GetClanScopeData()
                 local existing = bucket and bucket.lfg and bucket.lfg[myParsed.lookupKey]
                 if type(existing) == "table" then
@@ -4854,22 +5440,32 @@ function Clan:SyncOfficialActiveLfg()
                     existing.categoryKind = existing.categoryKind or meta.categoryKind
                     existing.newPlayerFriendly = meta.newPlayerFriendly
                     existing.soloRoles = officialSoloRoles
-                    self._officialLfgActive = true
                     QueueClanEmit(0.15)
                     return
                 end
             end
 
+            local clanOnly = (syncMode == "GUILD_ONLY") and (IsInGuild and IsInGuild() == true) or false
+            local rawComment = Compat.Trim(meta.comment or "")
+            local effComment = rawComment
+            if clanOnly and not effComment:find(L["Same Clan"], 1, true) then
+                local tag = "[" .. L["Same Clan"] .. "]"
+                effComment = (effComment ~= "") and (effComment .. " " .. tag) or tag
+                if #effComment > 80 then
+                    effComment = effComment:sub(1, 77) .. "..."
+                end
+            end
+
             self._syncingFromOfficial = true
-            self._officialLfgActive = true
             local officialMode = (Compat.IsInGroup and Compat.IsInGroup()) and "LFM" or "LFG"
+            local actLabel = meta.actDisplay or L["Group"]
             local _, row = self:PostLFG(
                 officialMode,
                 officialRole,
-                meta.actDisplay or L["Group"],
+                actLabel,
                 0,
-                meta.comment or "",
-                false,
+                effComment,
+                clanOnly,
                 meta.categoryKind == "DUNGEONS"
             )
             if type(row) == "table" then
@@ -4879,15 +5475,29 @@ function Clan:SyncOfficialActiveLfg()
                 row.categoryKind = meta.categoryKind
                 row.newPlayerFriendly = meta.newPlayerFriendly
                 row.soloRoles = officialSoloRoles
+                row.clanOnly = clanOnly
             end
             self._syncingFromOfficial = false
+
+            local sig = table.concat({ officialMode, syncMode, actLabel, rawComment }, "|")
+            if sig ~= self._lastSyncedOfficialSig then
+                self._lastSyncedOfficialSig = sig
+                if forceResync or (nowClock - (self._bootedAt or 0)) > 6 then
+                    if clanOnly then
+                        ns:Print(L["Official LFG listing (%s) synced to your Guild only."]:format(actLabel))
+                    else
+                        ns:Print(L["Official LFG listing (%s) synced to Guild, Allies & Friends."]:format(actLabel))
+                    end
+                end
+            end
         end
     elseif self._officialLfgActive then
         self._officialLfgActive = false
+        self._lastSyncedOfficialSig = nil
         if myParsed then
             local bucket = Store:GetClanScopeData()
             if bucket.lfg and bucket.lfg[myParsed.lookupKey] then
-                self:ClearMyLFG()
+                self:ClearMyLFG(false)
             end
         end
     end
@@ -5295,8 +5905,11 @@ function Clan:SearchOfficialLfg(catKind, specificActivityIds, forceIgnoreCooldow
     self._officialSearchPendingUntil = now + 4.0
 
     local ok = false
-    if #actIds > 0 then
+    if hasExplicitIds and #actIds > 0 then
         ok = pcall(C_LFGList.Search, catId, 0, 0, nil, false, nil, actIds)
+        if not ok then
+            ok = pcall(C_LFGList.Search, catId, actIds)
+        end
     end
     if not ok then
         ok = pcall(C_LFGList.Search, catId, 0, 0, nil, false)
@@ -5474,6 +6087,7 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
                     level = (mLvl and mLvl > 0) and mLvl or nil,
                     role = mRole,
                     isLeader = mIsLeader == true,
+                    isFallbackClass = true,
                     tag = nil,
                 }
             end
@@ -5554,17 +6168,33 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
         local resId = results[i]
         local info = resId and Safe.Call(C_LFGList.GetSearchResultInfo, resId)
         if type(info) == "table" and not info.isDelisted then
+            local rawSecretLeader = (info.leaderName ~= nil and Safe.IsSecret and Safe.IsSecret(info.leaderName)) and info.leaderName or nil
             local leaderRaw = Safe.String(info.leaderName)
             if (not leaderRaw or leaderRaw == "") and C_LFGList.GetSearchResultLeaderInfo then
-                local li = Safe.Call(C_LFGList.GetSearchResultLeaderInfo, resId)
-                if type(li) == "table" then
-                    leaderRaw = Safe.String(li.name)
+                local okLi, li = pcall(C_LFGList.GetSearchResultLeaderInfo, resId)
+                if okLi and li ~= nil then
+                    if type(li) == "table" and (not Safe.IsSecret or not Safe.IsSecret(li)) then
+                        local cand = li.name or li.leaderName or li.fullName or li.characterName
+                        if not rawSecretLeader and cand ~= nil and Safe.IsSecret and Safe.IsSecret(cand) then
+                            rawSecretLeader = cand
+                        end
+                        leaderRaw = Safe.String(cand)
+                    else
+                        if not rawSecretLeader and Safe.IsSecret and Safe.IsSecret(li) then
+                            rawSecretLeader = li
+                        end
+                        leaderRaw = Safe.String(li)
+                    end
                 end
             end
             if (not leaderRaw or leaderRaw == "") and C_LFGList.GetSearchResultPlayerInfo then
                 local mi = Safe.Call(C_LFGList.GetSearchResultPlayerInfo, resId, 1)
                 if type(mi) == "table" then
-                    leaderRaw = Safe.String(mi.name)
+                    local cand = mi.name or mi.fullName or mi.characterName
+                    if not rawSecretLeader and cand ~= nil and Safe.IsSecret and Safe.IsSecret(cand) then
+                        rawSecretLeader = cand
+                    end
+                    leaderRaw = Safe.String(cand)
                 end
             end
             local leaderLk, _, leaderDisp = leaderRaw and Compat.ParseCharacterFields and Compat.ParseCharacterFields(leaderRaw)
@@ -5582,7 +6212,11 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
                     if myKey and myKey ~= "" then
                         leaderLk = myKey
                     end
+                    rawSecretLeader = nil
                 end
+            elseif not leaderLk or not leaderDisp then
+                leaderLk = "official_" .. tostring(resId)
+                leaderDisp = L["Official LFG"]
             end
             if not skipEntry and leaderLk and leaderDisp then
                 local actIdsList = {}
@@ -5671,6 +6305,29 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
                 end
 
                 local mbrMeta = InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDisp)
+                if (not leaderRaw or leaderRaw == "") and not isSelfLeader and type(mbrMeta.members) == "table" then
+                    local promotedName = nil
+                    for mi = 1, #mbrMeta.members do
+                        local m = mbrMeta.members[mi]
+                        if type(m) == "table" and not m.isFallbackClass and type(m.name) == "string" and m.name ~= "" and m.name ~= L["Official LFG"] then
+                            if m.isLeader then
+                                promotedName = m.name
+                                break
+                            elseif not promotedName then
+                                promotedName = m.name
+                            end
+                        end
+                    end
+                    if promotedName and Compat.ParseCharacterFields then
+                        local pLk, _, pDisp = Compat.ParseCharacterFields(promotedName)
+                        if pLk and pDisp then
+                            leaderRaw = promotedName
+                            leaderLk = pLk
+                            leaderDisp = pDisp
+                            rawSecretLeader = nil
+                        end
+                    end
+                end
                 local leaderLvl = (mbrMeta.leaderLvl and mbrMeta.leaderLvl > 0) and mbrMeta.leaderLvl or (Safe.Number(info.leaderLevel) or 0)
                 local isClan, isAllied, isFriend, isWatchlist, resolvedGuild
                 if isSelfLeader then
@@ -5710,6 +6367,9 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
                 local rec = {
                     lookupKey = leaderLk,
                     displayName = leaderDisp,
+                    secretLeaderName = rawSecretLeader,
+                    isUnknownLeader = (not leaderRaw or leaderRaw == ""),
+                    voiceChat = Safe.String(info.voiceChat),
                     guild = resolvedGuild,
                     classFile = mbrMeta.leaderClass,
                     level = leaderLvl > 0 and leaderLvl or nil,
@@ -5769,7 +6429,7 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty)
         end
     end
 
-    if not skipPruningEmpty then
+    if not skipPruningEmpty and #results > 0 then
         local scopedSet = (self._lastOfficialSearchScoped and type(self._lastOfficialSearchActivitySet) == "table") and self._lastOfficialSearchActivitySet or nil
         for k, oldRec in pairs(self.officialLfgCache) do
             if not freshKeys[k] then
@@ -5918,12 +6578,28 @@ function Clan:PublishOfficialLfgListing(opts)
     return false, "rejected"
 end
 
-function Clan:OpenOfficialLfgForGuild(activity, note, mode)
+function Clan:OpenOfficialLfgForGuild(preferredSyncMode, rolesToSync)
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-    if inCombat then return false end
-    if Compat.IsInGroup and Compat.IsInGroup() and Compat.IsGroupLeader and not Compat.IsGroupLeader() then
+    if inCombat then
+        ns:Print(L["Target Radar"] .. ": " .. L["Unavailable during combat."])
+        return false
+    end
+    if Compat.IsInGroup and Compat.IsInGroup() and ((Compat.CanManageGroupListing and not Compat.CanManageGroupListing()) or (Compat.IsGroupLeader and not Compat.IsGroupLeader())) then
         ns:Print("%s", L["Only the party leader can list the group in Blizzard's Group Finder; your Guild & Allies broadcast was sent."])
         return false
+    end
+    if (preferredSyncMode == "GUILD_ALLIES" or preferredSyncMode == "GUILD_ONLY" or preferredSyncMode == "OFF") and ns.db and ns.db.settings then
+        ns.db.settings.officialLfgSyncMode = preferredSyncMode
+    end
+    if not (Compat.IsInGroup and Compat.IsInGroup()) and type(rolesToSync) == "table" and C_LFGListRoles and C_LFGListRoles.SetRoles then
+        pcall(C_LFGListRoles.SetRoles, {
+            tank = rolesToSync.TANK == true,
+            healer = rolesToSync.HEALER == true,
+            dps = rolesToSync.DPS == true,
+        })
+    end
+    if ns.LFGFrameTab and ns.LFGFrameTab.SwitchToOfficialListingTab then
+        return ns.LFGFrameTab:SwitchToOfficialListingTab(preferredSyncMode)
     end
     if ns.LFGFrameTab and ns.LFGFrameTab.HideSubPanel then
         ns.LFGFrameTab:HideSubPanel(false)
@@ -5934,7 +6610,6 @@ function Clan:OpenOfficialLfgForGuild(activity, note, mode)
     elseif _G.LFGListingFrame and _G.LFGListingFrame.Show then
         pcall(_G.LFGListingFrame.Show, _G.LFGListingFrame)
     end
-    ns:Print(L["Official LFG opened with your guild tag pre-filled; click List to publish."])
     return true
 end
 
@@ -6319,7 +6994,7 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
             local remT = math.max(0, (tonumber(evt.needT) or 0) - sum.TANK)
             local remH = math.max(0, (tonumber(evt.needH) or 0) - sum.HEALER)
             local remD = math.max(0, (tonumber(evt.needD) or 0) - sum.DPS)
-            local needText = string.format("Need T:%d H:%d D:%d", remT, remH, remD)
+            local needText = string.format("%s T:%d H:%d D:%d", L["Need"], remT, remH, remD)
             local live = evt.creatorKey and liveByLookup[evt.creatorKey]
 
             local hasFW, hasGoodP, hasAvoidP = false, false, false
@@ -6488,6 +7163,9 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
                     lookupKey = key,
                     guid = (live and live.guid) or off.guid,
                     displayName = (live and live.displayName) or off.displayName or key,
+                    secretLeaderName = off.secretLeaderName,
+                    isUnknownLeader = off.isUnknownLeader == true,
+                    voiceChat = off.voiceChat,
                     classFile = (live and live.classFile) or off.classFile,
                     level = (live and live.level) or off.level,
                     area = (live and live.area) or "",
@@ -7393,7 +8071,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
     end
 
     -- All Clan Hub interactive features require explicit clanSync opt-in (and GUILD, except Allied event whispers).
-    local isWhisperEventCmd = (chatType == "WHISPER") and (cmd == "EVT" or cmd == "EVS" or cmd == "DEL" or cmd == "SIG")
+    local isWhisperEventCmd = (chatType == "WHISPER") and (cmd == "EVT" or cmd == "EVS" or cmd == "DEL" or cmd == "SIG" or cmd == "AESH" or cmd == "AEVR")
     if (not (ns.db and ns.db.settings and ns.db.settings.clanSync)) or (chatType ~= "GUILD" and not isWhisperEventCmd) then
         return
     end
@@ -7514,15 +8192,142 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         end
         QueueClanEmit(0.5)
 
-    elseif cmd == "EVT" then
-        local isAlliedWhisper = false
-        if chatType == "WHISPER" then
-            local isClanW, isAlliedW = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
-            if not isClanW and not isAlliedW then
-                return
-            end
-            isAlliedWhisper = (isAlliedW == true)
+    elseif cmd == "AESH" then
+        if chatType ~= "WHISPER" then return end
+        local myGuildName = (Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+        local myGuildKey = NormalizeGuildKey(myGuildName)
+        if myGuildKey == "" then return end
+        local senderGuild = Compat.CleanPayloadField(parts[2] or "", 40)
+        local targetGuild = Compat.CleanPayloadField(parts[3] or "", 40)
+        local senderGKey = NormalizeGuildKey(senderGuild)
+        local targetGKey = NormalizeGuildKey(targetGuild)
+        if senderGKey == "" or senderGKey == myGuildKey then return end
+        if targetGKey ~= "" and targetGKey ~= myGuildKey then return end
+
+        local dipEntry = bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[senderGKey]
+        if not dipEntry or dipEntry.stance ~= "ALLY" then return end
+
+        local isClanW, _, _, _, knownGuild = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
+        if isClanW then return end
+        if knownGuild and knownGuild ~= "" and NormalizeGuildKey(knownGuild) ~= senderGKey then
+            return
         end
+
+        local flag = (parts[4] == "1")
+        local authorName = Compat.CleanPayloadField(parts[5] or parsed.displayName or "", 32)
+        local wasMutual = Clan:IsAlliedEventSharingMutual(senderGuild)
+        local changed = (dipEntry.peerShareEvents ~= flag) or (authorName ~= "" and dipEntry.peerApprovedBy ~= authorName)
+        dipEntry.peerShareEvents = flag
+        if authorName ~= "" then
+            dipEntry.peerApprovedBy = authorName
+        end
+        dipEntry.peerApprovedAt = now
+        dipEntry.updatedAt = now
+
+        local myTok = ComputeGuildScopeToken()
+        if myTok ~= "" then
+            EnqueueIntelPacket(("AEOK~%s~%s~%s~%s"):format(
+                myTok,
+                senderGKey:sub(1, 32),
+                flag and "1" or "0",
+                authorName
+            ))
+        end
+
+        local isNowMutual = Clan:IsAlliedEventSharingMutual(senderGuild)
+        if changed and isNowMutual and not wasMutual and (dipEntry.name or senderGuild) ~= "" then
+            ns:Print("%s", string.format(L["Allied Calendar & Event sharing with <%s> is now mutually authorized!"], dipEntry.name or senderGuild))
+        end
+        ns:Emit("CLAN_UPDATED")
+        ns:Emit("CLAN_DIPLOMACY_UPDATED")
+
+        local monoNow = GetTime and GetTime() or 0
+        Clan._lastAeshReplyAt = Clan._lastAeshReplyAt or {}
+        if flag and dipEntry.shareEvents == true and (monoNow - (Clan._lastAeshReplyAt[senderGKey] or 0)) >= 20 then
+            Clan._lastAeshReplyAt[senderGKey] = monoNow
+            local replyTarget = parsed.displayName
+            local mySelfName = Compat.CleanPayloadField(ResolveSelfIdentity() or "", 32)
+            local allyGName = Compat.CleanPayloadField(dipEntry.name or senderGuild, 40)
+            local cleanMyG = Compat.CleanPayloadField(myGuildName, 40)
+            C_Timer.After(0.6 + math.random() * 0.6, function()
+                if Clan.isStoppedThisSession or Clan:IsMessagingLocked() or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
+                    return
+                end
+                local aeshBack = ("AESH~%s~%s~1~%s"):format(cleanMyG, allyGName, mySelfName)
+                SendExternalLFGPacket(Clan, aeshBack, "WHISPER", replyTarget)
+            end)
+            C_Timer.After(5.8 + math.random() * 0.6, function()
+                if Clan.isStoppedThisSession or Clan:IsMessagingLocked() or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
+                    return
+                end
+                SendExternalLFGPacket(Clan, "AEVR~" .. cleanMyG, "WHISPER", replyTarget)
+            end)
+        end
+
+    elseif cmd == "AEVR" then
+        if chatType ~= "WHISPER" then return end
+        local myGuildName = (Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+        local myGuildKey = NormalizeGuildKey(myGuildName)
+        if myGuildKey == "" then return end
+        local senderGuild = Compat.CleanPayloadField(parts[2] or "", 40)
+        local senderGKey = NormalizeGuildKey(senderGuild)
+        if senderGKey == "" or senderGKey == myGuildKey then return end
+        if not Clan:IsAlliedEventSharingMutual(senderGuild) then return end
+
+        local isClanW, _, _, _, knownGuild = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
+        if isClanW then return end
+        if knownGuild and knownGuild ~= "" and NormalizeGuildKey(knownGuild) ~= senderGKey then
+            return
+        end
+
+        local monoNow = GetTime and GetTime() or 0
+        Clan._lastAevrReplyAt = Clan._lastAevrReplyAt or {}
+        local replyKey = parsed.lookupKey or senderGKey
+        if (monoNow - (Clan._lastAevrReplyAt[replyKey] or 0)) < 15 then
+            return
+        end
+        Clan._lastAevrReplyAt[replyKey] = monoNow
+
+        local candidates = {}
+        for _, e in pairs(bucket.events or {}) do
+            if type(e) == "table" and not e.isAlliedEvent and e.isOpen ~= false and e.shareAllies ~= false and e.id and e.title then
+                table.insert(candidates, e)
+            end
+        end
+        table.sort(candidates, function(a, b) return (a.updatedAt or 0) > (b.updatedAt or 0) end)
+
+        local cleanMyG = Compat.CleanPayloadField(myGuildName, 40)
+        local replyTarget = parsed.displayName
+        local limit = math.min(3, #candidates)
+        for i = 1, limit do
+            local ev = candidates[i]
+            local evtPkt = ("EVT~%s~%s~%s~%s~%d~%d~%d~%d~%s~%s~1"):format(
+                Compat.CleanPayloadField(ev.id, 16),
+                ev.category or "DUNGEON",
+                Compat.CleanPayloadField(ev.title or "", 40),
+                Compat.CleanPayloadField(ev.whenText or L["Now"], 24),
+                tonumber(ev.needT) or 0,
+                tonumber(ev.needH) or 0,
+                tonumber(ev.needD) or 0,
+                tonumber(ev.minLvl) or 0,
+                ev.isOpen ~= false and "1" or "0",
+                cleanMyG
+            )
+            local delay = ((i - 1) * 5.4) + 0.5 + math.random() * 0.5
+            C_Timer.After(delay, function()
+                if Clan.isStoppedThisSession or Clan:IsMessagingLocked() or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
+                    return
+                end
+                SendExternalLFGPacket(Clan, evtPkt, "WHISPER", replyTarget)
+            end)
+        end
+
+    elseif cmd == "EVT" then
+        local myGuildName = (Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+        local myGuildKey = NormalizeGuildKey(myGuildName)
+        local originGuild = Compat.CleanPayloadField(parts[11] or "", 40)
+        local shareAllies = (parts[12] ~= "0")
+        local relayCreator = Compat.CleanPayloadField(parts[13] or "", 32)
         local eventId = Compat.CleanPayloadField(parts[2] or "", 16)
         local cat = parts[3]
         local title = Compat.CleanPayloadField(parts[4] or "", 40)
@@ -7532,8 +8337,60 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local nD = math.max(0, math.min(30, tonumber(parts[8]) or 0))
         local nMinLvl = math.max(0, math.min(100, tonumber(parts[9]) or 0))
         local isOpen = parts[10] ~= "0"
+
+        local existing = bucket.events[eventId]
+        local effGuild = originGuild
+        local isAlliedEvent = false
+        local effCreator = parsed.displayName
+        local effCreatorKey = parsed.lookupKey
+
+        if chatType == "WHISPER" then
+            local isClanW, isAlliedW, _, _, knownGuild = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
+            if effGuild == "" and knownGuild and knownGuild ~= "" then
+                effGuild = Compat.CleanPayloadField(knownGuild, 40)
+            end
+            if knownGuild and knownGuild ~= "" and effGuild ~= "" and NormalizeGuildKey(knownGuild) ~= NormalizeGuildKey(effGuild) then
+                return
+            end
+            local effGKey = NormalizeGuildKey(effGuild)
+            isAlliedEvent = ((effGKey ~= "" and myGuildKey ~= "" and effGKey ~= myGuildKey) or (isAlliedW == true and not isClanW)) and true or false
+            if isAlliedEvent then
+                if effGKey == "" or not shareAllies or not Clan:IsAlliedEventSharingMutual(effGuild) then
+                    return
+                end
+                if not isAlliedW and knownGuild and knownGuild ~= "" then
+                    return
+                end
+            elseif not isClanW then
+                return
+            end
+        else
+            local originKey = NormalizeGuildKey(effGuild)
+            if originKey ~= "" and myGuildKey ~= "" and originKey ~= myGuildKey then
+                if not IsSenderConfirmedInGuild(parsed.lookupKey) or not shareAllies or not Clan:IsAlliedEventSharingMutual(effGuild) then
+                    return
+                end
+                isAlliedEvent = true
+                if relayCreator ~= "" and Compat.ParseCharacterName then
+                    local cp = Compat.ParseCharacterName(relayCreator)
+                    effCreator = (cp and cp.displayName) or relayCreator
+                    effCreatorKey = (cp and cp.lookupKey) or (existing and existing.creatorKey) or parsed.lookupKey
+                else
+                    effCreator = (existing and existing.creator) or effGuild
+                    effCreatorKey = (existing and existing.creatorKey) or parsed.lookupKey
+                end
+            else
+                if effGuild == "" and myGuildName ~= "" then
+                    effGuild = Compat.CleanPayloadField(myGuildName, 40)
+                end
+            end
+            if eventId ~= "" then
+                Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
+                Clan._heardGuildEvtSig["EVT:" .. eventId] = GetTime and GetTime() or now
+            end
+        end
+
         if eventId ~= "" and IsValidCategory(cat) and title ~= "" then
-            local existing = bucket.events[eventId]
             bucket.events[eventId] = {
                 id = eventId,
                 category = cat,
@@ -7544,22 +8401,48 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 needD = nD,
                 minLvl = nMinLvl,
                 isOpen = isOpen,
-                isAlliedEvent = isAlliedWhisper or (existing and existing.isAlliedEvent) or nil,
-                creator = parsed.displayName,
-                creatorKey = parsed.lookupKey,
+                shareAllies = shareAllies,
+                originGuild = (effGuild ~= "" and effGuild) or (existing and existing.originGuild) or nil,
+                isAlliedEvent = isAlliedEvent or (existing and existing.isAlliedEvent) or nil,
+                creator = effCreator,
+                creatorKey = effCreatorKey,
                 createdAt = existing and existing.createdAt or now,
                 updatedAt = now,
                 signups = existing and existing.signups or {},
             }
+            if chatType == "WHISPER" and isAlliedEvent and effGuild ~= "" then
+                local relayKey = "EVT:" .. eventId
+                local relayPayload = ("EVT~%s~%s~%s~%s~%d~%d~%d~%d~%s~%s~1~%s"):format(
+                    eventId,
+                    cat,
+                    title,
+                    whenText,
+                    nT,
+                    nH,
+                    nD,
+                    nMinLvl,
+                    isOpen and "1" or "0",
+                    Compat.CleanPayloadField(effGuild, 40),
+                    Compat.CleanPayloadField(effCreator or "", 32)
+                ):sub(1, Clan.MAX_PAYLOAD_BYTES or 240)
+                C_Timer.After(0.9 + math.random() * 1.4, function()
+                    if Clan._heardGuildEvtSig and Clan._heardGuildEvtSig[relayKey] then
+                        return
+                    end
+                    if not Clan:IsMessagingLocked() then
+                        EnqueueIntelPacket(relayPayload)
+                    end
+                end)
+            end
             if isOpen and not existing then
                 local isDng = IsDungeonLFGText(title, cat)
-                local srcOv = isAlliedWhisper and L["Allied Clans"] or nil
-                local didLfg = Clan:MaybeNotifyClanLFG(parsed.lookupKey, parsed.displayName, nil, title .. " (" .. (whenText ~= "" and whenText or L["Now"]) .. ")", title, isDng, "EVT", nil, srcOv)
+                local srcOv = isAlliedEvent and (effGuild ~= "" and effGuild or L["Allied Clans"]) or nil
+                local didLfg = Clan:MaybeNotifyClanLFG(effCreatorKey, effCreator, nil, title .. " (" .. (whenText ~= "" and whenText or L["Now"]) .. ")", title, isDng, "EVT", nil, srcOv)
                 local s = ns.db and ns.db.settings
-                if not didLfg and s and s.clanEventAlertEnabled == true and not Compat.IsMe(parsed.displayName) then
+                if not didLfg and s and s.clanEventAlertEnabled == true and not Compat.IsMe(effCreator) then
                     local evtWhen = whenText ~= "" and whenText or L["Now"]
                     local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
-                    ns:Print("%s", ("|cff58a6ff[%s]|r %s: %s (%s) %s"):format(L["Guild Event"], parsed.displayName, title, evtWhen, openLink))
+                    ns:Print("%s", ("|cff58a6ff[%s]|r %s: %s (%s) %s"):format(srcOv or L["Guild Event"], effCreator, title, evtWhen, openLink))
                     if s.clanLfgAlertSound ~= false then
                         PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
                     end
@@ -7567,8 +8450,8 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     ns:Emit("ADDON_MESSAGE_NOTIFY", {
                         id = "clanevt:" .. eventId,
                         kind = "CLAN_EVENT",
-                        sourceTag = L["Guild Event"],
-                        sender = parsed.displayName,
+                        sourceTag = srcOv or L["Guild Event"],
+                        sender = effCreator,
                         text = title .. " (" .. evtWhen .. ")",
                         eventId = eventId,
                         ts = now,
@@ -7584,13 +8467,37 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local evt = bucket.events[eventId]
         if evt then
             local canEvtMod = (evt.creatorKey == parsed.lookupKey)
-            if not canEvtMod and chatType == "GUILD" then
+            if evt.isAlliedEvent and evt.originGuild and evt.originGuild ~= "" and Clan:IsAlliedEventSharingMutual(evt.originGuild) then
+                if chatType == "GUILD" then
+                    if IsSenderConfirmedInGuild(parsed.lookupKey) then
+                        Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
+                        Clan._heardGuildEvtSig["EVS:" .. eventId .. ":" .. (parts[3] ~= "0" and "1" or "0")] = GetTime and GetTime() or now
+                        canEvtMod = true
+                    end
+                elseif chatType == "WHISPER" then
+                    local isClanW, _, _, _, knownGuild = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
+                    if not isClanW and ((knownGuild and knownGuild ~= "" and NormalizeGuildKey(knownGuild) == NormalizeGuildKey(evt.originGuild)) or (evt.creatorKey == parsed.lookupKey)) then
+                        canEvtMod = true
+                    end
+                end
+            elseif not canEvtMod and chatType == "GUILD" then
                 local pol = Clan:GetGuildHierarchyPolicy()
                 canEvtMod = IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.eventModMode, pol.eventModMaxRank)
             end
             if canEvtMod then
-                evt.isOpen = parts[3] ~= "0"
+                local newState = parts[3] ~= "0"
+                evt.isOpen = newState
                 evt.updatedAt = now
+                if chatType == "WHISPER" and evt.isAlliedEvent then
+                    local rKey = "EVS:" .. eventId .. ":" .. (newState and "1" or "0")
+                    local rPay = ("EVS~%s~%s"):format(eventId, newState and "1" or "0")
+                    C_Timer.After(0.8 + math.random() * 1.2, function()
+                        if Clan._heardGuildEvtSig and Clan._heardGuildEvtSig[rKey] then return end
+                        if not Clan:IsMessagingLocked() then
+                            EnqueueIntelPacket(rPay)
+                        end
+                    end)
+                end
                 QueueClanEmit(0.6)
             end
         end
@@ -7618,40 +8525,109 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local eventId = Compat.CleanPayloadField(parts[2] or "", 16)
         local role = parts[3]
         local classFile = Compat.CleanPayloadField(parts[4] or "", 16)
+        local sigGuild = Compat.CleanPayloadField(parts[5] or "", 28)
+        local relSigner = Compat.CleanPayloadField(parts[6] or "", 32)
         local evt = (chatType == "WHISPER") and (bucket.events and bucket.events[eventId]) or EnsureEventRecord(bucket, eventId)
         if chatType == "WHISPER" and not evt then
             return
         end
+
+        local signerKey = parsed.lookupKey
+        local signerName = parsed.displayName
+        local signerGuild = sigGuild
+        local relayNeeded = false
+
         if chatType == "WHISPER" then
-            local isClanW, isAlliedW = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
-            if not isClanW and not isAlliedW and not evt.isAlliedEvent then
-                return
+            local isClanW, isAlliedW, _, _, knownGuild = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
+            if signerGuild == "" and knownGuild and knownGuild ~= "" then
+                signerGuild = Compat.CleanPayloadField(knownGuild, 28)
+            end
+            if isClanW then
+                signerGuild = signerGuild ~= "" and signerGuild or Compat.CleanPayloadField((Store.guildInfo and Store.guildInfo.name) or "", 28)
+            else
+                if (not evt.isAlliedEvent) and evt.shareAllies == false then
+                    return
+                end
+                if knownGuild and knownGuild ~= "" then
+                    if not isAlliedW then return end
+                    if sigGuild ~= "" and NormalizeGuildKey(knownGuild) ~= NormalizeGuildKey(sigGuild) then
+                        return
+                    end
+                    if not Clan:IsAlliedEventSharingMutual(knownGuild) then
+                        return
+                    end
+                else
+                    if sigGuild == "" or not Clan:IsAlliedEventSharingMutual(sigGuild) then
+                        return
+                    end
+                end
+                relayNeeded = true
             end
             evt.signups = evt.signups or {}
+        elseif relSigner ~= "" then
+            local myGuildName = (Store.guildInfo and Store.guildInfo.name) or Safe.String(Safe.Call(GetGuildInfo, "player")) or ""
+            local myGKey = NormalizeGuildKey(myGuildName)
+            local sigGKey = NormalizeGuildKey(sigGuild)
+            if not IsSenderConfirmedInGuild(parsed.lookupKey) or sigGKey == "" or sigGKey == myGKey or not Clan:IsAlliedEventSharingMutual(sigGuild) then
+                return
+            end
+            if Compat.ParseCharacterName then
+                local rp = Compat.ParseCharacterName(relSigner)
+                if not rp or not rp.lookupKey then return end
+                signerKey = rp.lookupKey
+                signerName = rp.displayName or relSigner
+            else
+                return
+            end
+        elseif signerGuild == "" then
+            signerGuild = Compat.CleanPayloadField((Store.guildInfo and Store.guildInfo.name) or "", 28)
         end
+
+        if chatType == "GUILD" and eventId ~= "" and signerKey ~= "" and IsValidRole(role) then
+            Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
+            Clan._heardGuildEvtSig["SIG:" .. eventId .. ":" .. signerKey .. ":" .. role] = GetTime and GetTime() or now
+        end
+
         if evt and IsValidRole(role) then
             if role == "DECLINE" then
-                evt.signups[parsed.lookupKey] = nil
+                evt.signups[signerKey] = nil
             else
-                evt.signups[parsed.lookupKey] = {
-                    name = parsed.displayName,
+                evt.signups[signerKey] = {
+                    name = signerName,
                     classFile = classFile ~= "" and classFile or nil,
                     role = role,
+                    guild = (signerGuild ~= "" and signerGuild) or nil,
                     updatedAt = now,
                 }
             end
             evt.updatedAt = now
+            if relayNeeded and eventId ~= "" and signerKey ~= "" then
+                local rKey = "SIG:" .. eventId .. ":" .. signerKey .. ":" .. role
+                local rPay = ("SIG~%s~%s~%s~%s~%s"):format(
+                    eventId,
+                    role,
+                    classFile,
+                    Compat.CleanPayloadField(signerGuild or "", 28),
+                    Compat.CleanPayloadField(signerName or "", 32)
+                ):sub(1, Clan.MAX_PAYLOAD_BYTES or 240)
+                C_Timer.After(0.8 + math.random() * 1.2, function()
+                    if Clan._heardGuildEvtSig and Clan._heardGuildEvtSig[rKey] then return end
+                    if not Clan:IsMessagingLocked() then
+                        EnqueueIntelPacket(rPay)
+                    end
+                end)
+            end
             local _, myKey = ResolveSelfIdentity()
             local s = ns.db and ns.db.settings
-            if myKey and evt.creatorKey == myKey and not Compat.IsMe(parsed.displayName) and s and s.clanSignupAlertEnabled ~= false then
-                local cdKey = (parsed.lookupKey or "") .. ":" .. eventId
+            if myKey and evt.creatorKey == myKey and not Compat.IsMe(signerName) and s and s.clanSignupAlertEnabled ~= false then
+                local cdKey = (signerKey or "") .. ":" .. eventId
                 local monoNow = GetTime and GetTime() or time()
                 Clan.signupAlertCooldowns = Clan.signupAlertCooldowns or {}
                 if (monoNow - (Clan.signupAlertCooldowns[cdKey] or 0)) >= 15 then
                     Clan.signupAlertCooldowns[cdKey] = monoNow
                     local roleLbl = L[role] or role
                     local evtName = (evt.title and evt.title ~= "") and evt.title or eventId
-                    local msgBody = string.format(L["%s signed (%s): %s"], parsed.displayName, roleLbl, evtName)
+                    local msgBody = string.format(L["%s signed (%s): %s"], signerName, roleLbl, evtName)
                     local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
                     ns:Print("%s", "|cff3fb950[" .. L["Event Signup"] .. "]|r " .. msgBody .. " " .. openLink)
                     if s.chatSound ~= false then
@@ -7662,7 +8638,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                         id = "sig:" .. cdKey .. ":" .. tostring(now),
                         kind = "CLAN_SIGNUP",
                         sourceTag = L["Event Signup"],
-                        sender = parsed.displayName,
+                        sender = signerName,
                         senderClass = classFile ~= "" and classFile or nil,
                         text = msgBody,
                         eventId = eventId,
@@ -7679,17 +8655,41 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         local evt = bucket.events[eventId]
         if evt then
             local canEvtDel = (evt.creatorKey == parsed.lookupKey)
-            if not canEvtDel and chatType == "GUILD" then
+            if evt.isAlliedEvent and evt.originGuild and evt.originGuild ~= "" and Clan:IsAlliedEventSharingMutual(evt.originGuild) then
+                if chatType == "GUILD" then
+                    if IsSenderConfirmedInGuild(parsed.lookupKey) then
+                        Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
+                        Clan._heardGuildEvtSig["DEL:" .. eventId] = GetTime and GetTime() or now
+                        canEvtDel = true
+                    end
+                elseif chatType == "WHISPER" then
+                    local isClanW, _, _, _, knownGuild = Clan:GetPlayerRelationshipFlags(parsed.lookupKey, parsed.displayName)
+                    if not isClanW and ((knownGuild and knownGuild ~= "" and NormalizeGuildKey(knownGuild) == NormalizeGuildKey(evt.originGuild)) or (evt.creatorKey == parsed.lookupKey)) then
+                        canEvtDel = true
+                    end
+                end
+            elseif not canEvtDel and chatType == "GUILD" then
                 local pol = Clan:GetGuildHierarchyPolicy()
                 canEvtDel = IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.eventModMode, pol.eventModMaxRank)
             end
             if canEvtDel then
+                local wasAlliedWhisper = (chatType == "WHISPER" and evt.isAlliedEvent)
                 bucket.events[eventId] = nil
+                if wasAlliedWhisper then
+                    local rKey = "DEL:" .. eventId
+                    local rPay = "DEL~" .. eventId
+                    C_Timer.After(0.8 + math.random() * 1.2, function()
+                        if Clan._heardGuildEvtSig and Clan._heardGuildEvtSig[rKey] then return end
+                        if not Clan:IsMessagingLocked() then
+                            EnqueueIntelPacket(rPay)
+                        end
+                    end)
+                end
                 QueueClanEmit(0.5)
             end
         end
 
-    elseif cmd == "CINF" or cmd == "CINF2" or cmd == "CDIP" or cmd == "CDEL" or cmd == "CREQ" or cmd == "CHIR" or cmd == "ALLC" then
+    elseif cmd == "CINF" or cmd == "CINF2" or cmd == "CDIP" or cmd == "CDEL" or cmd == "CREQ" or cmd == "CHIR" or cmd == "ALLC" or cmd == "AEOK" then
         -- Strict multi-layer anti-leakage guard: scope token + active guild roster verification
         local myTok = ComputeGuildScopeToken()
         local pktTok = parts[2] or ""
@@ -7697,7 +8697,23 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             return
         end
 
-        if cmd == "ALLC" then
+        if cmd == "AEOK" then
+            local gKey = NormalizeGuildKey(parts[3] or "")
+            local flag = (parts[4] == "1")
+            local authorName = Compat.CleanPayloadField(parts[5] or "", 32)
+            local cur = gKey ~= "" and bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[gKey]
+            if cur and cur.stance == "ALLY" then
+                cur.peerShareEvents = flag
+                if authorName ~= "" then
+                    cur.peerApprovedBy = authorName
+                end
+                cur.peerApprovedAt = now
+                cur.updatedAt = now
+                ns:Emit("CLAN_UPDATED")
+                ns:Emit("CLAN_DIPLOMACY_UPDATED")
+            end
+            return
+        elseif cmd == "ALLC" then
             local canAll = IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, "LEADER", 0)
                 or (bucket.alliance and bucket.alliance.managers and bucket.alliance.managers[parsed.lookupKey] == true)
             if not canAll then
@@ -7799,7 +8815,9 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             end
         elseif cmd == "CDIP" then
             local pol = Clan:GetGuildHierarchyPolicy()
-            if not IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.diplomacyMode, pol.diplomacyMaxRank) then
+            local canFullDip = IsSenderAuthorizedForPolicy(Clan, parsed.lookupKey, pol.diplomacyMode, pol.diplomacyMaxRank)
+            local isAllMgr = (bucket.alliance and bucket.alliance.managers and bucket.alliance.managers[parsed.lookupKey] == true)
+            if not canFullDip and not isAllMgr then
                 return
             end
             local ver = parts[3]
@@ -7812,6 +8830,8 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             if gKey == "" then gKey = NormalizeGuildKey(parts[6] or "") end
             local gFaction = Compat.CleanPayloadField(parts[8] or "", 12)
             local reason = Compat.CleanPayloadField(parts[9] or "", 48)
+            local shareEvtFlag = (parts[10] == "1")
+            local hasPeerFlag = (parts[11] ~= nil and parts[11] ~= "")
             local myGuildKey = NormalizeGuildKey((Store.guildInfo and Store.guildInfo.name) or "")
             if IsSaneRemoteSemVer(ver) then
                 ProcessPeerVersion(parsed.displayName, parsed.lookupKey, ver, "GUILD")
@@ -7819,14 +8839,25 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             if gKey ~= "" and gName ~= "" and gKey ~= myGuildKey then
                 bucket.diplomacy = bucket.diplomacy or { rev = 0, guilds = {} }
                 local cur = bucket.diplomacy.guilds[gKey]
+                if not canFullDip and (not cur or cur.stance ~= "ALLY" or stance ~= "ALLY") then
+                    return
+                end
                 if not cur or cur.localOnly or rev >= (cur.rev or 0) then
+                    local effPeerShare = (cur and cur.peerShareEvents == true) or false
+                    if hasPeerFlag then
+                        effPeerShare = (parts[11] == "1")
+                    end
                     bucket.diplomacy.guilds[gKey] = {
                         key = gKey,
-                        name = gName,
-                        stance = stance,
-                        reason = reason,
-                        faction = gFaction,
-                        addedBy = parsed.displayName,
+                        name = canFullDip and gName or cur.name,
+                        stance = canFullDip and stance or cur.stance,
+                        reason = canFullDip and reason or cur.reason,
+                        faction = canFullDip and gFaction or cur.faction,
+                        addedBy = canFullDip and parsed.displayName or cur.addedBy,
+                        shareEvents = (stance == "ALLY") and shareEvtFlag or false,
+                        peerShareEvents = (stance == "ALLY") and effPeerShare or false,
+                        peerApprovedBy = (stance == "ALLY") and cur and cur.peerApprovedBy or nil,
+                        peerApprovedAt = (stance == "ALLY") and cur and cur.peerApprovedAt or nil,
                         localOnly = false,
                         rev = rev,
                         updatedAt = now,

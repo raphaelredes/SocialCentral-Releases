@@ -1556,14 +1556,47 @@ function Theme:ResetAllWindowPositions()
     return true
 end
 
+--- Configure any shared modal/popup to sit above all native & World Map hosts with a 100% opaque backing.
+function Theme:PrepareTopOverlayModal(m, minLevel)
+    if not m then return end
+    if m.GetParent and m:GetParent() ~= UIParent then
+        m:SetParent(UIParent)
+    end
+    local mapShown = _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()
+    local targetLevel = mapShown and math.max(minLevel or 850, 2750) or math.max(minLevel or 850, 840)
+    m:SetFrameStrata("FULLSCREEN_DIALOG")
+    m:SetFrameLevel(targetLevel)
+    if m.SetToplevel then m:SetToplevel(true) end
+    if m.SetClampedToScreen then m:SetClampedToScreen(true) end
+    m:EnableMouse(true)
+    if not m._solidOpaqueBg and m.CreateTexture then
+        local bg = m:CreateTexture(nil, "BACKGROUND", nil, -8)
+        bg:SetAllPoints(m)
+        bg:SetTexture(WHITE8X8)
+        m._solidOpaqueBg = bg
+    end
+    if m._solidOpaqueBg then
+        local pal = self:GetPalette()
+        local wBg = (pal and pal.windowBg) or { 0.08, 0.075, 0.07, 1.0 }
+        m._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
+        m._solidOpaqueBg:Show()
+    end
+    for _, closeKey in ipairs({ "topCloseBtn", "closeBtn", "topClose" }) do
+        local cb = m[closeKey]
+        if cb and cb.SetFrameLevel then
+            cb:SetFrameLevel(targetLevel + 12)
+        end
+    end
+    if m.Raise then m:Raise() end
+end
+
 --- Display a modal help card explaining what an option does and how to use it.
 function Theme:ShowHelpPopup(title, whatText, howText)
     if not helpPopup then
         local m = CreateFrame("Frame", "SocialCentralHelpPopup", UIParent, "BackdropTemplate")
         m:SetSize(430, 230)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(120)
+        self:PrepareTopOverlayModal(m, 860)
         self:MakeMovable(m, { key = "helpPopup" })
         table.insert(UISpecialFrames, "SocialCentralHelpPopup")
 
@@ -1599,6 +1632,7 @@ function Theme:ShowHelpPopup(title, whatText, howText)
         helpPopup = m
     end
 
+    self:PrepareTopOverlayModal(helpPopup, 860)
     self:ApplyBackdrop(helpPopup, "window")
     self:StyleButton(helpPopup.topCloseBtn, "default")
     self:StyleButton(helpPopup.closeBtn, "primary")
@@ -1608,6 +1642,7 @@ function Theme:ShowHelpPopup(title, whatText, howText)
         "\n\n|cff4ade80" .. L["How to use:"] .. "|r\n" .. (howText or "")
     )
     helpPopup:Show()
+    if helpPopup.Raise then helpPopup:Raise() end
 end
 
 --- Create a standardized '?' help micro-button beside an option or feature bar.
@@ -1681,8 +1716,7 @@ function Theme:ShowUpdatePopup(localVer, remoteVer, url)
         local m = CreateFrame("Frame", "SocialCentralUpdatePopup", UIParent, "BackdropTemplate")
         m:SetSize(470, 225)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(125)
+        self:PrepareTopOverlayModal(m, 865)
         self:MakeMovable(m, { key = "updatePopup" })
         table.insert(UISpecialFrames, "SocialCentralUpdatePopup")
 
@@ -1742,6 +1776,7 @@ function Theme:ShowUpdatePopup(localVer, remoteVer, url)
         updatePopup = m
     end
 
+    self:PrepareTopOverlayModal(updatePopup, 865)
     self:ApplyBackdrop(updatePopup, "window")
     self:StyleButton(updatePopup.topCloseBtn, "default")
     self:StyleButton(updatePopup.btnUrl, "default")
@@ -1771,6 +1806,7 @@ function Theme:ShowUpdatePopup(localVer, remoteVer, url)
     updatePopup.btnUrl:SetScript("OnClick", function() SelectValue(releaseUrl) end)
     updatePopup.btnCmd:SetScript("OnClick", function() SelectValue(psCmd) end)
     updatePopup:Show()
+    if updatePopup.Raise then updatePopup:Raise() end
     SelectValue(releaseUrl)
 end
 
@@ -1782,8 +1818,7 @@ function Theme:ShowReloadPrompt(langLabel)
         local m = CreateFrame("Frame", "SocialCentralReloadPopup", UIParent, "BackdropTemplate")
         m:SetSize(410, 160)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(130)
+        self:PrepareTopOverlayModal(m, 870)
         self:MakeMovable(m, { key = "reloadPopup" })
         table.insert(UISpecialFrames, "SocialCentralReloadPopup")
 
@@ -1836,6 +1871,7 @@ function Theme:ShowReloadPrompt(langLabel)
         reloadPopup = m
     end
 
+    self:PrepareTopOverlayModal(reloadPopup, 870)
     self:ApplyBackdrop(reloadPopup, "window")
     self:StyleButton(reloadPopup.topCloseBtn, "default")
     self:StyleButton(reloadPopup.btnLater, "default")
@@ -1843,6 +1879,7 @@ function Theme:ShowReloadPrompt(langLabel)
     reloadPopup.title:SetText(L["Language Changed"])
     reloadPopup.desc:SetText(L["Language saved as %s. Reload UI now to apply the new language across all SocialCentral panels?"]:format(langLabel or "Auto"))
     reloadPopup:Show()
+    if reloadPopup.Raise then reloadPopup:Raise() end
 end
 
 local themeWelcomePopup
@@ -1853,8 +1890,7 @@ function Theme:ShowThemeWelcomePicker()
         local m = CreateFrame("Frame", "SocialCentralThemePicker", UIParent, "BackdropTemplate")
         m:SetSize(664, 464)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("DIALOG")
-        m:SetFrameLevel(140)
+        self:PrepareTopOverlayModal(m, 880)
         self:MakeMovable(m, { key = "themePicker" })
         table.insert(UISpecialFrames, "SocialCentralThemePicker")
 
@@ -1903,7 +1939,7 @@ function Theme:ShowThemeWelcomePicker()
             card:EnableMouse(true)
 
             local bgSpec = BACKDROP_SPEC
-            local cardBg = isBlizzSample and { 0.11, 0.095, 0.075, 0.98 } or { 0.07, 0.08, 0.11, 0.98 }
+            local cardBg = isBlizzSample and { 0.11, 0.095, 0.075, 1.0 } or { 0.07, 0.08, 0.11, 1.0 }
             local baseBorder = isBlizzSample and { 0.68, 0.56, 0.30, 1.0 } or { 0.24, 0.34, 0.46, 0.95 }
             local hoverBorder = isBlizzSample and { 1.0, 0.82, 0.22, 1.0 } or { 0.35, 0.78, 1.0, 1.0 }
             card:SetBackdrop(bgSpec)
@@ -2274,9 +2310,11 @@ function Theme:ShowThemeWelcomePicker()
         themeWelcomePopup = m
     end
 
+    self:PrepareTopOverlayModal(themeWelcomePopup, 880)
     self:ApplyBackdrop(themeWelcomePopup, "window")
     self:StyleButton(themeWelcomePopup.closeBtn, "default")
     themeWelcomePopup:Show()
+    if themeWelcomePopup.Raise then themeWelcomePopup:Raise() end
 end
 
 --- Create a reusable clipped virtual scroll list with mouse wheel and slim thumb.

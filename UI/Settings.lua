@@ -332,6 +332,143 @@ local function EnsurePanelFrame()
     return panel
 end
 
+local function EnsureShortcutTable(s, field)
+    if not s then return nil end
+    if type(s[field]) ~= "table" then
+        s[field] = { O = false, I = false, J = false, C = false }
+    end
+    return s[field]
+end
+
+local function BuildShortcutAutoOpenSection(ov, anchor, deps, refs, NotifySettingChanged)
+    local scAutoHeader = AddSectionHeader(
+        ov,
+        L["Open Shortcut Directly on SocialCentral Tab"],
+        anchor,
+        -10,
+        L["Help: Shortcut Auto-Open"],
+        L["Lets you choose whether pressing an official game window shortcut (O, I, J, C) jumps straight to the SocialCentral tab or opens Blizzard's default tab."],
+        L["Choose whether to apply this preference to only the current shortcut or to all enabled shortcuts, and change it anytime in Settings."]
+    )
+
+    local scAutoGrid = CreateFrame("Frame", nil, ov)
+    scAutoGrid:SetPoint("TOPLEFT", scAutoHeader, "BOTTOMLEFT", 0, -4)
+    scAutoGrid:SetSize(600, 62)
+
+    local scAutoLeft = CreateFrame("Frame", nil, scAutoGrid)
+    scAutoLeft:SetPoint("TOPLEFT", scAutoGrid, "TOPLEFT", 0, 0)
+    scAutoLeft:SetSize(294, 60)
+
+    local scAutoRight = CreateFrame("Frame", nil, scAutoGrid)
+    scAutoRight:SetPoint("TOPLEFT", scAutoLeft, "TOPRIGHT", 10, 0)
+    scAutoRight:SetSize(294, 60)
+
+    refs.scAutoGrid, refs.scAutoLeft, refs.scAutoRight = scAutoGrid, scAutoLeft, scAutoRight
+
+    local function MakeAutoOpenCheckbox(colFrame, rowAnchor, winKey, labelText, helpTitle, helpWhat, helpHow)
+        return CreateGridCheckbox(
+            colFrame,
+            rowAnchor,
+            rowAnchor and -4 or -2,
+            labelText,
+            function()
+                local tbl = ns.db and ns.db.settings and ns.db.settings.shortcutAutoOpenAddon
+                return type(tbl) == "table" and tbl[winKey] == true
+            end,
+            function(checked)
+                local s = ns.db and ns.db.settings
+                if s then
+                    local autoTbl = EnsureShortcutTable(s, "shortcutAutoOpenAddon")
+                    local ansTbl = EnsureShortcutTable(s, "shortcutPromptAnswered")
+                    autoTbl[winKey] = (checked == true)
+                    ansTbl[winKey] = true
+                    if ns.LFGFrameTab and ns.LFGFrameTab._shortcutPromptDismissed then
+                        ns.LFGFrameTab._shortcutPromptDismissed[winKey] = nil
+                    end
+                end
+                NotifySettingChanged()
+            end,
+            helpTitle,
+            helpWhat,
+            helpHow
+        )
+    end
+
+    local autoSocCb = MakeAutoOpenCheckbox(
+        scAutoLeft, nil, "O", L["Social & Friends (O)"],
+        L["Help: Auto-Open Social (O)"],
+        L["Automatically opens the SocialCentral side-tab whenever you open Social / Friends (O)."],
+        L["Click any Blizzard tab inside the window anytime to switch back to the native Friends or Who lists."]
+    )
+    local autoLfgCb = MakeAutoOpenCheckbox(
+        scAutoLeft, autoSocCb, "I", L["Group Finder (I)"],
+        L["Help: Auto-Open Group Finder (I)"],
+        L["Automatically opens the SocialCentral Clans & Allies LFG tab whenever you open Group Finder (I)."],
+        L["Click Blizzard's Official Listing or Browse tabs anytime to switch back inside the same window."]
+    )
+    local autoGuildCb = MakeAutoOpenCheckbox(
+        scAutoRight, nil, "J", L["Guild & Diplomacy (J)"],
+        L["Help: Auto-Open Guild (J)"],
+        L["Automatically opens the SocialCentral Guild Hub tab whenever you open Guild / Communities (J)."],
+        L["Click Blizzard's Guild Chat or Roster tabs on the right anytime to return to the native guild view."]
+    )
+    local autoCharCb = MakeAutoOpenCheckbox(
+        scAutoRight, autoGuildCb, "C", L["Character & Alts (C)"],
+        L["Help: Auto-Open Character (C)"],
+        L["Automatically opens the SocialCentral My Alts inventory & gold vault tab whenever you open Character (C)."],
+        L["Click Blizzard's Character or Currency bottom tabs anytime to switch back to equipment view."]
+    )
+
+    AddDeps(deps.social, autoSocCb)
+    AddDeps(deps.lfg, autoLfgCb)
+    AddDeps(deps.guild, autoGuildCb)
+    AddDeps(deps.alts, autoCharCb)
+
+    local scResetRow = CreateFrame("Frame", nil, ov)
+    scResetRow:SetPoint("TOPLEFT", scAutoGrid, "BOTTOMLEFT", 0, -4)
+    scResetRow:SetSize(560, 24)
+
+    local askAgainBtn = ns.Theme:CreateButton(scResetRow, 206, 22, L["Ask Again on Shortcuts"], "default")
+    ns.Theme:AutoFitButton(askAgainBtn, 168, 16, 280)
+    askAgainBtn:SetPoint("LEFT", scResetRow, "LEFT", 0, 0)
+    askAgainBtn:SetScript("OnClick", function()
+        local function DoResetPrompts()
+            local s = ns.db and ns.db.settings
+            if s then
+                s.shortcutAutoOpenAddon = { O = false, I = false, J = false, C = false }
+                s.shortcutPromptAnswered = { O = false, I = false, J = false, C = false }
+            end
+            if ns.LFGFrameTab then
+                ns.LFGFrameTab._shortcutPromptDismissed = {}
+            end
+            NotifySettingChanged()
+            ns:Print("%s", L["Shortcut prompts reset: SocialCentral will ask again the next time you open each window."])
+        end
+        if ns.UI and ns.UI.OpenConfirmModal then
+            ns.UI:OpenConfirmModal({
+                title = L["Ask Again on Shortcuts"],
+                message = L["Are you sure you want to reset your shortcut auto-open choices so SocialCentral asks again on O, I, J, and C?"],
+                confirmText = L["Reset"],
+                confirmVariant = "primary",
+                onConfirm = DoResetPrompts,
+            })
+        else
+            DoResetPrompts()
+        end
+    end)
+
+    HelpBtn(
+        scResetRow,
+        askAgainBtn,
+        L["Help: Ask Again on Shortcuts"],
+        L["Clears your saved first-time shortcut choices (O, I, J, C) and resets auto-open back to asking on first open."],
+        L["Click to re-enable the confirmation prompt the next time you press an enabled official shortcut key."]
+    )
+    AddDeps(deps.defaultBtns, askAgainBtn)
+
+    return scResetRow
+end
+
 local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSettingsBeforeJump)
     local charProfCb = CreateCheckbox(
         ov,
@@ -599,10 +736,12 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Keep enabled so guildless characters stay clutter-free without manually turning Guild options off and on."]
     )
 
+    local scAutoBottom = BuildShortcutAutoOpenSection(ov, autoHideGuildCb, deps, refs, NotifySettingChanged)
+
     local dndCb = CreateCheckbox(
         ov,
         L["Do Not Disturb (pause all popups & chimes without changing your checkboxes)"],
-        autoHideGuildCb,
+        scAutoBottom,
         -4,
         function() return ns.db and ns.db.settings and ns.db.settings.doNotDisturb == true end,
         function(checked) ns.db.settings.doNotDisturb = checked; NotifySettingChanged() end,
@@ -1942,12 +2081,12 @@ local function BuildPanel()
     scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 6)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(610, 960)
+    content:SetSize(610, 1120)
     scrollFrame:SetScrollChild(content)
 
     local pages = {}
     local pageHeights = {
-        overview = 960,
+        overview = 1120,
         notifications = 1720,
         radar = 800,
         general = 1320,
@@ -2037,7 +2176,7 @@ local function BuildPanel()
     end
 
     local deps = {
-        wb = {}, radar = {}, guild = {}, lfg = {}, watch = {}, chat = {}, alts = {}, nearby = {},
+        wb = {}, radar = {}, guild = {}, lfg = {}, social = {}, watch = {}, chat = {}, alts = {}, nearby = {},
         defaultBtns = {}, primaryBtns = {},
     }
     local refs = {}
@@ -2129,6 +2268,7 @@ local function BuildPanel()
             radar = not s or s.spotterEnabled ~= false,
             guild = (not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled("J"),
             lfg = not s or s.embedLfgWindow ~= false,
+            social = not s or s.embedSocialWindow ~= false,
             alts = not s or s.embedCharacterWindow ~= false,
             watch = not s or s.moduleWatchlistEnabled ~= false,
             nearby = not s or s.moduleNearbyEnabled ~= false,
@@ -2148,6 +2288,11 @@ local function BuildPanel()
         refs.winGrid:SetWidth(w - 8)
         refs.winLeft:SetWidth(colW)
         refs.winRight:SetWidth(colW)
+        if refs.scAutoGrid then
+            refs.scAutoGrid:SetWidth(w - 8)
+            refs.scAutoLeft:SetWidth(colW)
+            refs.scAutoRight:SetWidth(colW)
+        end
         refs.qGrid:SetWidth(w - 8)
         refs.qLeft:SetWidth(colW)
         refs.qRight:SetWidth(colW)

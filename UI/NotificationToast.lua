@@ -1399,7 +1399,7 @@ function Toast:ShowTestNotification(variant)
             sourceTag = L["Room Invite"],
             sender = myName,
             senderClass = myClass or "MAGE",
-            text = "Dungeon & Raid Social",
+            text = L["Dungeon & Raid Social"],
             priority = 2,
             totalDuration = AUTO_DISMISS_INVITE_SEC,
         })
@@ -1452,7 +1452,7 @@ function Toast:ShowTestNotification(variant)
             id = "test:buff:" .. tostring(now),
             kind = "WORLDBUFF",
             sourceTag = L["World Buffs"],
-            sender = "Rallying Cry of the Dragonslayer",
+            sender = L["Rallying Cry of the Dragonslayer"],
             senderClass = nil,
             text = "~15s",
             priority = 2,
@@ -1470,7 +1470,7 @@ function Toast:ShowTestNotification(variant)
             sourceTag = L["Room Invite"],
             sender = myName,
             senderClass = myClass or "MAGE",
-            text = "Dungeon & Raid Social",
+            text = L["Dungeon & Raid Social"],
             priority = 2,
             totalDuration = AUTO_DISMISS_INVITE_SEC,
         })

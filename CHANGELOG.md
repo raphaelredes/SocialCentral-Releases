@@ -5,6 +5,22 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-11-19
+### Added & Improved
+- **First-Time Official Shortcut Auto-Open Choice & Settings (`Core/Init.lua`, `UI/LFGFrameTab.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**
+  - Added a one-time top-strata choice modal (`SocialCentralShortcutPromptModal`) shown on first open of enabled integrated Blizzard windows (`O`, `I`, `J`, `C`), asking whether pressing that shortcut should open directly into the SocialCentral tab or keep Blizzard's default tab, with an inline scope selector (**This shortcut only** vs **All applicable enabled shortcuts**).
+  - Protected sibling sub-shortcuts sharing the same host frames (`U` Reputation, `K` Skills, `H` Honor, and `/who` Tab 3) from accidental interception, while keeping native Blizzard tab switching inside open windows intact.
+  - Added **Open Shortcut Directly on SocialCentral Tab** toggles (`O`, `I`, `J`, `C`) with `[?]` help tooltips and a confirmed **Ask Again on Shortcuts** reset button under **Settings -> Summary & Windows**.
+- **Official LFG Tab Integration & Layout Fixes (`Core/Init.lua`, `Providers/Clan.lua`, `UI/LFGFrameTab.lua`, `Locales/Locale.lua`):**
+  - Resolved Blizzard's protected `C_LFGList.CreateListing`/`UpdateListing` restriction cleanly: Tab 1 (`LFGListingFrame`) now hosts a tailored SocialCentral bottom mirror bar (`Mirror: Guild & Allies`, `Mirror: My Guild Only`, `Official Only`, 1-click `Chat (/g)`, `Private [SC]`, and `View Groups`), automatically syncing active Official listings into SocialCentral while keeping Tab 4 honest for Private listings and redirecting Official actions smoothly to Tab 1.
+  - Fixed the `"Broadcast to"` label floating inside the activity checklist and hid the bottom bridge bar cleanly whenever Tab 4 (`SocialCentral`) is active.
+- **Mutually Authorized Allied Guild Calendar & Event Sharing (`Providers/Clan.lua`, `UI/MainFrame.lua`, `Locales/Locale.lua`):**
+  - Added mutual dual-guild authorization for sharing Guild Events & Event Calls (`AESH`, `AEVR`, `AEOK`, updated `CDIP`/`EVT`/`EVS`/`SIG`/`DEL`) manageable by Guild Leaders, Diplomacy-authorized ranks, or designated Alliance Managers on both allied guilds.
+  - Added `Allies (X/Y)` quick-authorization dropdown, `My Guild Only` & `Allied Guilds Only` filters, Diplomacy mutual/awaiting/requested status badges, Allied origin crests & signup `<Guild>` tooltips, improved MOTD/Calendar date-time parsing (`DD/MM` + hours/multi-month rollover), and promoting official WoW Calendar events directly into Shared Event Calls.
+- **Character (`C`) Shortcut Toggle, Account Matrix Redesign & Reopen Chrome Fixes (`UI/MainFrame.lua`, `UI/LFGFrameTab.lua`, `UI/SocialPanels.lua`):**
+  - Preserved `CharacterFrame` exclusive subframes (`PaperDollFrame`, etc.) as `:IsShown()` at `alpha = 0` with hidden 3D models while **My Alts** is active so pressing `C` a second time immediately closes `CharacterFrame` instead of switching back to the official panel, and cleanly closes stale single-panel containers across `J`, `O`, `I`, `C`, and `M`.
+  - Upgraded the **Account** comparison sub-tab inside `C` for clearer cross-character visibility alongside Blizzard-faithful visual/palette polish across `Theme`, `HUD`, `Toast`, `MainFrame`, `LFGFrameTab`, and complete English/Portuguese/Spanish localization parity.
+
 ## [0.2.18] - 2026-11-19
 ### Fixed & Improved
 - **Main Window Movement & Resizing Reliability (`UI/MainFrame.lua`, `UI/Theme.lua`, `Locales/Locale.lua`):**
