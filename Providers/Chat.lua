@@ -1012,6 +1012,51 @@ local function LookupClassFromCache(lookupKey, guid)
     return nil
 end
 
+local function LookupGuidFromCache(lookupKey)
+    if not lookupKey or lookupKey == "" then return nil end
+    if Store then
+        local byLookup = Store.socialByLookup
+        if byLookup and byLookup[lookupKey] and byLookup[lookupKey].guid then
+            return byLookup[lookupKey].guid
+        end
+        if Store.socialDirectoryByLookup and Store.socialDirectoryByLookup[lookupKey] and Store.socialDirectoryByLookup[lookupKey].guid then
+            return Store.socialDirectoryByLookup[lookupKey].guid
+        end
+        if Store.nearby and Store.nearby[lookupKey] and Store.nearby[lookupKey].guid then
+            return Store.nearby[lookupKey].guid
+        end
+    end
+    return nil
+end
+
+local function ResolvePreviewCategory(threadKind, extraFields)
+    if extraFields and extraFields.previewCategory then
+        return extraFields.previewCategory
+    end
+    if threadKind == "BN_WHISPER" then
+        return "BN_WHISPER"
+    elseif threadKind == "WHISPER" then
+        return "WHISPER"
+    elseif threadKind == "PARTY" or threadKind == "RAID" or threadKind == "INSTANCE_CHAT" then
+        return "GROUP"
+    elseif threadKind == "GUILD" or threadKind == "OFFICER" then
+        return "GUILD"
+    elseif threadKind == "ROOM" or threadKind == "ALLIANCE" then
+        return "ROOM"
+    end
+    return nil
+end
+
+local function ResolvePreviewChannelKind(threadKind, extraFields)
+    if extraFields and extraFields.previewChannelKind then
+        return extraFields.previewChannelKind
+    end
+    if extraFields and extraFields.viaAddon and threadKind == "WHISPER" then
+        return "DIRECT"
+    end
+    return threadKind
+end
+
 local function AppendMessage(thread, senderName, text, incoming, classFile, skipPersist, silent, extraFields)
     if not thread or not text or text == "" then return end
     local ts = time()
@@ -1153,6 +1198,36 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
                 ts = ts,
                 priority = (notifyKind == "DIRECT") and 2 or 1,
             })
+        end
+        if not silent and not isStatus and thread.kind ~= "NOTES" then
+            local pCat = ResolvePreviewCategory(thread.kind, extraFields)
+            if pCat then
+                local pChanKind = ResolvePreviewChannelKind(thread.kind, extraFields)
+                local pCharName = (extraFields and extraFields.senderCharName)
+                    or ((thread.kind == "WHISPER" or thread.kind == "PARTY" or thread.kind == "RAID" or thread.kind == "INSTANCE_CHAT" or thread.kind == "GUILD" or thread.kind == "OFFICER" or thread.kind == "ROOM") and senderDisp)
+                    or thread.targetName
+                local pCharLk = pCharName and Compat.ParseCharacterFields and Compat.ParseCharacterFields(pCharName) or senderLk
+                local pGuid = (extraFields and extraFields.senderGuid) or (pCharLk and LookupGuidFromCache(pCharLk)) or nil
+                ns:Emit("INCOMING_MESSAGE_PREVIEW", {
+                    id = (extraFields and extraFields.deliveryMsgId) or (tostring(thread.key) .. ":" .. tostring(ts)),
+                    category = pCat,
+                    channelKind = pChanKind,
+                    sender = tostring(senderDisp or "?"),
+                    senderCharName = pCharName,
+                    senderGuid = pGuid,
+                    senderClass = resolvedClass,
+                    bnetAccountID = thread.bnetAccountID,
+                    bnetName = thread.bnetName,
+                    text = text,
+                    threadKey = thread.key,
+                    roomId = thread.roomId,
+                    roomTitle = (thread.kind == "ROOM") and thread.title or nil,
+                    replySlash = (extraFields and extraFields.replySlash) or thread.slash,
+                    viaAddon = extraFields and extraFields.viaAddon == true or false,
+                    ts = ts,
+                    priority = (pCat == "WHISPER" or pCat == "BN_WHISPER") and 2 or 1,
+                })
+            end
         end
     end
 
@@ -1350,6 +1425,13 @@ function Chat:GetUnreadSummary()
     end
 
     local direct, roomsUnread, invites, channels = 0, 0, 0, 0
+    local byCategory = {
+        whisper = 0,
+        bnet = 0,
+        group = 0,
+        guild = 0,
+        room = 0,
+    }
     local senders = {}
 
     for key, t in pairs(self.threads) do
@@ -1358,9 +1440,15 @@ function Chat:GetUnreadSummary()
             if IsPublicChannelKind(t.kind) then
                 if chanFlag then
                     channels = channels + u
+                    if t.kind == "GUILD" or t.kind == "OFFICER" then
+                        byCategory.guild = byCategory.guild + u
+                    else
+                        byCategory.group = byCategory.group + u
+                    end
                 end
-            elseif t.kind == "ROOM" then
+            elseif t.kind == "ROOM" or t.kind == "ALLIANCE" then
                 roomsUnread = roomsUnread + u
+                byCategory.room = byCategory.room + u
                 table.insert(senders, {
                     key = key,
                     title = t.title or key,
@@ -1370,6 +1458,11 @@ function Chat:GetUnreadSummary()
                 })
             else
                 direct = direct + u
+                if t.kind == "BN_WHISPER" then
+                    byCategory.bnet = byCategory.bnet + u
+                else
+                    byCategory.whisper = byCategory.whisper + u
+                end
                 table.insert(senders, {
                     key = key,
                     title = t.title or t.targetName or key,
@@ -1386,6 +1479,7 @@ function Chat:GetUnreadSummary()
         for _, room in pairs(rooms) do
             if type(room) == "table" and room.pendingInvite and not room.joined then
                 invites = invites + 1
+                byCategory.room = byCategory.room + 1
             end
         end
     end
@@ -1393,6 +1487,11 @@ function Chat:GetUnreadSummary()
     table.sort(senders, function(a, b)
         return (a.lastAt or 0) > (b.lastAt or 0)
     end)
+
+    local directTones = {}
+    if byCategory.whisper > 0 then directTones[#directTones + 1] = "whisper" end
+    if byCategory.bnet > 0 then directTones[#directTones + 1] = "bnet" end
+    if byCategory.room > 0 then directTones[#directTones + 1] = "room" end
 
     local totalDirect = direct + roomsUnread + invites
     local summary = {
@@ -1402,6 +1501,8 @@ function Chat:GetUnreadSummary()
         channels = channels,
         totalDirect = totalDirect,
         total = totalDirect + channels,
+        byCategory = byCategory,
+        directTones = directTones,
         senders = senders,
     }
     self._unreadSummaryCache = summary
@@ -3166,6 +3267,10 @@ function Chat:ReceiveAllianceMessage(senderGuild, authorName, classFile, msgText
         viaAddon = true,
         notifyKind = "ALLIANCE",
         deliveryMsgId = msgId,
+        senderCharName = senderFull,
+        previewCategory = "ROOM",
+        previewChannelKind = "ALLIANCE",
+        replySlash = "/al ",
     })
 end
 
@@ -5148,6 +5253,9 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
                 viaAddon = true,
                 deliveryMsgId = msgId,
                 targetChar = meDisplay,
+                senderCharName = (charParsed and charParsed.displayName) or displaySender,
+                previewCategory = (bnGameAccId ~= nil) and "BN_WHISPER" or "WHISPER",
+                previewChannelKind = (bnGameAccId ~= nil) and "BN_WHISPER" or "DIRECT",
             })
         end
 
@@ -5276,6 +5384,9 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
         AppendMessage(t, displaySender, msgText, true, classFile, true, false, {
             viaAddon = true,
             notifyKind = "ROOM",
+            senderCharName = displaySender,
+            previewCategory = "ROOM",
+            previewChannelKind = "ROOM",
         })
     end
 end
@@ -5419,8 +5530,11 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
         local loggedText = (manualRec and manualRec.sentText == text and manualRec.text and manualRec.text ~= "") and manualRec.text or text
         AppendMessage(t, senderLabel, loggedText, incoming, incoming and cls or Safe.String(myClass), (kind ~= "WHISPER"), not incoming, {
             senderGuid = incoming and guid or nil,
+            senderCharName = incoming and peerDispResolved or nil,
             targetChar = targetCharLabel,
             targetClass = incoming and Safe.String(myClass) or cls,
+            previewCategory = "WHISPER",
+            previewChannelKind = "WHISPER",
         })
         if incoming and not Compat.IsMe(parsed.displayName) and Chat:IsDirectChatEnabled() then
             Chat:QueuePoliteDiscoveryPing({
@@ -5484,8 +5598,11 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
         local loggedText = (manualBnRec and manualBnRec.sentText == text and manualBnRec.text and manualBnRec.text ~= "") and manualBnRec.text or text
         local skipPersist = not hasSafeCharNames
         AppendMessage(t, senderLabel, loggedText, incoming, (incoming and cls) or (not incoming and Safe.String(myClass)) or nil, skipPersist, not incoming, {
+            senderCharName = incoming and (charParsed and charParsed.displayName or peerCharDisp) or nil,
             targetChar = targetCharLabel,
             targetClass = incoming and Safe.String(myClass) or cls,
+            previewCategory = "BN_WHISPER",
+            previewChannelKind = "BN_WHISPER",
         })
         return
     end
@@ -5504,7 +5621,18 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
     end
 
     if chKey then
-        if not (ns.db and ns.db.settings and ns.db.settings.chatMirrorChannels == true) then
+        local s = ns.db and ns.db.settings
+        local mirrorOn = (s and s.chatMirrorChannels == true)
+        local pCat = (chKind == "GUILD" or chKind == "OFFICER") and "GUILD" or "GROUP"
+        local chatModOn = (not Compat or not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
+        local previewNeedsChan = chatModOn and s ~= nil and (
+            s.msgPreviewPromptAnswered ~= true
+            or (s.msgPreviewEnabled ~= false and (
+                (pCat == "GROUP" and s.msgPreviewGroup == true)
+                or (pCat == "GUILD" and s.msgPreviewGuild == true)
+            ))
+        )
+        if not mirrorOn and not previewNeedsChan then
             return
         end
         local author = Safe.String(authorRaw)
@@ -5515,12 +5643,35 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
         end
         local isMe = (parsed and Compat.IsMe(parsed.displayName, guid)) or (author and Compat.IsMe(author, guid))
         local meta = STATIC_CHANNEL_ORDER[chKey]
-        local t = EnsureThread(chKey, chKind, L[meta.titleKey], { slash = meta.slash })
         local cls = parsed and LookupClassFromCache(parsed.lookupKey, guid)
         local senderLabel = ResolveChatSenderDisplay((parsed and parsed.displayName) or author, guid, nil)
-        AppendMessage(t, senderLabel, text, not isMe, cls, true, isMe == true, {
-            senderGuid = guid,
-        })
+        if mirrorOn then
+            local t = EnsureThread(chKey, chKind, L[meta.titleKey], { slash = meta.slash })
+            AppendMessage(t, senderLabel, text, not isMe, cls, true, isMe == true, {
+                senderGuid = guid,
+                senderCharName = senderLabel,
+                previewCategory = pCat,
+                previewChannelKind = chKind,
+                replySlash = meta.slash,
+            })
+        elseif not isMe and not Chat:IsThreadMuted(chKey) then
+            local pGuid = guid or (parsed and LookupGuidFromCache(parsed.lookupKey)) or nil
+            ns:Emit("INCOMING_MESSAGE_PREVIEW", {
+                id = chKey .. ":" .. tostring(time()),
+                category = pCat,
+                channelKind = chKind,
+                sender = tostring(senderLabel or "?"),
+                senderCharName = senderLabel,
+                senderGuid = pGuid,
+                senderClass = cls,
+                text = text,
+                threadKey = nil,
+                replySlash = meta.slash,
+                viaAddon = false,
+                ts = time(),
+                priority = 1,
+            })
+        end
     end
 end
 

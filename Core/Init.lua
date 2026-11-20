@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.20"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.20" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.21"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.21" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -127,7 +127,22 @@ local DEFAULTS = {
         addonChatFrames = { [1] = true }, -- [chatFrameIndex 1..10] Blizzard chat tabs showing [SC] addon chat (1 = General)
         addonMsgTaskbarFlash = true, -- pulse game taskbar icon on incoming addon messages
         addonMsgMinimapBadge = true, -- display compact unread counter badge on Minimap button
+        minimapBadgeStyle = "fusion", -- "fusion" (multi-color circle under SC icon + hover split) | "separate" (orbital numbers around SC icon)
         addonMsgTabBadges = true,   -- display compact unread badges on Social (O) & Guild (J) side-tabs
+        msgPreviewEnabled = true,       -- show compact animated message preview capsule beside Minimap
+        msgPreviewPromptAnswered = false, -- first-time opt-in & channel picker answered
+        msgPreviewWhispers = true,      -- show minimap previews for Character Whispers & Direct Addon chat
+        msgPreviewBNet = true,          -- show minimap previews for Battle.net friends messages
+        msgPreviewGroup = false,        -- show minimap previews for Party / Raid / Instance messages
+        msgPreviewGuild = false,        -- show minimap previews for Guild / Officer messages
+        msgPreviewRooms = true,         -- show minimap previews for SocialCentral Private Rooms & Alliance chat
+        msgPreviewSilenceDungeons = true, -- auto-hide minimap previews inside Dungeons / Scenarios
+        msgPreviewSilenceRaids = true,  -- auto-hide minimap previews inside Raids
+        msgPreviewSilencePvP = true,    -- auto-hide minimap previews inside Battlegrounds & Arenas
+        msgPreviewSilenceCombat = false, -- optionally pause minimap previews while in combat
+        msgPreviewDuration = 6,         -- seconds to display preview before retracting back into SC icon (default 6s)
+        msgPreviewMaxVisible = 3,       -- max simultaneous minimap preview rows (1..3); extras wait in FIFO queue
+        msgPreviewDefault6Migrated = false, -- one-time upgrade from initial 5s default to 6s default
         spotterEnabled = true,      -- lightweight event-driven radar (0ms idle CPU)
         spotterNotifyEnemy = true,  -- chat + banner notification when Enemy Clan player appears
         spotterNotifyAlly = true,   -- chat + banner notification when Ally Clan player appears
@@ -377,6 +392,14 @@ local function HandleSlash(raw)
         elseif ns.NotificationToast and ns.NotificationToast.ShowTestNotification then
             ns.NotificationToast:ShowTestNotification(rest)
         end
+    elseif cmd == "preview" or cmd == "msgpreview" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("chat") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
+        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+            ns.MinimapPreview:ShowTestPreview(rest)
+        end
     elseif cmd == "resetpos" or cmd == "reset" then
         if ns.Theme and ns.Theme.ResetAllWindowPositions then
             ns.Theme:ResetAllWindowPositions()
@@ -402,6 +425,9 @@ local function HandleSlash(raw)
         ns:Print("  |cffffd200/sc hub|r — %s", L["Unified Hub (/sc hub)"])
         if ModOn("radar") then ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"]) end
         ns:Print("  |cffffd200/sc toast [invite|friend|watchlist|buff|queue|clear]|r — %s", L["Test Notification Toast"])
+        if ModOn("chat") then
+            ns:Print("  |cffffd200/sc preview [whisper|bnet|group|guild|room|queue|setup|clear]|r — %s", L["Test Minimap Preview"])
+        end
         if ModOn("watchlist") then
             ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
             ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Watchlist character"])
@@ -443,12 +469,24 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.friendAlertAllMigrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.msgPreviewDefault6Migrated ~= true then
+        if SocialCentralDB.settings.msgPreviewDuration == 5 then
+            SocialCentralDB.settings.msgPreviewDuration = 6
+        end
+        SocialCentralDB.settings.msgPreviewDefault6Migrated = true
+    end
     ns._accountSettings = SocialCentralDB.settings
     if SocialCentralCharDB.useCharProfile == true then
         if type(SocialCentralCharDB.settings) ~= "table" then
             SocialCentralCharDB.settings = DeepCopyValue(ns._accountSettings or DEFAULTS.settings)
         else
             ApplyDefaults(SocialCentralCharDB.settings, ns._accountSettings or DEFAULTS.settings)
+            if SocialCentralCharDB.settings.msgPreviewDefault6Migrated ~= true then
+                if SocialCentralCharDB.settings.msgPreviewDuration == 5 then
+                    SocialCentralCharDB.settings.msgPreviewDuration = 6
+                end
+                SocialCentralCharDB.settings.msgPreviewDefault6Migrated = true
+            end
         end
         SocialCentralDB.settings = SocialCentralCharDB.settings
     end

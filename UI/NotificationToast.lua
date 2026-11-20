@@ -55,13 +55,20 @@ local function ApplyTexGradient(tex, orient, r1, g1, b1, a1, r2, g2, b2, a2)
 end
 
 local KIND_RGB = {
-    DIRECT           = { 0.25, 0.82, 0.56 },
-    ROOM             = { 0.35, 0.72, 1.00 },
-    RMI              = { 0.32, 0.72, 1.00 },
-    ALLIANCE         = { 0.80, 0.56, 1.00 },
-    CLAN_LFG         = { 0.96, 0.78, 0.24 },
-    CLAN_EVENT       = { 0.96, 0.78, 0.24 },
-    CLAN_SIGNUP      = { 0.35, 0.85, 0.55 },
+    WHISPER          = { 1.00, 0.50, 1.00 },
+    DIRECT           = { 1.00, 0.50, 1.00 },
+    BN_WHISPER       = { 0.10, 0.82, 1.00 },
+    PARTY            = { 0.48, 0.68, 1.00 },
+    GROUP            = { 0.48, 0.68, 1.00 },
+    RAID             = { 1.00, 0.54, 0.18 },
+    GUILD            = { 0.28, 0.94, 0.40 },
+    OFFICER          = { 0.28, 0.94, 0.40 },
+    ROOM             = { 0.74, 0.50, 1.00 },
+    RMI              = { 0.74, 0.50, 1.00 },
+    ALLIANCE         = { 0.74, 0.50, 1.00 },
+    CLAN_LFG         = { 0.48, 0.68, 1.00 },
+    CLAN_EVENT       = { 0.28, 0.94, 0.40 },
+    CLAN_SIGNUP      = { 0.28, 0.94, 0.40 },
     SCOUT            = { 0.96, 0.28, 0.28 },
     WORLDBUFF        = { 0.98, 0.62, 0.22 },
     FRIEND_ONLINE    = { 0.28, 0.92, 0.52 },
@@ -387,7 +394,11 @@ function Toast:EnsureFrame(index)
     markReadBtn:Hide()
     f.markReadBtn = markReadBtn
 
-    local queueLbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local queueLbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    if Theme and Theme.ApplyReadableCounterFont then
+        Theme:ApplyReadableCounterFont(queueLbl, 14, 17, 0, true)
+    end
+    queueLbl:SetTextColor(1.0, 0.88, 0.34)
     queueLbl:SetPoint("RIGHT", closeBtn, "LEFT", -4, 0)
     queueLbl:SetJustifyH("RIGHT")
     queueLbl:Hide()
@@ -611,7 +622,7 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
             f.leftBar:SetColorTexture(rgb[1], rgb[2], rgb[3], 1.0)
         end
         if f.bgAmbient then
-            ApplyTexGradient(f.bgAmbient, "HORIZONTAL", rgb[1] * 0.16, rgb[2] * 0.16, rgb[3] * 0.16, 0.35, 0.0, 0.0, 0.0, 0.0)
+            ApplyTexGradient(f.bgAmbient, "HORIZONTAL", rgb[1] * 0.26, rgb[2] * 0.26, rgb[3] * 0.26, 0.62, rgb[1] * 0.12, rgb[2] * 0.12, rgb[3] * 0.12, 0.26)
         end
         if f.titleRule then
             ApplyTexGradient(f.titleRule, "HORIZONTAL", rgb[1] * 0.7 + 0.25, rgb[2] * 0.7 + 0.25, rgb[3] * 0.7 + 0.25, 0.45, rgb[1], rgb[2], rgb[3], 0.0)
@@ -671,9 +682,13 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
     local rightPad = -51
     if showQuickRead then rightPad = rightPad - 27 end
     if remainingQueueCount and remainingQueueCount > 0 then
+        if Theme and Theme.ApplyReadableCounterFont then
+            Theme:ApplyReadableCounterFont(f.queueLbl, 14, 17, 0, true)
+        end
         f.queueLbl:SetText("+" .. tostring(remainingQueueCount))
         f.queueLbl:Show()
-        rightPad = rightPad - 22
+        local qw = math.max(26, math.ceil((f.queueLbl.GetStringWidth and f.queueLbl:GetStringWidth() or 22) + 6))
+        rightPad = rightPad - qw
     else
         f.queueLbl:SetText("")
         f.queueLbl:Hide()

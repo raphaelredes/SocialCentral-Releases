@@ -11,6 +11,831 @@ local panelBuilt = false
 local category
 local syncFns = {}
 local activeCategoryTab = "overview"
+local selectCategoryTabFn
+
+-- ============================================================================
+-- Professional Settings Search Engine (Multi-Tab, Accent-Insensitive, Live Edit)
+-- ============================================================================
+local Search = {
+    entries = {},
+    tabFilter = "all", -- "all" | "overview" | "notifications" | "radar" | "general"
+    query = "",
+    lastMatches = {},
+    cardPool = {},
+    filterBtns = {},
+    emptyChips = {},
+    buildTabId = "overview",
+    buildTabLabel = "",
+    buildTabOrder = 1,
+    buildSectionTitle = "",
+    buildSectionHelp = nil,
+    pendingMeta = nil,
+    searchPage = nil,
+    searchBox = nil,
+    countLbl = nil,
+    beaconFrame = nil,
+    scrollFrame = nil,
+    pages = nil,
+    content = nil,
+    pageHeights = nil,
+    catButtons = nil,
+    tabOrderMap = { overview = 1, notifications = 2, radar = 3, general = 4 },
+    tabColors = {
+        overview      = { 0.35, 0.72, 1.00 },
+        notifications = { 0.96, 0.76, 0.24 },
+        radar         = { 0.96, 0.42, 0.32 },
+        general       = { 0.30, 0.84, 0.62 },
+    },
+    maxRender = 42,
+}
+
+Search.ACCENT_MAP = {
+    ["á"] = "a", ["à"] = "a", ["â"] = "a", ["ã"] = "a", ["ä"] = "a",
+    ["Á"] = "a", ["À"] = "a", ["Â"] = "a", ["Ã"] = "a", ["Ä"] = "a",
+    ["é"] = "e", ["è"] = "e", ["ê"] = "e", ["ë"] = "e",
+    ["É"] = "e", ["È"] = "e", ["Ê"] = "e", ["Ë"] = "e",
+    ["í"] = "i", ["ì"] = "i", ["î"] = "i", ["ï"] = "i",
+    ["Í"] = "i", ["Ì"] = "i", ["Î"] = "i", ["Ï"] = "i",
+    ["ó"] = "o", ["ò"] = "o", ["ô"] = "o", ["õ"] = "o", ["ö"] = "o",
+    ["Ó"] = "o", ["Ò"] = "o", ["Ô"] = "o", ["Õ"] = "o", ["Ö"] = "o",
+    ["ú"] = "u", ["ù"] = "u", ["û"] = "u", ["ü"] = "u",
+    ["Ú"] = "u", ["Ù"] = "u", ["Û"] = "u", ["Ü"] = "u",
+    ["ç"] = "c", ["Ç"] = "c", ["ñ"] = "n", ["Ñ"] = "n",
+}
+
+Search.SYNONYM_GROUPS = {
+    { "whisper", "whispers", "sussurro", "sussurros", "susurro", "susurros", "pm", "dm", "tell", "direct", "direto", "directo" },
+    { "bnet", "battlenet", "battle", "realid", "blizzard" },
+    { "sound", "sounds", "som", "sons", "sonido", "sonidos", "audio", "chime", "campainha", "beep", "timbre" },
+    { "mute", "muted", "mudo", "silenciar", "silencio", "silenced", "silenciado", "calado", "quiet", "pausar", "pause" },
+    { "dungeon", "dungeons", "masmorra", "masmorras", "mazmorra", "mazmorras", "dg", "dng", "instancia", "instancias", "instance", "instances", "estancia" },
+    { "raid", "raids", "raide", "raides", "banda", "bandas", "boss", "chefe" },
+    { "pvp", "bg", "bgs", "arena", "arenas", "battleground", "battlegrounds", "batalha", "batalla", "jcj" },
+    { "combat", "combate", "luta", "fight", "pelea" },
+    { "minimap", "minimapa", "mini", "botao", "button", "boton", "icone", "icon", "icono" },
+    { "preview", "previews", "previa", "previas", "vista", "capsula", "capsule", "fila", "queue", "cola" },
+    { "toast", "toasts", "popup", "popups", "alerta", "alertas", "alert", "alerts", "aviso", "avisos", "notificacao", "notificacoes", "notification", "notifications", "notificacion" },
+    { "guild", "guilda", "guildas", "hermandad", "cla", "clan", "oficial", "oficiais", "officer", "alianca", "alianza", "alliance", "diplomacia", "diplomacy", "evento", "event" },
+    { "group", "grupo", "party", "lfg", "lfm", "localizador", "buscador", "finder", "companheiro", "companion", "companero" },
+    { "radar", "spotter", "alvo", "alvos", "target", "targets", "objetivo", "seta", "arrow", "flecha", "plaqueta", "plaquetas", "nameplate", "nameplates", "placa", "inimigo", "enemy", "enemigo", "aliado", "ally" },
+    { "buff", "buffs", "worldbuff", "world", "mundo", "mapa", "map", "pino", "pinos", "pin", "pins", "onyxia", "nefarian", "rend", "hakkar", "cronobencao" },
+    { "theme", "tema", "skin", "visual", "aparencia", "apariencia", "cor", "cores", "color", "escuro", "dark", "moderno", "modern", "dourado", "gold", "oro" },
+    { "language", "idioma", "lingua", "lengua", "portugues", "ptbr", "ingles", "english", "espanhol", "espanol", "traducao", "reload", "recarregar" },
+    { "shortcut", "shortcuts", "atalho", "atalhos", "atajo", "atajos", "tecla", "janela", "janelas", "window", "windows", "ventana", "aba", "abas", "tab", "tabs", "pestana", "embutir", "embed", "integracao" },
+    { "profile", "perfil", "conta", "account", "cuenta", "personagem", "character", "personaje", "preset", "predefinicao", "padrao", "default", "reset", "redefinir", "restaurar" },
+    { "dnd", "perturbe", "disturb", "molestar", "foco", "focus" },
+    { "alt", "alts", "ouro", "gold", "oro", "mochila", "bag", "bags", "banco", "bank", "item", "itens", "items", "inventario", "tooltip", "tooltips", "dica", "dicas", "nota", "notas", "note", "notes" },
+    { "watchlist", "who", "cooldown", "recarga", "nearby", "perto", "cerca", "evitar", "avoid", "bloqueado", "blocked", "ignore", "ignorar", "amigo", "amigos", "friend", "friends", "favorito", "favorites" },
+    { "chat", "conversa", "conversas", "conversations", "conversacion", "sala", "salas", "room", "rooms", "mensagem", "mensagens", "message", "messages", "mensaje", "historico", "history", "espelhar", "mirror", "eco", "echo", "spam", "boost", "wts", "update", "atualizacao", "versao", "version", "github" },
+}
+
+Search.synonymLookup = {}
+for _, grp in ipairs(Search.SYNONYM_GROUPS) do
+    for _, word in ipairs(grp) do
+        local list = Search.synonymLookup[word]
+        if not list then
+            list = {}
+            Search.synonymLookup[word] = list
+        end
+        for _, sibling in ipairs(grp) do
+            if sibling ~= word then
+                list[#list + 1] = sibling
+            end
+        end
+    end
+end
+
+function Search.Fold(text)
+    if type(text) ~= "string" or text == "" then
+        return ""
+    end
+    local s = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    s = s:gsub("[%z\1-\127\194-\244][\128-\191]*", function(ch)
+        return Search.ACCENT_MAP[ch] or ch
+    end)
+    s = s:lower()
+    local spaced = s:gsub("[^%w]+", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+    return spaced
+end
+
+function Search.ExpandSynonyms(tok)
+    local out = {}
+    local seen = { [tok] = true }
+    local direct = Search.synonymLookup[tok]
+    if direct then
+        for _, sib in ipairs(direct) do
+            if not seen[sib] then
+                seen[sib] = true
+                out[#out + 1] = sib
+            end
+        end
+    end
+    if #tok >= 3 then
+        for key, sibs in pairs(Search.synonymLookup) do
+            if key:sub(1, #tok) == tok and key ~= tok then
+                if not seen[key] then
+                    seen[key] = true
+                    out[#out + 1] = key
+                end
+                for _, sib in ipairs(sibs) do
+                    if not seen[sib] then
+                        seen[sib] = true
+                        out[#out + 1] = sib
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function Search.SetBuildContext(tabId, tabLabel, tabOrder)
+    Search.buildTabId = tabId
+    Search.buildTabLabel = tabLabel or tabId
+    Search.buildTabOrder = tabOrder or 1
+    Search.buildSectionTitle = tabLabel or ""
+    Search.buildSectionHelp = nil
+    Search.pendingMeta = nil
+end
+
+function Search.SetPendingMeta(title, helpTitle, helpWhat, helpHow)
+    Search.pendingMeta = {
+        title = title,
+        helpTitle = helpTitle,
+        description = helpWhat,
+        howText = helpHow,
+    }
+end
+
+function Search.Register(spec)
+    if type(spec) ~= "table" or not spec.title or spec.title == "" then
+        return
+    end
+    local entry = {
+        id = #Search.entries + 1,
+        tabId = spec.tabId or Search.buildTabId,
+        tabLabel = spec.tabLabel or Search.buildTabLabel,
+        tabOrder = spec.tabOrder or Search.buildTabOrder,
+        sectionTitle = spec.sectionTitle or Search.buildSectionTitle or "",
+        kind = spec.kind or "checkbox",
+        title = spec.title,
+        description = spec.description or "",
+        howText = spec.howText or "",
+        helpTitle = spec.helpTitle or spec.title,
+        widget = spec.widget,
+        getter = spec.getter,
+        setter = spec.setter,
+        options = spec.options,
+        minVal = spec.minVal,
+        maxVal = spec.maxVal,
+        unit = spec.unit,
+        step = spec.step,
+        actionLabel = spec.actionLabel,
+        onTrigger = spec.onTrigger,
+        extraKeywords = spec.extraKeywords or "",
+    }
+    local optLabels = {}
+    if type(entry.options) == "table" then
+        for _, opt in ipairs(entry.options) do
+            if opt and opt.label then
+                optLabels[#optLabels + 1] = tostring(opt.label)
+            end
+        end
+    end
+    local optStr = table.concat(optLabels, " ")
+    entry.foldTitle = " " .. Search.Fold(entry.title) .. " "
+    entry.foldSection = " " .. Search.Fold(entry.sectionTitle .. " " .. entry.tabLabel) .. " "
+    entry.foldOptions = " " .. Search.Fold(optStr) .. " "
+    entry.foldDesc = " " .. Search.Fold(entry.description .. " " .. entry.extraKeywords) .. " "
+    entry.foldHow = " " .. Search.Fold(entry.howText) .. " "
+    entry.compactAll = (entry.foldTitle .. entry.foldSection .. entry.foldOptions .. entry.foldDesc):gsub("%s+", "")
+    Search.entries[#Search.entries + 1] = entry
+    return entry
+end
+
+function Search.IsEntryModuleEnabled(entry)
+    local modKey = entry and entry.widget and entry.widget._scDepMod
+    if not modKey then return true end
+    local s = ns.db and ns.db.settings
+    if not s then return true end
+    if modKey == "wb" then return s.embedWorldMap ~= false
+    elseif modKey == "radar" then return s.spotterEnabled ~= false
+    elseif modKey == "guild" then return (not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled("J")
+    elseif modKey == "lfg" then return s.embedLfgWindow ~= false
+    elseif modKey == "social" then return s.embedSocialWindow ~= false
+    elseif modKey == "alts" then return s.embedCharacterWindow ~= false
+    elseif modKey == "watch" then return s.moduleWatchlistEnabled ~= false
+    elseif modKey == "nearby" then return s.moduleNearbyEnabled ~= false
+    elseif modKey == "chat" then return s.moduleChatEnabled ~= false
+    end
+    return true
+end
+
+function Search.ScoreEntry(entry, tokens, synTable)
+    local total = 0
+    for i = 1, #tokens do
+        local tok = tokens[i]
+        local tokScore = 0
+        if entry.foldTitle:find(" " .. tok, 1, true) then
+            tokScore = (entry.foldTitle:sub(2, 1 + #tok) == tok) and 120 or 85
+        elseif entry.foldTitle:find(tok, 1, true) then
+            tokScore = 58
+        elseif entry.foldOptions:find(tok, 1, true) then
+            tokScore = 44
+        elseif entry.foldSection:find(tok, 1, true) then
+            tokScore = 36
+        elseif entry.foldDesc:find(tok, 1, true) then
+            tokScore = 26
+        elseif entry.foldHow:find(tok, 1, true) then
+            tokScore = 16
+        elseif #tok >= 4 and entry.compactAll:find(tok, 1, true) then
+            tokScore = 32
+        else
+            local sibs = synTable[i]
+            if sibs then
+                for _, sib in ipairs(sibs) do
+                    if entry.foldTitle:find(" " .. sib, 1, true) then
+                        tokScore = math.max(tokScore, 30)
+                        break
+                    elseif entry.foldSection:find(" " .. sib, 1, true) or entry.foldOptions:find(" " .. sib, 1, true) then
+                        tokScore = math.max(tokScore, 20)
+                    elseif entry.foldDesc:find(" " .. sib, 1, true) then
+                        tokScore = math.max(tokScore, 12)
+                    end
+                end
+            end
+        end
+        if tokScore == 0 then
+            return 0
+        end
+        total = total + tokScore
+    end
+    if entry.kind == "checkbox" or entry.kind == "choice" or entry.kind == "stepper" then
+        total = total + 10
+    end
+    return total
+end
+
+function Search.HighlightTitle(rawText, tokens)
+    if type(rawText) ~= "string" or rawText == "" or not tokens or #tokens == 0 then
+        return rawText or ""
+    end
+    local clean = rawText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    -- Build accent-folded ASCII mirror with exact UTF-8 byte bounds so "previa" highlights "Prévia" cleanly
+    local foldedChars = {}
+    local origStarts = {}
+    local origEnds = {}
+    local pos = 1
+    local len = #clean
+    while pos <= len do
+        local b = clean:byte(pos)
+        local charLen = 1
+        if b >= 240 then charLen = 4
+        elseif b >= 224 then charLen = 3
+        elseif b >= 192 then charLen = 2
+        end
+        local ch = clean:sub(pos, pos + charLen - 1)
+        local mapped = Search.ACCENT_MAP[ch] or ch:lower()
+        local idx = #foldedChars + 1
+        foldedChars[idx] = mapped:sub(1, 1)
+        origStarts[idx] = pos
+        origEnds[idx] = pos + charLen - 1
+        pos = pos + charLen
+    end
+    local foldedStr = table.concat(foldedChars)
+    local bestStart, bestEnd
+    for _, tok in ipairs(tokens) do
+        if #tok >= 2 then
+            local s, e = foldedStr:find(tok, 1, true)
+            if s and (not bestStart or s < bestStart) then
+                bestStart, bestEnd = s, e
+            end
+        end
+    end
+    if not bestStart or not origStarts[bestStart] or not origEnds[bestEnd] then
+        return clean
+    end
+    local bStart = origStarts[bestStart]
+    local bEnd = origEnds[bestEnd]
+    return clean:sub(1, bStart - 1) .. "|cffffd24d" .. clean:sub(bStart, bEnd) .. "|r" .. clean:sub(bEnd + 1)
+end
+
+function Search.StopBeacon()
+    if Search.beaconFrame then
+        Search.beaconFrame:SetScript("OnUpdate", nil)
+        Search.beaconFrame:Hide()
+    end
+end
+
+function Search.LocateEntry(entry)
+    if not entry then return end
+    if Search.searchBox then
+        Search.searchBox:SetText("")
+        Search.searchBox:ClearFocus()
+    end
+    Search.query = ""
+    Search.tabFilter = "all"
+    if selectCategoryTabFn then
+        selectCategoryTabFn(entry.tabId)
+    end
+    local targetWidget = entry.widget
+    local targetPage = Search.pages and Search.pages[entry.tabId]
+    local sf = Search.scrollFrame
+    if not (targetWidget and targetPage and sf) then
+        return
+    end
+    local function ScrollAndPulse()
+        if not (targetPage:IsShown() and targetWidget.GetTop and targetPage.GetTop) then
+            return
+        end
+        local pTop = targetPage:GetTop()
+        local wTop = targetWidget:GetTop()
+        if pTop and wTop then
+            local relY = pTop - wTop
+            local maxRange = (sf.GetVerticalScrollRange and sf:GetVerticalScrollRange()) or 0
+            local destScroll = math.max(0, math.min(maxRange, relY - 68))
+            if sf.SetVerticalScroll then
+                sf:SetVerticalScroll(destScroll)
+            end
+        end
+        if targetWidget.GetObjectType and targetWidget:GetObjectType() == "EditBox" and targetWidget.SetFocus then
+            pcall(targetWidget.SetFocus, targetWidget)
+        end
+        local b = Search.beaconFrame
+        if not b then
+            b = CreateFrame("Frame", nil, targetPage, "BackdropTemplate")
+            b:EnableMouse(false)
+            if b.SetBackdrop then
+                b:SetBackdrop({
+                    bgFile = "Interface\\Buttons\\WHITE8X8",
+                    edgeFile = "Interface\\Buttons\\WHITE8X8",
+                    edgeSize = 2,
+                })
+            end
+            Search.beaconFrame = b
+        end
+        b:SetParent(targetPage)
+        b:SetFrameLevel(math.max((targetWidget.GetFrameLevel and targetWidget:GetFrameLevel() or 5) + 12, 24))
+        b:ClearAllPoints()
+        local rightTarget = (targetWidget._scLabel and targetWidget._scLabel.GetRight and targetWidget._scLabel) or targetWidget
+        b:SetPoint("TOPLEFT", targetWidget, "TOPLEFT", -6, 5)
+        b:SetPoint("BOTTOMRIGHT", rightTarget, "BOTTOMRIGHT", 12, -5)
+        if b.SetBackdropColor then
+            b:SetBackdropColor(1.0, 0.82, 0.22, 0.16)
+            b:SetBackdropBorderColor(1.0, 0.84, 0.24, 0.96)
+        end
+        b:SetAlpha(1)
+        b:Show()
+        local elapsed = 0
+        local dur = 2.4
+        b:SetScript("OnUpdate", function(self, dt)
+            elapsed = elapsed + (dt or 0)
+            if elapsed >= dur or not targetPage:IsShown() then
+                Search.StopBeacon()
+                return
+            end
+            local wave = 0.55 + 0.45 * math.sin(elapsed * 9.0)
+            local fade = (elapsed > 1.7) and (1 - ((elapsed - 1.7) / 0.7)) or 1.0
+            self:SetAlpha(math.max(0, math.min(1, wave * fade)))
+        end)
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0, ScrollAndPulse)
+    else
+        ScrollAndPulse()
+    end
+end
+
+function Search.EnsureCard(index)
+    if Search.cardPool[index] then
+        return Search.cardPool[index]
+    end
+    local parent = Search.searchPage
+    local card = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    card:SetSize(580, 74)
+    card:EnableMouse(false)
+    card:Hide()
+
+    local accentBar = card:CreateTexture(nil, "OVERLAY", nil, 2)
+    accentBar:SetWidth(3)
+    accentBar:SetPoint("TOPLEFT", card, "TOPLEFT", 2, -2)
+    accentBar:SetPoint("BOTTOMLEFT", card, "BOTTOMLEFT", 2, 2)
+    card.accentBar = accentBar
+
+    local locateBtn = ns.Theme:CreateButton(card, 74, 20, L["Go to"], "default")
+    ns.Theme:AutoFitButton(locateBtn, 58, 14, 110)
+    locateBtn:SetPoint("TOPRIGHT", card, "TOPRIGHT", -8, -7)
+    locateBtn:SetScript("OnClick", function()
+        if card._entry then
+            Search.LocateEntry(card._entry)
+        end
+    end)
+    card.locateBtn = locateBtn
+
+    local helpBtn = ns.Theme:CreateHelpButton(card, "", "", "", 18)
+    helpBtn:SetPoint("RIGHT", locateBtn, "LEFT", -6, 0)
+    helpBtn:SetScript("OnClick", function()
+        local e = card._entry
+        if e and ns.Theme and ns.Theme.ShowHelpPopup then
+            ns.Theme:ShowHelpPopup(e.helpTitle or e.title, e.description ~= "" and e.description or e.title, e.howText or "")
+        end
+    end)
+    helpBtn:SetScript("OnEnter", function(self)
+        local e = card._entry
+        if e and GameTooltip then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(e.helpTitle or e.title, 0.35, 0.78, 1.0)
+            if e.description and e.description ~= "" then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(L["What it does:"], 1.0, 0.82, 0.25)
+                GameTooltip:AddLine(e.description, 0.90, 0.93, 0.98, true)
+            end
+            if e.howText and e.howText ~= "" then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(L["How to use it:"], 0.35, 0.92, 0.55)
+                GameTooltip:AddLine(e.howText, 0.85, 0.90, 0.95, true)
+            end
+            GameTooltip:Show()
+        end
+    end)
+    helpBtn:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    card.helpBtn = helpBtn
+
+    local breadLbl = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    breadLbl:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -8)
+    breadLbl:SetPoint("TOPRIGHT", helpBtn, "TOPLEFT", -6, -8)
+    breadLbl:SetJustifyH("LEFT")
+    breadLbl:SetWordWrap(false)
+    card.breadLbl = breadLbl
+
+    -- Control row: live checkbox OR title + choice/stepper/action
+    local cb = CreateFrame("CheckButton", nil, card, "UICheckButtonTemplate")
+    cb:SetSize(22, 22)
+    cb:SetPoint("TOPLEFT", card, "TOPLEFT", 10, -25)
+    cb:SetScript("OnClick", function(self)
+        local e = card._entry
+        if e and e.setter then
+            e.setter(self:GetChecked() and true or false)
+            for _, sync in ipairs(syncFns) do sync() end
+            Search.RefreshCardStates()
+        end
+    end)
+    cb:Hide()
+    card.cb = cb
+
+    local titleLbl = card:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    titleLbl:SetPoint("TOPLEFT", card, "TOPLEFT", 36, -29)
+    titleLbl:SetPoint("TOPRIGHT", helpBtn, "TOPLEFT", -6, -29)
+    titleLbl:SetJustifyH("LEFT")
+    titleLbl:SetWordWrap(false)
+    card.titleLbl = titleLbl
+
+    local choiceHolder = CreateFrame("Frame", nil, card)
+    choiceHolder:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -48)
+    choiceHolder:SetPoint("TOPRIGHT", card, "TOPRIGHT", -10, -48)
+    choiceHolder:SetHeight(22)
+    choiceHolder:Hide()
+    card.choiceHolder = choiceHolder
+    card.choiceBtns = {}
+    for ci = 1, 4 do
+        local cbtn = ns.Theme:CreateButton(choiceHolder, 108, 20, "", "default")
+        cbtn:SetScript("OnClick", function()
+            local e = card._entry
+            if e and e.setter and cbtn._optValue ~= nil then
+                e.setter(cbtn._optValue)
+                for _, sync in ipairs(syncFns) do sync() end
+                Search.RefreshCardStates()
+            end
+        end)
+        cbtn:Hide()
+        card.choiceBtns[ci] = cbtn
+    end
+
+    local stepperHolder = CreateFrame("Frame", nil, card)
+    stepperHolder:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -48)
+    stepperHolder:SetSize(200, 22)
+    stepperHolder:Hide()
+    local sMinus = ns.Theme:CreateButton(stepperHolder, 24, 20, "-", "default")
+    sMinus:SetPoint("LEFT", stepperHolder, "LEFT", 0, 0)
+    local sVal = stepperHolder:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    sVal:SetPoint("LEFT", sMinus, "RIGHT", 6, 0)
+    sVal:SetWidth(68)
+    sVal:SetJustifyH("CENTER")
+    local sPlus = ns.Theme:CreateButton(stepperHolder, 24, 20, "+", "default")
+    sPlus:SetPoint("LEFT", sVal, "RIGHT", 6, 0)
+    sMinus:SetScript("OnClick", function()
+        local e = card._entry
+        if e and e.getter and e.setter then
+            local v = math.max(e.minVal or 0, (e.getter() or 0) - (e.step or 1))
+            e.setter(v)
+            for _, sync in ipairs(syncFns) do sync() end
+            Search.RefreshCardStates()
+        end
+    end)
+    sPlus:SetScript("OnClick", function()
+        local e = card._entry
+        if e and e.getter and e.setter then
+            local v = math.min(e.maxVal or 100, (e.getter() or 0) + (e.step or 1))
+            e.setter(v)
+            for _, sync in ipairs(syncFns) do sync() end
+            Search.RefreshCardStates()
+        end
+    end)
+    card.stepperHolder = stepperHolder
+    card.sMinus, card.sPlus, card.sVal = sMinus, sPlus, sVal
+
+    local actionBtn = ns.Theme:CreateButton(card, 140, 20, "", "primary")
+    actionBtn:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -48)
+    actionBtn:SetScript("OnClick", function()
+        local e = card._entry
+        if e and e.onTrigger then
+            e.onTrigger()
+            for _, sync in ipairs(syncFns) do sync() end
+            Search.RefreshCardStates()
+        end
+    end)
+    actionBtn:Hide()
+    card.actionBtn = actionBtn
+
+    local descLbl = card:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    descLbl:SetPoint("BOTTOMLEFT", card, "BOTTOMLEFT", 12, 8)
+    descLbl:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", -12, 8)
+    descLbl:SetJustifyH("LEFT")
+    descLbl:SetWordWrap(false)
+    card.descLbl = descLbl
+
+    Search.cardPool[index] = card
+    return card
+end
+
+function Search.RefreshCardStates()
+    local p = ns.Theme and ns.Theme.GetPalette and ns.Theme:GetPalette()
+    for _, card in ipairs(Search.cardPool) do
+        if card:IsShown() and card._entry then
+            local e = card._entry
+            local modOn = Search.IsEntryModuleEnabled(e)
+            ns.Theme:ApplyBackdrop(card, "surface", p)
+            local rgb = Search.tabColors[e.tabId] or { 0.45, 0.72, 1.0 }
+            card.accentBar:SetColorTexture(rgb[1], rgb[2], rgb[3], modOn and 1.0 or 0.45)
+
+            local tabHex = string.format("|cff%02x%02x%02x", math.floor(rgb[1] * 255), math.floor(rgb[2] * 255), math.floor(rgb[3] * 255))
+            local secPart = (e.sectionTitle ~= "" and e.sectionTitle ~= e.tabLabel) and ("  ›  " .. e.sectionTitle) or ""
+            local modTag = (not modOn) and ("  |cffff9b3d[" .. L["Module Disabled"] .. "]|r") or ""
+            card.breadLbl:SetText(tabHex .. (e.tabLabel or "") .. "|r|cff9da7b5" .. secPart .. "|r" .. modTag)
+
+            ns.Theme:StyleButton(card.locateBtn, "default")
+            if ns.Theme.SyncButtonLayers then ns.Theme:SyncButtonLayers(card.locateBtn) end
+            if card.helpBtn and ns.Theme.SyncButtonLayers then ns.Theme:SyncButtonLayers(card.helpBtn) end
+
+            if e.kind == "checkbox" and e.getter then
+                card.cb:SetChecked(e.getter() and true or false)
+                card.cb:SetEnabled(modOn)
+                card.cb:SetAlpha(modOn and 1.0 or 0.45)
+            elseif e.kind == "choice" and e.getter and type(e.options) == "table" then
+                local curVal = e.getter()
+                for ci, cbtn in ipairs(card.choiceBtns) do
+                    local opt = e.options[ci]
+                    if opt then
+                        local isAct = (curVal == opt.value)
+                        ns.Theme:StyleButton(cbtn, isAct and "primary" or "default")
+                        ns.Theme:SetButtonActive(cbtn, isAct, isAct and "primary" or "default")
+                        cbtn:SetEnabled(modOn)
+                        cbtn:SetAlpha(modOn and 1.0 or 0.45)
+                    end
+                end
+            elseif e.kind == "stepper" and e.getter then
+                local u = (e.unit and e.unit ~= "") and (" " .. e.unit) or ""
+                card.sVal:SetText(tostring(e.getter()) .. u)
+                ns.Theme:StyleButton(card.sMinus, "default")
+                ns.Theme:StyleButton(card.sPlus, "default")
+                card.sMinus:SetEnabled(modOn)
+                card.sPlus:SetEnabled(modOn)
+                card.sMinus:SetAlpha(modOn and 1.0 or 0.45)
+                card.sPlus:SetAlpha(modOn and 1.0 or 0.45)
+            elseif e.kind == "action" then
+                ns.Theme:StyleButton(card.actionBtn, "primary")
+                card.actionBtn:SetEnabled(modOn)
+                card.actionBtn:SetAlpha(modOn and 1.0 or 0.45)
+            end
+            card.titleLbl:SetAlpha(modOn and 1.0 or 0.55)
+        end
+    end
+end
+
+function Search.RenderResults()
+    local sp = Search.searchPage
+    if not sp then return end
+    local qRaw = Search.query or ""
+    local qFold = Search.Fold(qRaw)
+    if qFold == "" then
+        sp:Hide()
+        if Search.countLbl then Search.countLbl:SetText("") end
+        if Search.pages then
+            for id, pFrame in pairs(Search.pages) do
+                pFrame:SetShown(id == activeCategoryTab)
+            end
+        end
+        if Search.content and Search.pageHeights then
+            Search.content:SetHeight(Search.pageHeights[activeCategoryTab] or 900)
+        end
+        return
+    end
+
+    local tokens = {}
+    local synTable = {}
+    for tok in qFold:gmatch("%S+") do
+        tokens[#tokens + 1] = tok
+        synTable[#tokens] = Search.ExpandSynonyms(tok)
+    end
+
+    local allMatches = {}
+    local countsByTab = { overview = 0, notifications = 0, radar = 0, general = 0 }
+    for _, entry in ipairs(Search.entries) do
+        local sc = Search.ScoreEntry(entry, tokens, synTable)
+        if sc > 0 then
+            allMatches[#allMatches + 1] = { entry = entry, score = sc }
+            countsByTab[entry.tabId] = (countsByTab[entry.tabId] or 0) + 1
+        end
+    end
+    table.sort(allMatches, function(a, b)
+        if a.score ~= b.score then return a.score > b.score end
+        if a.entry.tabOrder ~= b.entry.tabOrder then return a.entry.tabOrder < b.entry.tabOrder end
+        return a.entry.id < b.entry.id
+    end)
+    Search.lastMatches = allMatches
+
+    if Search.tabFilter ~= "all" and (countsByTab[Search.tabFilter] or 0) == 0 then
+        Search.tabFilter = "all"
+    end
+
+    local filtered = {}
+    for _, m in ipairs(allMatches) do
+        if Search.tabFilter == "all" or m.entry.tabId == Search.tabFilter then
+            filtered[#filtered + 1] = m.entry
+        end
+    end
+
+    if Search.pages then
+        for _, pFrame in pairs(Search.pages) do
+            pFrame:Hide()
+        end
+    end
+    sp:Show()
+
+    local totalCount = #allMatches
+    if Search.countLbl then
+        if totalCount == 0 then
+            Search.countLbl:SetText("|cffff9b3d" .. L["0 results"] .. "|r")
+        elseif totalCount == 1 then
+            Search.countLbl:SetText("|cff3fb950" .. L["1 result"] .. "|r")
+        else
+            Search.countLbl:SetText("|cff3fb950" .. string.format(L["%d results"], totalCount) .. "|r")
+        end
+    end
+
+    local maxW = math.max(460, ((Search.content and Search.content:GetWidth()) or 590) - 16)
+    -- Update filter chips row
+    local fx = 8
+    local fy = -6
+    for _, fItem in ipairs(Search.filterBtns) do
+        local cnt = (fItem.id == "all") and totalCount or (countsByTab[fItem.id] or 0)
+        if (fItem.id == "all" and totalCount > 0) or cnt > 0 then
+            local lbl = string.format("%s (%d)", fItem.label, cnt)
+            ns.Theme:SetButtonText(fItem.btn, lbl)
+            ns.Theme:AutoFitButton(fItem.btn, 72, 14, 190)
+            local bw = fItem.btn:GetWidth() or 90
+            if fx > 8 and (fx + bw) > maxW then
+                fx = 8
+                fy = fy - 26
+            end
+            fItem.btn:ClearAllPoints()
+            fItem.btn:SetPoint("TOPLEFT", sp, "TOPLEFT", fx, fy)
+            local isAct = (Search.tabFilter == fItem.id)
+            ns.Theme:StyleButton(fItem.btn, isAct and "primary" or "default")
+            ns.Theme:SetButtonActive(fItem.btn, isAct, isAct and "primary" or "default")
+            fItem.btn:Show()
+            fx = fx + bw + 6
+        else
+            fItem.btn:Hide()
+        end
+    end
+
+    local yCursor = (totalCount > 0) and (fy - 30) or -12
+    local shownCards = 0
+    if #filtered == 0 then
+        for _, c in ipairs(Search.cardPool) do c:Hide() end
+        if sp.emptyBox then
+            sp.emptyBox:ClearAllPoints()
+            sp.emptyBox:SetPoint("TOPLEFT", sp, "TOPLEFT", 8, yCursor)
+            sp.emptyBox:SetWidth(maxW - 8)
+            sp.emptyTitle:SetText(string.format(L["No settings found for \"%s\"."], qRaw))
+            ns.Theme:ApplyBackdrop(sp.emptyBox, "surface")
+            local cx, cy = 12, -56
+            for _, chip in ipairs(Search.emptyChips) do
+                ns.Theme:StyleButton(chip.btn, "default")
+                ns.Theme:AutoFitButton(chip.btn, 64, 14, 140)
+                local cw = chip.btn:GetWidth() or 80
+                if cx > 12 and (cx + cw) > (maxW - 24) then
+                    cx = 12
+                    cy = cy - 26
+                end
+                chip.btn:ClearAllPoints()
+                chip.btn:SetPoint("TOPLEFT", sp.emptyBox, "TOPLEFT", cx, cy)
+                chip.btn:Show()
+                cx = cx + cw + 6
+            end
+            sp.emptyBox:SetHeight(math.abs(cy) + 36)
+            sp.emptyBox:Show()
+            yCursor = yCursor - (sp.emptyBox:GetHeight() + 16)
+        end
+    else
+        if sp.emptyBox then sp.emptyBox:Hide() end
+        local limit = math.min(#filtered, Search.maxRender)
+        for i = 1, limit do
+            local entry = filtered[i]
+            local card = Search.EnsureCard(i)
+            card._entry = entry
+            card:ClearAllPoints()
+            card:SetPoint("TOPLEFT", sp, "TOPLEFT", 8, yCursor)
+            card:SetWidth(maxW - 8)
+
+            local hiTitle = Search.HighlightTitle(entry.title, tokens)
+            card.titleLbl:SetText(hiTitle)
+
+            card.cb:Hide()
+            card.choiceHolder:Hide()
+            card.stepperHolder:Hide()
+            card.actionBtn:Hide()
+
+            local hasSubCtrl = false
+            if entry.kind == "checkbox" then
+                card.cb:Show()
+                card.titleLbl:ClearAllPoints()
+                card.titleLbl:SetPoint("LEFT", card.cb, "RIGHT", 6, 0)
+                card.titleLbl:SetPoint("RIGHT", card.helpBtn, "LEFT", -8, 0)
+            else
+                card.titleLbl:ClearAllPoints()
+                card.titleLbl:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -26)
+                card.titleLbl:SetPoint("TOPRIGHT", card.helpBtn, "TOPLEFT", -8, -26)
+                if entry.kind == "choice" and type(entry.options) == "table" then
+                    hasSubCtrl = true
+                    card.choiceHolder:Show()
+                    local bx = 0
+                    for ci, cbtn in ipairs(card.choiceBtns) do
+                        local opt = entry.options[ci]
+                        if opt then
+                            cbtn._optValue = opt.value
+                            ns.Theme:SetButtonText(cbtn, opt.label)
+                            ns.Theme:AutoFitButton(cbtn, 64, 12, math.floor((maxW - 36) * 0.45))
+                            cbtn:ClearAllPoints()
+                            cbtn:SetPoint("LEFT", card.choiceHolder, "LEFT", bx, 0)
+                            cbtn:Show()
+                            bx = bx + (cbtn:GetWidth() or 80) + 6
+                        else
+                            cbtn:Hide()
+                        end
+                    end
+                elseif entry.kind == "stepper" then
+                    hasSubCtrl = true
+                    card.stepperHolder:Show()
+                elseif entry.kind == "action" and entry.onTrigger then
+                    hasSubCtrl = true
+                    ns.Theme:SetButtonText(card.actionBtn, entry.actionLabel or entry.title)
+                    ns.Theme:AutoFitButton(card.actionBtn, 96, 16, 260)
+                    card.actionBtn:Show()
+                end
+            end
+
+            local hasDesc = (entry.description and entry.description ~= "")
+            if hasDesc then
+                card.descLbl:SetText(entry.description)
+                card.descLbl:Show()
+            else
+                card.descLbl:SetText("")
+                card.descLbl:Hide()
+            end
+
+            local cardH = hasSubCtrl and (hasDesc and 92 or 76) or (hasDesc and 68 or 52)
+            card:SetHeight(cardH)
+            card:Show()
+            shownCards = i
+            yCursor = yCursor - (cardH + 6)
+        end
+        for i = shownCards + 1, #Search.cardPool do
+            Search.cardPool[i]:Hide()
+        end
+    end
+
+    local totalH = math.max(360, math.abs(yCursor) + 24)
+    sp:SetHeight(totalH)
+    if Search.content then
+        Search.content:SetHeight(totalH)
+    end
+    Search.RefreshCardStates()
+end
 
 local function HelpBtn(parent, anchorTo, title, whatText, howText)
     if not (ns.Theme and ns.Theme.CreateHelpButton) then
@@ -22,9 +847,13 @@ local function HelpBtn(parent, anchorTo, title, whatText, howText)
 end
 
 local function AddDeps(list, ...)
+    local modKey = list and list._scModKey
     for i = 1, select("#", ...) do
         local w = select(i, ...)
         if w then
+            if modKey and type(w) == "table" then
+                w._scDepMod = modKey
+            end
             list[#list + 1] = w
         end
     end
@@ -79,6 +908,12 @@ local function AddSectionHeader(parent, text, anchorTo, yOffset, helpTitle, help
     if helpTitle then
         HelpBtn(parent, fs, helpTitle, helpWhat, helpHow)
     end
+    Search.buildSectionTitle = text or ""
+    Search.buildSectionHelp = {
+        helpTitle = helpTitle,
+        description = helpWhat,
+        howText = helpHow,
+    }
     return fs
 end
 
@@ -124,6 +959,17 @@ local function CreateCheckbox(parent, labelText, anchorTo, yOffset, getter, sett
         FitCheckboxLabel()
         cb:SetChecked(getter() and true or false)
     end
+
+    Search.Register({
+        kind = "checkbox",
+        title = labelText,
+        widget = cb,
+        getter = getter,
+        setter = setter,
+        helpTitle = helpTitle,
+        description = helpWhat,
+        howText = helpHow,
+    })
     return cb
 end
 
@@ -175,6 +1021,21 @@ local function CreateChoiceRow(parent, anchorTo, yOffset, options, getter, sette
         end
         ReflowChoiceRow()
     end
+
+    local meta = Search.pendingMeta or Search.buildSectionHelp
+    local choiceTitle = (Search.pendingMeta and Search.pendingMeta.title) or Search.buildSectionTitle
+    Search.pendingMeta = nil
+    Search.Register({
+        kind = "choice",
+        title = choiceTitle,
+        widget = row,
+        options = options,
+        getter = getter,
+        setter = setter,
+        helpTitle = meta and meta.helpTitle or choiceTitle,
+        description = meta and meta.description or "",
+        howText = meta and meta.howText or "",
+    })
     return row
 end
 
@@ -189,7 +1050,7 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
 
     local valueText = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     valueText:SetPoint("LEFT", minus, "RIGHT", 10, 0)
-    valueText:SetWidth(76)
+    valueText:SetWidth(84)
     valueText:SetJustifyH("CENTER")
 
     local plus = ns.Theme:CreateButton(row, 28, 24, "+", "default")
@@ -200,7 +1061,11 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
     row._scValue = valueText
 
     local function RefreshValue()
-        valueText:SetText(string.format("%d %s", getter(), unit))
+        if unit and unit ~= "" then
+            valueText:SetText(string.format("%d %s", getter(), unit))
+        else
+            valueText:SetText(tostring(getter()))
+        end
         ns.Theme:StyleButton(minus, "default")
         ns.Theme:StyleButton(plus, "default")
         ns.Theme:SetButtonActive(minus, false, "default")
@@ -220,6 +1085,24 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
     end)
 
     syncFns[#syncFns + 1] = RefreshValue
+
+    local meta = Search.pendingMeta or Search.buildSectionHelp
+    local stepTitle = (Search.pendingMeta and Search.pendingMeta.title) or Search.buildSectionTitle
+    Search.pendingMeta = nil
+    Search.Register({
+        kind = "stepper",
+        title = stepTitle,
+        widget = row,
+        minVal = minVal,
+        maxVal = maxVal,
+        unit = unit,
+        step = step,
+        getter = getter,
+        setter = setter,
+        helpTitle = meta and meta.helpTitle or stepTitle,
+        description = meta and meta.description or "",
+        howText = meta and meta.howText or "",
+    })
     return row
 end
 
@@ -267,6 +1150,7 @@ local function CollectDisabledNotificationNames()
     if s.friendOfflineAlertToast == false then out[#out + 1] = L["Friend Offline Alerts"] end
     if watchOn and s.alerts and s.alerts.toast == false then out[#out + 1] = L["Watchlist Online Alerts"] end
     if chatOn and s.addonMsgToast == false then out[#out + 1] = L["Floating Message Popups"] end
+    if chatOn and s.msgPreviewEnabled == false then out[#out + 1] = L["Minimap Message Previews"] end
     if chatOn and s.chatSound == false then out[#out + 1] = L["Chat Sounds (Master)"] end
     if wbOn and s.worldBuffsAlerts == false then out[#out + 1] = L["World Buff Drop Alerts"] end
     if wbOn and s.worldBuffsExpiryAlert == false then out[#out + 1] = L["World Buff Expiry Warning"] end
@@ -464,6 +1348,16 @@ local function BuildShortcutAutoOpenSection(ov, anchor, deps, refs, NotifySettin
         L["Clears your saved first-time shortcut choices (O, I, J, C) and resets auto-open back to asking on first open."],
         L["Click to re-enable the confirmation prompt the next time you press an enabled official shortcut key."]
     )
+    Search.Register({
+        kind = "action",
+        title = L["Ask Again on Shortcuts"],
+        actionLabel = L["Ask Again on Shortcuts"],
+        widget = askAgainBtn,
+        helpTitle = L["Help: Ask Again on Shortcuts"],
+        description = L["Clears your saved first-time shortcut choices (O, I, J, C) and resets auto-open back to asking on first open."],
+        howText = L["Click to re-enable the confirmation prompt the next time you press an enabled official shortcut key."],
+        onTrigger = function() askAgainBtn:Click() end,
+    })
     AddDeps(deps.defaultBtns, askAgainBtn)
 
     return scResetRow
@@ -617,6 +1511,31 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Instantly switch between Full Suite, Friends & Chat Only, or Ultra-Light (Alts & Notes) presets, then fine-tune any checkbox below."],
         L["Use 'Ultra-Light' on bank or crafting alts to pause all background scanners, popups, and extra Blizzard window tabs."]
     )
+    Search.Register({
+        kind = "choice",
+        title = L["Help: 1-Click Presets"],
+        widget = presetRow,
+        helpTitle = L["Help: 1-Click Presets"],
+        description = L["Instantly switch between Full Suite, Friends & Chat Only, or Ultra-Light (Alts & Notes) presets, then fine-tune any checkbox below."],
+        howText = L["Use 'Ultra-Light' on bank or crafting alts to pause all background scanners, popups, and extra Blizzard window tabs."],
+        options = {
+            { value = "full", label = L["Preset: Full (Default)"] },
+            { value = "social", label = L["Preset: Friends & Chat"] },
+            { value = "ultralight", label = L["Preset: Ultra-Light (Alts)"] },
+        },
+        getter = GetActivePresetMode,
+        setter = ApplyPreset,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["Reset Profile to Defaults"],
+        actionLabel = L["Reset Profile to Defaults"],
+        widget = resetProfBtn,
+        helpTitle = L["Help: Profile Actions"],
+        description = L["Copy your shared Account settings into this character profile or reset the currently active profile back to SocialCentral defaults."],
+        howText = L["'Copy from Account Profile' is available whenever per-character profile mode is enabled above."],
+        onTrigger = function() resetProfBtn:Click() end,
+    })
 
     local winToggleHeader = AddSectionHeader(
         ov,
@@ -874,6 +1793,7 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.friendOnlineAlertToast = false
             s.friendOfflineAlertToast = false
             s.addonMsgToast = false
+            s.msgPreviewEnabled = false
             s.worldBuffsAlerts = false
             s.worldBuffsExpiryAlert = false
             s.clanLfgAlertEnabled = false
@@ -886,6 +1806,9 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         end
         if ns.NotificationToast and ns.NotificationToast.DismissAll then
             ns.NotificationToast:DismissAll()
+        end
+        if ns.MinimapPreview and ns.MinimapPreview.Dismiss then
+            ns.MinimapPreview:Dismiss(false)
         end
         NotifySettingChanged("CLAN_UPDATED")
         for _, sync in ipairs(syncFns) do sync() end
@@ -900,6 +1823,8 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.friendOnlineAlertToast = true
             s.friendOfflineAlertToast = true
             s.addonMsgToast = true
+            s.msgPreviewEnabled = true
+            s.msgPreviewPromptAnswered = true
             s.worldBuffsAlerts = true
             s.worldBuffsExpiryAlert = true
             s.clanLfgAlertEnabled = true
@@ -922,6 +1847,26 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Quickly test notification positioning, silence social floating popups (while keeping Group Avoid safety warnings), or restore all notification popups in 1 click."],
         L["Click 'Mute All Popups' to uncheck popup alerts, or use 'Do Not Disturb' above to pause without overwriting your checkboxes."]
     )
+    Search.Register({
+        kind = "action",
+        title = L["Mute All Popups"],
+        actionLabel = L["Mute All Popups"],
+        widget = muteAllPopupsBtn,
+        helpTitle = L["Help: Quick Popup Controls"],
+        description = L["Quickly test notification positioning, silence social floating popups (while keeping Group Avoid safety warnings), or restore all notification popups in 1 click."],
+        howText = L["Click 'Mute All Popups' to uncheck popup alerts, or use 'Do Not Disturb' above to pause without overwriting your checkboxes."],
+        onTrigger = function() muteAllPopupsBtn:Click() end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["Restore Popups"],
+        actionLabel = L["Restore Popups"],
+        widget = enablePopupsBtn,
+        helpTitle = L["Help: Quick Popup Controls"],
+        description = L["Quickly test notification positioning, silence social floating popups (while keeping Group Avoid safety warnings), or restore all notification popups in 1 click."],
+        howText = L["Click 'Mute All Popups' to uncheck popup alerts, or use 'Do Not Disturb' above to pause without overwriting your checkboxes."],
+        onTrigger = function() enablePopupsBtn:Click() end,
+    })
 
     local winHeader = AddSectionHeader(
         ov,
@@ -1005,6 +1950,408 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
     AddDeps(deps.chat, qAddonCb, qChatSndCb)
 end
 
+local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySettingChanged)
+    local mpHeader = AddSectionHeader(
+        nf,
+        L["Minimap Message Previews"],
+        anchorTo,
+        -12,
+        L["Help: Minimap Message Previews"],
+        L["Temporarily expands a compact animated capsule vertically centered on the left side of your Minimap showing the sender's character icon and opening words, then smoothly closes back into the SC icon."],
+        L["Pick which channels trigger previews (Whispers, Battle.net, Group, Guild, Private Rooms) and silence them automatically inside Dungeons, Raids, Battlegrounds, or Combat."]
+    )
+
+    local mpMasterCb = CreateCheckbox(
+        nf, L["Enable animated message preview capsule beside Minimap"], mpHeader, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewEnabled ~= false end,
+        function(checked)
+            ns.db.settings.msgPreviewEnabled = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            if not checked and ns.MinimapPreview and ns.MinimapPreview.Dismiss then
+                ns.MinimapPreview:Dismiss(false)
+            end
+            NotifySettingChanged()
+        end,
+        L["Help: Enable Minimap Message Previews"],
+        L["Master switch for the animated message preview capsule beside the Minimap."],
+        L["Uncheck to disable minimap message previews completely without affecting your Conversations panel or unread counter badge."]
+    )
+
+    local mpWhisperCb = CreateCheckbox(
+        nf, L["Show previews for Whispers & SocialCentral Direct Chat"], mpMasterCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewWhispers ~= false end,
+        function(checked)
+            ns.db.settings.msgPreviewWhispers = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Whispers"],
+        L["Expands the minimap message preview whenever you receive an in-game character Whisper or SocialCentral 1-on-1 Direct Message."],
+        L["Hover over the preview to read the full text and pause the timer, or click to jump straight into replying."]
+    )
+
+    local mpBNetCb = CreateCheckbox(
+        nf, L["Show previews for Battle.net Friends"], mpWhisperCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewBNet ~= false end,
+        function(checked)
+            ns.db.settings.msgPreviewBNet = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Battle.net"],
+        L["Expands the minimap message preview whenever a Battle.net friend messages you (showing their character icon or the Battle.net emblem)."],
+        L["Left-click opens the conversation or Shift+Click opens a quick Battle.net reply."]
+    )
+
+    local mpGroupCb = CreateCheckbox(
+        nf, L["Show previews for Group Chat (Party / Raid / Instance)"], mpBNetCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.msgPreviewGroup == true end,
+        function(checked)
+            ns.db.settings.msgPreviewGroup = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Group"],
+        L["Expands the minimap message preview for Party, Raid, and Instance chat lines sent by your teammates (showing their live portrait when nearby)."],
+        L["Off by default to keep group runs quiet; combine with the Dungeon/Raid silence checkboxes below to show only open-world group chat."]
+    )
+
+    local mpGuildCb = CreateCheckbox(
+        nf, L["Show previews for Guild & Officer Chat"], mpGroupCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.msgPreviewGuild == true end,
+        function(checked)
+            ns.db.settings.msgPreviewGuild = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Guild"],
+        L["Expands the minimap message preview whenever a guildmate posts in Guild or Officer chat."],
+        L["Off by default for busy guilds; enable if you want to catch guild messages right beside your minimap without watching chat."]
+    )
+
+    local mpRoomsCb = CreateCheckbox(
+        nf, L["Show previews for Private Rooms & Alliance Chat"], mpGuildCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewRooms ~= false end,
+        function(checked)
+            ns.db.settings.msgPreviewRooms = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Rooms"],
+        L["Expands the minimap message preview for SocialCentral Private Rooms and cross-guild Alliance Chat messages."],
+        L["Uncheck if you prefer to receive Private Room & Alliance alerts only in the top Toast stack or Conversations panel."]
+    )
+
+    local mpSilDngCb = CreateCheckbox(
+        nf, L["Hide message previews inside Dungeons"], mpRoomsCb, -8,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewSilenceDungeons ~= false end,
+        function(checked)
+            ns.db.settings.msgPreviewSilenceDungeons = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Silence Dungeons"],
+        L["Automatically pauses minimap message previews while you are inside 5-player Dungeons or instanced scenarios."],
+        L["Keep checked to keep your minimap area completely clear during dungeon pulls; resumes automatically once you exit."]
+    )
+
+    local mpSilRaidCb = CreateCheckbox(
+        nf, L["Hide message previews inside Raids"], mpSilDngCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewSilenceRaids ~= false end,
+        function(checked)
+            ns.db.settings.msgPreviewSilenceRaids = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Silence Raids"],
+        L["Automatically pauses minimap message previews while you are inside Raid instances."],
+        L["Keep checked during boss nights to avoid distractions beside the minimap."]
+    )
+
+    local mpSilPvpCb = CreateCheckbox(
+        nf, L["Hide message previews inside Battlegrounds & Arenas"], mpSilRaidCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewSilencePvP ~= false end,
+        function(checked)
+            ns.db.settings.msgPreviewSilencePvP = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Silence PvP"],
+        L["Automatically pauses minimap message previews while you are inside Battlegrounds or Arenas."],
+        L["Uncheck if you still want Whispers or Group previews during PvP matches."]
+    )
+
+    local mpSilCombatCb = CreateCheckbox(
+        nf, L["Hide message previews while in combat"], mpSilPvpCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.msgPreviewSilenceCombat == true end,
+        function(checked)
+            ns.db.settings.msgPreviewSilenceCombat = checked
+            ns.db.settings.msgPreviewPromptAnswered = true
+            NotifySettingChanged()
+        end,
+        L["Help: Preview Silence Combat"],
+        L["Pauses minimap message previews whenever your character is actively in combat, even in the open world."],
+        L["Enable for completely distraction-free fights anywhere in Azeroth."]
+    )
+
+    local durLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    durLbl:SetPoint("TOPLEFT", mpSilCombatCb, "BOTTOMLEFT", 4, -8)
+    durLbl:SetText(L["Preview display duration (seconds):"])
+    HelpBtn(
+        nf, durLbl, L["Help: Preview Duration"],
+        L["Controls how many seconds the message preview stays expanded beside the Minimap before closing and gliding back into the SC icon."],
+        L["Hovering your mouse over the preview always pauses the countdown automatically so you can finish reading."]
+    )
+
+    Search.SetPendingMeta(
+        L["Preview display duration (seconds):"],
+        L["Help: Preview Duration"],
+        L["Controls how many seconds the message preview stays expanded beside the Minimap before closing and gliding back into the SC icon."],
+        L["Hovering your mouse over the preview always pauses the countdown automatically so you can finish reading."]
+    )
+    local durStep = CreateStepperRow(
+        nf, durLbl, -4, 3, 12, "s",
+        function() return (ns.db and ns.db.settings and ns.db.settings.msgPreviewDuration) or 6 end,
+        function(val)
+            if ns.db and ns.db.settings then
+                ns.db.settings.msgPreviewDuration = val
+                ns.db.settings.msgPreviewPromptAnswered = true
+            end
+        end,
+        1
+    )
+
+    local maxVisLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    maxVisLbl:SetPoint("TOPLEFT", durStep, "BOTTOMLEFT", 0, -8)
+    maxVisLbl:SetText(L["Simultaneous minimap preview rows (1–3):"])
+    HelpBtn(
+        nf, maxVisLbl, L["Help: Preview Max Visible"],
+        L["Sets how many message previews can appear stacked simultaneously beside your Minimap (1 to 3 rows, newest at the bottom)."],
+        L["Any additional incoming messages wait cleanly in a queue (+N) and rise smoothly into view as soon as the top preview finishes and returns to the SC icon."]
+    )
+
+    Search.SetPendingMeta(
+        L["Simultaneous minimap preview rows (1–3):"],
+        L["Help: Preview Max Visible"],
+        L["Sets how many message previews can appear stacked simultaneously beside your Minimap (1 to 3 rows, newest at the bottom)."],
+        L["Any additional incoming messages wait cleanly in a queue (+N) and rise smoothly into view as soon as the top preview finishes and returns to the SC icon."]
+    )
+    local maxVisStep = CreateStepperRow(
+        nf, maxVisLbl, -4, 1, 3, L["lines"],
+        function() return (ns.db and ns.db.settings and ns.db.settings.msgPreviewMaxVisible) or 3 end,
+        function(val)
+            if ns.db and ns.db.settings then
+                ns.db.settings.msgPreviewMaxVisible = val
+                ns.db.settings.msgPreviewPromptAnswered = true
+                NotifySettingChanged()
+            end
+        end,
+        1
+    )
+
+    local mpBtnRow = CreateFrame("Frame", nil, nf)
+    mpBtnRow:SetPoint("TOPLEFT", maxVisStep, "BOTTOMLEFT", 0, -8)
+    mpBtnRow:SetSize(560, 26)
+
+    local testMpBtn = ns.Theme:CreateButton(mpBtnRow, 148, 22, L["Test Minimap Preview"], "default")
+    ns.Theme:AutoFitButton(testMpBtn, 126, 14, 210)
+    testMpBtn:SetPoint("LEFT", mpBtnRow, "LEFT", 0, 0)
+    testMpBtn:SetScript("OnClick", function()
+        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+            ns.MinimapPreview:ShowTestPreview("")
+        end
+    end)
+
+    local testQueueMpBtn = ns.Theme:CreateButton(mpBtnRow, 134, 22, L["Test Queue (4)"], "default")
+    ns.Theme:AutoFitButton(testQueueMpBtn, 108, 14, 180)
+    testQueueMpBtn:SetPoint("LEFT", testMpBtn, "RIGHT", 6, 0)
+    testQueueMpBtn:SetScript("OnClick", function()
+        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+            ns.MinimapPreview:ShowTestPreview("queue")
+        end
+    end)
+
+    local setupMpBtn = ns.Theme:CreateButton(mpBtnRow, 146, 22, L["Open Setup Prompt"], "default")
+    ns.Theme:AutoFitButton(setupMpBtn, 118, 14, 195)
+    setupMpBtn:SetPoint("LEFT", testQueueMpBtn, "RIGHT", 6, 0)
+    setupMpBtn:SetScript("OnClick", function()
+        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+            ns.MinimapPreview:ShowTestPreview("setup")
+        end
+    end)
+
+    HelpBtn(
+        mpBtnRow, setupMpBtn, L["Help: Test Minimap Preview"],
+        L["Plays a live sample message preview beside your Minimap (with expand and close-to-SC-icon animation) or re-opens the first-time setup assistant."],
+        L["You can also test specific channels anytime using '/sc preview whisper', 'bnet', 'group', 'guild', or 'setup'."]
+    )
+
+    Search.Register({
+        kind = "action",
+        title = L["Test Minimap Preview"],
+        actionLabel = L["Test Minimap Preview"],
+        widget = testMpBtn,
+        helpTitle = L["Help: Test Minimap Preview"],
+        description = L["Plays a live sample message preview beside your Minimap (with expand and close-to-SC-icon animation) or re-opens the first-time setup assistant."],
+        howText = L["You can also test specific channels anytime using '/sc preview whisper', 'bnet', 'group', 'guild', or 'setup'."],
+        onTrigger = function()
+            if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+                ns.MinimapPreview:ShowTestPreview("")
+            end
+        end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["Test Queue (4)"],
+        actionLabel = L["Test Queue (4)"],
+        widget = testQueueMpBtn,
+        helpTitle = L["Help: Preview Max Visible"],
+        description = L["Sets how many message previews can appear stacked simultaneously beside your Minimap (1 to 3 rows, newest at the bottom)."],
+        howText = L["Any additional incoming messages wait cleanly in a queue (+N) and rise smoothly into view as soon as the top preview finishes and returns to the SC icon."],
+        onTrigger = function()
+            if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+                ns.MinimapPreview:ShowTestPreview("queue")
+            end
+        end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["Open Setup Prompt"],
+        actionLabel = L["Open Setup Prompt"],
+        widget = setupMpBtn,
+        helpTitle = L["Help: Minimap Message Preview Setup"],
+        description = L["Shows a compact animated preview with the sender's icon and opening words on the left side of your Minimap whenever a matching message arrives, then closes back into the SC icon."],
+        howText = L["Choose which message types should trigger previews and whether to automatically silence them inside Dungeons, Raids, Battlegrounds, or Combat. You can change this anytime in Settings -> Notifications."],
+        onTrigger = function()
+            if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+                ns.MinimapPreview:ShowTestPreview("setup")
+            end
+        end,
+    })
+
+    local mpPosRow = CreateFrame("Frame", nil, nf)
+    mpPosRow:SetPoint("TOPLEFT", mpBtnRow, "BOTTOMLEFT", 0, -6)
+    mpPosRow:SetSize(560, 26)
+
+    local moveMpPosBtn = ns.Theme:CreateButton(mpPosRow, 168, 22, L["Move Preview Position"], "default")
+    ns.Theme:AutoFitButton(moveMpPosBtn, 146, 16, 225)
+    moveMpPosBtn:SetPoint("LEFT", mpPosRow, "LEFT", 0, 0)
+    moveMpPosBtn:SetScript("OnClick", function()
+        if ns.MinimapPreview and ns.MinimapPreview.ToggleAnchorMover then
+            ns.MinimapPreview:ToggleAnchorMover()
+        end
+    end)
+
+    local resetMpPosBtn = ns.Theme:CreateButton(mpPosRow, 152, 22, L["Reset Preview Position"], "default")
+    ns.Theme:AutoFitButton(resetMpPosBtn, 134, 16, 215)
+    resetMpPosBtn:SetPoint("LEFT", moveMpPosBtn, "RIGHT", 6, 0)
+    resetMpPosBtn:SetScript("OnClick", function()
+        if ns.MinimapPreview and ns.MinimapPreview.ResetPosition then
+            ns.MinimapPreview:ResetPosition()
+        end
+    end)
+
+    HelpBtn(
+        mpPosRow, resetMpPosBtn, L["Help: Move Preview Position"],
+        L["Lets you move the 3-row message preview stack to any location on your screen (or drag any live preview directly), while keeping the smooth launch and return-to-Minimap fusion animation."],
+        L["Click 'Move Preview Position' (or type '/sc preview move') to drag the 3-slot guide anywhere on screen, then click 'Done'. Click 'Reset Preview Position' anytime to dock back beside the Minimap."]
+    )
+
+    Search.Register({
+        kind = "action",
+        title = L["Move Preview Position"],
+        actionLabel = L["Move Preview Position"],
+        widget = moveMpPosBtn,
+        helpTitle = L["Help: Move Preview Position"],
+        description = L["Lets you move the 3-row message preview stack to any location on your screen (or drag any live preview directly), while keeping the smooth launch and return-to-Minimap fusion animation."],
+        howText = L["Click 'Move Preview Position' (or type '/sc preview move') to drag the 3-slot guide anywhere on screen, then click 'Done'. Click 'Reset Preview Position' anytime to dock back beside the Minimap."],
+        onTrigger = function()
+            if ns.MinimapPreview and ns.MinimapPreview.ToggleAnchorMover then
+                ns.MinimapPreview:ToggleAnchorMover()
+            end
+        end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["Reset Preview Position"],
+        actionLabel = L["Reset Preview Position"],
+        widget = resetMpPosBtn,
+        helpTitle = L["Help: Move Preview Position"],
+        description = L["Lets you move the 3-row message preview stack to any location on your screen (or drag any live preview directly), while keeping the smooth launch and return-to-Minimap fusion animation."],
+        howText = L["Click 'Move Preview Position' (or type '/sc preview move') to drag the 3-slot guide anywhere on screen, then click 'Done'. Click 'Reset Preview Position' anytime to dock back beside the Minimap."],
+        onTrigger = function()
+            if ns.MinimapPreview and ns.MinimapPreview.ResetPosition then
+                ns.MinimapPreview:ResetPosition()
+            end
+        end,
+    })
+
+    AddDeps(deps.defaultBtns, testMpBtn, testQueueMpBtn, setupMpBtn, moveMpPosBtn, resetMpPosBtn)
+    AddDeps(deps.chat, mpMasterCb, mpWhisperCb, mpBNetCb, mpGroupCb, mpGuildCb, mpRoomsCb, mpSilDngCb, mpSilRaidCb, mpSilPvpCb, mpSilCombatCb, durLbl, durStep, maxVisLbl, maxVisStep, testMpBtn, testQueueMpBtn, setupMpBtn, moveMpPosBtn, resetMpPosBtn)
+    return mpPosRow
+end
+
+local function BuildMinimapBadgeStyleControls(nf, anchorTo, deps, NotifySettingChanged)
+    local styleLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    styleLbl:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, -8)
+    styleLbl:SetText(L["Minimap counter badge style:"])
+    HelpBtn(
+        nf, styleLbl, L["Help: Minimap Badge Style"],
+        L["Choose how multiple unread message types appear on the Minimap icon: either a single chat-colored Fusion Circle directly under the SC icon (blending Whisper pink, Group blue, Guild green, and Battle.net cyan, splitting cleanly on hover) or separate non-overlapping numbers orbiting around the icon."],
+        L["Pick 'Fusion Circle (Under Icon)' for the animated color-merge orb directly beneath the icon, or 'Around Icon (Separate)' to keep each chat type spaced around the icon at all times."]
+    )
+
+    Search.SetPendingMeta(
+        L["Minimap counter badge style:"],
+        L["Help: Minimap Badge Style"],
+        L["Choose how multiple unread message types appear on the Minimap icon: either a single chat-colored Fusion Circle directly under the SC icon (blending Whisper pink, Group blue, Guild green, and Battle.net cyan, splitting cleanly on hover) or separate non-overlapping numbers orbiting around the icon."],
+        L["Pick 'Fusion Circle (Under Icon)' for the animated color-merge orb directly beneath the icon, or 'Around Icon (Separate)' to keep each chat type spaced around the icon at all times."]
+    )
+    local styleRow = CreateChoiceRow(nf, styleLbl, -4, {
+        { value = "fusion", label = L["Fusion Circle (Under Icon)"], width = 205 },
+        { value = "separate", label = L["Around Icon (Separate)"], width = 185 },
+    }, function()
+        return (ns.db and ns.db.settings and ns.db.settings.minimapBadgeStyle) or "fusion"
+    end, function(val)
+        if ns.db and ns.db.settings then
+            ns.db.settings.minimapBadgeStyle = val
+            NotifySettingChanged()
+        end
+    end)
+
+    local testFusionBtn = ns.Theme:CreateButton(nf, 152, 22, L["Test Fusion Badge"], "default")
+    ns.Theme:AutoFitButton(testFusionBtn, 134, 16, 210)
+    testFusionBtn:SetPoint("TOPLEFT", styleRow, "BOTTOMLEFT", 0, -6)
+    testFusionBtn:SetScript("OnClick", function()
+        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+            ns.MinimapPreview:ShowTestPreview("badge fusion")
+        end
+    end)
+    HelpBtn(
+        nf, testFusionBtn, L["Help: Test Fusion Badge"],
+        L["Plays the live multi-color fusion animation on your Minimap icon with sample Whisper (pink), Group (blue), and Guild (green) counters."],
+        L["Hover over the SC minimap icon after fusion to see the numbers split cleanly around the icon, or type '/sc preview clear' to reset."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Test Fusion Badge"],
+        actionLabel = L["Test Fusion Badge"],
+        widget = testFusionBtn,
+        helpTitle = L["Help: Test Fusion Badge"],
+        description = L["Plays the live multi-color fusion animation on your Minimap icon with sample Whisper (pink), Group (blue), and Guild (green) counters."],
+        howText = L["Hover over the SC minimap icon after fusion to see the numbers split cleanly around the icon, or type '/sc preview clear' to reset."],
+        onTrigger = function()
+            if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
+                ns.MinimapPreview:ShowTestPreview("badge fusion")
+            end
+        end,
+    })
+
+    AddDeps(deps.defaultBtns, testFusionBtn)
+    AddDeps(deps.chat, styleLbl, styleRow, testFusionBtn)
+    return testFusionBtn
+end
+
 local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
     local mutedHeader = AddSectionHeader(
         nf,
@@ -1036,6 +2383,8 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
             s.friendOnlineAlertToast = true
             s.friendOfflineAlertToast = true
             s.addonMsgToast = true
+            s.msgPreviewEnabled = true
+            s.msgPreviewPromptAnswered = true
             s.worldBuffsAlerts = true
             s.worldBuffsExpiryAlert = true
             s.clanLfgAlertEnabled = true
@@ -1078,10 +2427,12 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
     refs.unmuteAlertsBtn = unmuteAlertsBtn
     refs.unmutePlayersBtn = unmutePlayersBtn
 
+    local mpSectionBottom = BuildMinimapPreviewSettingsSection(nf, mutedBtnRow, deps, NotifySettingChanged)
+
     local wlAlertHeader = AddSectionHeader(
         nf,
         L["Online alerts for Watchlist"],
-        mutedBtnRow,
+        mpSectionBottom,
         -12,
         L["Help: Watchlist Online Alerts"],
         L["Prints a local chat notification whenever a Watchlist character transitions from offline to online."],
@@ -1203,6 +2554,16 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         if ns.Theme and ns.Theme.ResetWindowPosition then ns.Theme:ResetWindowPosition("notification_toast") end
     end)
     HelpBtn(toastResetRow, resetToastPosBtn, L["Help: Reset Notification Position"], L["Moves the floating notification popup back to its default top-center screen position."], L["Also available anytime by right-clicking any floating notification."])
+    Search.Register({
+        kind = "action",
+        title = L["Reset Notification Position"],
+        actionLabel = L["Reset Notification Position"],
+        widget = resetToastPosBtn,
+        helpTitle = L["Help: Reset Notification Position"],
+        description = L["Moves the floating notification popup back to its default top-center screen position."],
+        howText = L["Also available anytime by right-clicking any floating notification."],
+        onTrigger = function() resetToastPosBtn:Click() end,
+    })
 
     local addonEchoCb = CreateCheckbox(
         nf, L["Print received [SC] addon messages in Blizzard Chat immediately"], toastResetRow, -6,
@@ -1299,8 +2660,9 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Displays a compact red unread counter badge directly on the corner of the SocialCentral Minimap button alongside the golden ring tint."],
         L["Clears automatically as soon as you open and view the unread threads or invitations."]
     )
+    local minimapBadgeStyleBottom = BuildMinimapBadgeStyleControls(nf, addonMinimapBadgeCb, deps, NotifySettingChanged)
     local addonTabBadgesCb = CreateCheckbox(
-        nf, L["Show unread counters on Social (O) & Guild (J) side-tabs"], addonMinimapBadgeCb, -6,
+        nf, L["Show unread counters on Social (O) & Guild (J) side-tabs"], minimapBadgeStyleBottom, -8,
         function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgTabBadges ~= false end,
         function(checked) ns.db.settings.addonMsgTabBadges = checked; NotifySettingChanged() end,
         L["Help: Side-Tab Unread Counters"],
@@ -1316,6 +2678,16 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         end
     end)
     HelpBtn(nf, testToastBtn, L["Help: Test Notification Toast"], L["Spawns a sample floating Notification Toast pill with sound so you can preview its look and drag it to your preferred screen position."], L["Click to show the pill, drag it anywhere on screen, or reset positions anytime with '/sc resetpos'."])
+    Search.Register({
+        kind = "action",
+        title = L["Test Notification Toast"],
+        actionLabel = L["Test Notification Toast"],
+        widget = testToastBtn,
+        helpTitle = L["Help: Test Notification Toast"],
+        description = L["Spawns a sample floating Notification Toast pill with sound so you can preview its look and drag it to your preferred screen position."],
+        howText = L["Click to show the pill, drag it anywhere on screen, or reset positions anytime with '/sc resetpos'."],
+        onTrigger = function() testToastBtn:Click() end,
+    })
 
     local chatSettingsHeader = AddSectionHeader(
         nf, L["Conversations & Sound Alerts"], testToastBtn, -14,
@@ -1464,6 +2836,14 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         if ns.db and ns.db.settings then ns.db.settings.clanLfgAlertFilter = ns.Compat.CleanInput(self:GetText() or "") or "" end
     end)
     HelpBtn(clanFilterRow, clanFilterInput, L["Help: Clan Alert Keywords"], L["Comma-separated dungeon or level keywords (e.g. 'BRD, Strat, tank') so Clan Dungeon Alerts only fire on matching requests."], L["Leave blank to receive alerts for all Dungeon LFG calls inside your guild."])
+    Search.Register({
+        kind = "input",
+        title = L["Dungeon keywords filter (comma-separated, blank = all):"],
+        widget = clanFilterInput,
+        helpTitle = L["Help: Clan Alert Keywords"],
+        description = L["Comma-separated dungeon or level keywords (e.g. 'BRD, Strat, tank') so Clan Dungeon Alerts only fire on matching requests."],
+        howText = L["Leave blank to receive alerts for all Dungeon LFG calls inside your guild."],
+    })
     syncFns[#syncFns + 1] = function()
         if not clanFilterInput:HasFocus() then
             clanFilterInput:SetText((ns.db and ns.db.settings and ns.db.settings.clanLfgAlertFilter) or "")
@@ -1715,6 +3095,46 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         if ns.SpotterHUD and ns.SpotterHUD.ShowRadarTutorial then ns.SpotterHUD:ShowRadarTutorial(true) end
     end)
     HelpBtn(rd, viewRadarTutorialBtn, L["Help: Radar Tutorial"], L["Opens the quick visual guide explaining how Target Radar proximity tracking, range display, and click-to-target work."], L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."])
+    Search.Register({
+        kind = "action",
+        title = L["Open Target Radar"],
+        actionLabel = L["Open Target Radar"],
+        widget = openRadarBtn,
+        helpTitle = L["Help: Open Target Radar"],
+        description = L["Manually opens the Target Radar HUD to test target tracking and range display."],
+        howText = L["Click this button or type '/sc radar' to show or hide the floating radar."],
+        onTrigger = function() openRadarBtn:Click() end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["Open World Buffs Tracker"],
+        actionLabel = L["Open World Buffs Tracker"],
+        widget = openBuffsBtn,
+        helpTitle = L["Help: Open World Buffs Tracker"],
+        description = L["Opens the World Buffs tab in SocialCentral to view active buffs, drop timers, and classic buff sources."],
+        howText = L["Click to review all classic world buffs and their status in WoW Forever."],
+        onTrigger = function() openBuffsBtn:Click() end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["View Nameplate Tutorial"],
+        actionLabel = L["View Nameplate Tutorial"],
+        widget = viewTutorialBtn,
+        helpTitle = L["Help: Nameplate Tutorial"],
+        description = L["Opens the quick visual guide showing how to toggle friendly (Shift+V) and enemy (V) nameplates so the Radar arrow and badges appear over targets."],
+        howText = L["Click anytime to review how nameplate shortcuts work alongside Target Radar."],
+        onTrigger = function() viewTutorialBtn:Click() end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["View Radar Tutorial"],
+        actionLabel = L["View Radar Tutorial"],
+        widget = viewRadarTutorialBtn,
+        helpTitle = L["Help: Radar Tutorial"],
+        description = L["Opens the quick visual guide explaining how Target Radar proximity tracking, range display, and click-to-target work."],
+        howText = L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."],
+        onTrigger = function() viewRadarTutorialBtn:Click() end,
+    })
 
     local resetRadarTabBtn = ns.Theme:CreateButton(rd, 190, 22, L["Restore Defaults (This Tab)"], "default")
     ns.Theme:AutoFitButton(resetRadarTabBtn, 160, 16, 250)
@@ -1842,6 +3262,26 @@ local function BuildGeneralTab(gn, deps)
         end
     end)
     HelpBtn(gn, resetPosBtn, L["Help: Reset Window Positions"], L["Restores the default screen positions of the Main Window, Target Radar HUD, and all popup dialogs."], L["Use this if any window was moved off-screen or after changing screen resolution."])
+    Search.Register({
+        kind = "action",
+        title = L["Open Theme Preview Picker"],
+        actionLabel = L["Open Theme Preview Picker"],
+        widget = themePickerBtn,
+        helpTitle = L["Help: Theme"],
+        description = L["Choose between Blizzard Official (default in-game portrait window, dark marble inset, and classic red/pewter buttons), Modern Theme (optional dark minimalist UI), or Classic Gold."],
+        howText = L["Click your preferred design button (or open the visual Preview Picker below); changes apply immediately across all SocialCentral windows without /reload."],
+        onTrigger = function() themePickerBtn:Click() end,
+    })
+    Search.Register({
+        kind = "action",
+        title = L["Reset All Window Positions"],
+        actionLabel = L["Reset All Window Positions"],
+        widget = resetPosBtn,
+        helpTitle = L["Help: Reset Window Positions"],
+        description = L["Restores the default screen positions of the Main Window, Target Radar HUD, and all popup dialogs."],
+        howText = L["Use this if any window was moved off-screen or after changing screen resolution."],
+        onTrigger = function() resetPosBtn:Click() end,
+    })
 
     local mmCb = CreateCheckbox(
         gn, L["Show minimap button"], themePickerBtn, -12,
@@ -2037,12 +3477,154 @@ local function BuildGeneralTab(gn, deps)
         end
     end)
     HelpBtn(gn, updateLinkBtn, L["Help: Update Check & GitHub"], L["Silently compares versions with other SocialCentral users in your guild or group (just like DBM) and warns you if a newer version is out."], L["Keep enabled for in-game update chat links. Click 'GitHub Releases / Updater' to copy the public GitHub download link or Windows updater command."])
+    Search.Register({
+        kind = "action",
+        title = L["GitHub Releases / Updater"],
+        actionLabel = L["GitHub Releases / Updater"],
+        widget = updateLinkBtn,
+        helpTitle = L["Help: Update Check & GitHub"],
+        description = L["Silently compares versions with other SocialCentral users in your guild or group (just like DBM) and warns you if a newer version is out."],
+        howText = L["Keep enabled for in-game update chat links. Click 'GitHub Releases / Updater' to copy the public GitHub download link or Windows updater command."],
+        onTrigger = function() updateLinkBtn:Click() end,
+    })
 
     AddDeps(deps.defaultBtns, langReloadBtn, themePickerBtn, resetPosBtn, updateLinkBtn)
     AddDeps(deps.guild, clanSyncCb, guildFinderCb, autoStatusCb, clanAutoCloseLfgCb)
     AddDeps(deps.lfg, globalChatLfgCb, lfgDraftCb, lfgAntiSpamCb)
     AddDeps(deps.alts, tooltipItemAltsCb)
     AddDeps(deps.nearby, nearbyRow)
+end
+
+function Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHeights, catTabs, catButtons)
+    Search.scrollFrame = scrollFrame
+    Search.pages = pages
+    Search.content = content
+    Search.pageHeights = pageHeights
+    Search.catButtons = catButtons
+    wipe(Search.entries)
+    wipe(Search.filterBtns)
+    wipe(Search.emptyChips)
+
+    local searchRow = CreateFrame("Frame", nil, headerArea)
+    searchRow:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -6)
+    searchRow:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", 0, -72)
+    searchRow:SetHeight(26)
+
+    local searchBox = CreateFrame("EditBox", "SocialCentralSettingsSearchBox", searchRow, "SearchBoxTemplate")
+    searchBox:SetHeight(24)
+    searchBox:SetPoint("LEFT", searchRow, "LEFT", 0, 0)
+    searchBox:SetPoint("RIGHT", searchRow, "RIGHT", -132, 0)
+    searchBox:SetAutoFocus(false)
+    if searchBox.Instructions then
+        searchBox.Instructions:SetText(L["Search settings (e.g. minimap, sound, raid, radar, theme)..."])
+    end
+    if ns.Theme and ns.Theme.StyleSearchBox then
+        ns.Theme:StyleSearchBox(searchBox)
+    end
+    Search.searchBox = searchBox
+
+    local countLbl = searchRow:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    countLbl:SetPoint("LEFT", searchBox, "RIGHT", 10, 0)
+    countLbl:SetWidth(90)
+    countLbl:SetJustifyH("LEFT")
+    countLbl:SetWordWrap(false)
+    Search.countLbl = countLbl
+
+    local searchHelp = HelpBtn(
+        searchRow,
+        countLbl,
+        L["Help: Settings Search"],
+        L["Instantly searches every SocialCentral option across all four tabs by title, description, channel, or common keywords in English, Portuguese, and Spanish (no accents required)."],
+        L["Toggle checkboxes, adjust counters, switch options, or run actions right inside the search results — or click 'Go to' on any card to jump directly to its tab and highlight it."]
+    )
+    if searchHelp then
+        searchHelp:ClearAllPoints()
+        searchHelp:SetPoint("RIGHT", searchRow, "RIGHT", -2, 0)
+    end
+
+    local sp = CreateFrame("Frame", nil, content)
+    sp:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+    sp:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, 0)
+    sp:SetHeight(420)
+    sp:Hide()
+    Search.searchPage = sp
+
+    local filterSpecs = { { id = "all", label = L["All"] } }
+    for _, spec in ipairs(catTabs) do
+        filterSpecs[#filterSpecs + 1] = { id = spec.id, label = spec.label }
+    end
+    for _, fSpec in ipairs(filterSpecs) do
+        local fBtn = ns.Theme:CreateButton(sp, 92, 22, fSpec.label, "default")
+        fBtn:SetScript("OnClick", function()
+            Search.tabFilter = fSpec.id
+            if scrollFrame.SetVerticalScroll then scrollFrame:SetVerticalScroll(0) end
+            Search.RenderResults()
+        end)
+        fBtn:Hide()
+        Search.filterBtns[#Search.filterBtns + 1] = { id = fSpec.id, label = fSpec.label, btn = fBtn }
+    end
+
+    local emptyBox = CreateFrame("Frame", nil, sp, "BackdropTemplate")
+    emptyBox:SetSize(560, 118)
+    emptyBox:Hide()
+    local emptyTitle = emptyBox:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    emptyTitle:SetPoint("TOPLEFT", 12, -12)
+    emptyTitle:SetPoint("TOPRIGHT", -12, -12)
+    emptyTitle:SetJustifyH("LEFT")
+    emptyTitle:SetWordWrap(false)
+    local emptyHint = emptyBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    emptyHint:SetPoint("TOPLEFT", emptyTitle, "BOTTOMLEFT", 0, -6)
+    emptyHint:SetPoint("TOPRIGHT", -12, -32)
+    emptyHint:SetJustifyH("LEFT")
+    emptyHint:SetText(L["Try a quick topic below or search by tab, feature, or shortcut key:"])
+    sp.emptyBox = emptyBox
+    sp.emptyTitle = emptyTitle
+
+    local quickTopics = {
+        L["Minimap"],
+        L["Whisper"],
+        L["Sound"],
+        L["Dungeons"],
+        L["Radar"],
+        L["Theme"],
+        L["Language"],
+        L["Shortcuts"],
+    }
+    for _, topic in ipairs(quickTopics) do
+        local qBtn = ns.Theme:CreateButton(emptyBox, 84, 20, topic, "default")
+        qBtn:SetScript("OnClick", function()
+            searchBox:SetText(topic)
+            searchBox:ClearFocus()
+        end)
+        Search.emptyChips[#Search.emptyChips + 1] = { term = topic, btn = qBtn }
+    end
+
+    searchBox:HookScript("OnTextChanged", function(self)
+        local raw = self:GetText() or ""
+        local trimmed = raw:match("^%s*(.-)%s*$") or ""
+        if trimmed ~= Search.query then
+            Search.query = trimmed
+            Search.tabFilter = "all"
+            Search.StopBeacon()
+            if scrollFrame.SetVerticalScroll then
+                scrollFrame:SetVerticalScroll(0)
+            end
+            Search.RenderResults()
+        end
+    end)
+
+    searchBox:SetScript("OnEscapePressed", function(self)
+        local txt = self:GetText() or ""
+        if txt ~= "" then
+            self:SetText("")
+        else
+            self:ClearFocus()
+        end
+    end)
+
+    searchBox:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+    end)
 end
 
 local function BuildPanel()
@@ -2053,11 +3635,11 @@ local function BuildPanel()
     EnsurePanelFrame()
     wipe(syncFns)
 
-    -- Top Fixed Header & Category Navigation Tabs
+    -- Top Fixed Header, Category Navigation Tabs & Pinned Search Bar
     local headerArea = CreateFrame("Frame", nil, panel)
     headerArea:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -10)
     headerArea:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -10)
-    headerArea:SetHeight(76)
+    headerArea:SetHeight(110)
 
     local title = headerArea:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", 2, -2)
@@ -2087,7 +3669,7 @@ local function BuildPanel()
     local pages = {}
     local pageHeights = {
         overview = 1120,
-        notifications = 1720,
+        notifications = 2360,
         radar = 800,
         general = 1320,
     }
@@ -2108,9 +3690,24 @@ local function BuildPanel()
         pages[spec.id] = pFrame
     end
 
+    Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHeights, catTabs, catButtons)
+
     local function SelectCategoryTab(tabId)
         if not pages[tabId] then tabId = "overview" end
         activeCategoryTab = tabId
+        Search.StopBeacon()
+        if Search.query ~= "" then
+            Search.query = ""
+            Search.tabFilter = "all"
+            if Search.searchBox then
+                Search.searchBox:SetText("")
+                Search.searchBox:ClearFocus()
+            end
+            if Search.countLbl then Search.countLbl:SetText("") end
+        end
+        if Search.searchPage then
+            Search.searchPage:Hide()
+        end
         for id, pFrame in pairs(pages) do
             pFrame:SetShown(id == tabId)
         end
@@ -2176,14 +3773,27 @@ local function BuildPanel()
     end
 
     local deps = {
-        wb = {}, radar = {}, guild = {}, lfg = {}, social = {}, watch = {}, chat = {}, alts = {}, nearby = {},
-        defaultBtns = {}, primaryBtns = {},
+        wb = { _scModKey = "wb" },
+        radar = { _scModKey = "radar" },
+        guild = { _scModKey = "guild" },
+        lfg = { _scModKey = "lfg" },
+        social = { _scModKey = "social" },
+        watch = { _scModKey = "watch" },
+        chat = { _scModKey = "chat" },
+        alts = { _scModKey = "alts" },
+        nearby = { _scModKey = "nearby" },
+        defaultBtns = {},
+        primaryBtns = {},
     }
     local refs = {}
 
+    Search.SetBuildContext("overview", L["Summary & Windows"], 1)
     BuildOverviewTab(pages.overview, deps, refs, NotifySettingChanged, CloseSettingsBeforeJump)
+    Search.SetBuildContext("notifications", L["Notifications"], 2)
     BuildNotificationsTab(pages.notifications, deps, refs, NotifySettingChanged)
+    Search.SetBuildContext("radar", L["Radar & Map"], 3)
     BuildRadarTab(pages.radar, deps, NotifySettingChanged, CloseSettingsBeforeJump)
+    Search.SetBuildContext("general", L["General & Tools"], 4)
     BuildGeneralTab(pages.general, deps)
 
     syncFns[#syncFns + 1] = function()
@@ -2299,14 +3909,21 @@ local function BuildPanel()
         for _, sync in ipairs(syncFns) do
             sync()
         end
+        if Search.query ~= "" then
+            Search.RenderResults()
+        end
     end)
 
     SelectCategoryTab(activeCategoryTab)
+    selectCategoryTabFn = SelectCategoryTab
 
     if ns.Theme and ns.Theme.RegisterListener then
         ns.Theme:RegisterListener(function()
             if panel and panel:IsShown() then
                 for _, sync in ipairs(syncFns) do sync() end
+                if Search.query ~= "" then
+                    Search.RenderResults()
+                end
             end
         end)
     end
@@ -2320,6 +3937,9 @@ function SettingsMod:Refresh()
     for _, sync in ipairs(syncFns) do
         sync()
     end
+    if Search.query ~= "" then
+        Search.RefreshCardStates()
+    end
 end
 
 --- Register SocialCentral inside Blizzard Settings.
@@ -2332,6 +3952,9 @@ function SettingsMod:Register()
         BuildPanel()
         for _, sync in ipairs(syncFns) do
             sync()
+        end
+        if Search.query ~= "" then
+            Search.RenderResults()
         end
     end)
 
@@ -2355,11 +3978,16 @@ function SettingsMod:Register()
 end
 
 --- Open the Blizzard Settings window at the SocialCentral category.
-function SettingsMod:Open()
+function SettingsMod:Open(tabId)
     if not panel then
         self:Register()
     end
     BuildPanel()
+    if tabId and selectCategoryTabFn then
+        selectCategoryTabFn(tabId)
+    elseif tabId then
+        activeCategoryTab = tabId
+    end
     if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
         ns:Print("%s", L["In Combat"])
         return

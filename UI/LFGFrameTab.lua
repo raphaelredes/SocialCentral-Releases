@@ -953,43 +953,74 @@ local function AutoFitNativeButton(btn, minW, pad, maxW)
     return w
 end
 
-local function UpdateSideTabBadge(tab, count)
+local function UpdateSideTabBadge(tab, count, tone)
     if not tab then return end
     local showBadges = not (ns.db and ns.db.settings and ns.db.settings.addonMsgTabBadges == false)
-    local n = tonumber(count) or 0
+    local n = math.floor(tonumber(count) or 0)
     if not showBadges or n <= 0 then
         if tab.scUnreadBadge then
-            tab.scUnreadBadge:Hide()
+            if tab.scUnreadBadge.SetCount then
+                tab.scUnreadBadge:SetCount(0)
+            else
+                tab.scUnreadBadge:Hide()
+            end
         end
         return
     end
     if not tab.scUnreadBadge then
-        local b = CreateFrame("Frame", nil, tab, "BackdropTemplate")
-        b:SetSize(18, 15)
-        b:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -2, 3)
-        b:SetFrameLevel((tab:GetFrameLevel() or 60) + 4)
-        b:EnableMouse(false)
-        if b.SetBackdrop then
-            b:SetBackdrop({
-                bgFile = "Interface\\Buttons\\WHITE8X8",
-                edgeFile = "Interface\\Buttons\\WHITE8X8",
-                edgeSize = 1,
+        if Theme and Theme.CreateCounterBadge then
+            local b = Theme:CreateCounterBadge(tab, {
+                height = 22,
+                maxNum = 99,
+                haloAlpha = 0.42,
+                minFontSize = 14,
+                maxFontSize = 17,
+                fontScaleOffset = 0,
             })
-            b:SetBackdropColor(0.86, 0.16, 0.22, 1.0)
-            b:SetBackdropBorderColor(0.08, 0.10, 0.14, 1.0)
+            b:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", 0, 2)
+            b:SetFrameLevel((tab:GetFrameLevel() or 60) + 6)
+            tab.scUnreadBadge = b
+        else
+            local b = CreateFrame("Frame", nil, tab, "BackdropTemplate")
+            b:SetSize(22, 22)
+            b:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", 0, 2)
+            b:SetFrameLevel((tab:GetFrameLevel() or 60) + 6)
+            b:EnableMouse(false)
+            if b.SetBackdrop then
+                b:SetBackdrop({
+                    bgFile = "Interface\\Buttons\\WHITE8X8",
+                    edgeFile = "Interface\\Buttons\\WHITE8X8",
+                    edgeSize = 1,
+                })
+                b:SetBackdropColor(0.84, 0.14, 0.18, 1.0)
+                b:SetBackdropBorderColor(0.08, 0.08, 0.10, 1.0)
+            end
+            local txt = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            if Theme and Theme.ApplyReadableCounterFont then
+                Theme:ApplyReadableCounterFont(txt, 14, 17, 0, true)
+            end
+            txt:SetPoint("CENTER", 0, 0)
+            txt:SetTextColor(1, 1, 1)
+            b.text = txt
+            tab.scUnreadBadge = b
         end
-        local txt = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
-        txt:SetPoint("CENTER", 0, 0)
-        txt:SetTextColor(1, 1, 1)
-        b.text = txt
-        tab.scUnreadBadge = b
     end
-    local lbl = n > 99 and "99+" or tostring(n)
-    tab.scUnreadBadge.text:SetText(lbl)
-    local bw = (n > 99 and 26) or (n > 9 and 22) or 18
-    tab.scUnreadBadge:SetSize(bw, 15)
-    tab.scUnreadBadge:SetFrameLevel((tab:GetFrameLevel() or 60) + 4)
-    tab.scUnreadBadge:Show()
+    tab.scUnreadBadge:SetFrameLevel((tab:GetFrameLevel() or 60) + 6)
+    if type(tone) == "table" and #tone >= 2 and tab.scUnreadBadge.SetCountMulti then
+        tab.scUnreadBadge:SetCountMulti(n, tone, false)
+    elseif tab.scUnreadBadge.SetCount then
+        local singleTone = (type(tone) == "table" and tone[1]) or tone or "whisper"
+        tab.scUnreadBadge:SetCount(n, singleTone)
+    else
+        local lbl = n > 99 and "99+" or tostring(n)
+        if Theme and Theme.ApplyReadableCounterFont then
+            Theme:ApplyReadableCounterFont(tab.scUnreadBadge.text, 14, 17, 0, true)
+        end
+        tab.scUnreadBadge.text:SetText(lbl)
+        local bw = (n > 99 and 36) or (n > 9 and 30) or 22
+        tab.scUnreadBadge:SetSize(bw, 22)
+        tab.scUnreadBadge:Show()
+    end
 end
 
 local function UpdateSideTabVisual(tab, isSelected)
@@ -8192,7 +8223,7 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         if shown or active then
             local bd = (ns.Clan and ns.Clan.GetTrustedLFGBreakdown and ns.Clan:GetTrustedLFGBreakdown()) or nil
             local lfgCount = (bd and bd.total) or 0
-            UpdateSideTabBadge(self.sideTab, active and 0 or lfgCount)
+            UpdateSideTabBadge(self.sideTab, active and 0 or lfgCount, "group")
             if shown then
                 self:UpdateNativeBridgeBar()
             end
@@ -8206,9 +8237,13 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local shown = socialHost and socialHost.IsShown and socialHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(socialHost)
         local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
-        local socialUnread = (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false)))) or 0
+        local chatSummary = (chatModOn and ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()) or nil
+        local socialUnread = (chatSummary and chatSummary.totalDirect)
+            or (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))))
+            or 0
+        local socialTone = (chatSummary and chatSummary.directTones and #chatSummary.directTones > 0) and chatSummary.directTones or "whisper"
         UpdateSideTabVisual(self.socialTab, active)
-        UpdateSideTabBadge(self.socialTab, socialUnread)
+        UpdateSideTabBadge(self.socialTab, socialUnread, socialTone)
         if shown or not active then
             SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
         end
@@ -8219,7 +8254,7 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(guildHost)
         local guildUnread = (ns.Clan and ns.Clan.GetNotificationCount and ns.Clan:GetNotificationCount()) or 0
         UpdateSideTabVisual(self.guildTab, active)
-        UpdateSideTabBadge(self.guildTab, active and 0 or guildUnread)
+        UpdateSideTabBadge(self.guildTab, active and 0 or guildUnread, "guild")
         if shown or not active then
             SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
         end

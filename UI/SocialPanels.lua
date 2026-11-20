@@ -2770,23 +2770,39 @@ function SocialPanels:CreateChatPanel(parent)
         r.scDot:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
         r.scDot:Hide()
 
-        r.unreadBadge = CreateFrame("Frame", nil, r, "BackdropTemplate")
-        r.unreadBadge:SetSize(20, 15)
-        r.unreadBadge:SetPoint("TOPRIGHT", r, "TOPRIGHT", -6, -4)
-        r.unreadBadge:EnableMouse(false)
-        if r.unreadBadge.SetBackdrop then
-            r.unreadBadge:SetBackdrop({
-                bgFile = "Interface\\Buttons\\WHITE8X8",
-                edgeFile = "Interface\\Buttons\\WHITE8X8",
-                edgeSize = 1,
+        if Theme and Theme.CreateCounterBadge then
+            r.unreadBadge = Theme:CreateCounterBadge(r, {
+                height = 22,
+                maxNum = 99,
+                haloAlpha = 0.25,
+                noPulse = true,
+                minFontSize = 14,
+                maxFontSize = 16,
+                fontScaleOffset = 0,
             })
-            r.unreadBadge:SetBackdropColor(0.86, 0.16, 0.22, 1.0)
-            r.unreadBadge:SetBackdropBorderColor(0.08, 0.10, 0.14, 1.0)
+            r.unreadBadge:SetPoint("RIGHT", r, "RIGHT", -6, 0)
+        else
+            r.unreadBadge = CreateFrame("Frame", nil, r, "BackdropTemplate")
+            r.unreadBadge:SetSize(22, 22)
+            r.unreadBadge:SetPoint("RIGHT", r, "RIGHT", -6, 0)
+            r.unreadBadge:EnableMouse(false)
+            if r.unreadBadge.SetBackdrop then
+                r.unreadBadge:SetBackdrop({
+                    bgFile = "Interface\\Buttons\\WHITE8X8",
+                    edgeFile = "Interface\\Buttons\\WHITE8X8",
+                    edgeSize = 1,
+                })
+                r.unreadBadge:SetBackdropColor(0.84, 0.14, 0.18, 1.0)
+                r.unreadBadge:SetBackdropBorderColor(0.08, 0.08, 0.10, 1.0)
+            end
+            r.unreadBadge.text = r.unreadBadge:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            if Theme and Theme.ApplyReadableCounterFont then
+                Theme:ApplyReadableCounterFont(r.unreadBadge.text, 14, 16, 0, true)
+            end
+            r.unreadBadge.text:SetPoint("CENTER", 0, 0)
+            r.unreadBadge.text:SetTextColor(1, 1, 1)
+            r.unreadBadge:Hide()
         end
-        r.unreadBadge.text = r.unreadBadge:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
-        r.unreadBadge.text:SetPoint("CENTER", 0, 0)
-        r.unreadBadge.text:SetTextColor(1, 1, 1)
-        r.unreadBadge:Hide()
 
         r.title = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         r.title:SetPoint("TOPLEFT", 10, -5)
@@ -2934,10 +2950,16 @@ function SocialPanels:CreateChatPanel(parent)
             r.unreadDot:SetShown(hasUnread)
         end
         if r.unreadBadge then
-            if hasUnread then
+            local rowTone = (Theme and Theme.GetChatToneForKind) and Theme:GetChatToneForKind(item.kind) or "whisper"
+            if r.unreadBadge.SetCount then
+                r.unreadBadge:SetCount(hasUnread and (item.unread or 0) or 0, rowTone)
+            elseif hasUnread then
                 local uCount = item.unread or 0
+                if Theme and Theme.ApplyReadableCounterFont then
+                    Theme:ApplyReadableCounterFont(r.unreadBadge.text, 14, 16, 0, true)
+                end
                 r.unreadBadge.text:SetText(uCount > 99 and "99+" or tostring(uCount))
-                r.unreadBadge:SetWidth((uCount > 99 and 28) or (uCount > 9 and 24) or 19)
+                r.unreadBadge:SetSize((uCount > 99 and 36) or (uCount > 9 and 30) or 22, 22)
                 r.unreadBadge:Show()
             else
                 r.unreadBadge:Hide()
@@ -2967,10 +2989,14 @@ function SocialPanels:CreateChatPanel(parent)
 
         r.title:ClearAllPoints()
         r.title:SetPoint("TOPLEFT", r.kindIcon or r, r.kindIcon and "TOPRIGHT" or "TOPLEFT", r.kindIcon and 6 or (hasUnread and 18 or 10), r.kindIcon and 0 or -5)
+        r.sub:ClearAllPoints()
+        r.sub:SetPoint("BOTTOMLEFT", 10, 4)
         if hasUnread and r.unreadBadge then
             r.title:SetPoint("RIGHT", r.unreadBadge, "LEFT", -6, 0)
+            r.sub:SetPoint("RIGHT", r.unreadBadge, "LEFT", -6, 0)
         else
             r.title:SetPoint("RIGHT", r, "RIGHT", -8, 0)
+            r.sub:SetPoint("RIGHT", r, "RIGHT", -8, 0)
         end
 
         local st = (ns.Chat and ns.Chat.GetPeerAddonState) and ns.Chat:GetPeerAddonState(item.key) or nil

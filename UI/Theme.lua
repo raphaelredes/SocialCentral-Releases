@@ -2643,3 +2643,772 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     UpdateTrackColors(false)
     return list
 end
+
+local BADGE_CIRCLE_TEX = "Interface\\AddOns\\SocialCentral\\Media\\dot"
+local BADGE_GLOW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\toast-glow"
+local BADGE_MASK_TEX = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
+local activeCounterBadges = setmetatable({}, { __mode = "k" })
+local counterFontHooksInstalled = false
+local counterFontEventFrame
+
+local function RefreshAllCounterBadges()
+    for badge in pairs(activeCounterBadges) do
+        if badge and badge.IsShown and badge:IsShown() and (badge._count or 0) > 0 then
+            if badge._isMulti and badge.SetCountMulti and badge._multiTones then
+                badge:SetCountMulti(badge._count, badge._multiTones, false)
+            elseif badge.SetCount then
+                badge:SetCount(badge._count, badge._tone)
+            end
+        end
+    end
+end
+
+local function EnsureCounterBadgeFontSync()
+    if counterFontHooksInstalled then
+        return
+    end
+    counterFontHooksInstalled = true
+    if not counterFontEventFrame and CreateFrame then
+        counterFontEventFrame = CreateFrame("Frame")
+        if ns and ns.RegisterEvent then
+            ns.RegisterEvent(counterFontEventFrame, "PLAYER_ENTERING_WORLD", RefreshAllCounterBadges)
+            ns.RegisterEvent(counterFontEventFrame, "UPDATE_CHAT_WINDOWS", RefreshAllCounterBadges)
+            ns.RegisterEvent(counterFontEventFrame, "UI_SCALE_CHANGED", RefreshAllCounterBadges)
+        end
+    end
+    if type(_G.FCF_SetChatWindowFontSize) == "function" and type(hooksecurefunc) == "function" then
+        hooksecurefunc("FCF_SetChatWindowFontSize", RefreshAllCounterBadges)
+    end
+end
+
+local BADGE_TONES = {
+    whisper = {
+        rimTop = { 1.00, 0.88, 0.42, 1.0 },
+        rimBot = { 0.80, 0.56, 0.14, 1.0 },
+        coreTop = { 0.94, 0.34, 0.90, 1.0 },
+        coreBot = { 0.60, 0.12, 0.62, 1.0 },
+        lobe = { 1.00, 0.34, 0.92 },
+        halo = { 1.00, 0.46, 0.96 },
+        accent = { 1.00, 0.50, 1.00 },
+        cardBgTop = { 0.30, 0.10, 0.29, 1.0 },
+        cardBgBot = { 0.17, 0.04, 0.18, 1.0 },
+        cardBorder = { 0.90, 0.40, 0.90, 1.0 },
+    },
+    bnet = {
+        rimTop = { 1.00, 0.88, 0.42, 1.0 },
+        rimBot = { 0.78, 0.56, 0.16, 1.0 },
+        coreTop = { 0.08, 0.72, 0.96, 1.0 },
+        coreBot = { 0.03, 0.40, 0.68, 1.0 },
+        lobe = { 0.08, 0.82, 1.00 },
+        halo = { 0.14, 0.86, 1.00 },
+        accent = { 0.10, 0.82, 1.00 },
+        cardBgTop = { 0.06, 0.21, 0.31, 1.0 },
+        cardBgBot = { 0.03, 0.11, 0.19, 1.0 },
+        cardBorder = { 0.18, 0.76, 0.98, 1.0 },
+    },
+    group = {
+        rimTop = { 1.00, 0.88, 0.42, 1.0 },
+        rimBot = { 0.78, 0.56, 0.16, 1.0 },
+        coreTop = { 0.32, 0.54, 1.00, 1.0 },
+        coreBot = { 0.14, 0.28, 0.72, 1.0 },
+        lobe = { 0.30, 0.58, 1.00 },
+        halo = { 0.44, 0.68, 1.00 },
+        accent = { 0.48, 0.68, 1.00 },
+        cardBgTop = { 0.11, 0.17, 0.36, 1.0 },
+        cardBgBot = { 0.06, 0.09, 0.22, 1.0 },
+        cardBorder = { 0.44, 0.64, 1.00, 1.0 },
+    },
+    raid = {
+        rimTop = { 1.00, 0.88, 0.42, 1.0 },
+        rimBot = { 0.80, 0.54, 0.14, 1.0 },
+        coreTop = { 0.94, 0.46, 0.08, 1.0 },
+        coreBot = { 0.62, 0.24, 0.03, 1.0 },
+        lobe = { 1.00, 0.52, 0.14 },
+        halo = { 1.00, 0.58, 0.20 },
+        accent = { 1.00, 0.54, 0.18 },
+        cardBgTop = { 0.32, 0.15, 0.04, 1.0 },
+        cardBgBot = { 0.18, 0.07, 0.02, 1.0 },
+        cardBorder = { 0.96, 0.52, 0.18, 1.0 },
+    },
+    guild = {
+        rimTop = { 1.00, 0.90, 0.44, 1.0 },
+        rimBot = { 0.80, 0.56, 0.14, 1.0 },
+        coreTop = { 0.18, 0.78, 0.26, 1.0 },
+        coreBot = { 0.08, 0.46, 0.14, 1.0 },
+        lobe = { 0.22, 0.94, 0.36 },
+        halo = { 0.30, 0.98, 0.42 },
+        accent = { 0.28, 0.94, 0.40 },
+        cardBgTop = { 0.07, 0.26, 0.10, 1.0 },
+        cardBgBot = { 0.03, 0.15, 0.06, 1.0 },
+        cardBorder = { 0.30, 0.88, 0.40, 1.0 },
+    },
+    room = {
+        rimTop = { 1.00, 0.88, 0.42, 1.0 },
+        rimBot = { 0.78, 0.56, 0.16, 1.0 },
+        coreTop = { 0.60, 0.32, 0.96, 1.0 },
+        coreBot = { 0.36, 0.14, 0.68, 1.0 },
+        lobe = { 0.68, 0.38, 1.00 },
+        halo = { 0.74, 0.46, 1.00 },
+        accent = { 0.74, 0.50, 1.00 },
+        cardBgTop = { 0.19, 0.10, 0.33, 1.0 },
+        cardBgBot = { 0.10, 0.05, 0.20, 1.0 },
+        cardBorder = { 0.70, 0.46, 0.98, 1.0 },
+    },
+    alert = {
+        rimTop = { 1.00, 0.86, 0.34, 1.0 },
+        rimBot = { 0.78, 0.56, 0.14, 1.0 },
+        coreTop = { 0.90, 0.14, 0.18, 1.0 },
+        coreBot = { 0.62, 0.04, 0.08, 1.0 },
+        lobe = { 0.96, 0.20, 0.24 },
+        halo = { 1.00, 0.26, 0.24 },
+        accent = { 1.00, 0.30, 0.32 },
+        cardBgTop = { 0.28, 0.07, 0.09, 1.0 },
+        cardBgBot = { 0.15, 0.03, 0.05, 1.0 },
+        cardBorder = { 0.92, 0.30, 0.32, 1.0 },
+    },
+}
+
+Theme.CHAT_TONES = BADGE_TONES
+
+function Theme:GetChatToneSpec(toneKey)
+    local key = type(toneKey) == "string" and toneKey:lower() or "whisper"
+    return BADGE_TONES[key] or BADGE_TONES.whisper
+end
+
+function Theme:GetChatToneForKind(kind)
+    local k = type(kind) == "string" and kind:upper() or ""
+    if k == "BN_WHISPER" or k == "BNET" then
+        return "bnet"
+    elseif k == "GUILD" or k == "OFFICER" then
+        return "guild"
+    elseif k == "RAID" or k == "INSTANCE_CHAT" or k == "INSTANCE" then
+        return "raid"
+    elseif k == "PARTY" or k == "GROUP" then
+        return "group"
+    elseif k == "ROOM" or k == "ALLIANCE" then
+        return "room"
+    elseif k == "WHISPER" or k == "DIRECT" then
+        return "whisper"
+    end
+    return "whisper"
+end
+
+local function ResolveReadableCounterFontSpec(minSize, maxSize, sizeOffset)
+    local chatPath, chatSize
+    local cf = _G.ChatFrame1
+    if cf and cf.GetFont then
+        local ok, p, sz = pcall(cf.GetFont, cf)
+        if ok and type(p) == "string" and p ~= "" and type(sz) == "number" and sz > 0 then
+            chatPath = p
+            chatSize = sz
+        end
+    end
+    if not chatSize and _G.ChatFontNormal and _G.ChatFontNormal.GetFont then
+        local ok, p, sz = pcall(_G.ChatFontNormal.GetFont, _G.ChatFontNormal)
+        if ok then
+            if type(p) == "string" and p ~= "" then
+                chatPath = chatPath or p
+            end
+            if type(sz) == "number" and sz > 0 then
+                chatSize = sz
+            end
+        end
+    end
+    local baseChat = chatSize or 14
+    local floorSz = minSize or 14
+    local ceilSz = maxSize or 20
+    local target = math.floor(baseChat + (sizeOffset or 0) + 0.5)
+    if target < floorSz then target = floorSz end
+    if target > ceilSz then target = ceilSz end
+
+    -- Prefer Blizzard's wider standard text typeface so thin digits like '1' stay bright white
+    -- instead of getting darkened by outline compression on condensed narrow fonts.
+    local stdPath = _G.STANDARD_TEXT_FONT
+    if (not stdPath or stdPath == "") and _G.GameFontNormal and _G.GameFontNormal.GetFont then
+        local ok, p = pcall(_G.GameFontNormal.GetFont, _G.GameFontNormal)
+        if ok and type(p) == "string" and p ~= "" then
+            stdPath = p
+        end
+    end
+    local fontPath = (type(stdPath) == "string" and stdPath ~= "") and stdPath or chatPath
+    if (not fontPath or fontPath == "") and _G.NumberFontNormal and _G.NumberFontNormal.GetFont then
+        local ok, p = pcall(_G.NumberFontNormal.GetFont, _G.NumberFontNormal)
+        if ok and type(p) == "string" and p ~= "" then
+            fontPath = p
+        end
+    end
+    return fontPath, target, baseChat
+end
+
+--- Return (fontPath, targetSize, rawChatSize) scaled to be at least WoW chat font size.
+function Theme:GetReadableCounterFont(minSize, maxSize, sizeOffset)
+    return ResolveReadableCounterFontSpec(minSize, maxSize, sizeOffset)
+end
+
+--- Apply crisp, high-contrast chat-scale typography to a notification/queue FontString.
+function Theme:ApplyReadableCounterFont(fs, minSize, maxSize, sizeOffset, useOutline)
+    if not fs then return end
+    local fontPath, targetSz = ResolveReadableCounterFontSpec(minSize, maxSize, sizeOffset)
+    local flags = (useOutline ~= false) and "OUTLINE" or ""
+    if fontPath and fs.SetFont then
+        pcall(fs.SetFont, fs, fontPath, targetSz, flags)
+    end
+    if fs.SetShadowColor then
+        fs:SetShadowColor(0, 0, 0, useOutline == false and 0.85 or 0.45)
+        fs:SetShadowOffset(0, -1)
+    end
+    return targetSz
+end
+
+local function CreateCounterPillBand(animFrame, layer, subLevel, inset)
+    local capL = animFrame:CreateTexture(nil, layer, nil, subLevel)
+    capL:SetTexture(BADGE_CIRCLE_TEX)
+    capL:SetTexCoord(0, 0.5, 0, 1)
+
+    local capR = animFrame:CreateTexture(nil, layer, nil, subLevel)
+    capR:SetTexture(BADGE_CIRCLE_TEX)
+    capR:SetTexCoord(0.5, 1, 0, 1)
+
+    local mid = animFrame:CreateTexture(nil, layer, nil, subLevel)
+    mid:SetTexture(WHITE8X8)
+
+    local band = {}
+    function band:SetSizeForBadge(totalW, totalH)
+        local effThick = math.max(8, (totalH or 24) - (inset or 0))
+        local bw = math.max(effThick, (totalW or effThick) - (inset or 0))
+        local capW = effThick * 0.5
+        local midW = bw - effThick
+        capL:SetSize(capW, effThick)
+        capL:ClearAllPoints()
+        capL:SetPoint("LEFT", animFrame, "CENTER", -bw * 0.5, 0)
+
+        capR:SetSize(capW, effThick)
+        capR:ClearAllPoints()
+        capR:SetPoint("RIGHT", animFrame, "CENTER", bw * 0.5, 0)
+
+        if midW > 0.25 then
+            mid:SetSize(midW + 0.8, effThick)
+            mid:ClearAllPoints()
+            mid:SetPoint("CENTER", animFrame, "CENTER", 0, 0)
+            mid:Show()
+        else
+            mid:Hide()
+        end
+    end
+
+    function band:SetSolidColor(r, g, b, a)
+        capL:SetVertexColor(r, g, b, a or 1)
+        capR:SetVertexColor(r, g, b, a or 1)
+        mid:SetVertexColor(r, g, b, a or 1)
+    end
+
+    function band:SetVerticalGradient(cTop, cBot)
+        if gradColorA and gradColorB and capL.SetGradient and CreateColor then
+            gradColorA:SetRGBA(cBot[1], cBot[2], cBot[3], cBot[4] or 1)
+            gradColorB:SetRGBA(cTop[1], cTop[2], cTop[3], cTop[4] or 1)
+            capL:SetVertexColor(1, 1, 1, 1)
+            capR:SetVertexColor(1, 1, 1, 1)
+            mid:SetVertexColor(1, 1, 1, 1)
+            pcall(capL.SetGradient, capL, "VERTICAL", gradColorA, gradColorB)
+            pcall(capR.SetGradient, capR, "VERTICAL", gradColorA, gradColorB)
+            pcall(mid.SetGradient, mid, "VERTICAL", gradColorA, gradColorB)
+        else
+            local r = (cTop[1] + cBot[1]) * 0.5
+            local g = (cTop[2] + cBot[2]) * 0.5
+            local b = (cTop[3] + cBot[3]) * 0.5
+            local a = ((cTop[4] or 1) + (cBot[4] or 1)) * 0.5
+            band:SetSolidColor(r, g, b, a)
+        end
+    end
+
+    return band
+end
+
+--- Create a high-contrast, chat-font-scaled pill/circle notification counter badge.
+function Theme:CreateCounterBadge(parent, opts)
+    opts = opts or {}
+    local minFontSize = opts.minFontSize or 14
+    local maxFontSize = opts.maxFontSize or 20
+    local fontScaleOffset = opts.fontScaleOffset or 0
+    local _, initialFontSz = ResolveReadableCounterFontSpec(minFontSize, maxFontSize, fontScaleOffset)
+    local h = math.max(opts.height or 24, initialFontSz + 8)
+    local maxNum = opts.maxNum or 99
+    local baseHaloAlpha = opts.haloAlpha or 0.48
+    local allowPulse = opts.noPulse ~= true
+
+    local b = CreateFrame("Frame", nil, parent)
+    b:SetSize(h, h)
+    b:EnableMouse(false)
+    if b.SetClipsChildren then
+        b:SetClipsChildren(false)
+    end
+    b._baseHeight = h
+    b._maxNum = maxNum
+    b._minFontSize = minFontSize
+    b._maxFontSize = maxFontSize
+    b._fontScaleOffset = fontScaleOffset
+    b._tone = "whisper"
+    b._count = 0
+    b._isMulti = false
+    b._multiTones = nil
+    b._pulseEnabled = allowPulse
+    b._popUntil = 0
+    b._fusionBurstUntil = 0
+    b._pulsePhase = 0
+    b._swirlAngle = 0.55
+    b._curW = h
+    b._curH = h
+
+    local anim = CreateFrame("Frame", nil, b)
+    anim:SetSize(h, h)
+    anim:SetPoint("CENTER", b, "CENTER", 0, 0)
+    anim:EnableMouse(false)
+    b.anim = anim
+
+    local halo = anim:CreateTexture(nil, "BACKGROUND", nil, -2)
+    halo:SetTexture(BADGE_GLOW_TEX)
+    halo:SetBlendMode("ADD")
+    halo:SetPoint("CENTER", anim, "CENTER", 0, 0)
+    halo:SetSize(h + 12, h + 12)
+    halo:SetAlpha(baseHaloAlpha)
+    b.halo = halo
+
+    local shadowBand = CreateCounterPillBand(anim, "BACKGROUND", -1, -2)
+    shadowBand:SetSolidColor(0.04, 0.03, 0.04, 0.96)
+    b.shadowBand = shadowBand
+
+    local rimBand = CreateCounterPillBand(anim, "ARTWORK", 0, 0)
+    b.rimBand = rimBand
+
+    local coreBand = CreateCounterPillBand(anim, "ARTWORK", 2, 3)
+    b.coreBand = coreBand
+
+    local txt = anim:CreateFontString(nil, "OVERLAY")
+    if txt.SetDrawLayer then
+        txt:SetDrawLayer("OVERLAY", 7)
+    end
+    txt:SetPoint("CENTER", anim, "CENTER", 0.5, 0)
+    txt:SetJustifyH("CENTER")
+    if txt.SetJustifyV then
+        txt:SetJustifyV("MIDDLE")
+    end
+    txt:SetWordWrap(false)
+    txt:SetTextColor(1, 1, 1, 1)
+    b.text = txt
+
+    local function SyncFont(charLen)
+        local drop = (charLen and charLen >= 3) and 1 or 0
+        local floorSz = math.max(13, minFontSize - drop)
+        local fontPath, targetSz = ResolveReadableCounterFontSpec(floorSz, maxFontSize, fontScaleOffset - drop)
+        if b._curFontPath ~= fontPath or b._curFontSize ~= targetSz then
+            b._curFontPath = fontPath
+            b._curFontSize = targetSz
+            if fontPath and txt.SetFont then
+                pcall(txt.SetFont, txt, fontPath, targetSz, "OUTLINE")
+            end
+            if txt.SetShadowColor then
+                txt:SetShadowColor(0, 0, 0, 0.45)
+                txt:SetShadowOffset(0, -1)
+            end
+        end
+        return targetSz
+    end
+
+    local function ApplyToneColors(toneKey)
+        local spec = BADGE_TONES[toneKey] or BADGE_TONES.whisper
+        rimBand:SetVerticalGradient(spec.rimTop, spec.rimBot)
+        coreBand:SetVerticalGradient(spec.coreTop, spec.coreBot)
+        halo:SetVertexColor(spec.halo[1], spec.halo[2], spec.halo[3], 1)
+    end
+
+    local function EnsureFusionVisuals()
+        if b._fusion then
+            return b._fusion
+        end
+        local mask = anim.CreateMaskTexture and anim:CreateMaskTexture() or nil
+        if mask then
+            mask:SetTexture(BADGE_MASK_TEX, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+            mask:SetPoint("CENTER", anim, "CENTER", 0, 0)
+            mask:SetSize(math.max(12, h - 3), math.max(12, h - 3))
+        end
+        local lobes = {}
+        for i = 1, 5 do
+            local outer = anim:CreateTexture(nil, "ARTWORK", nil, 3)
+            outer:SetTexture(BADGE_GLOW_TEX)
+            outer:SetBlendMode("BLEND")
+            if mask then outer:AddMaskTexture(mask) end
+            outer:Hide()
+
+            local inner = anim:CreateTexture(nil, "ARTWORK", nil, 4)
+            inner:SetTexture(BADGE_GLOW_TEX)
+            inner:SetBlendMode("BLEND")
+            if mask then inner:AddMaskTexture(mask) end
+            inner:Hide()
+
+            local aura = anim:CreateTexture(nil, "BACKGROUND", nil, -2)
+            aura:SetTexture(BADGE_GLOW_TEX)
+            aura:SetBlendMode("ADD")
+            aura:Hide()
+
+            lobes[i] = { outer = outer, inner = inner, aura = aura }
+        end
+
+        local vignette = anim:CreateTexture(nil, "ARTWORK", nil, 6)
+        vignette:SetTexture(BADGE_GLOW_TEX)
+        vignette:SetBlendMode("BLEND")
+        vignette:SetVertexColor(0.03, 0.02, 0.05, 0.36)
+        vignette:SetPoint("CENTER", anim, "CENTER", 0, 0)
+        if mask then vignette:AddMaskTexture(mask) end
+        vignette:Hide()
+
+        local flash = anim:CreateTexture(nil, "OVERLAY", nil, 5)
+        flash:SetTexture(BADGE_GLOW_TEX)
+        flash:SetBlendMode("ADD")
+        flash:SetVertexColor(1.0, 0.96, 0.86, 0)
+        flash:SetPoint("CENTER", anim, "CENTER", 0, 0)
+        flash:Hide()
+
+        b._fusion = {
+            mask = mask,
+            lobes = lobes,
+            vignette = vignette,
+            flash = flash,
+        }
+        return b._fusion
+    end
+
+    local function HideFusionVisuals()
+        local fz = b._fusion
+        if not fz then return end
+        for i = 1, 5 do
+            local lb = fz.lobes[i]
+            lb.outer:Hide()
+            lb.inner:Hide()
+            lb.aura:Hide()
+        end
+        fz.vignette:Hide()
+        fz.flash:Hide()
+    end
+
+    local function PositionFusionLobes(angleOffset)
+        local fz = b._fusion
+        local tones = b._multiTones
+        if not (fz and b._isMulti and tones and #tones >= 2) then
+            return
+        end
+        local bw = b._curW or h
+        local bh = b._curH or h
+        local coreW = math.max(12, bw - 3)
+        local coreH = math.max(12, bh - 3)
+        if fz.mask then
+            fz.mask:SetSize(coreW, coreH)
+        end
+        fz.vignette:SetSize(coreW * 0.78, coreH * 0.78)
+
+        local count = math.min(5, #tones)
+        local step = (math.pi * 2) / count
+        local rx = coreW * 0.36
+        local ry = coreH * 0.36
+        local outerW, outerH = coreW * 1.92, coreH * 1.92
+        local innerW, innerH = coreW * 1.36, coreH * 1.36
+        local auraW, auraH = bw + 12, bh + 12
+        local auraAlpha = b._pulseEnabled and (baseHaloAlpha * 0.72) or (baseHaloAlpha * 0.42)
+
+        for i = 1, 5 do
+            local lb = fz.lobes[i]
+            if i <= count then
+                local ang = angleOffset + (i - 1) * step
+                local cosA = math.cos(ang)
+                local sinA = math.sin(ang)
+                local ox = cosA * rx
+                local oy = sinA * ry
+                lb.outer:SetSize(outerW, outerH)
+                lb.outer:ClearAllPoints()
+                lb.outer:SetPoint("CENTER", anim, "CENTER", ox, oy)
+                lb.outer:Show()
+
+                lb.inner:SetSize(innerW, innerH)
+                lb.inner:ClearAllPoints()
+                lb.inner:SetPoint("CENTER", anim, "CENTER", ox, oy)
+                lb.inner:Show()
+
+                if b._pulseEnabled then
+                    lb.aura:SetSize(auraW, auraH)
+                    lb.aura:ClearAllPoints()
+                    lb.aura:SetPoint("CENTER", anim, "CENTER", cosA * 4.5, sinA * 4.5)
+                    lb.aura:SetAlpha(auraAlpha)
+                    lb.aura:Show()
+                else
+                    lb.aura:Hide()
+                end
+            else
+                lb.outer:Hide()
+                lb.inner:Hide()
+                lb.aura:Hide()
+            end
+        end
+        fz.vignette:Show()
+    end
+
+    local function StopAnimLoop()
+        anim:SetScript("OnUpdate", nil)
+        anim:SetScale(1)
+        if b._fusion and b._fusion.flash then
+            b._fusion.flash:Hide()
+        end
+        if b._isMulti then
+            halo:Hide()
+            PositionFusionLobes(b._swirlAngle or 0.55)
+        else
+            halo:SetAlpha(b._pulseEnabled and baseHaloAlpha or (baseHaloAlpha * 0.65))
+        end
+    end
+
+    local function DriveAnimLoop(_, dt)
+        if not (b:IsShown() and b._count > 0) then
+            StopAnimLoop()
+            return
+        end
+        local delta = math.min(dt or 0, 0.05)
+        local now = (GetTime and GetTime()) or 0
+        local pulsing = b._pulseEnabled == true
+        local popping = (b._popUntil or 0) > now
+        local bursting = (b._fusionBurstUntil or 0) > now
+        local swirling = b._isMulti == true
+        if not pulsing and not popping and not bursting and not swirling then
+            StopAnimLoop()
+            return
+        end
+
+        if popping then
+            local popDur = bursting and 0.34 or 0.24
+            local rem = math.max(0, math.min(1, (b._popUntil - now) / popDur))
+            local amp = bursting and 0.24 or 0.14
+            anim:SetScale(1 + amp * math.sin(rem * math.pi))
+        else
+            anim:SetScale(1)
+        end
+
+        if swirling then
+            local spinSpeed = 0.42
+            if bursting then
+                local bRem = math.max(0, math.min(1, (b._fusionBurstUntil - now) / 0.56))
+                spinSpeed = spinSpeed + 4.8 * (bRem * bRem)
+                if b._fusion and b._fusion.flash then
+                    local prog = 1 - bRem
+                    local fSize = ((b._curW or h) * (0.65 + 1.85 * prog))
+                    b._fusion.flash:SetSize(fSize, fSize)
+                    b._fusion.flash:SetAlpha(math.max(0, (1 - prog) * 0.92))
+                    b._fusion.flash:Show()
+                end
+            elseif b._fusion and b._fusion.flash then
+                b._fusion.flash:Hide()
+            end
+            b._swirlAngle = ((b._swirlAngle or 0.55) + delta * spinSpeed) % (math.pi * 2)
+            PositionFusionLobes(b._swirlAngle)
+            halo:Hide()
+        else
+            if b._fusion and b._fusion.flash then
+                b._fusion.flash:Hide()
+            end
+            if pulsing then
+                b._pulsePhase = ((b._pulsePhase or 0) + delta * 3.1) % (math.pi * 2)
+                local wave = 0.5 + 0.5 * math.sin(b._pulsePhase)
+                halo:SetAlpha(math.max(0.12, math.min(0.92, baseHaloAlpha * (0.68 + 0.55 * wave))))
+            else
+                halo:SetAlpha(baseHaloAlpha * 0.65)
+            end
+        end
+    end
+
+    local function RefreshAnimLoop()
+        local now = (GetTime and GetTime()) or 0
+        local needsDrive = b:IsShown() and b._count > 0 and (
+            b._pulseEnabled
+            or b._isMulti
+            or ((b._popUntil or 0) > now)
+            or ((b._fusionBurstUntil or 0) > now)
+        )
+        if needsDrive then
+            if not anim:GetScript("OnUpdate") then
+                anim:SetScript("OnUpdate", DriveAnimLoop)
+            end
+        else
+            StopAnimLoop()
+        end
+    end
+
+    local function ApplyMetricLayout(lbl)
+        local targetSz = SyncFont(#lbl) or 14
+        local effH = math.max(b._baseHeight, targetSz + 9)
+        txt:SetText(lbl)
+
+        local strW = 0
+        if txt.GetUnboundedStringWidth then
+            strW = txt:GetUnboundedStringWidth() or 0
+        elseif txt.GetStringWidth then
+            strW = txt:GetStringWidth() or 0
+        end
+
+        local w
+        if #lbl <= 1 then
+            w = math.max(effH, math.ceil(strW + 10))
+        else
+            w = math.max(effH + ((#lbl == 2) and 8 or 14), math.ceil(strW + 13))
+        end
+
+        b._curW = w
+        b._curH = effH
+        b:SetSize(w, effH)
+        anim:SetSize(w, effH)
+        halo:SetSize(w + 12, effH + 12)
+        shadowBand:SetSizeForBadge(w, effH)
+        rimBand:SetSizeForBadge(w, effH)
+        coreBand:SetSizeForBadge(w, effH)
+        return w, effH
+    end
+
+    function b:SetTone(toneKey)
+        local key = type(toneKey) == "string" and toneKey:lower() or "whisper"
+        local clean = BADGE_TONES[key] and key or "whisper"
+        self._tone = clean
+        if not self._isMulti then
+            ApplyToneColors(clean)
+        end
+    end
+
+    function b:SetPulseEnabled(enabled)
+        self._pulseEnabled = allowPulse and (enabled ~= false)
+        if not self._pulseEnabled then
+            halo:Hide()
+        elseif not self._isMulti then
+            halo:Show()
+        end
+        if self._isMulti then
+            PositionFusionLobes(self._swirlAngle or 0.55)
+        end
+        RefreshAnimLoop()
+    end
+
+    function b:TriggerFusionBurst()
+        if not GetTime then return end
+        local now = GetTime()
+        self._fusionBurstUntil = now + 0.56
+        self._popUntil = now + 0.34
+        RefreshAnimLoop()
+    end
+
+    function b:SetCount(count, toneKey)
+        self._isMulti = false
+        self._multiTones = nil
+        HideFusionVisuals()
+        if self._pulseEnabled then
+            halo:Show()
+        end
+        if toneKey then
+            self:SetTone(toneKey)
+        else
+            ApplyToneColors(self._tone or "whisper")
+        end
+        local n = math.floor(tonumber(count) or 0)
+        if n <= 0 then
+            self._count = 0
+            self._popUntil = 0
+            self._fusionBurstUntil = 0
+            txt:SetText("")
+            StopAnimLoop()
+            self:Hide()
+            return
+        end
+
+        local prev = self._count or 0
+        self._count = n
+        local lbl = (n > self._maxNum) and (tostring(self._maxNum) .. "+") or tostring(n)
+        ApplyMetricLayout(lbl)
+
+        if n > prev and prev >= 0 and self:IsVisible() and GetTime then
+            self._popUntil = GetTime() + 0.24
+        end
+        self:Show()
+        RefreshAnimLoop()
+    end
+
+    function b:SetCountMulti(count, tonesList, triggerBurst)
+        local cleanTones = {}
+        local seen = {}
+        if type(tonesList) == "table" then
+            for _, rawTone in ipairs(tonesList) do
+                local key = type(rawTone) == "string" and rawTone:lower() or nil
+                if key and BADGE_TONES[key] and not seen[key] then
+                    seen[key] = true
+                    cleanTones[#cleanTones + 1] = key
+                    if #cleanTones >= 5 then break end
+                end
+            end
+        end
+
+        if #cleanTones <= 1 then
+            self:SetCount(count, cleanTones[1] or self._tone or "whisper")
+            return
+        end
+
+        local n = math.floor(tonumber(count) or 0)
+        if n <= 0 then
+            self:SetCount(0)
+            return
+        end
+
+        local prev = self._count or 0
+        self._isMulti = true
+        self._multiTones = cleanTones
+        self._tone = cleanTones[1]
+        self._count = n
+
+        local fz = EnsureFusionVisuals()
+        rimBand:SetVerticalGradient({ 1.00, 0.90, 0.46, 1.0 }, { 0.80, 0.56, 0.14, 1.0 })
+        coreBand:SetSolidColor(0.11, 0.10, 0.15, 1.0)
+        halo:Hide()
+
+        for i = 1, 5 do
+            local lb = fz.lobes[i]
+            local tKey = cleanTones[i]
+            if tKey then
+                local spec = BADGE_TONES[tKey] or BADGE_TONES.whisper
+                local lc = spec.lobe or spec.accent
+                local hc = spec.halo or lc
+                lb.outer:SetVertexColor(lc[1], lc[2], lc[3], 1.0)
+                lb.inner:SetVertexColor(lc[1], lc[2], lc[3], 0.96)
+                lb.aura:SetVertexColor(hc[1], hc[2], hc[3], 1.0)
+            else
+                lb.outer:Hide()
+                lb.inner:Hide()
+                lb.aura:Hide()
+            end
+        end
+
+        local lbl = (n > self._maxNum) and (tostring(self._maxNum) .. "+") or tostring(n)
+        ApplyMetricLayout(lbl)
+        PositionFusionLobes(self._swirlAngle or 0.55)
+
+        if triggerBurst then
+            self:TriggerFusionBurst()
+        elseif n > prev and prev >= 0 and self:IsVisible() and GetTime then
+            self._popUntil = GetTime() + 0.24
+        end
+        self:Show()
+        RefreshAnimLoop()
+    end
+
+    b:SetScript("OnShow", RefreshAnimLoop)
+    b:SetScript("OnHide", StopAnimLoop)
+    ApplyToneColors("whisper")
+    if not allowPulse then
+        halo:Hide()
+        b._pulseEnabled = false
+    end
+    activeCounterBadges[b] = true
+    EnsureCounterBadgeFontSync()
+    SyncFont(1)
+    b:Hide()
+    return b
+end
