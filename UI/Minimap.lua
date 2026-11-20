@@ -3054,6 +3054,9 @@ function MsgPreview:ShowFirstTimePrompt(sampleItem, fromManualTrigger)
             if s then
                 s.msgPreviewEnabled = true
                 s.msgPreviewPromptAnswered = true
+                if ns.SetAccountTutorialShown then
+                    ns:SetAccountTutorialShown("msgPreviewPromptAnswered", true)
+                end
                 s.msgPreviewWhispers = (m.cbWhispers:GetChecked() == true)
                 s.msgPreviewBNet = (m.cbBNet:GetChecked() == true)
                 s.msgPreviewGroup = (m.cbGroup:GetChecked() == true)
@@ -3082,6 +3085,9 @@ function MsgPreview:ShowFirstTimePrompt(sampleItem, fromManualTrigger)
             if s then
                 s.msgPreviewEnabled = false
                 s.msgPreviewPromptAnswered = true
+                if ns.SetAccountTutorialShown then
+                    ns:SetAccountTutorialShown("msgPreviewPromptAnswered", true)
+                end
             end
             MsgPreview.sessionPromptDismissed = false
             m:Hide()
@@ -3466,7 +3472,8 @@ function MsgPreview:OnIncomingMessage(payload)
         return
     end
 
-    if s.msgPreviewPromptAnswered ~= true then
+    local promptDone = (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("msgPreviewPromptAnswered")) or (s.msgPreviewPromptAnswered == true)
+    if not promptDone then
         if self.sessionPromptDismissed then
             return
         end
@@ -3543,7 +3550,8 @@ function MsgPreview:Init()
             local item = MsgPreview.pendingPromptItem
             MsgPreview.pendingPromptItem = nil
             local s = ns.db and ns.db.settings
-            if s and s.msgPreviewPromptAnswered ~= true and not MsgPreview.sessionPromptDismissed and s.doNotDisturb ~= true then
+            local promptDone = (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("msgPreviewPromptAnswered")) or (s and s.msgPreviewPromptAnswered == true)
+            if s and not promptDone and not MsgPreview.sessionPromptDismissed and s.doNotDisturb ~= true then
                 MsgPreview:ShowFirstTimePrompt(item, false)
             end
         end

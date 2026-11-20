@@ -15,19 +15,29 @@ local Toast = {
     framePool = {},
     activeItems = {},
     queue = {},
+    activeIndex = 1,
+    tutorialDialog = nil,
+    pendingTutorial = false,
     hooksInitialized = false,
 }
 
 local TOAST_WIDTH = 304
 local TOAST_H_DEFAULT = 54
 local TOAST_H_INVITE = 82
-local MAX_VISIBLE_TOASTS = 4
-local MAX_QUEUE = 12
+local NAV_H = 22
+local MAX_NAV_NUMS = 5
+local PAGE_SIZE = 5
+local MAX_VISIBLE_TOASTS = 1
+local MAX_QUEUE = 15
+local DEFAULT_TOAST_DURATION_SEC = 6.0
 
-local AUTO_DISMISS_INVITE_SEC = 20.0
-local AUTO_DISMISS_BUFF_SEC = 14.0
-local AUTO_DISMISS_DEFAULT_SEC = 10.0
-local AUTO_DISMISS_FRIEND_SEC = 8.0
+local function GetConfiguredToastDuration()
+    local raw = ns.db and ns.db.settings and tonumber(ns.db.settings.toastDuration)
+    if not raw or raw ~= raw then
+        return DEFAULT_TOAST_DURATION_SEC
+    end
+    return math.max(3, math.min(15, math.floor(raw + 0.5)))
+end
 
 local ICON_DEFAULT = "Interface\\AddOns\\SocialCentral\\Media\\icon"
 local ICON_MAIL    = "Interface\\AddOns\\SocialCentral\\Media\\toast-mail"
@@ -133,6 +143,37 @@ local function FormatCooldownKey(item)
     return tostring(item.kind or "MSG") .. ":" .. tostring(item.sender or "?")
 end
 
+local function ApplyToastNavBarTheme(navBar, p)
+    if not navBar or not p then return end
+    local isBlizz = Theme and Theme.IsBlizzard and Theme:IsBlizzard(p)
+    if navBar.bg then
+        if isBlizz then
+            navBar.bg:SetColorTexture(0.08, 0.07, 0.06, 0.92)
+        else
+            local ib = p.insetBg or { 0.05, 0.06, 0.08 }
+            navBar.bg:SetColorTexture(ib[1], ib[2], ib[3], 0.92)
+        end
+    end
+    if navBar.div then
+        local sb = p.surfaceBorder or { 0.30, 0.30, 0.30 }
+        navBar.div:SetColorTexture(sb[1], sb[2], sb[3], 0.55)
+    end
+    if navBar.countFs then
+        local muted = p.textMuted or { 0.65, 0.70, 0.78 }
+        navBar.countFs:SetTextColor(muted[1], muted[2], muted[3])
+    end
+    if navBar.prevPageBtn then Theme:StyleButton(navBar.prevPageBtn, "default") end
+    if navBar.prevBtn then Theme:StyleButton(navBar.prevBtn, "default") end
+    if navBar.nextBtn then Theme:StyleButton(navBar.nextBtn, "default") end
+    if navBar.nextPageBtn then Theme:StyleButton(navBar.nextPageBtn, "default") end
+    if navBar.numBtns then
+        for _, btn in ipairs(navBar.numBtns) do
+            Theme:StyleButton(btn, btn._isActive and "primary" or "default")
+            Theme:SetButtonActive(btn, btn._isActive == true, btn._isActive and "primary" or "default")
+        end
+    end
+end
+
 local function ApplyToastThemeToFrame(f)
     if not f then return end
     if Theme and Theme.ApplyBackdrop then
@@ -149,6 +190,9 @@ local function ApplyToastThemeToFrame(f)
         end
         if f.queueLbl then
             f.queueLbl:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        end
+        if f.navBar then
+            ApplyToastNavBarTheme(f.navBar, p)
         end
         if f.closeBtn and Theme.StyleButton then
             Theme:StyleButton(f.closeBtn, "default")
@@ -219,6 +263,40 @@ local function NavigateForItem(item)
     end
 end
 
+local function HasSavedCustomToastPosition()
+    local posTbl = ns.db and ns.db.windowPositions
+    local saved = type(posTbl) == "table" and posTbl["notification_toast"] or nil
+    return type(saved) == "table" and saved.dx ~= nil and saved.dy ~= nil
+end
+
+local function PositionToastAnchorBelowChat(anchor)
+    if not anchor then return end
+    anchor:ClearAllPoints()
+    local cf = _G.ChatFrame1
+    local eb = _G.ChatFrame1EditBox
+    if cf and cf.GetLeft and cf.GetRight and cf.GetBottom then
+        local cLeft = cf:GetLeft()
+        local cRight = cf:GetRight()
+        local cBottom = cf:GetBottom()
+        if cLeft and cRight and cBottom and cRight > cLeft then
+            local cx = (cLeft + cRight) * 0.5
+            local minX = (TOAST_WIDTH * 0.5) + 12
+            if cx < minX then cx = minX end
+            local topY = cBottom - 36
+            if eb and eb.GetBottom then
+                local ebBot = eb:GetBottom()
+                if ebBot and ebBot < cBottom and ebBot >= (cBottom - 56) then
+                    topY = ebBot - 6
+                end
+            end
+            topY = math.max(96, topY)
+            anchor:SetPoint("TOP", UIParent, "BOTTOMLEFT", cx, topY)
+            return
+        end
+    end
+    anchor:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 42, 112)
+end
+
 local function EnsureAnchorFrame()
     if Toast.anchorFrame then
         return Toast.anchorFrame
@@ -226,7 +304,7 @@ local function EnsureAnchorFrame()
 
     local anchor = CreateFrame("Frame", "SocialCentralNotificationToastAnchor", UIParent)
     anchor:SetSize(TOAST_WIDTH, 1)
-    anchor:SetPoint("TOP", UIParent, "TOP", 0, -110)
+    PositionToastAnchorBelowChat(anchor)
     anchor:SetFrameStrata("DIALOG")
     anchor:SetFrameLevel(179)
     anchor:SetClampedToScreen(true)
@@ -237,17 +315,291 @@ local function EnsureAnchorFrame()
             anchor = "TOP",
             combatLock = false,
             onReset = function(win)
-                win:ClearAllPoints()
-                win:SetPoint("TOP", UIParent, "TOP", 0, -110)
+                PositionToastAnchorBelowChat(win)
                 if Toast.LayoutStack then
                     Toast:LayoutStack()
                 end
             end,
         })
     end
+    if not HasSavedCustomToastPosition() then
+        PositionToastAnchorBelowChat(anchor)
+    end
 
     Toast.anchorFrame = anchor
     return anchor
+end
+
+local function SelectToastIndex(idx)
+    local total = #Toast.activeItems
+    if total == 0 then return end
+    local clamped = math.max(1, math.min(idx or 1, total))
+    Toast.activeIndex = clamped
+    local cur = Toast.activeItems[clamped]
+    if cur then
+        cur.elapsed = 0
+    end
+    Toast:LayoutStack()
+end
+
+local function CycleToastNotification(delta)
+    local total = #Toast.activeItems
+    if total <= 1 then return end
+    local cur = Toast.activeIndex or 1
+    local nextIdx = ((cur - 1 + (delta or 1)) % total) + 1
+    SelectToastIndex(nextIdx)
+end
+
+local function CycleToastPage(pageDelta)
+    local total = #Toast.activeItems
+    if total <= MAX_NAV_NUMS then return end
+    local totalPages = math.ceil(total / PAGE_SIZE)
+    local curPage = math.floor(((Toast.activeIndex or 1) - 1) / PAGE_SIZE) + 1
+    local nextPage = ((curPage - 1 + (pageDelta or 1)) % totalPages) + 1
+    local nextIdx = (nextPage - 1) * PAGE_SIZE + 1
+    SelectToastIndex(math.min(total, nextIdx))
+end
+
+local function BuildToastNavBar(f)
+    local navBar = CreateFrame("Frame", nil, f)
+    navBar:SetHeight(NAV_H)
+    navBar:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -3)
+    navBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -26, -3)
+    navBar:SetFrameLevel(math.max((f:GetFrameLevel() or 180) + 10, 190))
+    if navBar.SetClipsChildren then
+        navBar:SetClipsChildren(true)
+    end
+
+    local bg = navBar:CreateTexture(nil, "BACKGROUND", nil, 1)
+    bg:SetAllPoints()
+    navBar.bg = bg
+
+    local div = navBar:CreateTexture(nil, "BORDER", nil, 1)
+    div:SetHeight(1)
+    div:SetPoint("BOTTOMLEFT", navBar, "BOTTOMLEFT", 0, 0)
+    div:SetPoint("BOTTOMRIGHT", navBar, "BOTTOMRIGHT", 0, 0)
+    navBar.div = div
+
+    navBar:EnableMouse(true)
+    navBar:EnableMouseWheel(true)
+    navBar:SetScript("OnMouseWheel", function(_, delta)
+        CycleToastNotification(delta > 0 and -1 or 1)
+    end)
+    navBar:SetScript("OnEnter", function(selfBar)
+        if GameTooltip and selfBar._totalCount and selfBar._totalCount > 1 then
+            GameTooltip:SetOwner(selfBar, "ANCHOR_TOP")
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(string.format(L["Notification %d of %d"], selfBar._activeIdx or 1, selfBar._totalCount), 1, 0.85, 0.35)
+            GameTooltip:AddLine(L["Left-click: Open  |  Right-click: Options  |  Wheel: Cycle"], 0.80, 0.85, 0.92, true)
+            GameTooltip:Show()
+        end
+    end)
+    navBar:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+
+    local function makeNavArrowBtn(w, text, tipText, onClickFn)
+        local b = Theme:CreateButton(navBar, w, 17, text, "default")
+        b:RegisterForClicks("AnyUp")
+        b:SetScript("OnClick", onClickFn)
+        b:SetScript("OnEnter", function(selfBtn)
+            if GameTooltip then
+                GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+                GameTooltip:SetText(tipText, 1, 0.9, 0.55)
+                GameTooltip:Show()
+            end
+        end)
+        b:SetScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
+        return b
+    end
+
+    navBar.prevPageBtn = makeNavArrowBtn(22, "<<", L["Previous notifications page"], function()
+        CycleToastPage(-1)
+    end)
+    navBar.prevBtn = makeNavArrowBtn(20, "<", L["Previous notification"], function()
+        CycleToastNotification(-1)
+    end)
+
+    local numBtns = {}
+    for i = 1, MAX_NAV_NUMS do
+        local b = Theme:CreateButton(navBar, 23, 17, tostring(i), "default")
+        b:RegisterForClicks("AnyUp")
+        local pip = b:CreateTexture(nil, "OVERLAY", nil, 4)
+        pip:SetHeight(2)
+        pip:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 2, 1)
+        pip:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -2, 1)
+        pip:SetColorTexture(0.98, 0.80, 0.24, 0.95)
+        b._kindPip = pip
+        b:SetScript("OnClick", function(selfBtn)
+            if selfBtn._targetIdx then
+                SelectToastIndex(selfBtn._targetIdx)
+            end
+        end)
+        b:SetScript("OnEnter", function(selfBtn)
+            local idx = selfBtn._targetIdx
+            if not (idx and GameTooltip) then return end
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:ClearLines()
+            local src = selfBtn._entrySource or "SocialCentral"
+            local sender = selfBtn._entrySender or "?"
+            GameTooltip:AddLine(string.format("#%d · [%s] %s", idx, src, sender), 1, 0.88, 0.38)
+            if selfBtn._entryText and selfBtn._entryText ~= "" then
+                GameTooltip:AddLine(selfBtn._entryText, 0.88, 0.92, 0.96, true)
+            end
+            GameTooltip:AddLine(string.format(L["Click to view notification #%d"], idx), 0.65, 0.75, 0.88, true)
+            GameTooltip:Show()
+        end)
+        b:SetScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
+        b:Hide()
+        numBtns[i] = b
+    end
+    navBar.numBtns = numBtns
+
+    navBar.nextBtn = makeNavArrowBtn(20, ">", L["Next notification"], function()
+        CycleToastNotification(1)
+    end)
+    navBar.nextPageBtn = makeNavArrowBtn(22, ">>", L["Next notifications page"], function()
+        CycleToastPage(1)
+    end)
+
+    local countFs = navBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    if Theme and Theme.ApplyReadableCounterFont then
+        Theme:ApplyReadableCounterFont(countFs, 13, 15, -1, true)
+    end
+    countFs:SetPoint("RIGHT", navBar, "RIGHT", -4, 0)
+    countFs:SetJustifyH("RIGHT")
+    navBar.countFs = countFs
+
+    if Theme and Theme.AttachDragHandle and Toast.anchorFrame then
+        Theme:AttachDragHandle(navBar, Toast.anchorFrame)
+    end
+
+    navBar:Hide()
+    return navBar
+end
+
+local function UpdateToastNavBar(f, allItems, activeIdx, totalCount, p)
+    local navBar = f and f.navBar
+    if not navBar or not totalCount or totalCount <= 1 then
+        if navBar then
+            navBar._activeIdx = nil
+            navBar._totalCount = nil
+            navBar:Hide()
+        end
+        return false
+    end
+
+    local idx = math.max(1, math.min(activeIdx or 1, totalCount))
+    navBar._activeIdx = idx
+    navBar._totalCount = totalCount
+
+    if navBar._lastCountActive ~= idx or navBar._lastCountTotal ~= totalCount then
+        navBar._lastCountActive = idx
+        navBar._lastCountTotal = totalCount
+        navBar.countFs:SetText(string.format("%d/%d", idx, totalCount))
+    end
+
+    local paged = (totalCount > MAX_NAV_NUMS)
+    local curPage = paged and (math.floor((idx - 1) / PAGE_SIZE) + 1) or 1
+    local startIdx = paged and ((curPage - 1) * PAGE_SIZE + 1) or 1
+    local maxSlots = paged and PAGE_SIZE or MAX_NAV_NUMS
+    local visibleCount = math.min(maxSlots, totalCount - startIdx + 1)
+    if visibleCount < 1 then visibleCount = 1 end
+
+    local prevAnchor
+    local layoutDirty = (navBar._lastPaged ~= paged) or (navBar._lastVisCount ~= visibleCount)
+    if layoutDirty then
+        navBar._lastPaged = paged
+        navBar._lastVisCount = visibleCount
+
+        navBar.prevPageBtn:ClearAllPoints()
+        if paged then
+            navBar.prevPageBtn:SetPoint("LEFT", navBar, "LEFT", 3, 1)
+            navBar.prevPageBtn:Show()
+            prevAnchor = navBar.prevPageBtn
+        else
+            navBar.prevPageBtn:Hide()
+        end
+
+        navBar.prevBtn:ClearAllPoints()
+        if prevAnchor then
+            navBar.prevBtn:SetPoint("LEFT", prevAnchor, "RIGHT", 2, 0)
+        else
+            navBar.prevBtn:SetPoint("LEFT", navBar, "LEFT", 3, 1)
+        end
+        prevAnchor = navBar.prevBtn
+    else
+        prevAnchor = navBar.prevBtn
+    end
+
+    for i = 1, MAX_NAV_NUMS do
+        local btn = navBar.numBtns[i]
+        if i <= visibleCount then
+            local tIdx = startIdx + i - 1
+            local cand = allItems and allItems[tIdx] or nil
+            local wantW = (tIdx >= 100) and 25 or 23
+            local isActive = (tIdx == idx)
+            local gradKey = (cand and cand.avoidWarning and "SCOUT") or (cand and cand.kind) or "DIRECT"
+            local kRgb = KIND_RGB[gradKey] or KIND_RGB.DIRECT
+
+            if layoutDirty or btn._lastLeftAnchor ~= prevAnchor then
+                btn._lastLeftAnchor = prevAnchor
+                btn:ClearAllPoints()
+                btn:SetPoint("LEFT", prevAnchor, "RIGHT", 2, 0)
+            end
+            if btn._lastWidth ~= wantW then
+                btn._lastWidth = wantW
+                btn:SetWidth(wantW)
+            end
+            if btn._targetIdx ~= tIdx then
+                btn._targetIdx = tIdx
+                Theme:SetButtonText(btn, tostring(tIdx))
+            end
+            if btn._isActive ~= isActive or btn._activePalKey ~= (p and p.key or "dark") then
+                btn._isActive = isActive
+                btn._activePalKey = p and p.key or "dark"
+                Theme:StyleButton(btn, isActive and "primary" or "default")
+                Theme:SetButtonActive(btn, isActive, isActive and "primary" or "default")
+            end
+            btn._kindPip:SetColorTexture(kRgb[1], kRgb[2], kRgb[3], isActive and 1.0 or 0.72)
+            btn._entrySource = cand and cand.sourceTag or "SocialCentral"
+            btn._entrySender = cand and cand.sender or "?"
+            btn._entryText = cand and cand.text or ""
+            if not btn:IsShown() then
+                btn:Show()
+            end
+            prevAnchor = btn
+        else
+            btn._targetIdx = nil
+            btn._entrySource = nil
+            btn._entrySender = nil
+            btn._entryText = nil
+            if btn:IsShown() then
+                btn:Hide()
+            end
+        end
+    end
+
+    if layoutDirty or navBar._lastNextAnchor ~= prevAnchor then
+        navBar._lastNextAnchor = prevAnchor
+        navBar.nextBtn:ClearAllPoints()
+        navBar.nextBtn:SetPoint("LEFT", prevAnchor, "RIGHT", 2, 0)
+
+        navBar.nextPageBtn:ClearAllPoints()
+        if paged then
+            navBar.nextPageBtn:SetPoint("LEFT", navBar.nextBtn, "RIGHT", 2, 0)
+            navBar.nextPageBtn:Show()
+        else
+            navBar.nextPageBtn:Hide()
+        end
+    end
+
+    navBar:Show()
+    return true
 end
 
 function Toast:EnsureFrame(index)
@@ -293,10 +645,17 @@ function Toast:EnsureFrame(index)
     hoverHighlight:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -3, 3)
     hoverHighlight:SetColorTexture(1, 0.94, 0.78, 0.06)
 
+    f.navBar = BuildToastNavBar(f)
+
+    f:EnableMouseWheel(true)
+    f:SetScript("OnMouseWheel", function(_, delta)
+        CycleToastNotification(delta > 0 and -1 or 1)
+    end)
+
     -- Compact Circular Emblem on Left (x = 12..46)
     local iconBadge = CreateFrame("Frame", nil, f)
     iconBadge:SetSize(34, 34)
-    iconBadge:SetPoint("LEFT", f, "LEFT", 12, 1)
+    iconBadge:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -10)
     iconBadge:EnableMouse(false)
     f.iconBadge = iconBadge
 
@@ -602,7 +961,7 @@ function Toast:EnsureFrame(index)
     return f
 end
 
-local function RenderItemOnFrame(f, item, remainingQueueCount)
+local function RenderItemOnFrame(f, item, showNav)
     if not f or not item then return end
     f.itemData = item
 
@@ -610,6 +969,7 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
     local isBuffAction = (item.kind == "WORLDBUFF" and item.buffDef ~= nil)
     local isLfgAction = (item.kind == "CLAN_LFG" and item.sender and item.sender ~= "")
     local hasActionRow = isInvite or isBuffAction or isLfgAction
+    local navOffset = showNav and NAV_H or 0
     f:SetWidth(TOAST_WIDTH)
 
     local gradKey = (item.avoidWarning and "SCOUT") or item.kind or "DIRECT"
@@ -640,8 +1000,11 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
             ApplyTexGradient(f.progressFill, "HORIZONTAL", rgb[1] * 0.65, rgb[2] * 0.65, rgb[3] * 0.65, 0.90, math.min(1, rgb[1] + 0.25), math.min(1, rgb[2] + 0.25), math.min(1, rgb[3] + 0.25), 1.0)
         end
     end
+
+    local totalDur = GetConfiguredToastDuration()
+    item.totalDuration = totalDur
     if f.progressFill then
-        local remainingFrac = math.max(0, 1 - ((item.elapsed or 0) / (item.totalDuration or AUTO_DISMISS_DEFAULT_SEC)))
+        local remainingFrac = math.max(0, 1 - ((item.elapsed or 0) / totalDur))
         local newW = math.max(1, (TOAST_WIDTH - 8) * remainingFrac)
         if f._lastProgressW ~= newW then
             f._lastProgressW = newW
@@ -665,37 +1028,61 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
     end
     f.bodyLbl:SetText(bodyText)
 
-    local measuredBodyH = (f.bodyLbl.GetStringHeight and f.bodyLbl:GetStringHeight()) or 13
-    local minH = hasActionRow and TOAST_H_INVITE or TOAST_H_DEFAULT
-    local bottomReserve = hasActionRow and 37 or 11
-    local finalH = math.max(minH, math.ceil(27 + measuredBodyH + bottomReserve))
-    f:SetSize(TOAST_WIDTH, finalH)
+    if f.iconBadge then
+        f.iconBadge:ClearAllPoints()
+        f.iconBadge:SetPoint("TOPLEFT", f, "TOPLEFT", 11, -(9 + navOffset))
+    end
+    if f.closeBtn then
+        f.closeBtn:ClearAllPoints()
+        f.closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -4)
+    end
+    if f.muteNotifBtn then
+        f.muteNotifBtn:ClearAllPoints()
+        if showNav then
+            f.muteNotifBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -(6 + navOffset))
+        else
+            f.muteNotifBtn:SetPoint("RIGHT", f.closeBtn, "LEFT", -3, 0)
+        end
+    end
+    if f.markReadBtn then
+        f.markReadBtn:ClearAllPoints()
+        f.markReadBtn:SetPoint("RIGHT", f.muteNotifBtn, "LEFT", -3, 0)
+    end
 
     local showQuickRead = (not hasActionRow) and item.threadKey and item.threadKey ~= "" and ns.Chat and ns.Chat.MarkThreadRead
     if f.markReadBtn then
         f.markReadBtn:SetShown(showQuickRead == true)
     end
-    f.queueLbl:ClearAllPoints()
-    local leftMostHdr = (showQuickRead and f.markReadBtn) or f.muteNotifBtn or f.closeBtn
-    f.queueLbl:SetPoint("RIGHT", leftMostHdr, "LEFT", -4, 0)
-
-    local rightPad = -51
-    if showQuickRead then rightPad = rightPad - 27 end
-    if remainingQueueCount and remainingQueueCount > 0 then
+    if f.queueLbl then
         if Theme and Theme.ApplyReadableCounterFont then
             Theme:ApplyReadableCounterFont(f.queueLbl, 14, 17, 0, true)
         end
-        f.queueLbl:SetText("+" .. tostring(remainingQueueCount))
-        f.queueLbl:Show()
-        local qw = math.max(26, math.ceil((f.queueLbl.GetStringWidth and f.queueLbl:GetStringWidth() or 22) + 6))
-        rightPad = rightPad - qw
-    else
         f.queueLbl:SetText("")
         f.queueLbl:Hide()
     end
+
+    local rightPad = showNav and -29 or -51
+    if showQuickRead then rightPad = rightPad - 27 end
     f.titleLbl:ClearAllPoints()
-    f.titleLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -8)
-    f.titleLbl:SetPoint("TOPRIGHT", f, "TOPRIGHT", rightPad, -8)
+    f.titleLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -(8 + navOffset))
+    f.titleLbl:SetPoint("TOPRIGHT", f, "TOPRIGHT", rightPad, -(8 + navOffset))
+
+    if f.titleRule then
+        f.titleRule:ClearAllPoints()
+        f.titleRule:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -(23 + navOffset))
+        f.titleRule:SetPoint("TOPRIGHT", f, "TOPRIGHT", -8, -(23 + navOffset))
+    end
+    if f.bodyLbl then
+        f.bodyLbl:ClearAllPoints()
+        f.bodyLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -(26 + navOffset))
+        f.bodyLbl:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -(26 + navOffset))
+    end
+
+    local measuredBodyH = (f.bodyLbl.GetStringHeight and f.bodyLbl:GetStringHeight()) or 13
+    local minH = (hasActionRow and TOAST_H_INVITE or TOAST_H_DEFAULT) + navOffset
+    local bottomReserve = hasActionRow and 37 or 11
+    local finalH = math.max(minH, math.ceil(27 + navOffset + measuredBodyH + bottomReserve))
+    f:SetSize(TOAST_WIDTH, finalH)
 
     if isInvite then
         Theme:SetButtonText(f.acceptBtn, L["Accept"])
@@ -736,23 +1123,228 @@ local function RenderItemOnFrame(f, item, remainingQueueCount)
 end
 
 function Toast:SortActiveItems()
-    -- Sort active items: longer total duration on top, shorter below.
-    table.sort(self.activeItems, function(a, b)
-        local durA = a.totalDuration or AUTO_DISMISS_DEFAULT_SEC
-        local durB = b.totalDuration or AUTO_DISMISS_DEFAULT_SEC
-        if durA ~= durB then
-            return durA > durB
+    -- Preserve arrival order so pagination (1/N) stays stable and predictable.
+end
+
+local function ApplyToastTutorialTheme(dlg, p)
+    if not dlg or not Theme then return end
+    p = p or Theme:GetPalette()
+    if not p then return end
+    Theme:ApplyBackdrop(dlg, "window", p)
+    if dlg.box then
+        Theme:ApplyBackdrop(dlg.box, "inset", p)
+    end
+    local titleColor = p.textGold or p.accent or { 1.0, 0.82, 0.20 }
+    if dlg.title then
+        dlg.title:SetTextColor(titleColor[1], titleColor[2], titleColor[3])
+    end
+    if dlg.body then
+        dlg.body:SetTextColor(p.text[1], p.text[2], p.text[3])
+    end
+    if dlg.b1 then
+        dlg.b1:SetTextColor(p.text[1], p.text[2], p.text[3])
+    end
+    if dlg.b2 then
+        dlg.b2:SetTextColor(p.text[1], p.text[2], p.text[3])
+    end
+    if dlg.b3 then
+        local muted = p.textMuted or p.text
+        dlg.b3:SetTextColor(muted[1], muted[2], muted[3])
+    end
+    if dlg.closeX then
+        Theme:StyleButton(dlg.closeX, "default")
+    end
+    if dlg.okBtn then
+        Theme:StyleButton(dlg.okBtn, "primary")
+    end
+end
+
+local function LayoutToastTutorialDialog(dlg)
+    if not dlg then return end
+    local bodyH = math.max(32, math.ceil((dlg.body and dlg.body.GetStringHeight and dlg.body:GetStringHeight()) or 36))
+    local b1H = math.max(24, math.ceil((dlg.b1 and dlg.b1.GetStringHeight and dlg.b1:GetStringHeight()) or 28))
+    local b2H = math.max(24, math.ceil((dlg.b2 and dlg.b2.GetStringHeight and dlg.b2:GetStringHeight()) or 28))
+    local b3H = math.max(22, math.ceil((dlg.b3 and dlg.b3.GetStringHeight and dlg.b3:GetStringHeight()) or 24))
+    local boxH = 10 + b1H + 8 + b2H + 8 + b3H + 10
+    if dlg.box then
+        dlg.box:SetHeight(boxH)
+    end
+    local totalH = 44 + bodyH + 10 + boxH + 48
+    dlg:SetHeight(math.max(236, math.min(360, totalH)))
+end
+
+function Toast:CreateTutorialDialog()
+    if self.tutorialDialog then return self.tutorialDialog end
+    if not Theme then return nil end
+
+    local dlg = CreateFrame("Frame", "SocialCentralToastTutorialDialog", UIParent, "BackdropTemplate")
+    dlg:Hide()
+    dlg:SetSize(430, 260)
+    dlg:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
+    if Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(dlg, 858)
+    else
+        dlg:SetFrameStrata("FULLSCREEN_DIALOG")
+        dlg:SetFrameLevel(858)
+        dlg:SetToplevel(true)
+        dlg:SetClampedToScreen(true)
+    end
+    dlg:EnableMouse(true)
+    Theme:ApplyBackdrop(dlg, "window")
+    Theme:MakeMovable(dlg, { key = "toastTutorial" })
+    if _G.UISpecialFrames then
+        table.insert(_G.UISpecialFrames, "SocialCentralToastTutorialDialog")
+    end
+
+    local iconTex = dlg:CreateTexture(nil, "ARTWORK")
+    iconTex:SetSize(22, 22)
+    iconTex:SetPoint("TOPLEFT", 14, -12)
+    iconTex:SetTexture(ICON_MAIL)
+    dlg.iconTex = iconTex
+
+    local title = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("LEFT", iconTex, "RIGHT", 8, 0)
+    title:SetPoint("RIGHT", dlg, "RIGHT", -38, 0)
+    title:SetJustifyH("LEFT")
+    title:SetWordWrap(false)
+    title:SetText(L["Floating Notifications & Pagination"])
+    dlg.title = title
+
+    local closeX = Theme:CreateButton(dlg, 22, 20, "X", "default")
+    closeX:SetPoint("TOPRIGHT", -10, -10)
+    closeX:SetScript("OnClick", function()
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("toastTutorialShown", true)
+        elseif ns.db and ns.db.settings then
+            ns.db.settings.toastTutorialShown = true
         end
-        return (a.createdAt or 0) < (b.createdAt or 0)
+        dlg:Hide()
     end)
+    dlg.closeX = closeX
+
+    local body = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    body:SetPoint("TOPLEFT", 16, -42)
+    body:SetPoint("TOPRIGHT", -16, -42)
+    body:SetJustifyH("LEFT")
+    body:SetWordWrap(true)
+    body:SetSpacing(3)
+    body:SetText(L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)))
+    dlg.body = body
+
+    local box = CreateFrame("Frame", nil, dlg, "BackdropTemplate")
+    box:SetPoint("TOPLEFT", body, "BOTTOMLEFT", 0, -10)
+    box:SetPoint("TOPRIGHT", body, "BOTTOMRIGHT", 0, -10)
+    box:SetHeight(112)
+    Theme:ApplyBackdrop(box, "inset")
+    dlg.box = box
+
+    local b1 = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    b1:SetPoint("TOPLEFT", 10, -10)
+    b1:SetPoint("TOPRIGHT", -10, -10)
+    b1:SetJustifyH("LEFT")
+    b1:SetWordWrap(true)
+    b1:SetSpacing(2)
+    b1:SetText("|cffffd100•|r " .. L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."])
+    dlg.b1 = b1
+
+    local b2 = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    b2:SetPoint("TOPLEFT", b1, "BOTTOMLEFT", 0, -8)
+    b2:SetPoint("TOPRIGHT", b1, "BOTTOMRIGHT", 0, -8)
+    b2:SetJustifyH("LEFT")
+    b2:SetWordWrap(true)
+    b2:SetSpacing(2)
+    b2:SetText("|cffffd100•|r " .. L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."])
+    dlg.b2 = b2
+
+    local b3 = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    b3:SetPoint("TOPLEFT", b2, "BOTTOMLEFT", 0, -8)
+    b3:SetPoint("TOPRIGHT", b2, "BOTTOMRIGHT", 0, -8)
+    b3:SetJustifyH("LEFT")
+    b3:SetWordWrap(true)
+    b3:SetSpacing(2)
+    b3:SetText("|cff4ade80•|r " .. L["Tip: You can change the 6s display timer or reset the position below chat anytime in Settings -> Notifications."])
+    dlg.b3 = b3
+
+    local okBtn = Theme:CreateButton(dlg, 210, 24, L["Got it, don't show again"], "primary")
+    if Theme.AutoFitButton then
+        Theme:AutoFitButton(okBtn, 196, 24, 320)
+    end
+    okBtn:SetPoint("BOTTOM", 0, 12)
+    okBtn:SetScript("OnClick", function()
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("toastTutorialShown", true)
+        elseif ns.db and ns.db.settings then
+            ns.db.settings.toastTutorialShown = true
+        end
+        dlg:Hide()
+    end)
+    dlg.okBtn = okBtn
+
+    dlg:SetScript("OnHide", function()
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("toastTutorialShown", true)
+        elseif ns.db and ns.db.settings then
+            ns.db.settings.toastTutorialShown = true
+        end
+    end)
+
+    ApplyToastTutorialTheme(dlg)
+    LayoutToastTutorialDialog(dlg)
+    self.tutorialDialog = dlg
+    return dlg
+end
+
+function Toast:ShowTutorial(forceShow)
+    local alreadyShown = (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("toastTutorialShown"))
+        or (ns.db and ns.db.settings and ns.db.settings.toastTutorialShown == true)
+    if not forceShow and alreadyShown then
+        return
+    end
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        self.pendingTutorial = true
+        return
+    end
+    self.pendingTutorial = false
+    local dlg = self:CreateTutorialDialog()
+    if not dlg then return end
+    if ns.SetAccountTutorialShown then
+        ns:SetAccountTutorialShown("toastTutorialShown", true)
+    elseif ns.db and ns.db.settings then
+        ns.db.settings.toastTutorialShown = true
+    end
+    if dlg.body then
+        dlg.body:SetText(L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)))
+    end
+    ApplyToastTutorialTheme(dlg)
+    LayoutToastTutorialDialog(dlg)
+    if Theme and Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(dlg, 858)
+    end
+    dlg:Show()
+    dlg:Raise()
+end
+
+function Toast:ShowTutorialIfNeeded()
+    local alreadyShown = (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("toastTutorialShown"))
+        or (ns.db and ns.db.settings and ns.db.settings.toastTutorialShown == true)
+    if alreadyShown then return end
+    self:ShowTutorial(false)
 end
 
 function Toast:LayoutStack()
     EnsureAnchorFrame()
 
-    if #self.activeItems == 0 then
+    while #self.queue > 0 and #self.activeItems < MAX_QUEUE do
+        local nextItem = table.remove(self.queue, 1)
+        table.insert(self.activeItems, nextItem)
+    end
+
+    local totalCount = #self.activeItems
+    if totalCount == 0 then
+        self.activeIndex = 1
         for _, f in ipairs(self.framePool) do
             f.itemData = nil
+            if f.navBar then f.navBar:Hide() end
             f:Hide()
         end
         if self.anchorFrame then
@@ -761,91 +1353,113 @@ function Toast:LayoutStack()
         return
     end
 
-    local count = math.min(#self.activeItems, MAX_VISIBLE_TOASTS)
+    if (self.activeIndex or 1) > totalCount then
+        self.activeIndex = totalCount
+    elseif (self.activeIndex or 1) < 1 then
+        self.activeIndex = 1
+    end
+
     local hudRef = (_G.SocialCentralSpotterFrame and _G.SocialCentralSpotterFrame.IsShown and _G.SocialCentralSpotterFrame:IsShown() and _G.SocialCentralSpotterFrame)
         or (_G.SocialCentralSpotterCombatArrow and _G.SocialCentralSpotterCombatArrow.IsShown and _G.SocialCentralSpotterCombatArrow:IsShown() and _G.SocialCentralSpotterCombatArrow)
         or nil
     local shouldAnchorToHud = false
     if hudRef and self.anchorFrame and self.anchorFrame.GetCenter and hudRef.GetCenter then
-        local ax = self.anchorFrame:GetCenter()
-        local hx = hudRef:GetCenter()
-        if ax and hx and math.abs(ax - hx) < (TOAST_WIDTH * 0.75) then
+        local ax, ay = self.anchorFrame:GetCenter()
+        local hx, hy = hudRef:GetCenter()
+        if ax and hx and ay and hy and math.abs(ax - hx) < (TOAST_WIDTH * 0.85) and math.abs(ay - hy) < 96 then
             shouldAnchorToHud = true
         end
     end
 
-    for i = 1, MAX_VISIBLE_TOASTS do
-        local f = self:EnsureFrame(i)
-        if i <= count then
-            local item = self.activeItems[i]
-            local extraInQueue = (i == count) and #self.queue or 0
-            f:ClearAllPoints()
-            if i == 1 then
-                if shouldAnchorToHud and hudRef then
-                    f:SetPoint("TOP", hudRef, "BOTTOM", 0, -8)
-                else
-                    f:SetPoint("TOP", self.anchorFrame, "TOP", 0, 0)
-                end
-            else
-                local prev = self.framePool[i - 1]
-                f:SetPoint("TOP", prev, "BOTTOM", 0, -6)
-            end
-            RenderItemOnFrame(f, item, extraInQueue)
-            f:Show()
-        else
-            f.itemData = nil
-            f:Hide()
+    local f = self:EnsureFrame(1)
+    for idx = 2, #self.framePool do
+        local extraF = self.framePool[idx]
+        if extraF then
+            extraF.itemData = nil
+            extraF:Hide()
         end
     end
 
-    -- Single shared OnUpdate ticker to drive progress bars and auto-dismiss cleanly
+    local activeIdx = self.activeIndex or 1
+    local item = self.activeItems[activeIdx]
+    local showNav = totalCount > 1
+
+    f:ClearAllPoints()
+    if shouldAnchorToHud and hudRef then
+        local hudBottom = (hudRef.GetBottom and hudRef:GetBottom()) or 120
+        if hudBottom < 92 then
+            f:SetPoint("TOPLEFT", hudRef, "TOPRIGHT", 8, 0)
+        else
+            f:SetPoint("TOP", hudRef, "BOTTOM", 0, -6)
+        end
+    else
+        f:SetPoint("TOP", self.anchorFrame, "TOP", 0, 0)
+    end
+
+    local p = Theme and Theme.GetPalette and Theme:GetPalette() or nil
+    UpdateToastNavBar(f, self.activeItems, activeIdx, totalCount, p)
+    RenderItemOnFrame(f, item, showNav)
+    f:Show()
+
+    self:ShowTutorialIfNeeded()
+
+    -- Single shared OnUpdate ticker to drive progress bar and auto-dismiss 1 notification every N seconds
     self.anchorFrame:SetScript("OnUpdate", function(_, dt)
-        if #Toast.activeItems == 0 then
+        local countNow = #Toast.activeItems
+        if countNow == 0 then
             Toast.anchorFrame:SetScript("OnUpdate", nil)
             return
         end
 
-        local needsLayout = false
+        local idx = Toast.activeIndex or 1
+        if idx > countNow then
+            idx = countNow
+            Toast.activeIndex = idx
+        elseif idx < 1 then
+            idx = 1
+            Toast.activeIndex = 1
+        end
+
+        local it = Toast.activeItems[idx]
+        local card = Toast.framePool[1]
+        if not it or not card then return end
+
         local delta = dt or 0
         local inCombat = (UnitAffectingCombat and UnitAffectingCombat("player")) == true
+        local confirmOpen = Toast.confirmPopup and Toast.confirmPopup:IsShown()
+        local tutorialOpen = Toast.tutorialDialog and Toast.tutorialDialog:IsShown()
+        local isHovered = confirmOpen or tutorialOpen
+            or (card:IsShown() and (card:IsMouseOver() or (card.navBar and card.navBar:IsShown() and card.navBar:IsMouseOver())))
 
-        for i = #Toast.activeItems, 1, -1 do
-            local it = Toast.activeItems[i]
-            local f = Toast.framePool[i]
-            local confirmOpenForThis = Toast.confirmPopup and Toast.confirmPopup:IsShown() and (Toast.confirmPopup._targetItem == it)
-            local isHovered = confirmOpenForThis or (f and f:IsShown() and f:IsMouseOver())
-
-            if it.countdownUntil and f and f:IsShown() and f.bodyLbl then
-                local remSec = math.max(0, math.ceil(it.countdownUntil - (GetTime and GetTime() or 0)))
-                if it._lastShownSec ~= remSec then
-                    it._lastShownSec = remSec
-                    f.bodyLbl:SetText((remSec > 0) and L["Dropping in ~%ds!"]:format(remSec) or L["World Buff should be active now!"])
-                end
-            end
-
-            if not isHovered and not inCombat then
-                it.elapsed = (it.elapsed or 0) + delta
-                local totalDur = it.totalDuration or AUTO_DISMISS_DEFAULT_SEC
-                local remainingFrac = math.max(0, 1 - (it.elapsed / totalDur))
-
-                if f and f:IsShown() and f.progressFill then
-                    f.progressFill:SetWidth(math.max(1, (TOAST_WIDTH - 8) * remainingFrac))
-                end
-
-                if it.elapsed >= totalDur then
-                    table.remove(Toast.activeItems, i)
-                    needsLayout = true
-                end
+        if it.countdownUntil and card:IsShown() and card.bodyLbl then
+            local remSec = math.max(0, math.ceil(it.countdownUntil - (GetTime and GetTime() or 0)))
+            if it._lastShownSec ~= remSec then
+                it._lastShownSec = remSec
+                card.bodyLbl:SetText((remSec > 0) and L["Dropping in ~%ds!"]:format(remSec) or L["World Buff should be active now!"])
             end
         end
 
-        if needsLayout then
-            while #Toast.queue > 0 and #Toast.activeItems < MAX_VISIBLE_TOASTS do
-                local nextItem = table.remove(Toast.queue, 1)
-                table.insert(Toast.activeItems, nextItem)
+        if not isHovered and not inCombat then
+            it.elapsed = (it.elapsed or 0) + delta
+            local totalDur = GetConfiguredToastDuration()
+            it.totalDuration = totalDur
+            local remainingFrac = math.max(0, 1 - (it.elapsed / totalDur))
+
+            if card:IsShown() and card.progressFill then
+                card.progressFill:SetWidth(math.max(1, (TOAST_WIDTH - 8) * remainingFrac))
             end
-            Toast:SortActiveItems()
-            Toast:LayoutStack()
+
+            if it.elapsed >= totalDur then
+                table.remove(Toast.activeItems, idx)
+                if idx > #Toast.activeItems then
+                    Toast.activeIndex = math.max(1, #Toast.activeItems)
+                end
+                local nextActive = Toast.activeItems[Toast.activeIndex]
+                if nextActive then
+                    nextActive.elapsed = 0
+                end
+                Toast:LayoutStack()
+            end
         end
     end)
 end
@@ -1241,16 +1855,23 @@ function Toast:DismissItem(item)
     for i, it in ipairs(self.activeItems) do
         if it == item or (it.id and it.id == item.id) then
             table.remove(self.activeItems, i)
+            if (self.activeIndex or 1) > #self.activeItems then
+                self.activeIndex = math.max(1, #self.activeItems)
+            end
             break
         end
     end
 
-    while #self.queue > 0 and #self.activeItems < MAX_VISIBLE_TOASTS do
+    while #self.queue > 0 and #self.activeItems < MAX_QUEUE do
         local nextItem = table.remove(self.queue, 1)
         table.insert(self.activeItems, nextItem)
     end
 
-    self:SortActiveItems()
+    local nextActive = self.activeItems[self.activeIndex or 1]
+    if nextActive then
+        nextActive.elapsed = 0
+    end
+
     self:LayoutStack()
 end
 
@@ -1260,10 +1881,11 @@ function Toast:DismissAll()
     end
     wipe(self.queue)
     wipe(self.activeItems)
+    self.activeIndex = 1
     self:LayoutStack()
 end
 
---- Display or coalesce an incoming addon notification item inside the floating toast stack.
+--- Display or coalesce an incoming addon notification item inside the single paginated floating toast below chat.
 function Toast:PushNotification(item)
     if type(item) ~= "table" then return end
     local s = ns.db and ns.db.settings
@@ -1365,32 +1987,17 @@ function Toast:PushNotification(item)
     entry.coalescedCount = 1
     entry.elapsed = 0
     entry.createdAt = time()
+    entry.totalDuration = GetConfiguredToastDuration()
 
-    local isInvite = (entry.kind == "RMI" and entry.roomId and entry.roomId ~= "")
-    if not entry.totalDuration then
-        if isInvite then
-            entry.totalDuration = AUTO_DISMISS_INVITE_SEC
-        elseif entry.kind == "WORLDBUFF" then
-            entry.totalDuration = AUTO_DISMISS_BUFF_SEC
-        elseif entry.kind == "FRIEND_ONLINE" or entry.kind == "FRIEND_OFFLINE" or entry.kind == "WATCHLIST_ONLINE" then
-            entry.totalDuration = AUTO_DISMISS_FRIEND_SEC
-        else
-            entry.totalDuration = AUTO_DISMISS_DEFAULT_SEC
-        end
-    end
-
-    if #self.activeItems < MAX_VISIBLE_TOASTS then
+    if #self.activeItems < MAX_QUEUE then
         table.insert(self.activeItems, entry)
-        self:SortActiveItems()
-        self:LayoutStack()
-    else
-        if #self.queue < MAX_QUEUE then
-            table.insert(self.queue, entry)
-        else
-            self.queue[#self.queue] = entry
+        if #self.activeItems == 1 then
+            self.activeIndex = 1
         end
-        self:LayoutStack()
+    else
+        self.activeItems[#self.activeItems] = entry
     end
+    self:LayoutStack()
 end
 
 --- Preview sample toast notifications directly from Settings or '/sc toast' for layout positioning & sound testing.
@@ -1399,12 +2006,16 @@ function Toast:ShowTestNotification(variant)
     if v == "clear" or v == "dismiss" or v == "hide" or v == "reset" then
         self:DismissAll()
         return
+    elseif v == "tutorial" or v == "help" then
+        self:ShowTutorial(true)
+        return
     end
 
     local resolvedSelf = Compat and Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
     local myName = (resolvedSelf and resolvedSelf.fullName) or (ns.Safe and ns.Safe.String(ns.Safe.Call(UnitName, "player"))) or "SocialCentral"
     local _, myClass = ns.Safe and ns.Safe.Call(UnitClass, "player") or UnitClass("player")
     local now = time()
+    local cfgDur = GetConfiguredToastDuration()
 
     if v == "invite" or v == "room" then
         self:PushNotification({
@@ -1416,7 +2027,7 @@ function Toast:ShowTestNotification(variant)
             senderClass = myClass or "MAGE",
             text = L["Dungeon & Raid Social"],
             priority = 2,
-            totalDuration = AUTO_DISMISS_INVITE_SEC,
+            totalDuration = cfgDur,
         })
     elseif v == "friend" then
         self:PushNotification({
@@ -1427,7 +2038,7 @@ function Toast:ShowTestNotification(variant)
             senderClass = myClass or "WARRIOR",
             text = L["Online"],
             priority = 1,
-            totalDuration = AUTO_DISMISS_FRIEND_SEC,
+            totalDuration = cfgDur,
         })
     elseif v == "offline" then
         self:PushNotification({
@@ -1438,7 +2049,7 @@ function Toast:ShowTestNotification(variant)
             senderClass = myClass or "WARRIOR",
             text = L["Disconnected"],
             priority = 1,
-            totalDuration = AUTO_DISMISS_FRIEND_SEC,
+            totalDuration = cfgDur,
         })
     elseif v == "avoid" then
         self:PushNotification({
@@ -1449,7 +2060,7 @@ function Toast:ShowTestNotification(variant)
             senderClass = myClass or "ROGUE",
             text = L["In your group! Flagged as Avoid."],
             priority = 2,
-            totalDuration = 12.0,
+            totalDuration = cfgDur,
         })
     elseif v == "watchlist" then
         self:PushNotification({
@@ -1460,7 +2071,7 @@ function Toast:ShowTestNotification(variant)
             senderClass = myClass or "ROGUE",
             text = L["Online"],
             priority = 2,
-            totalDuration = AUTO_DISMISS_FRIEND_SEC,
+            totalDuration = cfgDur,
         })
     elseif v == "buff" or v == "buffs" then
         self:PushNotification({
@@ -1471,13 +2082,22 @@ function Toast:ShowTestNotification(variant)
             senderClass = nil,
             text = "~15s",
             priority = 2,
-            totalDuration = AUTO_DISMISS_BUFF_SEC,
+            totalDuration = cfgDur,
         })
-    elseif v == "queue" or v == "multi" or v == "stack" then
+    elseif v == "queue" or v == "multi" or v == "stack" or v == "page" then
         wipe(self.queue)
         wipe(self.activeItems)
-        -- Push items with different durations: 20s (Invite), 10s (Direct), 8s (Friend)
-        -- They will automatically be sorted with longest (Invite) on top and shortest on bottom!
+        self.activeIndex = 1
+        self:PushNotification({
+            id = "test:direct:" .. tostring(now),
+            kind = "DIRECT",
+            sourceTag = L["Direct Addon"],
+            sender = myName,
+            senderClass = myClass,
+            text = L["Sample addon notification toast — drag anywhere to reposition!"],
+            priority = 2,
+            totalDuration = cfgDur,
+        })
         self:PushNotification({
             id = "test:invite:" .. tostring(now),
             kind = "RMI",
@@ -1487,17 +2107,7 @@ function Toast:ShowTestNotification(variant)
             senderClass = myClass or "MAGE",
             text = L["Dungeon & Raid Social"],
             priority = 2,
-            totalDuration = AUTO_DISMISS_INVITE_SEC,
-        })
-        self:PushNotification({
-            id = "test:direct:" .. tostring(now),
-            kind = "DIRECT",
-            sourceTag = L["Direct Addon"],
-            sender = myName,
-            senderClass = myClass,
-            text = L["Sample addon notification toast — drag anywhere to reposition!"],
-            priority = 2,
-            totalDuration = AUTO_DISMISS_DEFAULT_SEC,
+            totalDuration = cfgDur,
         })
         self:PushNotification({
             id = "test:friend:" .. tostring(now),
@@ -1507,7 +2117,7 @@ function Toast:ShowTestNotification(variant)
             senderClass = myClass or "WARRIOR",
             text = L["Online"],
             priority = 1,
-            totalDuration = AUTO_DISMISS_FRIEND_SEC,
+            totalDuration = cfgDur,
         })
     else
         self:PushNotification({
@@ -1519,7 +2129,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Sample addon notification toast — drag anywhere to reposition!"],
             threadKey = ns.Chat and ns.Chat.activeThreadKey or nil,
             priority = 2,
-            totalDuration = AUTO_DISMISS_DEFAULT_SEC,
+            totalDuration = cfgDur,
         })
     end
 
@@ -1557,10 +2167,9 @@ function Toast:Init()
             end
         end
         if changed then
-            while #Toast.queue > 0 and #Toast.activeItems < MAX_VISIBLE_TOASTS do
+            while #Toast.queue > 0 and #Toast.activeItems < MAX_QUEUE do
                 table.insert(Toast.activeItems, table.remove(Toast.queue, 1))
             end
-            Toast:SortActiveItems()
             Toast:LayoutStack()
         end
     end)
@@ -1602,16 +2211,23 @@ function Toast:Init()
             end
         end
         if changed then
-            while #Toast.queue > 0 and #Toast.activeItems < MAX_VISIBLE_TOASTS do
+            while #Toast.queue > 0 and #Toast.activeItems < MAX_QUEUE do
                 table.insert(Toast.activeItems, table.remove(Toast.queue, 1))
             end
-            Toast:SortActiveItems()
             Toast:LayoutStack()
         end
     end
 
-    ns:On("SETTINGS_UPDATED", PruneForSettingsOrInstance)
+    ns:On("SETTINGS_UPDATED", function()
+        PruneForSettingsOrInstance()
+        if #Toast.activeItems > 0 then
+            Toast:LayoutStack()
+        end
+    end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        if Toast.anchorFrame and not HasSavedCustomToastPosition() then
+            PositionToastAnchorBelowChat(Toast.anchorFrame)
+        end
         PruneForSettingsOrInstance()
         if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
     end)
@@ -1619,11 +2235,19 @@ function Toast:Init()
         PruneForSettingsOrInstance()
         if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
     end)
+    ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
+        if Toast.pendingTutorial then
+            Toast:ShowTutorialIfNeeded()
+        end
+    end)
 
     if Theme and Theme.RegisterListener then
         Theme:RegisterListener(function()
             for _, f in ipairs(Toast.framePool) do
                 ApplyToastThemeToFrame(f)
+            end
+            if Toast.tutorialDialog then
+                ApplyToastTutorialTheme(Toast.tutorialDialog)
             end
         end)
     end

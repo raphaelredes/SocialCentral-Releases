@@ -2545,15 +2545,15 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Left-click the pill to jump directly to the conversation (deferred automatically after combat), hover to pause, or right-click to dismiss."]
     )
     local toastResetRow = CreateFrame("Frame", nil, nf)
-    toastResetRow:SetSize(460, 26)
+    toastResetRow:SetSize(560, 26)
     toastResetRow:SetPoint("TOPLEFT", addonToastCb, "BOTTOMLEFT", 0, -4)
     local resetToastPosBtn = ns.Theme:CreateButton(toastResetRow, 190, 22, L["Reset Notification Position"], "default")
-    ns.Theme:AutoFitButton(resetToastPosBtn, 160, 18, 280)
+    ns.Theme:AutoFitButton(resetToastPosBtn, 160, 18, 250)
     resetToastPosBtn:SetPoint("LEFT", toastResetRow, "LEFT", 24, 0)
     resetToastPosBtn:SetScript("OnClick", function()
         if ns.Theme and ns.Theme.ResetWindowPosition then ns.Theme:ResetWindowPosition("notification_toast") end
     end)
-    HelpBtn(toastResetRow, resetToastPosBtn, L["Help: Reset Notification Position"], L["Moves the floating notification popup back to its default top-center screen position."], L["Also available anytime by right-clicking any floating notification."])
+    local rtpHelp = HelpBtn(toastResetRow, resetToastPosBtn, L["Help: Reset Notification Position"], L["Moves the floating notification popup back to its default top-center screen position."], L["Also available anytime by right-clicking any floating notification."])
     Search.Register({
         kind = "action",
         title = L["Reset Notification Position"],
@@ -2565,8 +2565,58 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         onTrigger = function() resetToastPosBtn:Click() end,
     })
 
+    local viewToastTutBtn = ns.Theme:CreateButton(toastResetRow, 150, 22, L["Toast Tutorial"], "default")
+    ns.Theme:AutoFitButton(viewToastTutBtn, 126, 16, 210)
+    viewToastTutBtn:SetPoint("LEFT", rtpHelp or resetToastPosBtn, "RIGHT", 12, 0)
+    viewToastTutBtn:SetScript("OnClick", function()
+        if ns.NotificationToast and ns.NotificationToast.ShowTutorial then
+            ns.NotificationToast:ShowTutorial(true)
+        end
+    end)
+    HelpBtn(
+        toastResetRow, viewToastTutBtn, L["Floating Notifications & Pagination"],
+        L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
+        L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Toast Tutorial"],
+        actionLabel = L["Toast Tutorial"],
+        widget = viewToastTutBtn,
+        helpTitle = L["Floating Notifications & Pagination"],
+        description = L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
+        howText = L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
+        onTrigger = function() viewToastTutBtn:Click() end,
+    })
+
+    local toastDurLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    toastDurLbl:SetPoint("TOPLEFT", toastResetRow, "BOTTOMLEFT", 4, -6)
+    toastDurLbl:SetText(L["Notification toast display duration (seconds):"])
+    HelpBtn(
+        nf, toastDurLbl, L["Help: Notification Toast Duration"],
+        L["Controls how many seconds each floating notification toast stays on screen before disappearing automatically (6 seconds by default)."],
+        L["When multiple notifications arrive, only 1 is shown at a time with pagination (< 1 2 3 >) and each disappears after this interval. Hovering pauses the timer."]
+    )
+    Search.SetPendingMeta(
+        L["Notification toast display duration (seconds):"],
+        L["Help: Notification Toast Duration"],
+        L["Controls how many seconds each floating notification toast stays on screen before disappearing automatically (6 seconds by default)."],
+        L["When multiple notifications arrive, only 1 is shown at a time with pagination (< 1 2 3 >) and each disappears after this interval. Hovering pauses the timer."]
+    )
+    local toastDurStep = CreateStepperRow(
+        nf, toastDurLbl, -4, 3, 15, "s",
+        function() return (ns.db and ns.db.settings and ns.db.settings.toastDuration) or 6 end,
+        function(val)
+            if ns.db and ns.db.settings then
+                ns.db.settings.toastDuration = val
+                NotifySettingChanged()
+            end
+        end,
+        1
+    )
+
     local addonEchoCb = CreateCheckbox(
-        nf, L["Print received [SC] addon messages in Blizzard Chat immediately"], toastResetRow, -6,
+        nf, L["Print received [SC] addon messages in Blizzard Chat immediately"], toastDurStep, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgChatEcho ~= false end,
         function(checked) ns.db.settings.addonMsgChatEcho = checked; NotifySettingChanged() end,
         L["Help: Addon Chat Echo"],
@@ -2670,14 +2720,14 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Uncheck if you prefer completely plain bookmark tabs without counter pills."]
     )
     local testToastBtn = ns.Theme:CreateButton(nf, 190, 22, L["Test Notification Toast"], "default")
-    ns.Theme:AutoFitButton(testToastBtn, 160, 18, 260)
+    ns.Theme:AutoFitButton(testToastBtn, 160, 18, 250)
     testToastBtn:SetPoint("TOPLEFT", addonTabBadgesCb, "BOTTOMLEFT", 0, -8)
     testToastBtn:SetScript("OnClick", function()
         if ns.NotificationToast and ns.NotificationToast.ShowTestNotification then
             ns.NotificationToast:ShowTestNotification()
         end
     end)
-    HelpBtn(nf, testToastBtn, L["Help: Test Notification Toast"], L["Spawns a sample floating Notification Toast pill with sound so you can preview its look and drag it to your preferred screen position."], L["Click to show the pill, drag it anywhere on screen, or reset positions anytime with '/sc resetpos'."])
+    local ttHelp = HelpBtn(nf, testToastBtn, L["Help: Test Notification Toast"], L["Spawns a sample floating Notification Toast pill with sound so you can preview its look and drag it to your preferred screen position."], L["Click to show the pill, drag it anywhere on screen, or reset positions anytime with '/sc resetpos'."])
     Search.Register({
         kind = "action",
         title = L["Test Notification Toast"],
@@ -2687,6 +2737,30 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         description = L["Spawns a sample floating Notification Toast pill with sound so you can preview its look and drag it to your preferred screen position."],
         howText = L["Click to show the pill, drag it anywhere on screen, or reset positions anytime with '/sc resetpos'."],
         onTrigger = function() testToastBtn:Click() end,
+    })
+
+    local testToastMultiBtn = ns.Theme:CreateButton(nf, 196, 22, L["Test Toast Pagination (3)"], "default")
+    ns.Theme:AutoFitButton(testToastMultiBtn, 166, 18, 260)
+    testToastMultiBtn:SetPoint("LEFT", ttHelp or testToastBtn, "RIGHT", 12, 0)
+    testToastMultiBtn:SetScript("OnClick", function()
+        if ns.NotificationToast and ns.NotificationToast.ShowTestNotification then
+            ns.NotificationToast:ShowTestNotification("queue")
+        end
+    end)
+    HelpBtn(
+        nf, testToastMultiBtn, L["Floating Notifications & Pagination"],
+        L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
+        L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Test Toast Pagination (3)"],
+        actionLabel = L["Test Toast Pagination (3)"],
+        widget = testToastMultiBtn,
+        helpTitle = L["Floating Notifications & Pagination"],
+        description = L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
+        howText = L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
+        onTrigger = function() testToastMultiBtn:Click() end,
     })
 
     local chatSettingsHeader = AddSectionHeader(
@@ -2775,8 +2849,8 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["When checked, clicking Send or pressing Enter in Conversations sends Whispers, Battle.net, Guild, and Group messages immediately without needing a second Enter."],
         L["Strictly triggered only by your manual Send click/Enter outside combat or boss chat lockdowns; safely falls back to pre-filling the chat bar when restricted."]
     )
-    AddDeps(deps.defaultBtns, unmuteAlertsBtn, unmutePlayersBtn, resetToastPosBtn, testToastBtn)
-    AddDeps(deps.chat, addonToastCb, resetToastPosBtn, addonEchoCb, addonEchoSentCb, addonFlashCb, chatSoundCb, chatSoundWhispersCb, chatSoundRoomsCb, chatSoundAllianceCb, chatSoundGuildCb, chatSoundGroupCb, chatMirrorCb, chatChannelUnreadCb, addonDirectCb, chatDirectOfficialCb)
+    AddDeps(deps.defaultBtns, unmuteAlertsBtn, unmutePlayersBtn, resetToastPosBtn, viewToastTutBtn, testToastBtn, testToastMultiBtn)
+    AddDeps(deps.chat, addonToastCb, resetToastPosBtn, viewToastTutBtn, toastDurLbl, toastDurStep, testToastMultiBtn, addonEchoCb, addonEchoSentCb, addonFlashCb, chatSoundCb, chatSoundWhispersCb, chatSoundRoomsCb, chatSoundAllianceCb, chatSoundGuildCb, chatSoundGroupCb, chatMirrorCb, chatChannelUnreadCb, addonDirectCb, chatDirectOfficialCb)
 
     local guildAlertsHeader = AddSectionHeader(
         nf, L["Guild, LFG & World Buff Alerts"], chatDirectOfficialCb, -14,

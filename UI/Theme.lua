@@ -619,7 +619,7 @@ function Theme:SyncButtonLayers(btn)
     if not btn or not btn.GetFrameLevel then
         return
     end
-    local bLvl = math.max(1, btn:GetFrameLevel() or 1)
+    local bLvl = math.max(1, math.min(9990, btn:GetFrameLevel() or 1))
     if btn._blizzTabFrame and btn._blizzTabFrame.SetFrameLevel then
         btn._blizzTabFrame:SetFrameLevel(bLvl + 1)
     end
@@ -628,6 +628,58 @@ function Theme:SyncButtonLayers(btn)
     end
     if btn._textLayer and btn._textLayer.SetFrameLevel then
         btn._textLayer:SetFrameLevel(bLvl + 4)
+    end
+end
+
+local function SyncThemeSubtreeChildren(visitFn, baseLvl, depth, ...)
+    local n = select("#", ...)
+    for i = 1, n do
+        local child = select(i, ...)
+        if child
+            and not (child.IsForbidden and child:IsForbidden())
+            and not child._scSkipLayerSync
+            and not child._scIsInternalBtnLayer
+            and not child._scIsInputBackdrop
+        then
+            if child.SetFrameLevel then
+                local desired = math.min(9980, baseLvl + (child._scLevelOffset or 1))
+                if (child:GetFrameLevel() or 0) ~= desired then
+                    child:SetFrameLevel(desired)
+                end
+            end
+            visitFn(Theme, child, depth)
+        end
+    end
+end
+
+--- Recursively synchronize frame levels across cards, inputs, scroll lists, and button text layers.
+function Theme:SyncSubtreeLayers(root, depth)
+    depth = depth or 10
+    if not root or depth <= 0
+        or (root.IsForbidden and root:IsForbidden())
+        or root._scSkipLayerSync
+        or root._scIsInternalBtnLayer
+        or root._scIsInputBackdrop
+    then
+        return
+    end
+    local baseLvl = math.max(1, math.min(9980, (root.GetFrameLevel and root:GetFrameLevel()) or 1))
+    if root._textLayer or root._blizzTabFrame or root._blizzBtn then
+        self:SyncButtonLayers(root)
+    end
+    if root.clearBtn and root.clearBtn.SetFrameLevel then
+        root.clearBtn._scLevelOffset = 4
+        root.clearBtn:SetFrameLevel(math.min(9985, baseLvl + 4))
+    end
+    if root._scClearBtn and root._scClearBtn.SetFrameLevel then
+        root._scClearBtn._scLevelOffset = 4
+        root._scClearBtn:SetFrameLevel(math.min(9985, baseLvl + 4))
+    end
+    if root._scBg and root._scBg.SetFrameLevel then
+        root._scBg:SetFrameLevel(math.max(0, baseLvl - 1))
+    end
+    if depth > 1 and root.GetChildren then
+        SyncThemeSubtreeChildren(self.SyncSubtreeLayers, baseLvl, depth - 1, root:GetChildren())
     end
 end
 
@@ -657,7 +709,7 @@ local function ApplyButtonColors(btn, hovered)
                 btn:SetBackdrop(nil)
                 btn._scAppliedBackdrop = nil
             end
-            vis:SetFrameLevel(math.max(0, btn:GetFrameLevel() + 1))
+            Theme:SyncButtonLayers(btn)
             vis:ClearAllPoints()
             if kind == "tab" then
                 vis:SetAllPoints(btn)
@@ -1588,6 +1640,7 @@ function Theme:PrepareTopOverlayModal(m, minLevel)
     end
     local mapShown = _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()
     local targetLevel = mapShown and math.max(minLevel or 850, 2750) or math.max(minLevel or 850, 840)
+    targetLevel = math.min(9200, targetLevel)
     m:SetFrameStrata("FULLSCREEN_DIALOG")
     m:SetFrameLevel(targetLevel)
     if m.SetToplevel then m:SetToplevel(true) end
@@ -1608,9 +1661,11 @@ function Theme:PrepareTopOverlayModal(m, minLevel)
     for _, closeKey in ipairs({ "topCloseBtn", "closeBtn", "topClose" }) do
         local cb = m[closeKey]
         if cb and cb.SetFrameLevel then
+            cb._scLevelOffset = 12
             cb:SetFrameLevel(targetLevel + 12)
         end
     end
+    self:SyncSubtreeLayers(m, 8)
     if m.Raise then m:Raise() end
 end
 
@@ -2471,7 +2526,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     end
 
     local function SyncScrollListLayers()
-        local cLvl = math.max(1, (container.GetFrameLevel and container:GetFrameLevel()) or 1)
+        local cLvl = math.max(1, math.min(9960, (container.GetFrameLevel and container:GetFrameLevel()) or 1))
         if viewport.SetFrameLevel and (viewport:GetFrameLevel() or 0) ~= (cLvl + 1) then
             viewport:SetFrameLevel(cLvl + 1)
         end
@@ -2523,8 +2578,13 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
             local dataIdx = firstIndex + poolIdx - 1
             local item = self.items[dataIdx]
             if item then
-                if row.SetFrameLevel and (row:GetFrameLevel() or 0) ~= (cLvl + 2) then
-                    row:SetFrameLevel(cLvl + 2)
+                local rowTargetLvl = math.min(9970, cLvl + 2)
+                if row.SetFrameLevel and (row:GetFrameLevel() or 0) ~= rowTargetLvl then
+                    row:SetFrameLevel(rowTargetLvl)
+                    Theme:SyncSubtreeLayers(row, 4)
+                elseif not row._scRowLayerInit then
+                    row._scRowLayerInit = true
+                    Theme:SyncSubtreeLayers(row, 4)
                 end
                 local y = -((poolIdx - 1) * self.rowHeight) + subOffset
                 if row._scRenderedY ~= y then

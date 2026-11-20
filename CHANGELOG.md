@@ -5,6 +5,20 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.22] - 2026-11-19
+### Added
+- **Below-Chat Single-Card Paginated Notification Toast (`1/N`), Configurable 6s Timer & Account-Wide One-Time Tutorial (`Core/Init.lua`, `UI/NotificationToast.lua`, `UI/Settings.lua`, `UI/Minimap.lua`, `UI/ClanSpotterHUD.lua`, `Providers/ClanSpotter.lua`, `Locales/Locale.lua`):**
+  - Repositioned the floating **Notification Toast** (`UI/NotificationToast.lua`, distinct from the Minimap Message Previews in `UI/Minimap.lua`) to appear right below the chat window (`ChatFrame1` / `ChatFrame1EditBox`) by default (with automatic one-time position migration `toastBelowChatMigrated`, and automatic vertical/horizontal offset when `SocialCentralSpotterFrame` is also shown below chat).
+  - Enforced **single-card display (`MAX_VISIBLE_TOASTS = 1`)** with a Target-Radar-style pagination header (`<< < 1 2 3 4 5 > >> 1/N` + mouse wheel cycling) whenever 2 or more notifications are active, so notifications never stack vertically on screen.
+  - Set default auto-dismiss duration to **6 seconds per notification** (`toastDuration = 6`, pausing on hover, combat, or confirmation/tutorial popups and advancing through remaining notifications one by one), configurable from `3s` to `15s` in **Settings -> Notifications** alongside **`Test Toast Pagination (3)`** and **`Toast Tutorial`** buttons.
+  - Added a one-time account-wide tutorial dialog (`SocialCentralToastTutorialDialog`) on first notification appearance and synchronized all addon tutorial flags (`toastTutorialShown`, `spotterPlateTutorialShown`, `spotterRadarTutorialShown`, `msgPreviewPromptAnswered`, `themeChosen`, `shortcutPromptAnswered`) into account-wide `SocialCentralDB.accountTutorials` so tutorials never repeat across different characters of the same player.
+
+### Fixed
+- **Idempotent Frame-Level Ceiling & Minimap Notification Chat Open Layout (`UI/MainFrame.lua`, `UI/Theme.lua`, `UI/SocialPanels.lua`, `UI/LFGFrameTab.lua`, `scripts/verify-compliance.py`):**
+  - Eliminated a runaway frame-level feedback loop where `MaxHierarchyFrameLevel(frame.blizzChrome, 3)` included `blizzChrome.CloseButton` and `RaiseWindowCloseButton` added `+50` on every `ApplyTheme()` / `OnShow` / deferred pass, eventually clamping `interactiveBase` and all standalone window sections (`header`, `tabBar`, `content`) at WoW's `10000` ceiling and causing opaque card/button backdrops to draw over tab labels (`Grupo`, `Buffs`), header buttons (`Configurações`, `[?]`), conversation rows, action buttons, and chat messages.
+  - Eliminated the matching embedded-host frame-level feedback loop in `ScanEmbeddedHostContentMax` across `O`, `I`, `J`, `C`, and `M` by tracking elevated Blizzard chrome via a taint-free weak-key table (`elevatedHostChrome`), skipping all `embedContainers` and addon side tabs, and enforcing bounded, idempotent level ceilings.
+  - Added shared `Theme:SyncSubtreeLayers` across `Theme:PrepareTopOverlayModal`, virtual scroll list row updates (`Theme:CreateScrollList`), LFG host switching (`ShowSubPanel`), and remaining shared modals (`EnsureModal`, `OpenConfirmModal`, `OpenDeleteThreadModal`, `EnsureAltRemoveModal`), synchronized `Theme:SyncButtonLayers` after creating Blizzard button plates in `ApplyButtonColors`, and aligned `UI:ShowHub("chat")` to reset active conversation filters cleanly when jumping from Minimap notifications.
+
 ## [0.2.21] - 2026-11-19
 ### Added
 - **Chat-Colored Backgrounds, Prismatic Multi-Color Fusion Orb & Non-Overlapping Orbital Minimap Counters (`Core/Init.lua`, `Providers/Chat.lua`, `UI/Theme.lua`, `UI/Minimap.lua`, `UI/LFGFrameTab.lua`, `UI/SocialPanels.lua`, `UI/NotificationToast.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**

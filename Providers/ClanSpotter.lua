@@ -3306,8 +3306,13 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     AddPositiveCandidate(displayName, cleanGuid, nil, nil, true)
 
     local s = ns.db and ns.db.settings
-    if s and not s.spotterRadarTutorialShown then
-        s.spotterRadarTutorialShown = true
+    local radarTutShown = (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("spotterRadarTutorialShown")) or (s and s.spotterRadarTutorialShown == true)
+    if s and not radarTutShown then
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
+        else
+            s.spotterRadarTutorialShown = true
+        end
         if ns.SpotterHUD and ns.SpotterHUD.ShowRadarTutorial then
             ns.SpotterHUD:ShowRadarTutorial(true)
         end

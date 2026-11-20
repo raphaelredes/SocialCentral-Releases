@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.21"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.21" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.22"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.22" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -122,6 +122,9 @@ local DEFAULTS = {
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
         chatDirectOfficialSend = true, -- send official /w, Battle.net, and guild/group replies in 1 click from Conversations (hardware-event only)
         addonMsgToast = true,       -- show compact floating toast pill when addon messages arrive
+        toastDuration = 6,          -- seconds each notification toast stays visible before disappearing (default 6s)
+        toastTutorialShown = false, -- one-time account-wide tutorial shown when first notification toast appears
+        toastBelowChatMigrated = false, -- one-time migration placing default toast position directly below ChatFrame1
         addonMsgChatEcho = true,    -- echo clickable [SC] summary line to Blizzard chat windows for incoming addon messages
         addonMsgChatEchoSent = true, -- echo sent [SC] addon messages into Blizzard chat windows immediately
         addonChatFrames = { [1] = true }, -- [chatFrameIndex 1..10] Blizzard chat tabs showing [SC] addon chat (1 = General)
@@ -212,6 +215,7 @@ local DEFAULTS = {
         height = 520,
     },
     windowPositions = {},            -- [windowKey] = { dx, dy } center-normalized positions across all frames
+    accountTutorials = {},           -- [tutorialKey] = true account-wide one-time tutorial completion flags (never repeated on alts)
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
     itemCatalog = {},              -- [itemID] = "name\ticon\tquality\tclassID\tsubClassID" shared across all alts
@@ -444,6 +448,98 @@ local function HandleSlash(raw)
     end
 end
 
+local ACCOUNT_TUTORIAL_KEYS = {
+    "toastTutorialShown",
+    "spotterPlateTutorialShown",
+    "spotterRadarTutorialShown",
+    "msgPreviewPromptAnswered",
+    "themeChosen",
+}
+
+local function SyncAccountWideTutorialFlags()
+    if type(SocialCentralDB) ~= "table" then return end
+    if type(SocialCentralDB.accountTutorials) ~= "table" then
+        SocialCentralDB.accountTutorials = {}
+    end
+    local acctTut = SocialCentralDB.accountTutorials
+    local acctSet = ns._accountSettings or (type(SocialCentralDB.settings) == "table" and SocialCentralDB.settings) or nil
+    local charSet = (type(SocialCentralCharDB) == "table" and type(SocialCentralCharDB.settings) == "table") and SocialCentralCharDB.settings or nil
+    local liveSet = (ns.db and type(ns.db.settings) == "table") and ns.db.settings or nil
+
+    for i = 1, #ACCOUNT_TUTORIAL_KEYS do
+        local k = ACCOUNT_TUTORIAL_KEYS[i]
+        local done = (acctTut[k] == true)
+            or (acctSet and acctSet[k] == true)
+            or (charSet and charSet[k] == true)
+            or (liveSet and liveSet[k] == true)
+        if done then
+            acctTut[k] = true
+            if acctSet then acctSet[k] = true end
+            if charSet then charSet[k] = true end
+            if liveSet then liveSet[k] = true end
+        end
+    end
+
+    if type(acctTut.shortcutPromptAnswered) ~= "table" then
+        acctTut.shortcutPromptAnswered = {}
+    end
+    for _, wk in ipairs({ "O", "I", "J", "C" }) do
+        local wDone = (acctTut.shortcutPromptAnswered[wk] == true)
+            or (acctSet and type(acctSet.shortcutPromptAnswered) == "table" and acctSet.shortcutPromptAnswered[wk] == true)
+            or (charSet and type(charSet.shortcutPromptAnswered) == "table" and charSet.shortcutPromptAnswered[wk] == true)
+            or (liveSet and type(liveSet.shortcutPromptAnswered) == "table" and liveSet.shortcutPromptAnswered[wk] == true)
+        if wDone then
+            acctTut.shortcutPromptAnswered[wk] = true
+            if acctSet then
+                if type(acctSet.shortcutPromptAnswered) ~= "table" then acctSet.shortcutPromptAnswered = {} end
+                acctSet.shortcutPromptAnswered[wk] = true
+            end
+            if charSet then
+                if type(charSet.shortcutPromptAnswered) ~= "table" then charSet.shortcutPromptAnswered = {} end
+                charSet.shortcutPromptAnswered[wk] = true
+            end
+            if liveSet then
+                if type(liveSet.shortcutPromptAnswered) ~= "table" then liveSet.shortcutPromptAnswered = {} end
+                liveSet.shortcutPromptAnswered[wk] = true
+            end
+        end
+    end
+end
+
+function ns:IsAccountTutorialShown(key)
+    if not key then return false end
+    if SocialCentralDB and type(SocialCentralDB.accountTutorials) == "table" and SocialCentralDB.accountTutorials[key] == true then
+        return true
+    end
+    if ns._accountSettings and ns._accountSettings[key] == true then
+        return true
+    end
+    if ns.db and ns.db.settings and ns.db.settings[key] == true then
+        return true
+    end
+    return false
+end
+
+function ns:SetAccountTutorialShown(key, shown)
+    if not key then return end
+    local val = (shown ~= false) and true or false
+    if SocialCentralDB then
+        if type(SocialCentralDB.accountTutorials) ~= "table" then
+            SocialCentralDB.accountTutorials = {}
+        end
+        SocialCentralDB.accountTutorials[key] = val
+    end
+    if ns._accountSettings then
+        ns._accountSettings[key] = val
+    end
+    if SocialCentralCharDB and type(SocialCentralCharDB.settings) == "table" then
+        SocialCentralCharDB.settings[key] = val
+    end
+    if ns.db and ns.db.settings then
+        ns.db.settings[key] = val
+    end
+end
+
 ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
     if loaded ~= ADDON_NAME then return end
     SocialCentralDB = SocialCentralDB or {}
@@ -475,6 +571,12 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.msgPreviewDefault6Migrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.toastBelowChatMigrated ~= true then
+        if type(SocialCentralDB.windowPositions) == "table" then
+            SocialCentralDB.windowPositions["notification_toast"] = nil
+        end
+        SocialCentralDB.settings.toastBelowChatMigrated = true
+    end
     ns._accountSettings = SocialCentralDB.settings
     if SocialCentralCharDB.useCharProfile == true then
         if type(SocialCentralCharDB.settings) ~= "table" then
@@ -492,6 +594,7 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
     end
     ns.db = SocialCentralDB
     ns.charDb = SocialCentralCharDB
+    SyncAccountWideTutorialFlags()
     ns.UnregisterEvent(boot, "ADDON_LOADED")
 end)
 
@@ -557,6 +660,7 @@ function ns:ResetCurrentSettingsToDefaults()
 end
 
 ns.RegisterEvent(boot, "PLAYER_LOGOUT", function()
+    SyncAccountWideTutorialFlags()
     if ns._accountSettings and SocialCentralDB then
         SocialCentralDB.settings = ns._accountSettings
     end

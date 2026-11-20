@@ -1689,17 +1689,18 @@ local function SetNativeTabsCheckedFalse()
 end
 
 local function ElevateTree(root, targetLevel, depth)
-    if not root or (depth or 0) <= 0 then return end
+    if not root or (depth or 0) <= 0 or not IsSafeUiObj(root) then return end
+    local capped = math.min(9600, targetLevel or 1)
     if root.SetFrameLevel and root.GetFrameLevel then
         local cur = root:GetFrameLevel() or 1
-        if cur < targetLevel then
-            pcall(root.SetFrameLevel, root, targetLevel)
+        if cur < capped then
+            pcall(root.SetFrameLevel, root, capped)
         end
     end
     if root.GetChildren then
         local children = { root:GetChildren() }
         for i = 1, #children do
-            ElevateTree(children[i], targetLevel + 1, (depth or 1) - 1)
+            ElevateTree(children[i], capped + 1, (depth or 1) - 1)
         end
     end
 end
@@ -1814,10 +1815,10 @@ local function ElevateLfgParentControls()
     local panel = LFGFrameTab.subPanel
     if not parent or not panel then return end
     if not (LFGFrameTab.active and panel:GetParent() == parent) then return end
-    local minControlLevel = math.max(
+    local minControlLevel = math.min(9200, math.max(
         MaxHierarchyLevel(panel, 4) + 20,
         (panel:GetFrameLevel() or 6) + 30
-    )
+    ))
     local chromeFrames = {
         parent.NineSlice,
         parent.BorderFrame,
@@ -3195,7 +3196,10 @@ function LFGFrameTab:ShowSubPanel(customHost)
         end
         local nineLvl = (self.subPanel.NineSlice and MaxHierarchyLevel(self.subPanel.NineSlice, 3)) or subLvl
         if self.controls and self.controls.body then
-            self.controls.body:SetFrameLevel(math.max(subLvl + 4, nineLvl + 2))
+            self.controls.body:SetFrameLevel(math.min(4500, math.max(subLvl + 4, nineLvl + 2)))
+            if Theme and Theme.SyncSubtreeLayers then
+                Theme:SyncSubtreeLayers(self.controls.body, 10)
+            end
         end
         HideNativeLfgSubFrames()
         SetNativeTabsCheckedFalse()
@@ -3240,6 +3244,9 @@ function LFGFrameTab:ShowSubPanel(customHost)
         end
         if self.controls and self.controls.body then
             self.controls.body:SetFrameLevel(subLvl + 4)
+            if Theme and Theme.SyncSubtreeLayers then
+                Theme:SyncSubtreeLayers(self.controls.body, 10)
+            end
         end
         if targetHost.headerBar then
             targetHost.headerBar:SetFrameLevel(subLvl + 50)
@@ -8007,7 +8014,7 @@ function LFGFrameTab:AttachWorldMapButton()
     local pill = CreateFrame("Button", "SocialCentralWorldMapBuffsPill", container, "BackdropTemplate")
     pill:SetSize(148, 26)
     pill:SetPoint("TOPRIGHT", container, "TOPRIGHT", -10, -10)
-    pill:SetFrameLevel(math.max(MaxHierarchyLevel(container, 2) + 30, 2550))
+    pill:SetFrameLevel(math.min(9500, math.max(MaxHierarchyLevel(container, 2) + 30, 2550)))
     pill:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
     local solidBg = pill:CreateTexture(nil, "BACKGROUND", nil, -8)

@@ -301,10 +301,14 @@ end
 
 local function EnsureModal()
     if modalFrame then
-        modalFrame:SetParent(UIParent)
-        modalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
-        modalFrame:SetFrameLevel(820)
-        if modalFrame.SetToplevel then modalFrame:SetToplevel(true) end
+        if Theme and Theme.PrepareTopOverlayModal then
+            Theme:PrepareTopOverlayModal(modalFrame, 820)
+        else
+            modalFrame:SetParent(UIParent)
+            modalFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+            modalFrame:SetFrameLevel(820)
+            if modalFrame.SetToplevel then modalFrame:SetToplevel(true) end
+        end
         modalFrame:SetHeight(162)
         if modalFrame.input then
             modalFrame.input:Show()
@@ -326,15 +330,22 @@ local function EnsureModal()
         Theme:StyleButton(modalFrame.topCloseBtn, "default")
         Theme:StyleButton(modalFrame.btnSave, "primary")
         Theme:StyleButton(modalFrame.btnCancel, "default")
+        if Theme and Theme.SyncSubtreeLayers then
+            Theme:SyncSubtreeLayers(modalFrame, 8)
+        end
         return modalFrame
     end
 
     local m = CreateFrame("Frame", "SocialCentralModal", UIParent, "BackdropTemplate")
     m:SetSize(418, 162)
     m:SetPoint("CENTER")
-    m:SetFrameStrata("FULLSCREEN_DIALOG")
-    m:SetFrameLevel(820)
-    if m.SetToplevel then m:SetToplevel(true) end
+    if Theme and Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(m, 820)
+    else
+        m:SetFrameStrata("FULLSCREEN_DIALOG")
+        m:SetFrameLevel(820)
+        if m.SetToplevel then m:SetToplevel(true) end
+    end
     if m.SetClipsChildren then m:SetClipsChildren(false) end
     m:EnableMouse(true)
     Theme:MakeMovable(m, { key = "modal_generic" })
@@ -523,9 +534,13 @@ function UI:OpenConfirmModal(opts)
         UI._confirmModal = m
     end
 
-    m:SetParent(UIParent)
-    m:SetFrameStrata("FULLSCREEN_DIALOG")
-    m:SetFrameLevel(840)
+    if Theme and Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(m, 840)
+    else
+        m:SetParent(UIParent)
+        m:SetFrameStrata("FULLSCREEN_DIALOG")
+        m:SetFrameLevel(840)
+    end
     Theme:ApplyBackdrop(m, "window")
     Theme:StyleButton(m.topCloseBtn, "default")
     Theme:StyleButton(m.btnCancel, "default")
@@ -537,6 +552,9 @@ function UI:OpenConfirmModal(opts)
     Theme:SetButtonText(m.btnConfirm, confirmLabel)
     Theme:AutoFitButton(m.btnConfirm, 96, 20)
     Theme:StyleButton(m.btnConfirm, variant)
+    if Theme and Theme.SyncSubtreeLayers then
+        Theme:SyncSubtreeLayers(m, 8)
+    end
 
     m.title:SetText(opts.title or L["Confirm Action"])
     m.desc:SetText(opts.message or "")
@@ -4941,7 +4959,7 @@ local function SyncSubtreeChildren(visitFn, baseLvl, depth, ...)
             and not child._scIsInputBackdrop
         then
             if child.SetFrameLevel then
-                local desired = baseLvl + (child._scLevelOffset or 1)
+                local desired = math.min(9980, baseLvl + (child._scLevelOffset or 1))
                 if (child:GetFrameLevel() or 0) ~= desired then
                     child:SetFrameLevel(desired)
                 end
@@ -4961,17 +4979,17 @@ local function SyncSubtreeButtonLayers(root, depth)
     then
         return
     end
-    local baseLvl = math.max(1, (root.GetFrameLevel and root:GetFrameLevel()) or 1)
+    local baseLvl = math.max(1, math.min(9980, (root.GetFrameLevel and root:GetFrameLevel()) or 1))
     if (root._textLayer or root._blizzTabFrame or root._blizzBtn) and Theme and Theme.SyncButtonLayers then
         Theme:SyncButtonLayers(root)
     end
     if root.clearBtn and root.clearBtn.SetFrameLevel then
         root.clearBtn._scLevelOffset = 4
-        root.clearBtn:SetFrameLevel(baseLvl + 4)
+        root.clearBtn:SetFrameLevel(math.min(9985, baseLvl + 4))
     end
     if root._scClearBtn and root._scClearBtn.SetFrameLevel then
         root._scClearBtn._scLevelOffset = 4
-        root._scClearBtn:SetFrameLevel(baseLvl + 4)
+        root._scClearBtn:SetFrameLevel(math.min(9985, baseLvl + 4))
     end
     if root._scBg and root._scBg.SetFrameLevel then
         root._scBg:SetFrameLevel(math.max(0, baseLvl - 1))
@@ -6452,9 +6470,9 @@ local function DisableChromeMouseRecursive(root, skipObj, depth)
     end
 end
 
-local function MaxHierarchyFrameLevel(root, depth)
+local function MaxHierarchyFrameLevel(root, depth, skipA, skipB)
     local maxLevel = 0
-    if not root or (depth or 0) <= 0 then
+    if not root or (depth or 0) <= 0 or root == skipA or root == skipB then
         return maxLevel
     end
     if root.GetFrameLevel then
@@ -6466,7 +6484,7 @@ local function MaxHierarchyFrameLevel(root, depth)
     if root.GetChildren then
         local children = { root:GetChildren() }
         for i = 1, #children do
-            local childMax = MaxHierarchyFrameLevel(children[i], (depth or 1) - 1)
+            local childMax = MaxHierarchyFrameLevel(children[i], (depth or 1) - 1, skipA, skipB)
             if childMax > maxLevel then
                 maxLevel = childMax
             end
@@ -6484,15 +6502,20 @@ local function RaiseWindowCloseButton(btn)
         btn:SetFrameStrata(strata)
     end
     -- ButtonFrameTemplate.NineSlice renders at hardcoded XML frameLevel 500+,
-    -- so elevate the active close button strictly above every chrome descendant.
+    -- so elevate the active close button strictly above every chrome descendant
+    -- WITHOUT feeding the close button's own level back into MaxHierarchyFrameLevel.
+    local baseLvl = math.max(1, math.min(4500, frame:GetFrameLevel() or 1))
+    local blizzCloseRef = frame.blizzChrome and frame.blizzChrome.CloseButton or nil
+    local chromeMax = frame.blizzChrome and MaxHierarchyFrameLevel(frame.blizzChrome, 3, btn, blizzCloseRef) or baseLvl
+    chromeMax = math.min(baseLvl + 40, chromeMax)
     local topLevel = math.max(
-        (frame:GetFrameLevel() or 1) + 60,
-        frame.header and (frame.header:GetFrameLevel() or 0) or 0,
-        frame.blizzTitleDrag and (frame.blizzTitleDrag:GetFrameLevel() or 0) or 0,
-        frame.grip and (frame.grip:GetFrameLevel() or 0) + 10 or 0,
-        MaxHierarchyFrameLevel(frame.blizzChrome, 3) + 50
+        baseLvl + 60,
+        frame.header and ((frame.header:GetFrameLevel() or 0) + 12) or 0,
+        frame.blizzTitleDrag and ((frame.blizzTitleDrag:GetFrameLevel() or 0) + 4) or 0,
+        frame.grip and ((frame.grip:GetFrameLevel() or 0) + 10) or 0,
+        chromeMax + 40
     )
-    btn:SetFrameLevel(topLevel)
+    btn:SetFrameLevel(math.min(9600, topLevel))
 end
 
 local function SetupFallbackCloseButton(btn)
@@ -6813,6 +6836,9 @@ local function BuildSingleEmbedContainer(tabKey)
             panel:ClearAllPoints()
             panel:SetAllPoints(frame.content)
             panel:SetShown(standaloneActive and true or false)
+            if standaloneActive then
+                SyncSubtreeButtonLayers(panel, 12)
+            end
         end
         if wasEmbedded then
             if prevHost and UI.RestoreEmbeddedHostUI then
@@ -6868,7 +6894,7 @@ local function ApplyTheme()
     local isEmbedded = embeddedState.active == true
     local p = Theme:GetPalette()
     local isBlizz = Theme:IsBlizzard(p)
-    local baseLevel = frame:GetFrameLevel() or 1
+    local baseLevel = math.max(1, math.min(4500, frame:GetFrameLevel() or 1))
     local fw = frame:GetWidth() or 760
     local isCompact = isEmbedded and fw < 540
 
@@ -6919,7 +6945,8 @@ local function ApplyTheme()
         end
     end
 
-    local chromeTop = showBlizzChrome and MaxHierarchyFrameLevel(frame.blizzChrome, 3) or baseLevel
+    local blizzCloseRef = frame.blizzChrome and frame.blizzChrome.CloseButton or nil
+    local chromeTop = showBlizzChrome and math.min(baseLevel + 40, MaxHierarchyFrameLevel(frame.blizzChrome, 3, blizzCloseRef, frame.closeBtn)) or baseLevel
     local interactiveBase = (not isEmbedded) and math.max(baseLevel, chromeTop) or baseLevel
 
     local singleEmbedded = IsSingleTabEmbedded()
@@ -9123,17 +9150,22 @@ local function IsSafeHostObj(obj)
     return true
 end
 
+local elevatedHostChrome = setmetatable({}, { __mode = "k" })
+
 local function SetMinFrameLevel(obj, minLevel)
     if obj and IsSafeHostObj(obj) and obj.GetFrameLevel and obj.SetFrameLevel then
+        local target = math.min(9600, minLevel or 1)
+        elevatedHostChrome[obj] = true
         local cur = obj:GetFrameLevel() or 0
-        if cur < minLevel then
-            pcall(obj.SetFrameLevel, obj, minLevel)
+        if cur < target then
+            pcall(obj.SetFrameLevel, obj, target)
         end
     end
 end
 
 local function ScanEmbeddedHostContentMax(hostFrame)
     local contentMax = (hostFrame.GetFrameLevel and hostFrame:GetFrameLevel()) or 1
+    local hostName = hostFrame.GetName and hostFrame:GetName() or nil
     local skip = {
         [hostFrame.NineSlice or false] = true,
         [hostFrame.BorderFrame or false] = true,
@@ -9142,9 +9174,21 @@ local function ScanEmbeddedHostContentMax(hostFrame)
         [hostFrame.TitleContainer or false] = true,
         [hostFrame.CloseButton or false] = true,
         [hostFrame.MaximizeMinimizeFrame or false] = true,
+        [hostFrame.ModeTabs or false] = true,
+        [(hostName and _G[hostName .. "CloseButton"]) or false] = true,
+        [(hostName and _G[hostName .. "PortraitFrame"]) or false] = true,
         [frame or false] = true,
         [_G.SocialCentralLFGSubPanel or false] = true,
+        [_G.SocialCentralWorldMapBuffsPill or false] = true,
+        [_G.SocialCentralLFGNativeBridgeBar or false] = true,
     }
+    if ns.LFGFrameTab then
+        for _, scTab in ipairs({ ns.LFGFrameTab.sideTab, ns.LFGFrameTab.socialTab, ns.LFGFrameTab.guildTab, ns.LFGFrameTab.charTab, ns.LFGFrameTab.mapSideTab }) do
+            if scTab then
+                skip[scTab] = true
+            end
+        end
+    end
     local hRight = hostFrame.GetRight and hostFrame:GetRight() or nil
     local hLeft = hostFrame.GetLeft and hostFrame:GetLeft() or nil
     local hTop = hostFrame.GetTop and hostFrame:GetTop() or nil
@@ -9153,7 +9197,12 @@ local function ScanEmbeddedHostContentMax(hostFrame)
             return
         end
         for _, child in ipairs({ node:GetChildren() }) do
-            if IsSafeHostObj(child) and not skip[child] and (not child.IsShown or child:IsShown()) then
+            if IsSafeHostObj(child)
+                and not skip[child]
+                and not elevatedHostChrome[child]
+                and not IsAnyEmbedContainer(child)
+                and (not child.IsShown or child:IsShown())
+            then
                 local cLeft = child.GetLeft and child:GetLeft()
                 local cTop = child.GetTop and child:GetTop()
                 local cW = (child.GetWidth and child:GetWidth()) or 0
@@ -9786,7 +9835,8 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
         local baseHostLvl = (hostFrame.GetFrameLevel and hostFrame:GetFrameLevel()) or 1
         local lvlOff = (singleKey == "buffs") and 60 or 30
         local maxOff = (singleKey == "buffs") and 25 or 12
-        local embedLvl = math.max(spec.minEmbedLevel or 520, baseHostLvl + lvlOff, hostMax + maxOff)
+        local maxCap = (singleKey == "buffs") and 4500 or 2500
+        local embedLvl = math.min(maxCap, math.max(spec.minEmbedLevel or 520, baseHostLvl + lvlOff, hostMax + maxOff))
         container:SetFrameLevel(embedLvl)
         ElevateEmbeddedHostChrome(hostFrame, embedLvl + 45)
 
@@ -9904,9 +9954,9 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
 
         local baseHostLvl = (hostFrame.GetFrameLevel and hostFrame:GetFrameLevel()) or 1
         if hostFrame == _G.WorldMapFrame then
-            embedLvl = math.max(2600, baseHostLvl + 60, hostMax + 25)
+            embedLvl = math.min(4500, math.max(2600, baseHostLvl + 60, hostMax + 25))
         else
-            embedLvl = math.max(520, baseHostLvl + 30, hostMax + 12)
+            embedLvl = math.min(2500, math.max(520, baseHostLvl + 30, hostMax + 12))
         end
         frame:SetFrameLevel(embedLvl)
         ElevateEmbeddedHostChrome(hostFrame, embedLvl + 45)
@@ -9956,6 +10006,7 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
         if chatPanel.Refresh then
             chatPanel:Refresh(true)
         end
+        UI:SyncFrameSectionLayers()
     end
     MaybePromptThemePicker()
     if hostFrame and embedLvl then
@@ -10024,6 +10075,15 @@ function UI:ShowHub(defaultTab)
         ApplyTheme()
         UI:Refresh(true)
     else
+        UI:SyncFrameSectionLayers()
+    end
+    if defaultTab == "chat" and activeTab == "chat" and chatPanel then
+        if chatPanel._filter ~= "all" then
+            chatPanel._filter = "all"
+            if chatPanel.Refresh then
+                chatPanel:Refresh(true)
+            end
+        end
         UI:SyncFrameSectionLayers()
     end
     MaybePromptThemePicker()
@@ -10122,6 +10182,7 @@ function UI:OpenTab(tabId)
         if chatPanel.Refresh then
             chatPanel:Refresh(true)
         end
+        UI:SyncFrameSectionLayers()
     end
     MaybePromptThemePicker()
     if ns.LFGFrameTab and ns.LFGFrameTab.SyncAllEmbeddedTabStates then

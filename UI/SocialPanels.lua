@@ -2654,10 +2654,7 @@ function SocialPanels:CreateChatPanel(parent)
             local m = CreateFrame("Frame", "SocialCentralDeleteThreadModal", UIParent, "BackdropTemplate")
             m:SetSize(380, 176)
             m:SetPoint("CENTER")
-            m:SetFrameStrata("FULLSCREEN_DIALOG")
-            m:SetFrameLevel(840)
-            if m.SetToplevel then m:SetToplevel(true) end
-            m:EnableMouse(true)
+            Theme:PrepareTopOverlayModal(m, 850)
             Theme:MakeMovable(m, { key = "modal_delete_thread" })
             table.insert(UISpecialFrames, "SocialCentralDeleteThreadModal")
 
@@ -2674,6 +2671,7 @@ function SocialPanels:CreateChatPanel(parent)
                 if m.input then m.input:ClearFocus() end
                 m:Hide()
             end)
+            m.topCloseBtn = topCloseBtn
 
             local desc = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             desc:SetPoint("TOPLEFT", 16, -42)
@@ -2698,6 +2696,7 @@ function SocialPanels:CreateChatPanel(parent)
                 input:ClearFocus()
                 m:Hide()
             end)
+            m.btnCancel = btnCancel
 
             local function IsWordMatched()
                 local raw = (input:GetText() or ""):gsub("^%s*(.-)%s*$", "%1"):upper()
@@ -2729,7 +2728,11 @@ function SocialPanels:CreateChatPanel(parent)
         end
 
         deleteThreadModal._threadKey = threadKey
+        Theme:PrepareTopOverlayModal(deleteThreadModal, 850)
         Theme:ApplyBackdrop(deleteThreadModal, "window")
+        if deleteThreadModal.topCloseBtn then Theme:StyleButton(deleteThreadModal.topCloseBtn, "default") end
+        if deleteThreadModal.btnConfirm then Theme:StyleButton(deleteThreadModal.btnConfirm, "danger") end
+        if deleteThreadModal.btnCancel then Theme:StyleButton(deleteThreadModal.btnCancel, "default") end
         deleteThreadModal.desc:SetText(string.format(
             L["Are you sure you want to permanently delete the conversation with \"%s\"?\n\nType %s to confirm:"],
             threadTitle or threadKey,
@@ -2737,6 +2740,7 @@ function SocialPanels:CreateChatPanel(parent)
         ))
         deleteThreadModal.input:SetText("")
         deleteThreadModal.btnConfirm:SetEnabled(false)
+        Theme:SyncSubtreeLayers(deleteThreadModal, 8)
         deleteThreadModal:Show()
         if deleteThreadModal.Raise then deleteThreadModal:Raise() end
         deleteThreadModal.input:SetFocus()
@@ -5072,24 +5076,19 @@ local function CurrentAltKey()
 end
 local function EnsureAltRemoveModal()
     if altRemoveModal then
-        altRemoveModal:SetParent(UIParent)
-        altRemoveModal:SetFrameStrata("FULLSCREEN_DIALOG")
-        altRemoveModal:SetFrameLevel(840)
-        if altRemoveModal.SetToplevel then altRemoveModal:SetToplevel(true) end
+        Theme:PrepareTopOverlayModal(altRemoveModal, 850)
         Theme:ApplyBackdrop(altRemoveModal, "window")
         Theme:StyleButton(altRemoveModal.topCloseBtn, "default")
         Theme:StyleButton(altRemoveModal.btnConfirm, "danger")
         Theme:StyleButton(altRemoveModal.btnCancel, "default")
+        Theme:SyncSubtreeLayers(altRemoveModal, 8)
         return altRemoveModal
     end
 
     local m = CreateFrame("Frame", "SocialCentralRemoveAltModal", UIParent, "BackdropTemplate")
     m:SetSize(400, 168)
     m:SetPoint("CENTER")
-    m:SetFrameStrata("FULLSCREEN_DIALOG")
-    m:SetFrameLevel(840)
-    if m.SetToplevel then m:SetToplevel(true) end
-    m:EnableMouse(true)
+    Theme:PrepareTopOverlayModal(m, 850)
     Theme:MakeMovable(m, { key = "modal_alt_remove" })
     table.insert(UISpecialFrames, "SocialCentralRemoveAltModal")
     m:Hide()
@@ -5139,6 +5138,7 @@ local function EnsureAltRemoveModal()
     end)
 
     Theme:ApplyBackdrop(m, "window")
+    Theme:SyncSubtreeLayers(m, 8)
     altRemoveModal = m
     return m
 end

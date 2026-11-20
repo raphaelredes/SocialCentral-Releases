@@ -1876,7 +1876,9 @@ function SpotterHUD:CreateTutorialDialog()
     local closeBtn = Theme:CreateButton(dlg, 20, 20, "X", "default")
     closeBtn:SetPoint("TOPRIGHT", -10, -10)
     closeBtn:SetScript("OnClick", function()
-        if ns.db and ns.db.settings then
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
+        elseif ns.db and ns.db.settings then
             ns.db.settings.spotterPlateTutorialShown = true
         end
         dlg:Hide()
@@ -1925,7 +1927,9 @@ function SpotterHUD:CreateTutorialDialog()
     okBtn:SetPoint("BOTTOM", 0, 12)
     Theme:AutoFitButton(okBtn, 190, 24, 340)
     okBtn:SetScript("OnClick", function()
-        if ns.db and ns.db.settings then
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
+        elseif ns.db and ns.db.settings then
             ns.db.settings.spotterPlateTutorialShown = true
         end
         dlg:Hide()
@@ -1933,7 +1937,9 @@ function SpotterHUD:CreateTutorialDialog()
     dlg.okBtn = okBtn
 
     dlg:SetScript("OnHide", function()
-        if ns.db and ns.db.settings then
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
+        elseif ns.db and ns.db.settings then
             ns.db.settings.spotterPlateTutorialShown = true
         end
     end)
@@ -1952,7 +1958,7 @@ function SpotterHUD:ShowNameplateTutorial(forceShow)
         if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
             return
         end
-        if s and s.spotterPlateTutorialShown == true then
+        if (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("spotterPlateTutorialShown")) or (s and s.spotterPlateTutorialShown == true) then
             return
         end
         if s and s.spotterNameplateArrow == false and s.spotterNameplateBadges == false then
@@ -2000,7 +2006,9 @@ function SpotterHUD:CreateRadarTutorialDialog()
     local closeBtn = Theme:CreateButton(dlg, 20, 20, "X", "default")
     closeBtn:SetPoint("TOPRIGHT", -10, -10)
     closeBtn:SetScript("OnClick", function()
-        if ns.db and ns.db.settings then
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
+        elseif ns.db and ns.db.settings then
             ns.db.settings.spotterRadarTutorialShown = true
         end
         dlg:Hide()
@@ -2049,7 +2057,9 @@ function SpotterHUD:CreateRadarTutorialDialog()
     okBtn:SetPoint("BOTTOM", 0, 12)
     Theme:AutoFitButton(okBtn, 190, 24, 340)
     okBtn:SetScript("OnClick", function()
-        if ns.db and ns.db.settings then
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
+        elseif ns.db and ns.db.settings then
             ns.db.settings.spotterRadarTutorialShown = true
         end
         dlg:Hide()
@@ -2057,7 +2067,9 @@ function SpotterHUD:CreateRadarTutorialDialog()
     dlg.okBtn = okBtn
 
     dlg:SetScript("OnHide", function()
-        if ns.db and ns.db.settings then
+        if ns.SetAccountTutorialShown then
+            ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
+        elseif ns.db and ns.db.settings then
             ns.db.settings.spotterRadarTutorialShown = true
         end
     end)
@@ -2076,7 +2088,7 @@ function SpotterHUD:ShowRadarTutorial(forceShow)
         if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
             return
         end
-        if s and s.spotterRadarTutorialShown == true then
+        if (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("spotterRadarTutorialShown")) or (s and s.spotterRadarTutorialShown == true) then
             return
         end
     end
