@@ -40,6 +40,7 @@ local LFGFrameTab = {
     selectedKey = nil,
     selectedItem = nil,
     query = "",
+    collapsedBuckets = {},
     list = nil,
     activityList = nil,
     controls = {},
@@ -388,12 +389,25 @@ local function CheckActivityLevelSuitability(item)
     return true, false
 end
 
+local browseActivityOptionsCache = {}
+local browseActivityOptionsCacheLvl = nil
+local browseActivityOptionsBuiltAt = 0
+
 local function GetBrowseActivityOptions(catId)
     if not catId or catId == "ALL" then
         return {}
     end
     local myLvl = (ns.Safe and ns.Safe.Number(UnitLevel and UnitLevel("player"))) or 60
     if myLvl <= 0 then myLvl = 60 end
+    local nowClock = GetTime and GetTime() or 0
+    if browseActivityOptionsCacheLvl ~= myLvl then
+        wipe(browseActivityOptionsCache)
+        browseActivityOptionsCacheLvl = myLvl
+    end
+    local cached = browseActivityOptionsCache[catId]
+    if cached and #cached > 0 and (nowClock - (cached._builtAt or 0)) < 120 then
+        return cached
+    end
 
     local merged = {}
     local seenName = {}
@@ -471,6 +485,15 @@ local function GetBrowseActivityOptions(catId)
         end
         return (a.label or "") < (b.label or "")
     end)
+    local suitableCount = 0
+    for i = 1, #merged do
+        if merged[i].hasKnownRange and merged[i].isSuitable then
+            suitableCount = suitableCount + 1
+        end
+    end
+    merged._suitableCount = suitableCount
+    merged._builtAt = nowClock
+    browseActivityOptionsCache[catId] = merged
     return merged
 end
 
@@ -498,13 +521,29 @@ local ACTIVITY_ALIAS_RULES = {
     { keys = { "scholomance" }, aliases = { "scholo" } },
 }
 
+local foldLfgTextCache = {}
+local foldLfgTextCount = 0
+
 local function FoldLfgLookupText(s)
     if type(s) ~= "string" then return "" end
-    return s:lower()
+    local cached = foldLfgTextCache[s]
+    if cached ~= nil then
+        return cached
+    end
+    local folded = s:lower()
         :gsub("á", "a"):gsub("à", "a"):gsub("ã", "a"):gsub("â", "a")
         :gsub("é", "e"):gsub("ê", "e"):gsub("í", "i")
         :gsub("ó", "o"):gsub("ô", "o"):gsub("õ", "o")
         :gsub("ú", "u"):gsub("ç", "c"):gsub("ñ", "n")
+    if foldLfgTextCount >= 300 then
+        wipe(foldLfgTextCache)
+        foldLfgTextCount = 0
+    end
+    if #s <= 140 then
+        foldLfgTextCache[s] = folded
+        foldLfgTextCount = foldLfgTextCount + 1
+    end
+    return folded
 end
 
 local function MatchesBrowseActivityFilter(item)
@@ -559,6 +598,230 @@ local function MatchesBrowseActivityFilter(item)
         end
     end
     return false
+end
+
+local CATEGORY_SORT_ORDER = {
+    DUNGEONS = 1,
+    RAIDS = 2,
+    QUESTS = 3,
+    PVP = 4,
+    CUSTOM = 5,
+}
+
+local CANONICAL_SEARCH_ORDER = { "DUNGEONS", "RAIDS", "PVP", "QUESTS", "CUSTOM" }
+
+local function ResolveCanonicalActivityBucket(item)
+    if not item then
+        return "misc:other", L["Custom"], 999, 999, 6
+    end
+    if item._canonicalBucketKey and item._canonicalActivityLabel then
+        return item._canonicalBucketKey, item._canonicalActivityLabel, item._canonicalMinLvl or 999, item._canonicalMaxLvl or 999, item._canonicalCatOrder or 6
+    end
+
+    local prefCat = item.categoryKind
+    local catsToCheck
+    if prefCat and CATEGORY_SORT_ORDER[prefCat] then
+        catsToCheck = { prefCat }
+        for i = 1, #CANONICAL_SEARCH_ORDER do
+            if CANONICAL_SEARCH_ORDER[i] ~= prefCat then
+                catsToCheck[#catsToCheck + 1] = CANONICAL_SEARCH_ORDER[i]
+            end
+        end
+    else
+        catsToCheck = CANONICAL_SEARCH_ORDER
+    end
+
+    local matchedKey, matchedLabel, minL, maxL, catOrd
+
+    if type(item.activityIds) == "table" and #item.activityIds > 0 then
+        local firstAid = item.activityIds[1]
+        for ci = 1, #catsToCheck do
+            local catId = catsToCheck[ci]
+            local opts = GetBrowseActivityOptions(catId)
+            for oi = 1, #opts do
+                local opt = opts[oi]
+                if opt.officialId == firstAid then
+                    matchedKey = opt.key
+                    matchedLabel = opt.label
+                    minL = opt.minLvl
+                    maxL = opt.maxLvl
+                    catOrd = CATEGORY_SORT_ORDER[catId] or 6
+                    break
+                end
+            end
+            if matchedKey then break end
+        end
+    end
+
+    if not matchedKey then
+        local hay = FoldLfgLookupText((item.activity or "") .. " " .. (item.activityAllNames or "") .. " " .. (item.note or ""))
+        if hay ~= "" then
+            for ri = 1, #ACTIVITY_ALIAS_RULES do
+                local rule = ACTIVITY_ALIAS_RULES[ri]
+                local hitAlias = false
+                for ai = 1, #rule.aliases do
+                    if hay:find("%f[%w]" .. rule.aliases[ai] .. "%f[%W]") then
+                        hitAlias = true
+                        break
+                    end
+                end
+                if hitAlias then
+                    for ci = 1, #catsToCheck do
+                        local catId = catsToCheck[ci]
+                        local opts = GetBrowseActivityOptions(catId)
+                        for oi = 1, #opts do
+                            local opt = opts[oi]
+                            local foldedOpt = FoldLfgLookupText((opt.labelLower or "") .. " " .. (opt.shortLower or ""))
+                            for ki = 1, #rule.keys do
+                                if foldedOpt:find(rule.keys[ki], 1, true) then
+                                    matchedKey = opt.key
+                                    matchedLabel = opt.label
+                                    minL = opt.minLvl
+                                    maxL = opt.maxLvl
+                                    catOrd = CATEGORY_SORT_ORDER[catId] or 6
+                                    break
+                                end
+                            end
+                            if matchedKey then break end
+                        end
+                        if matchedKey then break end
+                    end
+                end
+                if matchedKey then break end
+            end
+        end
+
+        if not matchedKey and hay ~= "" then
+            for ci = 1, #catsToCheck do
+                local catId = catsToCheck[ci]
+                local opts = GetBrowseActivityOptions(catId)
+                for oi = 1, #opts do
+                    local opt = opts[oi]
+                    local lblF = FoldLfgLookupText(opt.labelLower or "")
+                    local shortF = FoldLfgLookupText(opt.shortLower or "")
+                    if (#lblF >= 4 and hay:find(lblF, 1, true)) or (#shortF >= 4 and hay:find(shortF, 1, true)) then
+                        matchedKey = opt.key
+                        matchedLabel = opt.label
+                        minL = opt.minLvl
+                        maxL = opt.maxLvl
+                        catOrd = CATEGORY_SORT_ORDER[catId] or 6
+                        break
+                    end
+                end
+                if matchedKey then break end
+            end
+        end
+    end
+
+    if not matchedKey then
+        local rawAct = (type(item.activity) == "string" and item.activity ~= "") and item.activity or GetCategoryLabel(prefCat or "CUSTOM")
+        local cleanFallback = rawAct:gsub("^%[[^%]]+%]%s*", "")
+        if cleanFallback == "" then cleanFallback = rawAct end
+        if #cleanFallback > 42 then cleanFallback = cleanFallback:sub(1, 39) .. "..." end
+        local foldedFb = FoldLfgLookupText(cleanFallback)
+        if item.sourceType == "PUBLIC_CHAT" then
+            matchedKey = "cat:" .. tostring(prefCat or "CHAT") .. ":other"
+            matchedLabel = L["Public LFG & Zone Chat"]
+        else
+            matchedKey = "misc:" .. (foldedFb ~= "" and foldedFb or tostring(prefCat or "custom"))
+            matchedLabel = cleanFallback
+        end
+        minL = item.minActLvl or item.level or 999
+        maxL = item.maxActLvl or item.level or 999
+        catOrd = CATEGORY_SORT_ORDER[prefCat] or 6
+    end
+
+    if minL and minL > 0 and minL < 900 and (not item.minActLvl or item.minActLvl <= 0) then
+        item.minActLvl = minL
+    end
+    if maxL and maxL > 0 and maxL < 900 and (not item.maxActLvl or item.maxActLvl <= 0) then
+        item.maxActLvl = maxL
+    end
+    item._canonicalBucketKey = matchedKey
+    item._canonicalActivityLabel = matchedLabel
+    item._canonicalMinLvl = minL or 999
+    item._canonicalMaxLvl = maxL or 999
+    item._canonicalCatOrder = catOrd or 6
+    return matchedKey, matchedLabel, item._canonicalMinLvl, item._canonicalMaxLvl, item._canonicalCatOrder
+end
+
+function LFGFrameTab:ResolveItemCanonicalBucket(item)
+    if not item then return nil, nil end
+    return ResolveCanonicalActivityBucket(item)
+end
+
+function LFGFrameTab:GetWatchedActivitiesCount()
+    local w = ns.db and ns.db.settings and ns.db.settings.lfgWatchedActivities
+    if type(w) ~= "table" then return 0 end
+    local cnt = 0
+    for _, v in pairs(w) do
+        if v then cnt = cnt + 1 end
+    end
+    return cnt
+end
+
+function LFGFrameTab:IsActivityWatched(bucketKey, fallbackLabel)
+    local w = ns.db and ns.db.settings and ns.db.settings.lfgWatchedActivities
+    if type(w) ~= "table" then return false end
+    if bucketKey and w[bucketKey] then
+        return true
+    end
+    if type(fallbackLabel) == "string" and fallbackLabel ~= "" then
+        local folded = FoldLfgLookupText(fallbackLabel)
+        for _, v in pairs(w) do
+            if type(v) == "string" and FoldLfgLookupText(v) == folded then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function LFGFrameTab:ToggleActivityWatched(bucketKey, label)
+    local key = bucketKey or (type(label) == "string" and label ~= "" and ("lbl:" .. FoldLfgLookupText(label)) or nil)
+    if not key or key == "" then return false end
+    local s = ns.db and ns.db.settings
+    if not s then return false end
+    if type(s.lfgWatchedActivities) ~= "table" then
+        s.lfgWatchedActivities = {}
+    end
+    local disp = (type(label) == "string" and label ~= "") and label or key
+    if s.lfgWatchedActivities[key] then
+        s.lfgWatchedActivities[key] = nil
+        ns:Print("%s", string.format(L["LFG Watcher stopped for %s."], disp))
+        self:RefreshData()
+        return false
+    end
+    s.lfgWatchedActivities[key] = disp
+    s.lfgWatchersEnabled = true
+    ns:Print("%s", string.format(L["LFG Watcher active in Official Chat for %s."], disp))
+    self:RefreshData()
+    return true
+end
+
+function LFGFrameTab:ConfirmClearWatchedActivities()
+    if self:GetWatchedActivitiesCount() == 0 then
+        return
+    end
+    local function doClear()
+        local s = ns.db and ns.db.settings
+        if s and type(s.lfgWatchedActivities) == "table" then
+            wipe(s.lfgWatchedActivities)
+        end
+        LFGFrameTab:RefreshData()
+        ns:Print("%s", L["Cleared all watched LFG dungeons and raids."])
+    end
+    if ns.UI and ns.UI.OpenConfirmModal then
+        ns.UI:OpenConfirmModal({
+            title = L["Clear All Watchers"],
+            message = L["Remove all watched dungeons and raids from your Official Chat LFG alerts?"],
+            confirmText = L["Clear"],
+            confirmVariant = "danger",
+            onConfirm = doClear,
+        })
+    else
+        doClear()
+    end
 end
 
 function LFGFrameTab:ApplyIdealActivitiesForCategory(catId, clearIfEmpty)
@@ -816,12 +1079,7 @@ function LFGFrameTab:GetBrowseActivityDropdownLabel()
         return names[1]
     end
     local opts = GetBrowseActivityOptions(self.categoryFilter)
-    local suitableCnt = 0
-    for i = 1, #opts do
-        if opts[i].hasKnownRange and opts[i].isSuitable then
-            suitableCnt = suitableCnt + 1
-        end
-    end
+    local suitableCnt = opts and opts._suitableCount or 0
     if self.suitableLevelOnly and suitableCnt > 0 and #names == suitableCnt then
         return L["Ideal (%d)"]:format(#names)
     end
@@ -868,6 +1126,9 @@ local function GetNativeLfgSubFrames()
 end
 
 local function HideNativeLfgSubFrames()
+    if _G.LFGParentFrame and ns.UI and ns.UI.HideEmbeddedHostSubframes then
+        ns.UI:HideEmbeddedHostSubframes(_G.LFGParentFrame)
+    end
     for _, sub in ipairs(GetNativeLfgSubFrames()) do
         if sub and sub.Hide then
             local canTouch = true
@@ -1040,13 +1301,20 @@ local function CreateRightSideTab(parent, name, lastNative, tooltipTitle, toolti
     local w, h = 55, 60
     if lastNative and lastNative.GetSize then
         local tw, th = lastNative:GetSize()
-        if tw and tw > 0 and th and th > 0 then
+        if tw and tw >= 24 and tw <= 84 and th and th >= 24 and th <= 96 then
             w, h = tw, th
         end
     end
     tab:SetSize(w, h)
+    tab:EnableMouse(true)
+    if tab.SetEnabled then
+        pcall(tab.SetEnabled, tab, true)
+    end
+    if tab.SetHitRectInsets then
+        tab:SetHitRectInsets(0, 0, 0, 0)
+    end
     local lastLvl = (lastNative and lastNative.GetFrameLevel and lastNative:GetFrameLevel()) or 20
-    tab:SetFrameLevel(math.max(60, lastLvl + 2))
+    tab:SetFrameLevel(math.min(9500, math.max(600, lastLvl + 35)))
 
     local useCommon = (w >= 44) and HasAtlas("common-sidetab")
     tab._useCommonSideTab = useCommon
@@ -1056,6 +1324,13 @@ local function CreateRightSideTab(parent, name, lastNative, tooltipTitle, toolti
         bg:SetAtlas("common-sidetab", true)
         bg:SetPoint("CENTER")
         tab.bgTex = bg
+
+        if bg.GetSize then
+            local bgW, bgH = bg:GetSize()
+            if bgW and bgW > w and bgW <= 84 then w = bgW end
+            if bgH and bgH > h and bgH <= 96 then h = bgH end
+        end
+        tab:SetSize(w, h)
 
         local icon = tab:CreateTexture(nil, "ARTWORK", nil, 1)
         icon:SetTexture(ICON_TEX)
@@ -1280,7 +1555,11 @@ local function DiscoverRightSideTabs(parentFrame, excludeTab, namedKeys)
         end
         local tLeft = tab.GetLeft and tab:GetLeft()
         local tW = (tab.GetWidth and tab:GetWidth()) or 0
-        return tLeft ~= nil and tLeft >= (pRight - 38) and tW >= 20 and tW <= 84
+        local tH = (tab.GetHeight and tab:GetHeight()) or 0
+        return tLeft ~= nil
+            and tLeft >= (pRight - 38)
+            and tW >= 20 and tW <= 84
+            and (tH == 0 or (tH >= 24 and tH <= 96))
     end
 
     local function AddFound(tab, requireRightEdge)
@@ -1365,24 +1644,196 @@ local function DiscoverRightSideTabs(parentFrame, excludeTab, namedKeys)
     end
     ScanRightEdgeChildren(parentFrame, 3)
 
-    table.sort(found, function(a, b)
+    -- Prune nested sub-controls whose parent/ancestor is already a discovered outer tab
+    -- so lastNative is always a real outer side-tab button.
+    local filtered = {}
+    for _, cand in ipairs(found) do
+        local isNestedChild = false
+        local anc = cand.GetParent and cand:GetParent() or nil
+        local hops = 0
+        while anc and anc ~= parentFrame and hops < 4 do
+            if seen[anc] then
+                isNestedChild = true
+                break
+            end
+            anc = anc.GetParent and anc:GetParent() or nil
+            hops = hops + 1
+        end
+        if not isNestedChild then
+            filtered[#filtered + 1] = cand
+        end
+    end
+
+    table.sort(filtered, function(a, b)
         return ((a.GetTop and a:GetTop()) or 0) > ((b.GetTop and b:GetTop()) or 0)
     end)
-    return found
+    return filtered
 end
 
-local function MeasureTabGap(nativeTabs, fallbackGap)
+local function MeasureTabGap(nativeTabs, fallbackGap, isCommonTab)
+    local minAllowed = isCommonTab and -16 or -36
     if #nativeTabs >= 2 then
-        local b1 = nativeTabs[1].GetBottom and nativeTabs[1]:GetBottom()
-        local t2 = nativeTabs[2].GetTop and nativeTabs[2]:GetTop()
-        if b1 and t2 then
-            local measured = t2 - b1
-            if measured <= 0 and measured >= -36 then
-                return measured
+        for i = #nativeTabs - 1, 1, -1 do
+            local b1 = nativeTabs[i].GetBottom and nativeTabs[i]:GetBottom()
+            local t2 = nativeTabs[i + 1].GetTop and nativeTabs[i + 1]:GetTop()
+            if b1 and t2 then
+                local measured = t2 - b1
+                if measured <= 2 and measured >= minAllowed then
+                    return math.min(0, measured)
+                end
             end
         end
     end
     return fallbackGap or -2
+end
+
+local SIDE_TAB_STRATA_RANK = {
+    BACKGROUND = 1,
+    LOW = 2,
+    MEDIUM = 3,
+    HIGH = 4,
+}
+
+local function ResolveSideTabStrata(parentFrame, nativeTabs)
+    local best = "MEDIUM"
+    local bestRank = 0
+    local function Consider(obj)
+        if not obj or not obj.GetFrameStrata then return end
+        local ok, s = pcall(obj.GetFrameStrata, obj)
+        if ok and type(s) == "string" then
+            local r = SIDE_TAB_STRATA_RANK[s]
+            if r and r > bestRank then
+                bestRank = r
+                best = s
+            end
+        end
+    end
+    Consider(parentFrame)
+    if type(nativeTabs) == "table" then
+        for _, nt in ipairs(nativeTabs) do
+            Consider(nt)
+        end
+    end
+    return best
+end
+
+local function IsAddonSideTabFrame(obj, excludeTab)
+    if not obj then return false end
+    if obj == excludeTab
+        or obj == LFGFrameTab.sideTab
+        or obj == LFGFrameTab.socialTab
+        or obj == LFGFrameTab.guildTab
+        or obj == LFGFrameTab.charTab
+        or obj == LFGFrameTab.mapSideTab
+    then
+        return true
+    end
+    local name = obj.GetName and obj:GetName() or ""
+    if name ~= "" and name:find("SocialCentral", 1, true) and name:find("SideTab", 1, true) then
+        return true
+    end
+    return false
+end
+
+local function ComputeSideTabTargetLevel(parentFrame, tab, nativeTabs, minBaseLevel)
+    local maxOtherLvl = (parentFrame and parentFrame.GetFrameLevel and parentFrame:GetFrameLevel()) or 1
+    local function ConsiderLevel(lvl)
+        if type(lvl) == "number" and lvl > maxOtherLvl then
+            maxOtherLvl = lvl
+        end
+    end
+    if parentFrame then
+        for _, chromePart in pairs({
+            parentFrame.NineSlice,
+            parentFrame.BorderFrame,
+            parentFrame.TitleContainer,
+            parentFrame.PortraitContainer,
+            parentFrame.PortraitOverlay,
+        }) do
+            if chromePart and IsSafeUiObj(chromePart) then
+                ConsiderLevel(MaxHierarchyLevel(chromePart, 2))
+            end
+        end
+        if type(nativeTabs) == "table" then
+            for _, nt in ipairs(nativeTabs) do
+                if nt and not IsAddonSideTabFrame(nt, tab) and IsSafeUiObj(nt) then
+                    ConsiderLevel(MaxHierarchyLevel(nt, 3))
+                end
+            end
+        end
+        local pRight = parentFrame.GetRight and parentFrame:GetRight() or nil
+        if parentFrame.GetChildren then
+            for _, child in ipairs({ parentFrame:GetChildren() }) do
+                if child and not IsAddonSideTabFrame(child, tab) and IsSafeUiObj(child) and (not child.IsShown or child:IsShown()) then
+                    local cLeft = child.GetLeft and child:GetLeft()
+                    if pRight and cLeft and cLeft >= (pRight - 42) then
+                        ConsiderLevel(MaxHierarchyLevel(child, 3))
+                    elseif child.GetFrameLevel then
+                        ConsiderLevel(child:GetFrameLevel() or 0)
+                    end
+                end
+            end
+        end
+    end
+    return math.min(9500, math.max(minBaseLevel or 600, maxOtherLvl + 35))
+end
+
+local function SyncRightSideTabHitboxAndLayer(parentFrame, tab, nativeTabs, minBaseLevel)
+    if not parentFrame or not tab then return end
+    local lastNative = type(nativeTabs) == "table" and nativeTabs[#nativeTabs] or nil
+    local w, h = tab:GetWidth() or 55, tab:GetHeight() or 60
+    if lastNative and lastNative.GetSize then
+        local tw, th = lastNative:GetSize()
+        if tw and tw >= 24 and tw <= 84 and th and th >= 24 and th <= 96 then
+            w, h = tw, th
+        end
+    end
+    if tab._useCommonSideTab and tab.bgTex and tab.bgTex.GetSize then
+        local bgW, bgH = tab.bgTex:GetSize()
+        if bgW and bgW > w and bgW <= 84 then w = bgW end
+        if bgH and bgH > h and bgH <= 96 then h = bgH end
+    end
+    if w >= 24 and h >= 24 then
+        local rw = math.floor(w + 0.5)
+        local rh = math.floor(h + 0.5)
+        if math.abs((tab:GetWidth() or 0) - rw) >= 1 or math.abs((tab:GetHeight() or 0) - rh) >= 1 then
+            tab:SetSize(rw, rh)
+        end
+    end
+    if tab.IsMouseEnabled and not tab:IsMouseEnabled() then
+        tab:EnableMouse(true)
+    elseif not tab._scMouseHitInit then
+        tab._scMouseHitInit = true
+        tab:EnableMouse(true)
+    end
+    if tab.SetEnabled and tab.IsEnabled and not tab:IsEnabled() then
+        pcall(tab.SetEnabled, tab, true)
+    end
+    if tab.SetHitRectInsets and not tab._scHitRectInit then
+        tab._scHitRectInit = true
+        tab:SetHitRectInsets(0, 0, 0, 0)
+    end
+    local desiredStrata = ResolveSideTabStrata(parentFrame, nativeTabs)
+    if tab.SetFrameStrata and tab.GetFrameStrata and tab:GetFrameStrata() ~= desiredStrata then
+        pcall(tab.SetFrameStrata, tab, desiredStrata)
+    end
+    if tab.SetFrameLevel then
+        local desiredLvl = ComputeSideTabTargetLevel(parentFrame, tab, nativeTabs, minBaseLevel)
+        if (tab:GetFrameLevel() or 0) ~= desiredLvl then
+            pcall(tab.SetFrameLevel, tab, desiredLvl)
+        end
+    end
+    if tab.scUnreadBadge then
+        if tab.scUnreadBadge.EnableMouse and (not tab.scUnreadBadge.IsMouseEnabled or tab.scUnreadBadge:IsMouseEnabled()) then
+            tab.scUnreadBadge:EnableMouse(false)
+        end
+        if tab.scUnreadBadge.SetFrameLevel then
+            local badgeLvl = math.min(9600, (tab:GetFrameLevel() or 600) + 6)
+            if (tab.scUnreadBadge:GetFrameLevel() or 0) ~= badgeLvl then
+                tab.scUnreadBadge:SetFrameLevel(badgeLvl)
+            end
+        end
+    end
 end
 
 local function DiscoverNativeSideTabs(parentFrame)
@@ -1773,7 +2224,7 @@ end
 local function SyncSubPanelTemplateChrome(panel, useLfgHost)
     if not panel then return end
     local pName = panel.GetName and panel:GetName() or nil
-    for _, dup in ipairs({
+    for _, dup in pairs({
         panel.PortraitContainer,
         panel.PortraitOverlay,
         panel.TitleContainer,
@@ -1789,7 +2240,7 @@ local function SyncSubPanelTemplateChrome(panel, useLfgHost)
         end
     end
 
-    for _, chromePart in ipairs({
+    for _, chromePart in pairs({
         panel.NineSlice,
         panel.Bg,
         panel.TopTileStreaks,
@@ -1827,7 +2278,7 @@ local function ElevateLfgParentControls()
         parent.PortraitOverlay,
         _G.LFGParentFramePortraitFrame,
     }
-    for _, f in ipairs(chromeFrames) do
+    for _, f in pairs(chromeFrames) do
         if f then
             local targetL = (f == parent.NineSlice or f == parent.BorderFrame) and (minControlLevel + 2) or (minControlLevel + 8)
             ElevateTree(f, targetL, 4)
@@ -1846,7 +2297,10 @@ local function ElevateLfgParentControls()
         ElevateTree(tab, minControlLevel + 10, 2)
     end
     if LFGFrameTab.sideTab then
-        ElevateTree(LFGFrameTab.sideTab, minControlLevel + 10, 2)
+        ElevateTree(LFGFrameTab.sideTab, minControlLevel + 35, 2)
+        if LFGFrameTab.sideTab.SetHitRectInsets then
+            LFGFrameTab.sideTab:SetHitRectInsets(0, 0, 0, 0)
+        end
     end
 end
 
@@ -1882,14 +2336,21 @@ local function ApplyTexSpec(tex, spec, fallbackAtlas, fallbackTex, l, r, t, b)
     return false
 end
 
+local lfgLastArtHarvestAt = 0
+
 local function HarvestLfgListingArt(forceRefresh)
     if lfgArtCache and next(lfgArtCache.banners) ~= nil then
         if not forceRefresh or next(lfgArtCache.roles) ~= nil then
             return lfgArtCache
         end
     end
+    local nowClock = GetTime and GetTime() or 0
+    if lfgArtCache and next(lfgArtCache.roles) ~= nil and lfgLastArtHarvestAt > 0 and (nowClock - lfgLastArtHarvestAt) < 15.0 then
+        return lfgArtCache
+    end
+    lfgLastArtHarvestAt = nowClock
     local cache = lfgArtCache or { roles = {}, banners = {} }
-    if forceRefresh then
+    if forceRefresh and next(cache.banners) == nil then
         cache.banners = {}
     end
     lfgArtCache = cache
@@ -1971,7 +2432,7 @@ local function HarvestLfgListingArt(forceRefresh)
                             end
                         end
                     end
-                    for _, iconField in ipairs({ child.Icon, child.RoleIcon, child.Texture }) do
+                    for _, iconField in pairs({ child.Icon, child.RoleIcon, child.Texture }) do
                         if iconField then
                             local iconSpec = captureTexture(iconField)
                             if iconSpec then
@@ -1993,7 +2454,7 @@ local function HarvestLfgListingArt(forceRefresh)
             -- Discover illustrated category banners inside CategorySelection / ScrollBox (including nested child frames)
             if (objType == "Button" or objType == "CheckButton" or (child.Label or child.Name or child.Text or child.Cover or child.Background)) and child.GetRegions then
                 local textStr = ""
-                for _, labelField in ipairs({ child.Label, child.Name, child.Text, child.Title }) do
+                for _, labelField in pairs({ child.Label, child.Name, child.Text, child.Title }) do
                     if labelField and labelField.GetText then
                         local okT, txt = pcall(labelField.GetText, labelField)
                         if okT and type(txt) == "string" and txt ~= "" then
@@ -2016,7 +2477,7 @@ local function HarvestLfgListingArt(forceRefresh)
                             end
                         end
                     end
-                    for _, texField in ipairs({ frm.Background, frm.Cover, frm.Icon, frm.Texture, frm.Art, frm.Image, frm.Bg }) do
+                    for _, texField in pairs({ frm.Background, frm.Cover, frm.Icon, frm.Texture, frm.Art, frm.Image, frm.Bg }) do
                         if texField then
                             candidateTextures[#candidateTextures + 1] = texField
                         end
@@ -2648,6 +3109,11 @@ end
 
 local function ApplySubPanelChromeLayout(c, useLfgHost, topOffset, hdrHeight)
     if not (c and c.artFrame) then return end
+    local chromeSig = (useLfgHost and "H:" or "S:") .. tostring(topOffset or 0) .. ":" .. tostring(hdrHeight or 0)
+    if c.artFrame._scChromeSig == chromeSig then
+        return
+    end
+    c.artFrame._scChromeSig = chromeSig
     local bgLeft = useLfgHost and 4 or 3
     local bgRight = useLfgHost and -4 or -3
     local bgTop = useLfgHost and -21 or -2
@@ -2691,7 +3157,7 @@ local function ApplySubPanelChromeLayout(c, useLfgHost, topOffset, hdrHeight)
 end
 
 local function SyncActionButtonsVisibility(c, isBrowse, isCats, isActs, hasListing, canManage, isNonLeaderMember, selfSelected)
-    for _, btn in ipairs({
+    for _, btn in pairs({
         c.sendMsgBtn,
         c.inviteBtn,
         c.listGroupBtn,
@@ -2883,9 +3349,12 @@ function LFGFrameTab:UpdateViewLayout()
 
     if isBrowse and self.list and self.list.container and c.body then
         local browseOffset = isNonLeaderMember and (listTop - 25) or listTop
-        self.list.container:ClearAllPoints()
-        self.list.container:SetPoint("TOPLEFT", c.body, "TOPLEFT", 12, browseOffset)
-        self.list.container:SetPoint("BOTTOMRIGHT", c.body, "BOTTOMRIGHT", -12, 35)
+        if self.list.container._scBrowseOffset ~= browseOffset then
+            self.list.container._scBrowseOffset = browseOffset
+            self.list.container:ClearAllPoints()
+            self.list.container:SetPoint("TOPLEFT", c.body, "TOPLEFT", 12, browseOffset)
+            self.list.container:SetPoint("BOTTOMRIGHT", c.body, "BOTTOMRIGHT", -12, 35)
+        end
     end
 
     if c.quickSourceButtons and self.UpdateQuickFilterVisuals then
@@ -3350,6 +3819,9 @@ function LFGFrameTab:HideSubPanel(restoreNative)
 
     local lfgHost = _G.LFGParentFrame
     if lfgHost and not self.active and not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(lfgHost)) then
+        if ns.UI and ns.UI.RestoreEmbeddedHostUI then
+            ns.UI:RestoreEmbeddedHostUI(lfgHost)
+        end
         local selectedTab = lfgHost.selectedTab or 1
         local subs = GetNativeLfgSubFrames()
         local shownOne = false
@@ -3515,26 +3987,273 @@ function LFGFrameTab:RefreshTheme()
     self:UpdateViewLayout()
 end
 
+local function FormatLfgTemplateText(templateText, activityName, allowDefaultWhenAutoOff)
+    local roleId = (LFGFrameTab.GetPrimaryListingRole and LFGFrameTab:GetPrimaryListingRole()) or "DPS"
+    local baseRole = (roleId == "TANK" and L["Tank"]) or (roleId == "HEALER" and L["Healer"]) or L["DPS"]
+    local sum = ns.Clan and ns.Clan.GetPlayerGameSummary and ns.Clan:GetPlayerGameSummary() or nil
+    local ilvlVal = (sum and (sum.avgItemLevel or 0) > 0) and tostring(sum.avgItemLevel) or ""
+    local ilvlPart = (ilvlVal ~= "") and ("iLvl " .. ilvlVal) or ""
+    local lvlNum = (UnitLevel and ns.Safe and ns.Safe.Number(ns.Safe.Call(UnitLevel, "player"))) or 0
+    local lvlStr = (lvlNum > 0) and tostring(lvlNum) or "60"
+    local classLoc = UnitClass and ns.Safe and ns.Safe.String(ns.Safe.Call(UnitClass, "player")) or ""
+    local actStr = (type(activityName) == "string" and activityName ~= "") and activityName or L["Dungeon"]
+
+    if type(templateText) == "string" and templateText:match("%S") then
+        local msg = templateText
+        msg = msg:gsub("{level}", function() return lvlStr end)
+        msg = msg:gsub("{class}", function() return classLoc end)
+        msg = msg:gsub("{role}", function() return baseRole end)
+        msg = msg:gsub("{ilvl}", function() return ilvlPart end)
+        msg = msg:gsub("{activity}", function() return actStr end)
+        msg = msg:gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+        if msg ~= "" then
+            return msg
+        end
+    end
+
+    local roleFull = (ilvlPart ~= "") and (baseRole .. " · " .. ilvlPart) or baseRole
+    if lvlNum > 0 and classLoc ~= "" then
+        if activityName and activityName ~= "" then
+            return string.format(L["Hi! Lv %d %s (%s) available for %s"], lvlNum, classLoc, roleFull, activityName)
+        end
+        return string.format(L["Hi! Lv %d %s (%s) available!"], lvlNum, classLoc, roleFull)
+    end
+    if activityName and activityName ~= "" then
+        return string.format(L["Hi! Available (%s) for %s"], roleFull, activityName)
+    end
+    return allowDefaultWhenAutoOff and L["Hi! Available!"] or nil
+end
+
 local function BuildLfgApplyDraft(item)
     if ns.db and ns.db.settings and ns.db.settings.lfgAutoApplyDraft == false then
         return nil
     end
-    local roleId = (LFGFrameTab.GetPrimaryListingRole and LFGFrameTab:GetPrimaryListingRole()) or "DPS"
-    local roleName = (roleId == "TANK" and L["Tank"]) or (roleId == "HEALER" and L["Healer"]) or L["DPS"]
-    local sum = ns.Clan and ns.Clan.GetPlayerGameSummary and ns.Clan:GetPlayerGameSummary() or nil
-    if sum and (sum.avgItemLevel or 0) > 0 then
-        roleName = roleName .. " · iLvl " .. tostring(sum.avgItemLevel)
+    local tmpl = ns.db and ns.db.settings and ns.db.settings.lfgWhisperTemplate or ""
+    local act = item and (item._canonicalActivityLabel or (item.activity and item.activity ~= "" and item.activity)) or nil
+    return FormatLfgTemplateText(tmpl, act, false)
+end
+
+function LFGFrameTab:FormatApplyDraftPreview(tmplOverride, sampleActivity)
+    local rawTmpl = tmplOverride
+    if rawTmpl == nil then
+        rawTmpl = ns.db and ns.db.settings and ns.db.settings.lfgWhisperTemplate or ""
     end
-    local lvl = (UnitLevel and ns.Safe and ns.Safe.Number(ns.Safe.Call(UnitLevel, "player"))) or 0
-    local classLoc = UnitClass and ns.Safe and ns.Safe.String(ns.Safe.Call(UnitClass, "player")) or ""
-    local act = item and item.activity and item.activity ~= "" and item.activity or nil
-    if lvl > 0 and classLoc ~= "" then
-        if act then
-            return string.format(L["Hi! Lv %d %s (%s) available for %s"], lvl, classLoc, roleName, act)
+    return FormatLfgTemplateText(rawTmpl, sampleActivity or L["The Deadmines"], true) or ""
+end
+
+function LFGFrameTab:OpenWhisperTemplateModal()
+    if IsCombatLocked() then
+        ns:Print("%s", L["Unavailable during combat."])
+        return
+    end
+    local m = self._whisperTemplateModal
+    if not m then
+        m = CreateFrame("Frame", "SocialCentralLFGWhisperTemplateModal", UIParent, "BackdropTemplate")
+        m:Hide()
+        m:SetSize(468, 308)
+        m:SetPoint("CENTER")
+        m:SetClampedToScreen(true)
+        m:EnableMouse(true)
+        if Theme.MakeMovable then
+            Theme:MakeMovable(m, { clampToScreen = true })
         end
-        return string.format(L["Hi! Lv %d %s (%s) available!"], lvl, classLoc, roleName)
+        if _G.UISpecialFrames then
+            local found = false
+            for _, n in ipairs(_G.UISpecialFrames) do
+                if n == "SocialCentralLFGWhisperTemplateModal" then found = true break end
+            end
+            if not found then
+                table.insert(_G.UISpecialFrames, "SocialCentralLFGWhisperTemplateModal")
+            end
+        end
+
+        local bg = m:CreateTexture(nil, "BACKGROUND", nil, -8)
+        bg:SetAllPoints(m)
+        bg:SetTexture(WHITE8X8)
+        bg:SetVertexColor(0.08, 0.08, 0.09, 1.0)
+        m._solidOpaqueBg = bg
+
+        local titleFs = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        titleFs:SetPoint("TOPLEFT", 16, -14)
+        titleFs:SetPoint("RIGHT", m, "RIGHT", -40, 0)
+        titleFs:SetJustifyH("LEFT")
+        titleFs:SetText(L["Apply Whisper Template (/w)"])
+        m.titleFs = titleFs
+
+        local closeBtn = Theme:CreateButton(m, 24, 22, "X", "default")
+        closeBtn:SetPoint("TOPRIGHT", -12, -12)
+        closeBtn:SetScript("OnClick", function() m:Hide() end)
+        m.closeBtn = closeBtn
+
+        local helpBtn = Theme:CreateHelpButton(
+            m,
+            L["Help: Apply Whisper Template (/w)"],
+            L["Customizes the message automatically pre-filled or sent when clicking Quick Apply, Whisper, or Watcher links for any group."],
+            L["Use {level}, {class}, {role}, {ilvl}, and {activity}, click a preset, or leave blank to restore SocialCentral's default automatic greeting."]
+        )
+        helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -6, 0)
+
+        local hintFs = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        hintFs:SetPoint("TOPLEFT", 16, -44)
+        hintFs:SetPoint("TOPRIGHT", -16, -44)
+        hintFs:SetJustifyH("LEFT")
+        hintFs:SetWordWrap(true)
+        hintFs:SetTextColor(0.84, 0.88, 0.94)
+        hintFs:SetText(L["Variables: {level}, {class}, {role}, {ilvl}, {activity} (leave blank for default)"])
+        m.hintFs = hintFs
+
+        local inputBox = Theme:CreateEditBox(m, {
+            height = 28,
+            maxLetters = 160,
+            clearButton = true,
+            placeholder = L["Leave blank to use the built-in Level/Class/Role draft..."],
+        })
+        inputBox:SetPoint("TOPLEFT", 16, -80)
+        inputBox:SetPoint("TOPRIGHT", -16, -80)
+        inputBox:SetScript("OnEscapePressed", function() m:Hide() end)
+        m.inputBox = inputBox
+
+        local function RefreshPreview()
+            local preview = LFGFrameTab:FormatApplyDraftPreview(m.inputBox:GetText() or "", L["The Deadmines"])
+            m.previewText:SetText(preview)
+        end
+        inputBox:HookScript("OnTextChanged", RefreshPreview)
+
+        local presetLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        presetLbl:SetPoint("TOPLEFT", inputBox, "BOTTOMLEFT", 0, -10)
+        presetLbl:SetTextColor(0.75, 0.80, 0.88)
+        presetLbl:SetText(L["Quick Presets:"])
+
+        local presets = {
+            { lbl = L["Standard"], tmpl = "" },
+            { lbl = L["Short (Role + Lv)"], tmpl = "{role} Lv {level} {class} — inv for {activity}" },
+            { lbl = L["With Gear / iLvl"], tmpl = "Hi! {level} {class} ({role} {ilvl}) for {activity}" },
+        }
+        m.presetBtns = {}
+        local prevPreset = nil
+        for _, pr in ipairs(presets) do
+            local b = Theme:CreateButton(m, 120, 22, pr.lbl, "default")
+            Theme:AutoFitButton(b, 92, 16, 152)
+            if not prevPreset then
+                b:SetPoint("TOPLEFT", presetLbl, "BOTTOMLEFT", 0, -6)
+            else
+                b:SetPoint("LEFT", prevPreset, "RIGHT", 6, 0)
+            end
+            b:SetScript("OnClick", function()
+                m.inputBox:SetText(pr.tmpl)
+                RefreshPreview()
+            end)
+            m.presetBtns[#m.presetBtns + 1] = b
+            prevPreset = b
+        end
+
+        local previewBox = CreateFrame("Frame", nil, m, "BackdropTemplate")
+        previewBox:SetPoint("TOPLEFT", m.presetBtns[1], "BOTTOMLEFT", 0, -10)
+        previewBox:SetPoint("RIGHT", m, "RIGHT", -16, 0)
+        previewBox:SetHeight(56)
+        m.previewBox = previewBox
+
+        local previewTitle = previewBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        previewTitle:SetPoint("TOPLEFT", 10, -8)
+        previewTitle:SetText(L["Live Preview:"])
+        m.previewTitle = previewTitle
+
+        local previewText = previewBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        previewText:SetPoint("TOPLEFT", previewTitle, "BOTTOMLEFT", 0, -4)
+        previewText:SetPoint("BOTTOMRIGHT", -10, 6)
+        previewText:SetJustifyH("LEFT")
+        previewText:SetJustifyV("TOP")
+        previewText:SetWordWrap(true)
+        previewText:SetTextColor(0.95, 0.85, 0.45)
+        m.previewText = previewText
+
+        local autoCb = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
+        autoCb:SetSize(22, 22)
+        autoCb:SetPoint("TOPLEFT", previewBox, "BOTTOMLEFT", -2, -8)
+        autoCb:SetScript("OnClick", function(selfCheck)
+            if ns.db and ns.db.settings then
+                ns.db.settings.lfgAutoApplyDraft = (selfCheck:GetChecked() == true)
+            end
+        end)
+        m.autoCb = autoCb
+
+        local autoLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        autoLbl:SetPoint("LEFT", autoCb, "RIGHT", 4, 0)
+        autoLbl:SetPoint("RIGHT", m, "RIGHT", -16, 0)
+        autoLbl:SetJustifyH("LEFT")
+        autoLbl:SetText(L["Pre-fill Level, Class & Role when applying in Group Finder (I)"])
+
+        local saveBtn = Theme:CreateButton(m, 110, 24, L["Save"], "primary")
+        Theme:AutoFitButton(saveBtn, 96, 20, 140)
+        saveBtn:SetPoint("BOTTOMRIGHT", -14, 14)
+        saveBtn:SetScript("OnClick", function()
+            if ns.db and ns.db.settings then
+                local clean = (m.inputBox:GetText() or ""):gsub("[|\r\n]", " "):match("^%s*(.-)%s*$") or ""
+                ns.db.settings.lfgWhisperTemplate = clean
+                ns.db.settings.lfgAutoApplyDraft = (m.autoCb:GetChecked() == true)
+            end
+            m:Hide()
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            ns:Print("%s", L["Saved LFG Apply Whisper Template."])
+        end)
+        m.saveBtn = saveBtn
+
+        local cancelBtn = Theme:CreateButton(m, 96, 24, L["Cancel"], "default")
+        Theme:AutoFitButton(cancelBtn, 86, 18, 128)
+        cancelBtn:SetPoint("RIGHT", saveBtn, "LEFT", -8, 0)
+        cancelBtn:SetScript("OnClick", function() m:Hide() end)
+        m.cancelBtn = cancelBtn
+
+        local resetBtn = Theme:CreateButton(m, 116, 24, L["Reset Default"], "default")
+        Theme:AutoFitButton(resetBtn, 96, 18, 148)
+        resetBtn:SetPoint("BOTTOMLEFT", 14, 14)
+        resetBtn:SetScript("OnClick", function()
+            m.inputBox:SetText("")
+            RefreshPreview()
+        end)
+        m.resetBtn = resetBtn
+
+        self._whisperTemplateModal = m
     end
-    return act and string.format(L["Hi! Available (%s) for %s"], roleName, act) or nil
+
+    if Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(m, 860)
+    else
+        m:SetParent(UIParent)
+        m:SetFrameStrata("FULLSCREEN_DIALOG")
+        m:SetFrameLevel(860)
+        m:SetToplevel(true)
+    end
+    local p = Theme:GetPalette()
+    if m._solidOpaqueBg then
+        local wBg = (p and p.windowBg) or { 0.08, 0.08, 0.09, 1.0 }
+        m._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
+    end
+    Theme:ApplyBackdrop(m, "window", p)
+    if m.previewBox then
+        Theme:ApplyBackdrop(m.previewBox, "surface", p)
+    end
+    if m.inputBox and Theme.StyleEditBox then
+        Theme:StyleEditBox(m.inputBox)
+    end
+    if m.previewTitle then
+        local c = p and (p.textGold or p.accent) or { 1.0, 0.82, 0.25 }
+        m.previewTitle:SetTextColor(c[1], c[2], c[3])
+    end
+    Theme:StyleButton(m.closeBtn, "default")
+    Theme:StyleButton(m.saveBtn, "primary")
+    Theme:StyleButton(m.cancelBtn, "default")
+    Theme:StyleButton(m.resetBtn, "default")
+    for _, b in ipairs(m.presetBtns or {}) do
+        Theme:StyleButton(b, "default")
+    end
+
+    local s = ns.db and ns.db.settings
+    m.autoCb:SetChecked(not s or s.lfgAutoApplyDraft ~= false)
+    m.inputBox:SetText((s and type(s.lfgWhisperTemplate) == "string") and s.lfgWhisperTemplate or "")
+    m.previewText:SetText(self:FormatApplyDraftPreview(m.inputBox:GetText() or "", L["The Deadmines"]))
+    m:Show()
+    if m.Raise then m:Raise() end
 end
 
 local function OpenPlayerWhisper(item)
@@ -3565,6 +4284,9 @@ end
 
 function LFGFrameTab:QuickApplyToPlayer(targetName, lookupKey, activity)
     if not targetName or targetName == "" then return end
+    if (not lookupKey or lookupKey == "") and Compat.ParseCharacterFields then
+        lookupKey = Compat.ParseCharacterFields(targetName)
+    end
     local matchedItem = nil
     if lookupKey and ns.Clan and ns.Clan.GetClanLFGList then
         for _, it in ipairs(ns.Clan:GetClanLFGList(nil, false, "ALL") or {}) do
@@ -3598,8 +4320,9 @@ local function CreateNativeDropdown(parent, name, width, height, getTextFn, buil
     local ok, dd = pcall(CreateFrame, "DropdownButton", name, parent, "WowStyle1DropdownTemplate")
     if ok and dd and dd.SetupMenu then
         dd:SetSize(width, height or 24)
+        local initTxt = getTextFn()
         if dd.SetDefaultText then
-            pcall(dd.SetDefaultText, dd, getTextFn())
+            pcall(dd.SetDefaultText, dd, initTxt)
         end
         if dd.SetSelectionText then
             pcall(dd.SetSelectionText, dd, function()
@@ -3609,14 +4332,18 @@ local function CreateNativeDropdown(parent, name, width, height, getTextFn, buil
         pcall(dd.SetupMenu, dd, function(_, root)
             buildMenuFn(root)
         end)
+        dd._scLastLabelText = initTxt
         function dd:RefreshDropdownLabel()
             local txt = getTextFn()
+            if self._scLastLabelText == txt then
+                return
+            end
+            self._scLastLabelText = txt
             if self.SetDefaultText then
                 pcall(self.SetDefaultText, self, txt)
             end
-            if not (self.IsMenuOpen and self:IsMenuOpen()) and self.GenerateMenu then
-                pcall(self.GenerateMenu, self)
-            elseif self.OverrideText then
+            -- Never invoke GenerateMenu() during label sync: rebuilding Blizzard Menu trees & closures on every data refresh causes multi-MB heap growth.
+            if self.OverrideText then
                 pcall(self.OverrideText, self, txt)
             elseif self.Text and self.Text.SetText then
                 self.Text:SetText(txt)
@@ -3648,14 +4375,87 @@ local function CreateNativeDropdown(parent, name, width, height, getTextFn, buil
         end
     end)
     function btn:RefreshDropdownLabel()
-        self._label:SetText(getTextFn())
+        local txt = getTextFn()
+        if self._scLastLabelText == txt then
+            return
+        end
+        self._scLastLabelText = txt
+        self._label:SetText(txt)
     end
     btn:RefreshDropdownLabel()
     return btn
 end
 
+local function OpenBulletinHeaderMenu(anchor, headerItem)
+    if not (MenuUtil and MenuUtil.CreateContextMenu and headerItem) then return end
+    MenuUtil.CreateContextMenu(anchor, function(_, root)
+        local lbl = headerItem.bucketLabel or L["Dungeon"]
+        root:CreateTitle(lbl)
+        local isW = LFGFrameTab:IsActivityWatched(headerItem.bucketKey, lbl)
+        root:CreateButton(isW and ("|cff3fb950[x]|r " .. L["Watch This Dungeon in Official Chat"]) or L["Watch This Dungeon in Official Chat"], function()
+            LFGFrameTab:ToggleActivityWatched(headerItem.bucketKey, lbl)
+        end)
+        root:CreateButton(L["Filter Only This Activity"], function()
+            LFGFrameTab._hasSearchedThisSession = true
+            local applied = false
+            for _, catId in ipairs(CANONICAL_SEARCH_ORDER) do
+                local opts = GetBrowseActivityOptions(catId)
+                for i = 1, #opts do
+                    if opts[i].key == headerItem.bucketKey then
+                        LFGFrameTab.categoryFilter = catId
+                        wipe(LFGFrameTab.browseActivityFilter)
+                        LFGFrameTab.browseActivityFilter[opts[i].key] = opts[i]
+                        applied = true
+                        break
+                    end
+                end
+                if applied then break end
+            end
+            if not applied then
+                LFGFrameTab.query = lbl
+                if LFGFrameTab.controls and LFGFrameTab.controls.searchBox then
+                    LFGFrameTab.controls.searchBox:SetText(lbl)
+                end
+            end
+            LFGFrameTab.collapsedBuckets[headerItem.bucketKey] = nil
+            LFGFrameTab:SaveBrowseFilters()
+            LFGFrameTab:TriggerOfficialBrowseSearch(true)
+            LFGFrameTab:RefreshData()
+        end)
+        root:CreateButton(headerItem.isCollapsed and L["Expand Section"] or L["Collapse Section"], function()
+            LFGFrameTab.collapsedBuckets[headerItem.bucketKey] = not LFGFrameTab.collapsedBuckets[headerItem.bucketKey]
+            LFGFrameTab:RefreshData()
+        end)
+        root:CreateDivider()
+        root:CreateButton(L["Expand All Sections"], function()
+            wipe(LFGFrameTab.collapsedBuckets)
+            LFGFrameTab:RefreshData()
+        end)
+        root:CreateButton(L["Collapse All Sections"], function()
+            if LFGFrameTab.list and type(LFGFrameTab.list.items) == "table" then
+                for _, rowItem in ipairs(LFGFrameTab.list.items) do
+                    if rowItem and rowItem._isBulletinHeader and rowItem.bucketKey then
+                        LFGFrameTab.collapsedBuckets[rowItem.bucketKey] = true
+                    end
+                end
+            end
+            LFGFrameTab:RefreshData()
+        end)
+        if LFGFrameTab:GetWatchedActivitiesCount() > 0 then
+            root:CreateDivider()
+            root:CreateButton(L["Clear All Watchers"], function()
+                LFGFrameTab:ConfirmClearWatchedActivities()
+            end)
+        end
+    end)
+end
+
 local function OpenLfgRowContextMenu(anchor, item)
     if not (MenuUtil and MenuUtil.CreateContextMenu and item) then return end
+    if item._isBulletinHeader then
+        OpenBulletinHeaderMenu(anchor, item)
+        return
+    end
     local targetName = item.displayName or item.lookupKey
     MenuUtil.CreateContextMenu(anchor, function(_, root)
         if item.isSelf then
@@ -3698,6 +4498,16 @@ local function OpenLfgRowContextMenu(anchor, item)
                     if Compat.Invite then Compat.Invite(invTarget, invBnetId) end
                 end)
             end
+            local bKey, bLbl = ResolveCanonicalActivityBucket(item)
+            if bKey and bLbl then
+                local isW = LFGFrameTab:IsActivityWatched(bKey, bLbl)
+                root:CreateButton(isW and ("|cff3fb950[x]|r " .. L["Watch This Dungeon in Official Chat"]) or L["Watch This Dungeon in Official Chat"], function()
+                    LFGFrameTab:ToggleActivityWatched(bKey, bLbl)
+                end)
+            end
+            root:CreateButton(L["Edit Apply Whisper Template (/w)..."], function()
+                LFGFrameTab:OpenWhisperTemplateModal()
+            end)
             local isTracked = ns.Spotter and ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(targetName, item.guid)
             if isTracked and ns.Spotter and ns.Spotter.UntrackPlayer then
                 root:CreateButton(L["Untrack from Radar"], function()
@@ -3753,11 +4563,132 @@ local function SyncRowSelectionVisuals()
     local selKey = LFGFrameTab.selectedKey
     for _, row in ipairs(list.rows) do
         if row and row.SelectedTex and row:IsShown() then
-            local rowKey = GetItemIdentityKey(row._item)
-            row.SelectedTex:SetShown(selKey ~= nil and rowKey == selKey)
+            if row._item and row._item._isBulletinHeader then
+                row.SelectedTex:Hide()
+            else
+                local rowKey = GetItemIdentityKey(row._item)
+                row.SelectedTex:SetShown(selKey ~= nil and rowKey == selKey)
+            end
         end
     end
     LFGFrameTab:UpdateBottomButtons()
+end
+
+local function IsItemFullForBrowse(item, roleFilter)
+    if not item or item.isSelf then
+        return false
+    end
+    if item.mode ~= "LFM" or item.sourceType == "EVENT" then
+        return false
+    end
+    local rf = roleFilter or "ALL"
+    if rf == "ANY" then rf = "ALL" end
+    if item.maxMembers and item.maxMembers > 0 and item.numMembers and item.numMembers >= item.maxMembers then
+        return true
+    end
+    if (not item.maxMembers) and item.categoryKind == "DUNGEONS" and (item.numMembers or 0) >= 5 then
+        return true
+    end
+    if item.needT == nil and item.needH == nil and item.needD == nil then
+        return false
+    end
+    local nT = math.max(0, item.needT or 0)
+    local nH = math.max(0, item.needH or 0)
+    local nD = math.max(0, item.needD or 0)
+    if nT == 0 and nH == 0 and nD == 0 then
+        return true
+    end
+    if rf == "TANK" and nT == 0 then
+        return true
+    elseif rf == "HEALER" and nH == 0 then
+        return true
+    elseif rf == "DPS" and nD == 0 then
+        return true
+    end
+    return false
+end
+
+local function BuildBulletinBoardRows(filteredRows, collapsedBuckets, pendingItem)
+    local bucketsByKey = {}
+    local bucketList = {}
+    local collapsed = type(collapsedBuckets) == "table" and collapsedBuckets or {}
+    for _, item in ipairs(filteredRows) do
+        local bKey, bLabel, bMin, bMax, bCatOrd = ResolveCanonicalActivityBucket(item)
+        if pendingItem and item == pendingItem and bKey then
+            collapsed[bKey] = nil
+        end
+        local b = bucketsByKey[bKey]
+        if not b then
+            b = {
+                bucketKey = bKey,
+                bucketLabel = bLabel or L["Custom"],
+                minLvl = bMin or 999,
+                maxLvl = bMax or 999,
+                catOrder = bCatOrd or 6,
+                items = {},
+                trustedCount = 0,
+                needT = 0,
+                needH = 0,
+                needD = 0,
+                selfHere = false,
+                lockoutInfo = nil,
+                isWatched = LFGFrameTab:IsActivityWatched(bKey, bLabel),
+            }
+            bucketsByKey[bKey] = b
+            bucketList[#bucketList + 1] = b
+        end
+        b.items[#b.items + 1] = item
+        if item.isSelf == true then
+            b.selfHere = true
+        end
+        if not b.lockoutInfo and item._lockoutInfo then
+            b.lockoutInfo = item._lockoutInfo
+        end
+        if item.isTrusted or item.sourceType == "CLAN" or item.sourceType == "ALLY" or item.sourceType == "FRIEND" or item.sourceType == "EVENT" or item._isGoodFlag then
+            b.trustedCount = b.trustedCount + 1
+        end
+        if item.mode == "LFM" and item.sourceType ~= "EVENT" then
+            b.needT = b.needT + math.max(0, item.needT or 0)
+            b.needH = b.needH + math.max(0, item.needH or 0)
+            b.needD = b.needD + math.max(0, item.needD or 0)
+        end
+    end
+
+    table.sort(bucketList, function(a, b)
+        if a.selfHere ~= b.selfHere then return a.selfHere end
+        if a.isWatched ~= b.isWatched then return a.isWatched end
+        if a.catOrder ~= b.catOrder then return a.catOrder < b.catOrder end
+        if a.minLvl ~= b.minLvl then return a.minLvl < b.minLvl end
+        return tostring(a.bucketLabel or "") < tostring(b.bucketLabel or "")
+    end)
+
+    local out = {}
+    for bi = 1, #bucketList do
+        local b = bucketList[bi]
+        local isCollapsed = (collapsed[b.bucketKey] == true)
+        out[#out + 1] = {
+            _isBulletinHeader = true,
+            bucketKey = b.bucketKey,
+            bucketLabel = b.bucketLabel,
+            minLvl = b.minLvl,
+            maxLvl = b.maxLvl,
+            catOrder = b.catOrder,
+            groupCount = #b.items,
+            trustedCount = b.trustedCount,
+            needT = b.needT,
+            needH = b.needH,
+            needD = b.needD,
+            isWatched = b.isWatched,
+            isCollapsed = isCollapsed,
+            _lockoutInfo = b.lockoutInfo,
+        }
+        if not isCollapsed then
+            for ii = 1, #b.items do
+                out[#out + 1] = b.items[ii]
+            end
+        end
+    end
+    return out
 end
 
 local function AppendLfgMembersTooltip(tooltip, it)
@@ -3868,6 +4799,12 @@ local function CreateLfgRow(parent)
         row.SelfTex:SetColorTexture(0.18, 0.72, 0.36, 0.14)
     end
     row.SelfTex:Hide()
+
+    row.headerAccentTex = row:CreateTexture(nil, "BACKGROUND", nil, 3)
+    row.headerAccentTex:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -3)
+    row.headerAccentTex:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -3, 1)
+    row.headerAccentTex:SetColorTexture(0.20, 0.15, 0.08, 0.90)
+    row.headerAccentTex:Hide()
 
     row.SelectedTex = row:CreateTexture(nil, "OVERLAY", nil, 2)
     row.SelectedTex:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -3)
@@ -3988,6 +4925,15 @@ local function CreateLfgRow(parent)
     row:SetScript("OnClick", function(selfRow, btn)
         local it = selfRow._item
         if not it then return end
+        if it._isBulletinHeader then
+            if btn == "RightButton" then
+                OpenBulletinHeaderMenu(selfRow, it)
+            else
+                LFGFrameTab.collapsedBuckets[it.bucketKey] = not LFGFrameTab.collapsedBuckets[it.bucketKey]
+                LFGFrameTab:RefreshData()
+            end
+            return
+        end
         LFGFrameTab.selectedKey = GetItemIdentityKey(it)
         LFGFrameTab.selectedItem = it
         SyncRowSelectionVisuals()
@@ -4000,7 +4946,7 @@ local function CreateLfgRow(parent)
     row:SetScript("OnDoubleClick", function(selfRow, btn)
         if btn ~= "LeftButton" then return end
         local it = selfRow._item
-        if not it then return end
+        if not it or it._isBulletinHeader then return end
         if it.isSelf then
             LFGFrameTab:StartEditListing(it)
             return
@@ -4015,6 +4961,30 @@ local function CreateLfgRow(parent)
     row:SetScript("OnEnter", function(selfRow)
         local it = selfRow._item
         if not it then return end
+        if it._isBulletinHeader then
+            GameTooltip:SetOwner(selfRow, "ANCHOR_RIGHT")
+            GameTooltip:ClearLines()
+            local lvlSpan = (it.minLvl and it.minLvl < 900 and it.maxLvl and it.maxLvl < 900)
+                and string.format(" [%d-%d]", it.minLvl, it.maxLvl) or ""
+            GameTooltip:AddLine((it.bucketLabel or L["Dungeon"]) .. lvlSpan, 1.0, 0.82, 0.25)
+            local gLbl = (it.groupCount == 1) and L["%d group"]:format(1) or L["%d groups"]:format(it.groupCount or 0)
+            GameTooltip:AddLine(gLbl, 0.35, 0.90, 0.55)
+            if (it.needT or 0) > 0 or (it.needH or 0) > 0 or (it.needD or 0) > 0 then
+                GameTooltip:AddLine(string.format("%s: %d %s · %d %s · %d %s", L["Open Slots"], it.needT or 0, L["Tank"], it.needH or 0, L["Healer"], it.needD or 0, L["DPS"]), 0.85, 0.90, 0.96)
+            end
+            if it.isWatched then
+                GameTooltip:AddLine(L["Watched in Official Chat — matching groups print clickable alerts directly in chat."], 0.35, 0.92, 0.55, true)
+            end
+            if it._lockoutInfo then
+                local lk = it._lockoutInfo
+                local prog = (lk.numEncounters and lk.numEncounters > 0) and string.format("%d/%d", lk.encounterProgress or 0, lk.numEncounters) or L["Saved"]
+                GameTooltip:AddLine(string.format(L["Saved Lockout: %s (%s · %s)"], lk.name or "?", prog, ""), 1.0, 0.62, 0.24, true)
+            end
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine(L["Click: Expand / Collapse  |  Right-click: Watch in Chat"], 0.65, 0.72, 0.80, true)
+            GameTooltip:Show()
+            return
+        end
         GameTooltip:SetOwner(selfRow, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
         if it.secretLeaderName ~= nil then
@@ -4090,107 +5060,86 @@ local function CreateLfgRow(parent)
     return row
 end
 
+local TC_FULL = { 0, 1, 0, 1 }
+local TC_FRIEND = { 0.12, 0.88, 0.12, 0.88 }
+local TC_FLAG = { 0.15, 0.85, 0.10, 0.90 }
+local TINT_CLAN = { 1.0, 0.82, 0.25 }
+local TINT_ALLY = { 0.30, 0.92, 0.52 }
+local TINT_FRIEND = { 0.45, 0.82, 1.0 }
+local TINT_WATCH = { 1.0, 0.72, 0.25 }
+local TINT_GOOD = { 0.25, 0.95, 0.50 }
+local TINT_AVOID = { 1.0, 0.30, 0.30 }
+local TINT_AVOID_TIP = { 1.0, 0.35, 0.35 }
+local TINT_GUIDE = { 0.28, 0.95, 0.42 }
+local TINT_WHITE = { 1.0, 1.0, 1.0 }
+local TINT_SC_TIP = { 0.35, 0.90, 0.55 }
+
+local lfgBadgePool = { {}, {}, {}, {}, {}, {} }
+local lfgSoloListScratch = {}
+local lfgRaidSlots = { "TANK", "HEALER", "DPS" }
+local lfgSlotRoles = { "TANK", "HEALER", "DPS", "DPS", "DPS" }
+local lfgSlotFilledScratch = { false, false, false, false, false }
+local lfgFillPriorityOrder = { 3, 4, 5, 1, 2 }
+
+local function PushBadgeSpec(count, atlas, tex, tc, tint, title, desc, tipColor)
+    if count >= 6 then return count end
+    local idx = count + 1
+    local slot = lfgBadgePool[idx]
+    slot.atlas = atlas
+    slot.tex = tex
+    slot.tc = tc
+    slot.tint = tint
+    slot.title = title
+    slot.desc = desc
+    slot.tipColor = tipColor
+    return idx
+end
+
 local function BuildLfgRowBadgeSpecs(item, sMeta)
-    local badgeSpecs = {}
+    local cnt = 0
     local gGuildDesc = (item.guild and item.guild ~= "") and ("<" .. item.guild .. ">") or ""
     if item.isClan then
         local gDesc = (item.guildMemberNames and item.guildMemberNames ~= "") and item.guildMemberNames
             or ((item.numGuildMates or 0) > 0 and (L["Guild in group"] .. ": " .. tostring(item.numGuildMates)) or gGuildDesc)
-        badgeSpecs[#badgeSpecs + 1] = {
-            tex = "Interface\\GossipFrame\\TabardGossipIcon",
-            tc = { 0, 1, 0, 1 },
-            tint = { 1.0, 0.82, 0.25 },
-            title = L["Guild Member"],
-            desc = gDesc,
-            tipColor = { 1.0, 0.82, 0.25 },
-        }
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\GossipFrame\\TabardGossipIcon", TC_FULL, TINT_CLAN, L["Guild Member"], gDesc, TINT_CLAN)
     end
     if item.isAllied then
         local aDesc = (item.alliedMemberNames and item.alliedMemberNames ~= "") and item.alliedMemberNames or gGuildDesc
-        badgeSpecs[#badgeSpecs + 1] = {
-            tex = "Interface\\GossipFrame\\TabardGossipIcon",
-            tc = { 0, 1, 0, 1 },
-            tint = { 0.30, 0.92, 0.52 },
-            title = L["Allied Guild"],
-            desc = aDesc,
-            tipColor = { 0.30, 0.92, 0.52 },
-        }
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\GossipFrame\\TabardGossipIcon", TC_FULL, TINT_ALLY, L["Allied Guild"], aDesc, TINT_ALLY)
     end
     if item.isFriend then
         local totalFriends = (item.numBNetFriends or 0) + (item.numCharFriends or 0)
         local fDesc = (item.friendMemberNames and item.friendMemberNames ~= "") and item.friendMemberNames
             or (totalFriends > 0 and (L["Friends in group"] .. ": " .. tostring(totalFriends)) or "")
-        badgeSpecs[#badgeSpecs + 1] = {
-            tex = "Interface\\FriendsFrame\\UI-Toast-FriendOnlineIcon",
-            tc = { 0.12, 0.88, 0.12, 0.88 },
-            tint = { 0.45, 0.82, 1.0 },
-            title = L["FRIEND"],
-            desc = fDesc,
-            tipColor = { 0.45, 0.82, 1.0 },
-        }
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\FriendsFrame\\UI-Toast-FriendOnlineIcon", TC_FRIEND, TINT_FRIEND, L["FRIEND"], fDesc, TINT_FRIEND)
     end
     if item.isWatchlist or item.hasFriendOrWatchlistSignup then
         local rawW = (item.watchlistMemberNames and item.watchlistMemberNames ~= "") and item.watchlistMemberNames or item.friendOrWatchlistNames
         local wDesc = (rawW and rawW ~= "") and (L["In group"] .. ": " .. rawW) or ""
-        badgeSpecs[#badgeSpecs + 1] = {
-            tex = "Interface\\AddOns\\SocialCentral\\Media\\bell-on",
-            tc = { 0, 1, 0, 1 },
-            tint = { 1.0, 0.72, 0.25 },
-            title = L["WATCHLIST"],
-            desc = wDesc,
-            tipColor = { 1.0, 0.72, 0.25 },
-        }
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\AddOns\\SocialCentral\\Media\\bell-on", TC_FULL, TINT_WATCH, L["WATCHLIST"], wDesc, TINT_WATCH)
     end
     if (sMeta and sMeta.flag == "GOOD") or item.hasGoodPartnerSignup or item.isCompanion then
         local gpDesc = (item.goodPartnerNames and item.goodPartnerNames ~= "") and item.goodPartnerNames
             or (item.isCompanion and L["Recent companion (%d runs)"]:format(item.companionRuns or 1) or "")
-        badgeSpecs[#badgeSpecs + 1] = {
-            tex = "Interface\\Buttons\\UI-CheckBox-Check",
-            tc = { 0, 1, 0, 1 },
-            tint = { 0.25, 0.95, 0.50 },
-            title = L["Good Partner (+)"],
-            desc = gpDesc,
-            tipColor = { 0.25, 0.95, 0.50 },
-        }
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\Buttons\\UI-CheckBox-Check", TC_FULL, TINT_GOOD, L["Good Partner (+)"], gpDesc, TINT_GOOD)
     end
     if (sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup or item.isEnemyGuild then
         local warnTitle = ((sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup) and L["Avoid Warning"] or L["Enemy Guild"]
         local warnDesc = (item.avoidSignupNames and item.avoidSignupNames ~= "") and item.avoidSignupNames
             or ((item.enemyGuildNames and item.enemyGuildNames ~= "") and item.enemyGuildNames or gGuildDesc)
-        badgeSpecs[#badgeSpecs + 1] = {
-            tex = "Interface\\TARGETINGFRAME\\UI-TargetingFrame-Skull",
-            tc = { 0, 1, 0, 1 },
-            tint = { 1.0, 0.30, 0.30 },
-            title = warnTitle,
-            desc = warnDesc,
-            tipColor = { 1.0, 0.35, 0.35 },
-        }
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\TARGETINGFRAME\\UI-TargetingFrame-Skull", TC_FULL, TINT_AVOID, warnTitle, warnDesc, TINT_AVOID_TIP)
     end
-    if item.newPlayerFriendly and #badgeSpecs < 6 then
-        badgeSpecs[#badgeSpecs + 1] = {
-            atlas = HasAtlas("groupfinder-icon-role-large-newplayer") and "groupfinder-icon-role-large-newplayer"
-                or (HasAtlas("groupfinder-icon-role-large-guide") and "groupfinder-icon-role-large-guide")
-                or (HasAtlas("communities-chat-icon-flag") and "communities-chat-icon-flag")
-                or nil,
-            tex = "Interface\\WorldStateFrame\\AllianceFlag",
-            tc = { 0.15, 0.85, 0.10, 0.90 },
-            tint = { 0.28, 0.95, 0.42 },
-            title = L["New Player Friendly"],
-            desc = L["Dungeon Guide"],
-            tipColor = { 0.28, 0.95, 0.42 },
-        }
+    if item.newPlayerFriendly and cnt < 6 then
+        local npAtlas = HasAtlas("groupfinder-icon-role-large-newplayer") and "groupfinder-icon-role-large-newplayer"
+            or (HasAtlas("groupfinder-icon-role-large-guide") and "groupfinder-icon-role-large-guide")
+            or (HasAtlas("communities-chat-icon-flag") and "communities-chat-icon-flag")
+            or nil
+        cnt = PushBadgeSpec(cnt, npAtlas, "Interface\\WorldStateFrame\\AllianceFlag", TC_FLAG, TINT_GUIDE, L["New Player Friendly"], L["Dungeon Guide"], TINT_GUIDE)
     end
-    if item.hasAddon and #badgeSpecs < 6 then
-        badgeSpecs[#badgeSpecs + 1] = {
-            tex = "Interface\\AddOns\\SocialCentral\\Media\\icon",
-            tc = { 0, 1, 0, 1 },
-            tint = { 1.0, 1.0, 1.0 },
-            title = L["Uses SocialCentral [SC]"],
-            desc = "",
-            tipColor = { 0.35, 0.90, 0.55 },
-        }
+    if item.hasAddon and cnt < 6 then
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\AddOns\\SocialCentral\\Media\\icon", TC_FULL, TINT_WHITE, L["Uses SocialCentral [SC]"], "", TINT_SC_TIP)
     end
-    return badgeSpecs
+    return lfgBadgePool, cnt
 end
 
 local function UpdateLfgRow(row, item, _, palette)
@@ -4199,6 +5148,74 @@ local function UpdateLfgRow(row, item, _, palette)
         Theme:ApplyBackdrop(row, "none", palette)
     else
         Theme:ApplyBackdrop(row, "row", palette)
+    end
+    if item and item._isBulletinHeader then
+        if row.headerAccentTex then
+            row.headerAccentTex:Show()
+        end
+        if row.SelfTex then
+            row.SelfTex:Hide()
+        end
+        if row.SelectedTex then
+            row.SelectedTex:Hide()
+        end
+        row._lastLeaderMode = "HEADER"
+        row._scBadgeAnchorSig = "HEADER"
+        row.partyIcon:Hide()
+        row.classIcon:Hide()
+        row.levelFs:SetText("")
+        for ri = 1, 5 do
+            if row.roleIcons[ri] then
+                row.roleIcons[ri]:Hide()
+            end
+        end
+        for bi = 1, 6 do
+            if row.infoBadges[bi] then
+                row.infoBadges[bi]._tipTitle = nil
+                row.infoBadges[bi]:Hide()
+            end
+        end
+
+        row.badgeFs:ClearAllPoints()
+        row.badgeFs:SetPoint("TOPRIGHT", row, "TOPRIGHT", -10, -10)
+        row.badgeFs:SetWidth(94)
+        row.badgeFs:SetJustifyH("RIGHT")
+        local cnt = item.groupCount or 0
+        local cntText = (cnt == 1) and L["%d group"]:format(cnt) or L["%d groups"]:format(cnt)
+        row.badgeFs:SetText("|cff3fb950" .. cntText .. "|r")
+
+        row.nameFs:ClearAllPoints()
+        row.nameFs:SetWidth(0)
+        row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -9)
+        row.nameFs:SetPoint("RIGHT", row.badgeFs, "LEFT", -6, 0)
+        row.nameFs:SetTextColor(1.0, 0.85, 0.30, 1)
+        local arrowStr = item.isCollapsed and "|cffffd24d[+]|r " or "|cffffd24d[-]|r "
+        local lvlSpan = (item.minLvl and item.minLvl < 900 and item.maxLvl and item.maxLvl < 900)
+            and (" |cff9da7b5[" .. tostring(item.minLvl) .. "-" .. tostring(item.maxLvl) .. "]|r") or ""
+        local watchTag = item.isWatched and (" |cff3fb950[" .. L["Watched"] .. "]|r") or ""
+        local lockTag = item._lockoutInfo and (" |cffff9b3d[" .. L["Saved"] .. "]|r") or ""
+        row.nameFs:SetText(arrowStr .. (item.bucketLabel or L["Dungeon"]) .. lvlSpan .. watchTag .. lockTag)
+
+        row.activityFs:ClearAllPoints()
+        row.activityFs:SetPoint("TOPLEFT", row, "TOPLEFT", 24, -29)
+        row.activityFs:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+        row.activityFs:SetJustifyH("LEFT")
+        local metaParts = {}
+        if (item.trustedCount or 0) > 0 then
+            metaParts[#metaParts + 1] = "|cff72c6ff" .. L["Trusted: %d"]:format(item.trustedCount) .. "|r"
+        end
+        if (item.needT or 0) > 0 or (item.needH or 0) > 0 or (item.needD or 0) > 0 then
+            metaParts[#metaParts + 1] = string.format("%s: %dT · %dH · %dD", L["Open Slots"], item.needT or 0, item.needH or 0, item.needD or 0)
+        end
+        if #metaParts == 0 then
+            metaParts[1] = item.isCollapsed and L["Click to show groups · Right-click to Watch"] or L["Click to collapse · Right-click to Watch"]
+        end
+        row.activityFs:SetText("|cffb8c0cc" .. table.concat(metaParts, "  ·  ") .. "|r")
+        return
+    end
+
+    if row.headerAccentTex then
+        row.headerAccentTex:Hide()
     end
     if row.SelfTex then
         row.SelfTex:SetShown(item.isSelf == true)
@@ -4225,7 +5242,8 @@ local function UpdateLfgRow(row, item, _, palette)
     local roleBlockW = ((isRaidLike and 3 or 5) * 20) + 12
 
     if isSoloLfg then
-        local soloList = {}
+        local soloList = lfgSoloListScratch
+        wipe(soloList)
         if type(item.soloRoles) == "table" and (item.soloRoles.TANK or item.soloRoles.HEALER or item.soloRoles.DPS) then
             if item.soloRoles.TANK then soloList[#soloList + 1] = "TANK" end
             if item.soloRoles.HEALER then soloList[#soloList + 1] = "HEALER" end
@@ -4255,10 +5273,9 @@ local function UpdateLfgRow(row, item, _, palette)
         for ri = 1, 2 do
             if row.roleIcons[ri] then row.roleIcons[ri]:Hide() end
         end
-        local raidSlots = { "TANK", "HEALER", "DPS" }
         for offset = 1, 3 do
             local ico = row.roleIcons[2 + offset]
-            local rType = raidSlots[offset]
+            local rType = lfgRaidSlots[offset]
             SetRoleSlotTexture(ico, rType)
             local openSlot = true
             if item.needT ~= nil or item.needH ~= nil or item.needD ~= nil then
@@ -4274,8 +5291,10 @@ local function UpdateLfgRow(row, item, _, palette)
             ico:Show()
         end
     else
-        local slotRoles = { "TANK", "HEALER", "DPS", "DPS", "DPS" }
-        local slotFilled = { false, false, false, false, false }
+        local slotFilled = lfgSlotFilledScratch
+        for s = 1, 5 do
+            slotFilled[s] = false
+        end
         local totalNum = item.numMembers or 0
         if totalNum >= 5 or (item.needT == 0 and item.needH == 0 and item.needD == 0) then
             for s = 1, 5 do slotFilled[s] = true end
@@ -4290,8 +5309,9 @@ local function UpdateLfgRow(row, item, _, palette)
                 slotFilled[2 + d] = true
             end
             local remNo = curNo
-            for _, orderIdx in ipairs({ 3, 4, 5, 1, 2 }) do
+            for oi = 1, #lfgFillPriorityOrder do
                 if remNo <= 0 then break end
+                local orderIdx = lfgFillPriorityOrder[oi]
                 if not slotFilled[orderIdx] then
                     slotFilled[orderIdx] = true
                     remNo = remNo - 1
@@ -4306,8 +5326,9 @@ local function UpdateLfgRow(row, item, _, palette)
             end
         elseif totalNum > 0 then
             local rem = math.min(5, totalNum)
-            for _, orderIdx in ipairs({ 3, 4, 5, 1, 2 }) do
+            for oi = 1, #lfgFillPriorityOrder do
                 if rem <= 0 then break end
+                local orderIdx = lfgFillPriorityOrder[oi]
                 slotFilled[orderIdx] = true
                 rem = rem - 1
             end
@@ -4315,7 +5336,7 @@ local function UpdateLfgRow(row, item, _, palette)
 
         for s = 1, 5 do
             local ico = row.roleIcons[s]
-            SetRoleSlotTexture(ico, slotRoles[s])
+            SetRoleSlotTexture(ico, lfgSlotRoles[s])
             local isFilled = slotFilled[s] == true
             ico:SetDesaturated(isFilled)
             ico:SetAlpha(isFilled and 0.28 or 1.0)
@@ -4356,8 +5377,7 @@ local function UpdateLfgRow(row, item, _, palette)
     local classSlug = type(item.classFile) == "string" and item.classFile:lower() or nil
     local classAtlas = classSlug and ("groupfinder-icon-class-" .. classSlug) or nil
     local hasClassIcon = (classAtlas and HasAtlas(classAtlas)) and true or false
-    local badgeSpecs = BuildLfgRowBadgeSpecs(item, sMeta)
-    local numBadges = math.min(6, #badgeSpecs)
+    local badgeSpecs, numBadges = BuildLfgRowBadgeSpecs(item, sMeta)
 
     local rowW = (row.GetWidth and row:GetWidth()) or 0
     if rowW < 180 then rowW = 314 end
@@ -4370,10 +5390,19 @@ local function UpdateLfgRow(row, item, _, palette)
     row.nameFs:SetWidth(math.min(maxNameW, math.max(42, row.nameFs:GetStringWidth() or 96)))
 
     local lastAnchor = (lvlPart ~= "") and row.levelFs or row.nameFs
-    row.classIcon:ClearAllPoints()
+    local rowAnchorSig = ((lvlPart ~= "") and "L:" or "N:") .. (hasClassIcon and "C:" or "0:") .. tostring(numBadges) .. ":" .. tostring(anchorRoleIcon)
+    local needAnchorReset = (row._scBadgeAnchorSig ~= rowAnchorSig)
+    row._scBadgeAnchorSig = rowAnchorSig
+
     if hasClassIcon then
-        row.classIcon:SetAtlas(classAtlas, false)
-        row.classIcon:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
+        if row._lastClassAtlas ~= classAtlas then
+            row._lastClassAtlas = classAtlas
+            row.classIcon:SetAtlas(classAtlas, false)
+        end
+        if needAnchorReset then
+            row.classIcon:ClearAllPoints()
+            row.classIcon:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
+        end
         row.classIcon:Show()
         lastAnchor = row.classIcon
     else
@@ -4382,10 +5411,12 @@ local function UpdateLfgRow(row, item, _, palette)
 
     for bi = 1, 6 do
         local bf = row.infoBadges[bi]
-        local sp = badgeSpecs[bi]
+        local sp = (bi <= numBadges) and badgeSpecs[bi] or nil
         if bf and sp then
-            bf:ClearAllPoints()
-            bf:SetPoint("LEFT", lastAnchor, "RIGHT", (bi == 1) and 4 or 2, 0)
+            if needAnchorReset then
+                bf:ClearAllPoints()
+                bf:SetPoint("LEFT", lastAnchor, "RIGHT", (bi == 1) and 4 or 2, 0)
+            end
             if sp.atlas and HasAtlas(sp.atlas) then
                 bf.tex:SetTexCoord(0, 1, 0, 1)
                 bf.tex:SetAtlas(sp.atlas, false)
@@ -4405,12 +5436,17 @@ local function UpdateLfgRow(row, item, _, palette)
         end
     end
 
-    row.badgeFs:ClearAllPoints()
-    row.badgeFs:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
-    row.badgeFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
-    row.activityFs:ClearAllPoints()
-    row.activityFs:SetPoint("TOPLEFT", row.nameFs, "BOTTOMLEFT", 0, -4)
-    row.activityFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
+    if needAnchorReset then
+        row.badgeFs:ClearAllPoints()
+        row.badgeFs:SetWidth(0)
+        row.badgeFs:SetJustifyH("LEFT")
+        row.badgeFs:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
+        row.badgeFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
+        row.activityFs:ClearAllPoints()
+        row.activityFs:SetJustifyH("LEFT")
+        row.activityFs:SetPoint("TOPLEFT", row.nameFs, "BOTTOMLEFT", 0, -4)
+        row.activityFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
+    end
 
     local badges = ""
     if sMeta and sMeta.flag == "AVOID" then
@@ -5066,6 +6102,13 @@ function LFGFrameTab:RefreshData()
     if c.suitLevelBtn then
         StyleNativeButton(c.suitLevelBtn, self.suitableLevelOnly == true)
     end
+    local sCfg = ns.db and ns.db.settings
+    if c.bulletinToggleBtn then
+        StyleNativeButton(c.bulletinToggleBtn, (not sCfg) or sCfg.lfgBulletinMode ~= false)
+    end
+    if c.browseQuickBtn and c.browseQuickBtn.RefreshTheme then
+        c.browseQuickBtn:RefreshTheme()
+    end
     if self.UpdateQuickFilterVisuals then
         self:UpdateQuickFilterVisuals()
     end
@@ -5086,22 +6129,34 @@ function LFGFrameTab:RefreshData()
         and ns.Clan:GetClanLFGList(self.query, self.dungeonsOnly, self.sourceFilter, self.roleFilter)
         or {}
 
-    local hideAvoidEnemy = ns.db and ns.db.settings and ns.db.settings.lfgHideAvoidEnemy == true
+    local hideAvoidEnemy = sCfg and sCfg.lfgHideAvoidEnemy == true
+    local hideSavedLockouts = sCfg and sCfg.lfgHideSavedLockouts == true
+    local hideFullGroups = (not sCfg) or sCfg.lfgHideFullGroups ~= false
+    local useBulletin = (not sCfg) or sCfg.lfgBulletinMode ~= false
     local activeLockouts = (ns.Clan and ns.Clan.GetSavedLockouts) and ns.Clan:GetSavedLockouts(true) or {}
 
     local rows = {}
     local foundSelected = nil
+    local foundPendingItem = nil
     local foundPendingIdx = nil
     local pendingTarget = self.pendingSelectKey
     self.pendingSelectKey = nil
     for _, item in ipairs(rawRows) do
         local suppressed = false
+        local lkKey = item.lookupKey or item.displayName
+        local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(lkKey) or (Store.GetSocialMeta and Store:GetSocialMeta(lkKey)))
+        item._isGoodFlag = (sMeta and sMeta.flag == "GOOD") == true
         if hideAvoidEnemy and not item.isSelf then
-            local lkKey = item.lookupKey or item.displayName
-            local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(lkKey) or (Store.GetSocialMeta and Store:GetSocialMeta(lkKey)))
             if (sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup == true or item.isEnemyGuild == true then
                 suppressed = true
             end
+        end
+        item._lockoutInfo = GetActivityLockout(item, activeLockouts)
+        if not suppressed and hideSavedLockouts and not item.isSelf and item._lockoutInfo ~= nil then
+            suppressed = true
+        end
+        if not suppressed and hideFullGroups and IsItemFullForBrowse(item, self.roleFilter) then
+            suppressed = true
         end
         local suitOk, knownRange = CheckActivityLevelSuitability(item)
         item._idealLevel = (knownRange and suitOk) == true
@@ -5127,15 +6182,28 @@ function LFGFrameTab:RefreshData()
                     end
                 end
             end
-            item._lockoutInfo = GetActivityLockout(item, activeLockouts)
             rows[#rows + 1] = item
             local idKey = GetItemIdentityKey(item)
-            if pendingTarget and not foundPendingIdx and (item.lookupKey == pendingTarget or idKey == pendingTarget) then
+            if pendingTarget and not foundPendingItem and (item.lookupKey == pendingTarget or idKey == pendingTarget) then
                 self.selectedKey = idKey
+                foundPendingItem = item
                 foundPendingIdx = #rows
                 foundSelected = item
             elseif self.selectedKey and idKey == self.selectedKey then
                 foundSelected = item
+            end
+        end
+    end
+
+    if useBulletin and #rows > 0 then
+        rows = BuildBulletinBoardRows(rows, self.collapsedBuckets, foundPendingItem)
+        if foundPendingItem then
+            foundPendingIdx = nil
+            for ri = 1, #rows do
+                if rows[ri] == foundPendingItem then
+                    foundPendingIdx = ri
+                    break
+                end
             end
         end
     end
@@ -5231,6 +6299,22 @@ function LFGFrameTab:UpdateQuickFilterVisuals()
             end
         end
     end
+    if c.bulletinToggleBtn then
+        local bBtn = c.bulletinToggleBtn
+        local isBulletinOn = (not ns.db or not ns.db.settings or ns.db.settings.lfgBulletinMode ~= false)
+        bBtn:ClearAllPoints()
+        if not lastVisible then
+            bBtn:SetPoint("TOPRIGHT", c.browseHeader, "TOPRIGHT", -14, -50.5)
+        else
+            bBtn:SetPoint("RIGHT", lastVisible, "LEFT", -3, 0)
+        end
+        lastVisible = bBtn
+        StyleNativeButton(bBtn, isBulletinOn)
+        if bBtn._activeRing then
+            bBtn._activeRing:SetShown(isBulletinOn)
+        end
+        bBtn:Show()
+    end
     if c.searchBox and c.browseHeader then
         c.searchBox:ClearAllPoints()
         c.searchBox:SetPoint("TOPLEFT", c.browseHeader, "TOPLEFT", 62, -51)
@@ -5296,6 +6380,229 @@ local function CreateQuickSourceIcons(browseHeader)
         btns[#btns + 1] = b
     end
     LFGFrameTab.controls.quickSourceButtons = btns
+
+    local bBtn = CreateFrame("Button", nil, browseHeader, "BackdropTemplate")
+    bBtn:SetSize(22, 22)
+    Theme:ApplyBackdrop(bBtn, "inset")
+    local bHl = bBtn:CreateTexture(nil, "HIGHLIGHT")
+    bHl:SetAllPoints()
+    bHl:SetTexture("Interface\\Buttons\\UI-Common-MouseHilight")
+    bHl:SetBlendMode("ADD")
+
+    local bRing = bBtn:CreateTexture(nil, "OVERLAY", nil, 3)
+    bRing:SetPoint("TOPLEFT", bBtn, "TOPLEFT", -2, 2)
+    bRing:SetPoint("BOTTOMRIGHT", bBtn, "BOTTOMRIGHT", 2, -2)
+    bRing:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+    bRing:SetBlendMode("ADD")
+    bRing:SetVertexColor(1.0, 0.82, 0.20, 0.95)
+    bRing:Hide()
+    bBtn._activeRing = bRing
+
+    local bIco = bBtn:CreateTexture(nil, "ARTWORK", nil, 2)
+    bIco:SetSize(14, 14)
+    bIco:SetPoint("CENTER", bBtn, "CENTER", 0, 0)
+    bIco:SetTexture("Interface\\Buttons\\UI-GuildButton-PublicNote-Up")
+    bIco:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    bIco:SetVertexColor(1.0, 0.86, 0.42, 1.0)
+    bBtn._pillIcon = bIco
+
+    bBtn:SetScript("OnClick", function()
+        LFGFrameTab._hasSearchedThisSession = true
+        if ns.db and ns.db.settings then
+            ns.db.settings.lfgBulletinMode = not (ns.db.settings.lfgBulletinMode ~= false)
+        end
+        LFGFrameTab:RefreshData()
+        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+    end)
+    bBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:SetText(L["Group by Dungeon (Bulletin Board)"], 1.0, 0.82, 0.25)
+        GameTooltip:AddLine(L["Groups LFG listings by dungeon, raid, or quest with collapsible headers and open-slot summaries."], 0.9, 0.9, 0.9, true)
+        GameTooltip:Show()
+    end)
+    bBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    LFGFrameTab.controls.bulletinToggleBtn = bBtn
+end
+
+local function PopulateWatchedActivitiesSubmenu(watchSub)
+    if not watchSub then return end
+    if watchSub.CreateTitle then
+        watchSub:CreateTitle(L["LFG Watchers in Official Chat"])
+    end
+    local primary = {}
+    local others = {}
+    local seen = {}
+    local cats = { "DUNGEONS", "RAIDS" }
+    for ci = 1, #cats do
+        local opts = GetBrowseActivityOptions(cats[ci])
+        for oi = 1, #opts do
+            local opt = opts[oi]
+            if opt and opt.key and not seen[opt.key] then
+                seen[opt.key] = true
+                local isW = LFGFrameTab:IsActivityWatched(opt.key, opt.label)
+                if isW or opt.isSuitable then
+                    primary[#primary + 1] = opt
+                else
+                    others[#others + 1] = opt
+                end
+            end
+        end
+    end
+
+    local function addWatcherChoice(menuParent, opt)
+        local key = opt.key
+        local lbl = opt.label
+        local lvlTxt = (opt.hasKnownRange and opt.minLvl and opt.maxLvl)
+            and string.format(" |cff9da7b5[%d-%d]|r", opt.minLvl, opt.maxLvl)
+            or ""
+        if menuParent.CreateCheckbox then
+            menuParent:CreateCheckbox(lbl .. lvlTxt, function()
+                return LFGFrameTab:IsActivityWatched(key, lbl)
+            end, function()
+                LFGFrameTab:ToggleActivityWatched(key, lbl)
+            end)
+        else
+            menuParent:CreateButton(lbl .. lvlTxt, function()
+                LFGFrameTab:ToggleActivityWatched(key, lbl)
+            end)
+        end
+    end
+
+    for i = 1, #primary do
+        addWatcherChoice(watchSub, primary[i])
+    end
+    if #others > 0 then
+        local allSub = watchSub:CreateButton(L["All Dungeons & Raids"])
+        for i = 1, #others do
+            addWatcherChoice(allSub, others[i])
+        end
+    end
+    if watchSub.CreateDivider then watchSub:CreateDivider() end
+    watchSub:CreateButton(L["Clear All Watchers"], function()
+        LFGFrameTab:ConfirmClearWatchedActivities()
+    end)
+end
+
+local function GetLfgQuickStatusState()
+    local s = ns.db and ns.db.settings
+    if s and s.embedLfgWindow == false then return "off" end
+    if s and s.embedLfgMirrorBar == false then return "partial" end
+    return "active"
+end
+
+local function GetLfgQuickTooltipLines()
+    local s = ns.db and ns.db.settings
+    local mirrorOn = not s or s.embedLfgMirrorBar ~= false
+    local bullOn = not s or s.lfgBulletinMode ~= false
+    local watchOn = not s or s.lfgWatchersEnabled ~= false
+    local watchCnt = LFGFrameTab:GetWatchedActivitiesCount()
+    return {
+        { left = L["Tab 1 Mirror Bar"], right = mirrorOn and ("|cff3fb950" .. L["On"] .. "|r") or ("|cff8b949e" .. L["Off"] .. "|r") },
+        { left = L["Bulletin Board Mode"], right = bullOn and ("|cff3fb950" .. L["On"] .. "|r") or ("|cff8b949e" .. L["Off"] .. "|r") },
+        { left = L["LFG Watchers in Official Chat"], right = watchOn and ("|cff3fb950" .. L["On"] .. " (" .. tostring(watchCnt) .. ")|r") or ("|cff8b949e" .. L["Off"] .. "|r") },
+        L["Right-click or click to configure SocialCentral LFG features or disable Group Finder (I) integration."],
+    }
+end
+
+local function BuildLfgQuickOptionsMenu(root, includeMirrorOption)
+    if root.CreateTitle then
+        root:CreateTitle("SocialCentral — " .. L["Group Finder (I)"])
+    end
+    if root.CreateCheckbox then
+        root:CreateCheckbox(L["Group by Dungeon (Bulletin Board)"], function()
+            local s = ns.db and ns.db.settings
+            return (not s) or s.lfgBulletinMode ~= false
+        end, function()
+            if ns.db and ns.db.settings then
+                LFGFrameTab._hasSearchedThisSession = true
+                ns.db.settings.lfgBulletinMode = not (ns.db.settings.lfgBulletinMode ~= false)
+                LFGFrameTab:RefreshData()
+                if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            end
+        end)
+        root:CreateCheckbox(L["Hide Full Groups"], function()
+            local s = ns.db and ns.db.settings
+            return (not s) or s.lfgHideFullGroups ~= false
+        end, function()
+            if ns.db and ns.db.settings then
+                LFGFrameTab._hasSearchedThisSession = true
+                ns.db.settings.lfgHideFullGroups = not (ns.db.settings.lfgHideFullGroups ~= false)
+                LFGFrameTab:RefreshData()
+                if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            end
+        end)
+        root:CreateCheckbox(L["Hide Saved Lockouts"], function()
+            local s = ns.db and ns.db.settings
+            return s and s.lfgHideSavedLockouts == true
+        end, function()
+            if ns.db and ns.db.settings then
+                LFGFrameTab._hasSearchedThisSession = true
+                ns.db.settings.lfgHideSavedLockouts = not (ns.db.settings.lfgHideSavedLockouts == true)
+                LFGFrameTab:RefreshData()
+                if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            end
+        end)
+        root:CreateCheckbox(L["Hide Avoid / Enemy"], function()
+            local s = ns.db and ns.db.settings
+            return s and s.lfgHideAvoidEnemy == true
+        end, function()
+            if ns.db and ns.db.settings then
+                LFGFrameTab._hasSearchedThisSession = true
+                ns.db.settings.lfgHideAvoidEnemy = not (ns.db.settings.lfgHideAvoidEnemy == true)
+                LFGFrameTab:RefreshData()
+                if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            end
+        end)
+        root:CreateCheckbox(L["LFG Watchers in Official Chat"], function()
+            local s = ns.db and ns.db.settings
+            return (not s) or s.lfgWatchersEnabled ~= false
+        end, function()
+            if ns.db and ns.db.settings then
+                ns.db.settings.lfgWatchersEnabled = not (ns.db.settings.lfgWatchersEnabled ~= false)
+                if ns.Clan and ns.Clan.SyncOfficialLfgEvents then
+                    ns.Clan:SyncOfficialLfgEvents()
+                end
+                LFGFrameTab:RefreshData()
+                if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            end
+        end)
+    end
+    local watchSub = root:CreateButton(L["Watched Dungeons (%d)"]:format(LFGFrameTab:GetWatchedActivitiesCount()))
+    PopulateWatchedActivitiesSubmenu(watchSub)
+    root:CreateButton(L["Edit Apply Whisper Template (/w)..."], function()
+        LFGFrameTab:OpenWhisperTemplateModal()
+    end)
+    if includeMirrorOption and root.CreateCheckbox then
+        if root.CreateDivider then root:CreateDivider() end
+        root:CreateCheckbox(L["Show Official Tab 1 Mirror Bar"], function()
+            local s = ns.db and ns.db.settings
+            return not s or s.embedLfgMirrorBar ~= false
+        end, function()
+            if ns.db and ns.db.settings then
+                ns.db.settings.embedLfgMirrorBar = not (ns.db.settings.embedLfgMirrorBar ~= false)
+            end
+            LFGFrameTab:UpdateNativeBridgeBar()
+            LFGFrameTab:RefreshData()
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+        end)
+    end
+    if root.CreateDivider then root:CreateDivider() end
+    root:CreateButton(L["Disable in this window"], function()
+        if ns.db and ns.db.settings then
+            ns.db.settings.embedLfgWindow = false
+        end
+        LFGFrameTab:HideSubPanel(false)
+        LFGFrameTab:UpdateNativeBridgeBar()
+        ns:Emit("SETTINGS_UPDATED")
+        ns:Emit("CLAN_UPDATED")
+        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+        ns:Print("%s", L["Disabled in this window. Re-enable anytime in Settings (/sc)."])
+    end)
+    root:CreateButton(L["Settings"], function()
+        if ns.Settings and ns.Settings.Open then ns.Settings:Open() end
+    end)
 end
 
 local function CreateBrowseHeaderControls(selfObj, body)
@@ -5386,9 +6693,25 @@ local function CreateBrowseHeaderControls(selfObj, body)
     )
     helpBtn:SetPoint("TOPRIGHT", browseHeader, "TOPRIGHT", -10, -27)
 
+    local browseQuickBtn = Theme.CreateOfficialQuickButton and Theme:CreateOfficialQuickButton(browseHeader, {
+        name = "SocialCentralLFGBrowseQuickBtn",
+        size = 18,
+        title = L["Group Finder (I)"],
+        tooltipAnchor = "ANCHOR_RIGHT",
+        getStatusState = GetLfgQuickStatusState,
+        getTooltipLines = GetLfgQuickTooltipLines,
+        buildMenu = function(root)
+            BuildLfgQuickOptionsMenu(root, true)
+        end,
+    })
+    if browseQuickBtn then
+        browseQuickBtn:SetPoint("RIGHT", helpBtn, "LEFT", -4, 0)
+        selfObj.controls.browseQuickBtn = browseQuickBtn
+    end
+
     local refreshBtn = CreateFrame("Button", "SocialCentralLFGRefreshButton", browseHeader)
     refreshBtn:SetSize(26, 26)
-    refreshBtn:SetPoint("RIGHT", helpBtn, "LEFT", -4, 0)
+    refreshBtn:SetPoint("RIGHT", browseQuickBtn or helpBtn, "LEFT", -4, 0)
     refreshBtn:SetNormalTexture("Interface\\Buttons\\UI-SquareButton-Up")
     refreshBtn:SetPushedTexture("Interface\\Buttons\\UI-SquareButton-Down")
     refreshBtn:SetDisabledTexture("Interface\\Buttons\\UI-SquareButton-Disabled")
@@ -5490,6 +6813,38 @@ local function CreateBrowseHeaderControls(selfObj, body)
             end
             if root.CreateDivider then root:CreateDivider() end
             if root.CreateCheckbox then
+                root:CreateCheckbox(L["Group by Dungeon (Bulletin Board)"], function()
+                    local s = ns.db and ns.db.settings
+                    return (not s) or s.lfgBulletinMode ~= false
+                end, function()
+                    if ns.db and ns.db.settings then
+                        LFGFrameTab._hasSearchedThisSession = true
+                        ns.db.settings.lfgBulletinMode = not (ns.db.settings.lfgBulletinMode ~= false)
+                        LFGFrameTab:RefreshData()
+                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    end
+                end)
+                root:CreateCheckbox(L["Hide Full Groups"], function()
+                    local s = ns.db and ns.db.settings
+                    return (not s) or s.lfgHideFullGroups ~= false
+                end, function()
+                    if ns.db and ns.db.settings then
+                        LFGFrameTab._hasSearchedThisSession = true
+                        ns.db.settings.lfgHideFullGroups = not (ns.db.settings.lfgHideFullGroups ~= false)
+                        LFGFrameTab:RefreshData()
+                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    end
+                end)
+                root:CreateCheckbox(L["Hide Saved Lockouts"], function()
+                    return ns.db and ns.db.settings and ns.db.settings.lfgHideSavedLockouts == true
+                end, function()
+                    if ns.db and ns.db.settings then
+                        LFGFrameTab._hasSearchedThisSession = true
+                        ns.db.settings.lfgHideSavedLockouts = not (ns.db.settings.lfgHideSavedLockouts == true)
+                        LFGFrameTab:RefreshData()
+                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    end
+                end)
                 root:CreateCheckbox(L["Suitable for My Level"], function()
                     return LFGFrameTab.suitableLevelOnly == true
                 end, function()
@@ -5511,6 +6866,9 @@ local function CreateBrowseHeaderControls(selfObj, body)
                     end
                 end)
             end
+            root:CreateButton(L["Edit Apply Whisper Template (/w)..."], function()
+                LFGFrameTab:OpenWhisperTemplateModal()
+            end)
             root:CreateButton(L["List Group"], function()
                 LFGFrameTab.viewMode = "categories"
                 LFGFrameTab:RefreshData()
@@ -5646,6 +7004,8 @@ local function CreateBrowseHeaderControls(selfObj, body)
                     LFGFrameTab:RefreshData()
                 end)
             end
+            local watchSub = root:CreateButton(L["Watched Dungeons (%d)"]:format(LFGFrameTab:GetWatchedActivitiesCount()))
+            PopulateWatchedActivitiesSubmenu(watchSub)
             if root.CreateDivider then root:CreateDivider() end
             local opts = GetBrowseActivityOptions(LFGFrameTab.categoryFilter)
             for i = 1, #opts do
@@ -5657,6 +7017,9 @@ local function CreateBrowseHeaderControls(selfObj, body)
                     local itemLbl = (opt.hasKnownRange and opt.isSuitable)
                         and ("|cff3fb950" .. opt.label .. lvlTxt .. "|r")
                         or (opt.label .. "|cff9da7b5" .. lvlTxt .. "|r")
+                    if LFGFrameTab:IsActivityWatched(opt.key, opt.label) then
+                        itemLbl = itemLbl .. " |cff3fb950[" .. L["Watched"] .. "]|r"
+                    end
                     local key = opt.key
                     if root.CreateCheckbox then
                         root:CreateCheckbox(itemLbl, function()
@@ -6484,9 +7847,25 @@ function LFGFrameTab:EnsureNativeBridgeBar()
     helpBtn:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -7, -5)
     bar.helpBtn = helpBtn
 
+    local quickBtn = Theme.CreateOfficialQuickButton and Theme:CreateOfficialQuickButton(bar, {
+        name = "SocialCentralLFGMirrorQuickBtn",
+        size = 18,
+        title = L["Group Finder (I)"],
+        tooltipAnchor = "ANCHOR_RIGHT",
+        getStatusState = GetLfgQuickStatusState,
+        getTooltipLines = GetLfgQuickTooltipLines,
+        buildMenu = function(root)
+            BuildLfgQuickOptionsMenu(root, true)
+        end,
+    })
+    if quickBtn then
+        quickBtn:SetPoint("RIGHT", helpBtn, "LEFT", -4, 0)
+        bar.quickBtn = quickBtn
+    end
+
     local statusLbl = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     statusLbl:SetPoint("TOPLEFT", bar, "TOPLEFT", 10, -7)
-    statusLbl:SetPoint("RIGHT", helpBtn, "LEFT", -6, 0)
+    statusLbl:SetPoint("RIGHT", quickBtn or helpBtn, "LEFT", -6, 0)
     statusLbl:SetJustifyH("LEFT")
     statusLbl:SetWordWrap(false)
     bar.statusLbl = statusLbl
@@ -6632,7 +8011,10 @@ function LFGFrameTab:EnsureNativeBridgeBar()
 end
 
 function LFGFrameTab:UpdateNativeBridgeBar()
-    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("I") then
+    local s = ns.db and ns.db.settings
+    if (ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("I"))
+        or (s and s.embedLfgMirrorBar == false)
+    then
         if self.nativeBridgeBar then
             self.nativeBridgeBar:Hide()
         end
@@ -6647,6 +8029,9 @@ function LFGFrameTab:UpdateNativeBridgeBar()
     end
     local bar = self:EnsureNativeBridgeBar()
     if not bar then return end
+    if bar.quickBtn and bar.quickBtn.RefreshTheme then
+        bar.quickBtn:RefreshTheme()
+    end
     bar:Show()
 
     local bd = (ns.Clan and ns.Clan.GetTrustedLFGBreakdown and ns.Clan:GetTrustedLFGBreakdown()) or { total = 0 }
@@ -6795,9 +8180,10 @@ function LFGFrameTab:EnsureSideTab()
         end)
     end
 
-    local gapY = MeasureTabGap(nativeTabs, -2)
+    local gapY = MeasureTabGap(nativeTabs, -2, self.sideTab._useCommonSideTab)
     self.sideTab:ClearAllPoints()
     self.sideTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
+    SyncRightSideTabHitboxAndLayer(parent, self.sideTab, nativeTabs, 600)
     self.sideTab:Show()
     ElevateLfgParentControls()
     self:UpdateTabSelectionVisual()
@@ -6849,6 +8235,9 @@ function LFGFrameTab:AttachHooks()
 
     parent:HookScript("OnHide", function()
         LFGFrameTab:HideSubPanel(false)
+        if ns.RequestIdleGcStep then
+            ns:RequestIdleGcStep(250, 0.8)
+        end
     end)
 
     if hooksecurefunc and type(parent.UpdateTabs) == "function" and not parent._scHookedUpdateTabs then
@@ -7022,7 +8411,7 @@ function LFGFrameTab:EnsureSocialSideTab()
 
     self.socialTab:ClearAllPoints()
     if lastNative then
-        local gapY = MeasureTabGap(nativeTabs, -2)
+        local gapY = MeasureTabGap(nativeTabs, -2, self.socialTab._useCommonSideTab)
         self.socialTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
         for _, nt in ipairs(nativeTabs) do
             nt._scSocialCloseHooked = true
@@ -7046,6 +8435,7 @@ function LFGFrameTab:EnsureSocialSideTab()
             HookNativeHostTab(parent, nTab, self.socialTab, nil, false)
         end
     end
+    SyncRightSideTabHitboxAndLayer(parent, self.socialTab, nativeTabs, 600)
     self.socialTab:Show()
     self:SyncAllEmbeddedTabStates()
 end
@@ -7079,6 +8469,13 @@ function LFGFrameTab:AttachSocialUI()
             if type(parent[methodName]) == "function" then
                 hooksecurefunc(parent, methodName, function()
                     if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                    if C_Timer and C_Timer.After then
+                        C_Timer.After(0, function()
+                            if parent and parent:IsShown() then
+                                LFGFrameTab:EnsureSocialSideTab()
+                            end
+                        end)
+                    end
                 end)
             end
         end
@@ -7148,12 +8545,10 @@ function LFGFrameTab:EnsureGuildSideTab()
         )
     end
 
-    local maxLvl = math.max(520, (lastNative and lastNative.GetFrameLevel and lastNative:GetFrameLevel() or 510) + 2)
-    self.guildTab:SetFrameLevel(maxLvl)
     self.guildTab:ClearAllPoints()
     if lastNative then
         local defaultGap = (self.guildTab:GetWidth() or 32) < 44 and -20 or -2
-        local gapY = MeasureTabGap(nativeTabs, defaultGap)
+        local gapY = MeasureTabGap(nativeTabs, defaultGap, self.guildTab._useCommonSideTab)
         self.guildTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
         -- Hook every native tab individually as guild-only tabs can appear dynamically when switching clubs.
         for _, nt in ipairs(nativeTabs) do
@@ -7170,6 +8565,7 @@ function LFGFrameTab:EnsureGuildSideTab()
             HookNativeHostTab(parent, nt, self.guildTab, COMMUNITIES_NATIVE_TABS, false)
         end
     end
+    SyncRightSideTabHitboxAndLayer(parent, self.guildTab, nativeTabs, 600)
     self.guildTab:Show()
     self:SyncAllEmbeddedTabStates()
 end
@@ -7212,7 +8608,7 @@ function LFGFrameTab:AttachCommunitiesUI()
                     if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent) and ns.UI.CloseEmbeddedIfHost then
                         ns.UI:CloseEmbeddedIfHost(parent)
                     end
-                    if methodName == "SetDisplayMode" and C_Timer and C_Timer.After then
+                    if C_Timer and C_Timer.After then
                         C_Timer.After(0, function()
                             if parent and parent:IsShown() then
                                 LFGFrameTab:EnsureGuildSideTab()
@@ -7243,6 +8639,17 @@ end
 -- ============================================================================
 -- Official Game Window Transition #4: CharacterFrame ('C') -> My Alts
 -- ============================================================================
+local CHARACTER_NATIVE_TABS = {
+    "Tab1",
+    "Tab2",
+    "Tab3",
+    "Tab4",
+    "Tab5",
+    "Tab6",
+    "Tab7",
+    "Tab8",
+}
+
 function LFGFrameTab:EnsureCharacterSideTab()
     local parent = _G.CharacterFrame
     if not parent then return end
@@ -7252,7 +8659,7 @@ function LFGFrameTab:EnsureCharacterSideTab()
         return
     end
 
-    local nativeTabs = DiscoverRightSideTabs(parent, self.charTab)
+    local nativeTabs = DiscoverRightSideTabs(parent, self.charTab, CHARACTER_NATIVE_TABS)
     local lastNative = nativeTabs[#nativeTabs]
 
     if not self.charTab then
@@ -7273,11 +8680,11 @@ function LFGFrameTab:EnsureCharacterSideTab()
 
     self.charTab:ClearAllPoints()
     if lastNative then
-        local gapY = MeasureTabGap(nativeTabs, -2)
+        local gapY = MeasureTabGap(nativeTabs, -2, self.charTab._useCommonSideTab)
         self.charTab:SetPoint("TOPLEFT", lastNative, "BOTTOMLEFT", 0, gapY)
         for _, nt in ipairs(nativeTabs) do
             nt._scCharCloseHooked = true
-            HookNativeHostTab(parent, nt, self.charTab, { "Tab1", "Tab2", "Tab3", "Tab4" }, false)
+            HookNativeHostTab(parent, nt, self.charTab, CHARACTER_NATIVE_TABS, false)
         end
     else
         self.charTab:SetPoint("TOPLEFT", parent, "TOPRIGHT", -2, -260)
@@ -7287,10 +8694,11 @@ function LFGFrameTab:EnsureCharacterSideTab()
             local extraTab = _G[prefix .. idx]
             if extraTab then
                 extraTab._scCharCloseHooked = true
-                HookNativeHostTab(parent, extraTab, self.charTab, { "Tab1", "Tab2", "Tab3", "Tab4" }, false)
+                HookNativeHostTab(parent, extraTab, self.charTab, CHARACTER_NATIVE_TABS, false)
             end
         end
     end
+    SyncRightSideTabHitboxAndLayer(parent, self.charTab, nativeTabs, 600)
     self.charTab:Show()
     self:SyncAllEmbeddedTabStates()
 end
@@ -7299,6 +8707,18 @@ function LFGFrameTab:AttachCharacterUI()
     local parent = _G.CharacterFrame
     if self.charHooked or not parent then return end
     self.charHooked = true
+
+    local function QueueEnsureCharTab()
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0, function()
+                if parent and parent:IsShown() then
+                    LFGFrameTab:EnsureCharacterSideTab()
+                end
+            end)
+        elseif parent and parent:IsShown() then
+            LFGFrameTab:EnsureCharacterSideTab()
+        end
+    end
 
     parent:HookScript("OnShow", function()
         if not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent)) then
@@ -7346,19 +8766,14 @@ function LFGFrameTab:AttachCharacterUI()
                         ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
                     end
                     if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                    QueueEnsureCharTab()
                 end)
             end
         end
-        if type(parent.UpdateTabLayout) == "function" then
-            hooksecurefunc(parent, "UpdateTabLayout", function()
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0, function()
-                        if parent and parent:IsShown() then
-                            LFGFrameTab:EnsureCharacterSideTab()
-                        end
-                    end)
-                end
-            end)
+        for _, layoutMethod in ipairs({ "UpdateTabLayout", "UpdateTabs", "ResetTabs" }) do
+            if type(parent[layoutMethod]) == "function" then
+                hooksecurefunc(parent, layoutMethod, QueueEnsureCharTab)
+            end
         end
         if type(_G.CharacterFrameTab_OnClick) == "function" then
             hooksecurefunc("CharacterFrameTab_OnClick", function()
@@ -7366,6 +8781,7 @@ function LFGFrameTab:AttachCharacterUI()
                     ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
                 end
                 if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                QueueEnsureCharTab()
             end)
         end
         if type(_G.PanelTemplates_SetTab) == "function" then
@@ -7375,6 +8791,7 @@ function LFGFrameTab:AttachCharacterUI()
                         ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
                     end
                     if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+                    QueueEnsureCharTab()
                 end
             end)
         end
@@ -7385,13 +8802,331 @@ function LFGFrameTab:AttachCharacterUI()
     end
 end
 
--- ChatFrame1 floating overlay button removed by design; Private & Alliance Chat stays docked inside Social ('O').
+local function AnchorOfficialChatQuickBtn(btn)
+    if not btn then return end
+    local cf = _G.ChatFrame1
+    if not cf then return end
+    local rail = _G.ChatFrame1ButtonFrame
+    btn:ClearAllPoints()
+    if rail and rail.IsShown and rail:IsShown() then
+        btn:SetPoint("BOTTOM", rail, "TOP", 0, 3)
+    else
+        local leftPos = cf.GetLeft and cf:GetLeft()
+        if leftPos and leftPos >= 26 then
+            btn:SetPoint("BOTTOMRIGHT", cf, "TOPLEFT", -3, 2)
+        elseif _G.ChatFrame1Tab then
+            btn:SetPoint("LEFT", _G.ChatFrame1Tab, "RIGHT", 4, 0)
+        else
+            btn:SetPoint("BOTTOMLEFT", cf, "TOPLEFT", 2, 24)
+        end
+    end
+    local refLvl = (rail and rail.IsShown and rail:IsShown() and rail.GetFrameLevel and rail:GetFrameLevel())
+        or (cf.GetFrameLevel and cf:GetFrameLevel()) or 1
+    btn:SetFrameLevel(math.min(9500, math.max(10, refLvl + 10)))
+end
+
+local function GetOfficialChatQuickState()
+    local s = ns.db and ns.db.settings
+    if s and s.embedOfficialChat == false then
+        return "off"
+    end
+    if s and (
+        s.officialChatShortChannels == false
+        or s.officialChatSenderTags == false
+        or s.officialChatEditHistory == false
+        or s.officialChatFastScroll == false
+        or s.chatClickableUrls == false
+    ) then
+        return "partial"
+    end
+    return "active"
+end
+
+function LFGFrameTab:RefreshOfficialChatQuickButton()
+    local btn = self.officialChatBtn
+    local s = ns.db and ns.db.settings
+    local cf = _G.ChatFrame1
+    local shouldShow = cf and cf.IsShown and cf:IsShown()
+        and (not s or (s.embedOfficialChat ~= false and s.officialChatQuickButton ~= false))
+    if not btn then return end
+    if shouldShow then
+        AnchorOfficialChatQuickBtn(btn)
+        if btn.RefreshTheme then btn:RefreshTheme() end
+        btn:Show()
+    else
+        btn:Hide()
+    end
+end
+
+-- Standardized quick [SC] control button anchored beside ChatFrame1 (never covers chat lines or tabs).
 function LFGFrameTab:AttachChatButton()
     if _G.SocialCentralChatButton and _G.SocialCentralChatButton.Hide then
         _G.SocialCentralChatButton:Hide()
     end
     self.chatBtn = nil
-    self.chatHooked = true
+    local cf = _G.ChatFrame1
+    if not cf then return end
+
+    if not self.officialChatBtn and Theme.CreateOfficialQuickButton then
+        local function ToggleChatOpt(key, defaultTrue)
+            if not (ns.db and ns.db.settings) then return end
+            local cur = defaultTrue and (ns.db.settings[key] ~= false) or (ns.db.settings[key] == true)
+            ns.db.settings[key] = not cur
+            ns:Emit("SETTINGS_UPDATED")
+            ns:Emit("CHAT_UPDATED")
+            LFGFrameTab:RefreshOfficialChatQuickButton()
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+        end
+
+        local btn = Theme:CreateOfficialQuickButton(_G.UIParent, {
+            name = "SocialCentralOfficialChatAnchorBtn",
+            size = 20,
+            title = L["Official Chat"],
+            tooltipAnchor = "ANCHOR_RIGHT",
+            getStatusState = GetOfficialChatQuickState,
+            getTooltipLines = function()
+                local s = ns.db and ns.db.settings
+                local onLbl = "|cff3fb950" .. L["On"] .. "|r"
+                local offLbl = "|cff8b949e" .. L["Off"] .. "|r"
+                return {
+                    { left = L["Short Channels"], right = (not s or s.officialChatShortChannels ~= false) and onLbl or offLbl },
+                    { left = L["Sender Badges"], right = (not s or s.officialChatSenderTags ~= false) and onLbl or offLbl },
+                    { left = L["Clickable URLs"], right = (not s or s.chatClickableUrls ~= false) and onLbl or offLbl },
+                    { left = L["EditBox History"], right = (not s or s.officialChatEditHistory ~= false) and onLbl or offLbl },
+                    { left = L["Fast Scroll"], right = (not s or s.officialChatFastScroll ~= false) and onLbl or offLbl },
+                    { left = L["Anti-Spam Shield"], right = (s and s.chatAntiSpamEnabled == true) and onLbl or offLbl },
+                }
+            end,
+            buildMenu = function(root)
+                local s = ns.db and ns.db.settings
+                root:CreateTitle("SocialCentral — " .. L["Official Chat"])
+                root:CreateCheckbox(L["Shorten public channel names"], function()
+                    return not s or s.officialChatShortChannels ~= false
+                end, function() ToggleChatOpt("officialChatShortChannels", true) end)
+                root:CreateCheckbox(L["Show [Lv], [Main], [+]/[Avoid] tags"], function()
+                    return not s or s.officialChatSenderTags ~= false
+                end, function() ToggleChatOpt("officialChatSenderTags", true) end)
+                root:CreateCheckbox(L["Clickable URLs"], function()
+                    return not s or s.chatClickableUrls ~= false
+                end, function() ToggleChatOpt("chatClickableUrls", true) end)
+                root:CreateCheckbox(L["Remember typed chat history (EditBox)"], function()
+                    return not s or s.officialChatEditHistory ~= false
+                end, function() ToggleChatOpt("officialChatEditHistory", true) end)
+                root:CreateCheckbox(L["Fast scroll (Shift/Ctrl + Wheel)"], function()
+                    return not s or s.officialChatFastScroll ~= false
+                end, function() ToggleChatOpt("officialChatFastScroll", true) end)
+                root:CreateCheckbox(L["Hide Account-Ignored chat"], function()
+                    return not s or s.accountIgnoreHideChat ~= false
+                end, function() ToggleChatOpt("accountIgnoreHideChat", true) end)
+                root:CreateCheckbox(L["Public Chat Anti-Spam Shield"], function()
+                    return s and s.chatAntiSpamEnabled == true
+                end, function() ToggleChatOpt("chatAntiSpamEnabled", false) end)
+                root:CreateCheckbox(L["Mirror Alliance Chat in Official Chat (/ali)"], function()
+                    return not s or s.clanOfficialGreenWall ~= false
+                end, function() ToggleChatOpt("clanOfficialGreenWall", false) end)
+
+                root:CreateDivider()
+                root:CreateButton(L["Copy Official Chat"], function()
+                    if ns.Chat and ns.Chat.OpenCopyOfficialChat then
+                        ns.Chat:OpenCopyOfficialChat(50, 1)
+                    end
+                end)
+                root:CreateButton(L["Mentions & Keywords Radar..."], function()
+                    if ns.SocialPanels and ns.SocialPanels.OpenMentionKeywordsModal then
+                        ns.SocialPanels:OpenMentionKeywordsModal()
+                    end
+                end)
+                local filtCnt = (ns.Chat and ns.Chat.GetFilteredChatCount and ns.Chat:GetFilteredChatCount()) or 0
+                local filtLbl = (filtCnt > 0) and (L["Filtered Chat Log"] .. " (" .. filtCnt .. ")") or L["Filtered Chat Log"]
+                root:CreateButton(filtLbl, function()
+                    if ns.SocialPanels and ns.SocialPanels.OpenFilteredChatModal then
+                        ns.SocialPanels:OpenFilteredChatModal()
+                    end
+                end)
+
+                root:CreateDivider()
+                root:CreateButton(L["Hide quick [SC] button here"], function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.officialChatQuickButton = false
+                    end
+                    LFGFrameTab:RefreshOfficialChatQuickButton()
+                    ns:Emit("SETTINGS_UPDATED")
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    ns:Print("%s", L["Official Chat [SC] button hidden. Re-enable anytime in Settings (/sc)."])
+                end)
+                root:CreateButton(L["Disable Official Chat Enhancements"], function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.embedOfficialChat = false
+                    end
+                    LFGFrameTab:RefreshOfficialChatQuickButton()
+                    ns:Emit("SETTINGS_UPDATED")
+                    ns:Emit("CHAT_UPDATED")
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    ns:Print("%s", L["Official Chat enhancements disabled. Re-enable anytime in Settings (/sc)."])
+                end)
+                root:CreateButton(L["Settings"], function()
+                    if ns.Settings and ns.Settings.Open then ns.Settings:Open("general") end
+                end)
+            end,
+        })
+        btn:SetClampedToScreen(true)
+        self.officialChatBtn = btn
+    end
+
+    if not self.chatHooked then
+        self.chatHooked = true
+        if cf.HookScript then
+            cf:HookScript("OnShow", function() LFGFrameTab:RefreshOfficialChatQuickButton() end)
+            cf:HookScript("OnHide", function() LFGFrameTab:RefreshOfficialChatQuickButton() end)
+        end
+        if _G.ChatFrame1ButtonFrame and _G.ChatFrame1ButtonFrame.HookScript then
+            _G.ChatFrame1ButtonFrame:HookScript("OnShow", function() LFGFrameTab:RefreshOfficialChatQuickButton() end)
+            _G.ChatFrame1ButtonFrame:HookScript("OnHide", function() LFGFrameTab:RefreshOfficialChatQuickButton() end)
+        end
+    end
+    self:RefreshOfficialChatQuickButton()
+end
+
+-- ============================================================================
+-- Official Game Window Integration #5B: Official Profession Window -> Recipe Catalog [SC]
+-- ============================================================================
+local hookedProfHosts = setmetatable({}, { __mode = "k" })
+
+local function ResolveVisibleProfessionHost()
+    for _, gName in ipairs({ "ProfessionsFrame", "TradeSkillFrame", "CraftFrame" }) do
+        local f = _G[gName]
+        if f and f.IsShown and f:IsShown() then
+            return f
+        end
+    end
+    return nil
+end
+
+local function AnchorProfessionQuickBtn(btn, host)
+    if not (btn and host) then return end
+    btn:ClearAllPoints()
+    local closeRef = host.CloseButton or (host.TitleContainer and host.TitleContainer.CloseButton) or _G[(host:GetName() or "") .. "CloseButton"]
+    if closeRef and closeRef.IsShown and closeRef:IsShown() then
+        btn:SetPoint("RIGHT", closeRef, "LEFT", -6, 0)
+    else
+        btn:SetPoint("TOPRIGHT", host, "TOPRIGHT", -32, -6)
+    end
+    if host.GetFrameStrata then
+        local strata = host:GetFrameStrata()
+        if strata then btn:SetFrameStrata(strata) end
+    end
+    local hostLvl = (host.GetFrameLevel and host:GetFrameLevel()) or 1
+    btn:SetFrameLevel(math.min(9500, math.max(20, hostLvl + 25)))
+end
+
+function LFGFrameTab:RefreshProfessionQuickButton()
+    local btn = self.profQuickBtn
+    local s = ns.db and ns.db.settings
+    local host = ResolveVisibleProfessionHost()
+    local shouldShow = (host ~= nil) and (not s or s.embedProfessionWindow ~= false)
+    if not btn then return end
+    if shouldShow then
+        AnchorProfessionQuickBtn(btn, host)
+        if btn.RefreshTheme then btn:RefreshTheme() end
+        btn:Show()
+    else
+        btn:Hide()
+    end
+end
+
+function LFGFrameTab:AttachProfessionButton()
+    for _, gName in ipairs({ "ProfessionsFrame", "TradeSkillFrame", "CraftFrame" }) do
+        local f = _G[gName]
+        if f and f.HookScript and not hookedProfHosts[f] then
+            hookedProfHosts[f] = true
+            f:HookScript("OnShow", function() LFGFrameTab:RefreshProfessionQuickButton() end)
+            f:HookScript("OnHide", function() LFGFrameTab:RefreshProfessionQuickButton() end)
+        end
+    end
+
+    local host = ResolveVisibleProfessionHost()
+    if not self.profQuickBtn and host and Theme.CreateOfficialQuickButton then
+        local btn = Theme:CreateOfficialQuickButton(_G.UIParent, {
+            name = "SocialCentralProfessionQuickBtn",
+            size = 20,
+            title = L["Official Professions (Recipes)"],
+            tooltipAnchor = "ANCHOR_RIGHT",
+            getStatusState = function()
+                local s = ns.db and ns.db.settings
+                if s and s.embedProfessionWindow == false then
+                    return "off"
+                end
+                if s and s.tooltipRecipeAlts == false then
+                    return "partial"
+                end
+                return "active"
+            end,
+            getTooltipLines = function()
+                local myCnt, uniqCnt, altCnt = 0, 0, 0
+                if ns.Alts and ns.Alts.GetRecipeSummaryStats then
+                    myCnt, uniqCnt, altCnt = ns.Alts:GetRecipeSummaryStats()
+                end
+                local s = ns.db and ns.db.settings
+                local onLbl = "|cff3fb950" .. L["On"] .. "|r"
+                local offLbl = "|cff8b949e" .. L["Off"] .. "|r"
+                return {
+                    { left = L["This Character"], right = L["%d recipes"]:format(myCnt or 0) },
+                    { left = L["Account Catalog"], right = L["%d recipes (%d alts)"]:format(uniqCnt or 0, altCnt or 0) },
+                    { left = L["Craftable Tooltips"], right = (not s or s.tooltipRecipeAlts ~= false) and onLbl or offLbl },
+                    { left = L["Guild Recipe Replies"], right = (not s or s.guildRecipeReply ~= false) and onLbl or offLbl },
+                }
+            end,
+            buildMenu = function(root)
+                local s = ns.db and ns.db.settings
+                root:CreateTitle("SocialCentral — " .. L["Official Professions (Recipes)"])
+                root:CreateCheckbox(L["Show 'Craftable by' in Item Tooltips"], function()
+                    return not s or s.tooltipRecipeAlts ~= false
+                end, function()
+                    if s then s.tooltipRecipeAlts = not (s.tooltipRecipeAlts ~= false) end
+                    ns:Emit("SETTINGS_UPDATED")
+                    LFGFrameTab:RefreshProfessionQuickButton()
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                end)
+                root:CreateCheckbox(L["Answer Guild Recipe Searches"], function()
+                    return not s or s.guildRecipeReply ~= false
+                end, function()
+                    if s then s.guildRecipeReply = not (s.guildRecipeReply ~= false) end
+                    ns:Emit("SETTINGS_UPDATED")
+                    LFGFrameTab:RefreshProfessionQuickButton()
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                end)
+
+                root:CreateDivider()
+                root:CreateButton(L["Search All Alt Recipes (C)..."], function()
+                    if ns.NavigateToModule then
+                        ns:NavigateToModule("alts", { altSubTab = "items", altBagSource = "recipes", altAllAlts = true })
+                    end
+                end)
+                if not Compat.ShouldShowGuildFeatures or Compat.ShouldShowGuildFeatures() then
+                    root:CreateButton(L["Guild Professions & Requests (J)..."], function()
+                        if ns.NavigateToModule then
+                            ns:NavigateToModule("clan", { clanRightView = "prof" })
+                        end
+                    end)
+                end
+
+                root:CreateDivider()
+                root:CreateButton(L["Disable in this window"], function()
+                    if s then s.embedProfessionWindow = false end
+                    LFGFrameTab:RefreshProfessionQuickButton()
+                    ns:Emit("SETTINGS_UPDATED")
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    ns:Print("%s", L["Disabled in this window. Re-enable anytime in Settings (/sc)."])
+                end)
+                root:CreateButton(L["Settings"], function()
+                    if ns.Settings and ns.Settings.Open then ns.Settings:Open("overview") end
+                end)
+            end,
+        })
+        btn:SetClampedToScreen(true)
+        self.profQuickBtn = btn
+    end
+    self:RefreshProfessionQuickButton()
 end
 
 -- ============================================================================
@@ -7512,6 +9247,18 @@ local WORLD_BUFF_MAP_PINS = {
         buffIds = { "silithyst" },
         continent = { [1414] = { 0.422, 0.858 }, [947] = { 0.226, 0.735 } },
     },
+}
+
+local WORLD_BUFF_SONGFLOWER_NODES = {
+    { key = "sf_1", mapID = 1448, x = 0.343, y = 0.847, faction = "Both", label = L["Felwood Songflower Node (#1 South)"], buffIds = { "songflower" } },
+    { key = "sf_2", mapID = 1448, x = 0.399, y = 0.220, faction = "Both", label = L["Felwood Songflower Node (#2 Felpaw)"], buffIds = { "songflower" } },
+    { key = "sf_3", mapID = 1448, x = 0.399, y = 0.443, faction = "Both", label = L["Felwood Songflower Node (#3 Shatter Scar)"], buffIds = { "songflower" } },
+    { key = "sf_4", mapID = 1448, x = 0.399, y = 0.594, faction = "Both", label = L["Felwood Songflower Node (#4 Bloodvenom)"], buffIds = { "songflower" } },
+    { key = "sf_5", mapID = 1448, x = 0.409, y = 0.854, faction = "Both", label = L["Felwood Songflower Node (#5 Deadwood)"], buffIds = { "songflower" } },
+    { key = "sf_6", mapID = 1448, x = 0.506, y = 0.139, faction = "Both", label = L["Felwood Songflower Node (#6 Irontree N)"], buffIds = { "songflower" } },
+    { key = "sf_7", mapID = 1448, x = 0.528, y = 0.241, faction = "Both", label = L["Felwood Songflower Node (#7 Irontree S)"], buffIds = { "songflower" } },
+    { key = "sf_8", mapID = 1448, x = 0.543, y = 0.753, faction = "Both", label = L["Felwood Songflower Node (#8 Jadefire)"], buffIds = { "songflower" } },
+    { key = "sf_9", mapID = 1448, x = 0.556, y = 0.075, faction = "Both", label = L["Felwood Songflower Node (#9 Timbermaw)"], buffIds = { "songflower" } },
 }
 
 local function GetPlayerFactionSafe()
@@ -7700,7 +9447,7 @@ local function ShowWorldBuffPinTooltip(pinBtn)
     end
 
     GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(L["Left-click: Report in chat"], 0.45, 0.85, 1.0)
+    GameTooltip:AddLine(L["Left-click: Open Buffs tracker"], 0.45, 0.85, 1.0)
     if pinBtn.canZoomZone then
         GameTooltip:AddLine(L["Right-click: Zoom to zone"], 0.45, 0.85, 1.0)
     end
@@ -7795,8 +9542,7 @@ local function ShowWorldBuffsPillTooltip(anchor)
     GameTooltip:AddDoubleLine(L["Guild Buff Sync"], syncState, 0.72, 0.76, 0.82, syncEnabled and 0.30 or 0.75, syncEnabled and 0.92 or 0.68, syncEnabled and 0.50 or 0.50)
     local pinState = AreWorldMapPinsEnabled() and L["Shown"] or L["Hidden"]
     GameTooltip:AddDoubleLine(L["Map pins"], pinState, 0.72, 0.76, 0.82, AreWorldMapPinsEnabled() and 0.30 or 0.75, AreWorldMapPinsEnabled() and 0.92 or 0.45, AreWorldMapPinsEnabled() and 0.50 or 0.45)
-    GameTooltip:AddLine(L["Left-click: Report in chat"], 0.45, 0.85, 1.0)
-    GameTooltip:AddLine(L["Shift+Click: Open full Buffs window"], 0.45, 0.85, 1.0)
+    GameTooltip:AddLine(L["Left-click: Open Buffs tracker"], 0.45, 0.85, 1.0)
     GameTooltip:AddLine(L["Right-click: Toggle map pins"], 0.45, 0.85, 1.0)
     GameTooltip:Show()
 end
@@ -7853,27 +9599,8 @@ local function AcquireWorldBuffPin(canvas, idx)
             end
             return
         end
-        if IsShiftKeyDown and IsShiftKeyDown() then
-            if ns.UI and ns.UI.ShowHub then
-                ns.UI:ShowHub("buffs")
-            end
-            return
-        end
-        local defById, activeById = GetWorldBuffLookup()
-        local chosenDef = nil
-        for _, buffId in ipairs(selfPin.pinDef.buffIds) do
-            if activeById[buffId] and defById[buffId] then
-                chosenDef = defById[buffId]
-                break
-            end
-            if not chosenDef and defById[buffId] then
-                chosenDef = defById[buffId]
-            end
-        end
-        if chosenDef and ns.WorldBuffs and ns.WorldBuffs.OpenIndividualBuffAnnouncement then
-            ns.WorldBuffs:OpenIndividualBuffAnnouncement(chosenDef)
-        elseif ns.WorldBuffs and ns.WorldBuffs.OpenChatAnnouncement then
-            ns.WorldBuffs:OpenChatAnnouncement()
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub("buffs")
         end
     end)
 
@@ -7885,6 +9612,7 @@ function LFGFrameTab:RefreshWorldMapBuffs()
     local mapFrame = _G.WorldMapFrame
     if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("M") then
         if self.mapPill then self.mapPill:Hide() end
+        if self.mapQuickBtn then self.mapQuickBtn:Hide() end
         if self.mapPins then
             for _, p in ipairs(self.mapPins) do
                 p:Hide()
@@ -7893,6 +9621,10 @@ function LFGFrameTab:RefreshWorldMapBuffs()
         return
     end
     if self.mapPill then self.mapPill:Show() end
+    if self.mapQuickBtn then
+        self.mapQuickBtn:Show()
+        if self.mapQuickBtn.RefreshTheme then self.mapQuickBtn:RefreshTheme() end
+    end
     if not (mapFrame and mapFrame.IsShown and mapFrame:IsShown()) then return end
 
     local defById, activeById, activeList = GetWorldBuffLookup()
@@ -7960,14 +9692,18 @@ function LFGFrameTab:RefreshWorldMapBuffs()
 
     local dmfStatus = ns.WorldBuffs and ns.WorldBuffs.GetDarkmoonFaireStatus and ns.WorldBuffs:GetDarkmoonFaireStatus() or nil
     local activeDmfKey = nil
-    if dmfStatus and dmfStatus.isActive then
-        local t = date("*t", (GetServerTime and GetServerTime()) or time())
-        activeDmfKey = (t and ((t.month or 1) % 2 == 1)) and "dmf_mulgore" or "dmf_elwynn"
+    local targetDmfKey = nil
+    if dmfStatus then
+        local isMulgore = (dmfStatus.location == L["Mulgore"])
+        targetDmfKey = isMulgore and "dmf_mulgore" or "dmf_elwynn"
+        if dmfStatus.isActive then
+            activeDmfKey = targetDmfKey
+        end
     end
 
     for _, pinDef in ipairs(WORLD_BUFF_MAP_PINS) do
         local isDmfPin = (pinDef.key == "dmf_elwynn" or pinDef.key == "dmf_mulgore")
-        local dmfVisible = (not isDmfPin) or (activeDmfKey == pinDef.key)
+        local dmfVisible = (not isDmfPin) or (targetDmfKey == pinDef.key)
         if dmfVisible and (pinDef.faction == "Both" or pinDef.faction == playerFaction or playerFaction == "Both") then
             local px, py = ProjectWorldMapCoord(pinDef, currentMapID)
             if px and py then
@@ -7986,6 +9722,9 @@ function LFGFrameTab:RefreshWorldMapBuffs()
                 if state == "ACTIVE" then
                     if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(0.22, 0.92, 0.40, 1.0) end
                     pin.activeDot:Show()
+                elseif isDmfPin and activeDmfKey ~= pinDef.key then
+                    if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(0.45, 0.65, 0.90, 0.92) end
+                    pin.activeDot:Hide()
                 elseif state == "READY" then
                     if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(1.0, 0.84, 0.16, 1.0) end
                     pin.activeDot:Hide()
@@ -8000,6 +9739,76 @@ function LFGFrameTab:RefreshWorldMapBuffs()
             end
         end
     end
+
+    if currentMapID == 1448 and (not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSongflowerPins ~= false) then
+        local sfDef = defById["songflower"]
+        local sfIcon = (sfDef and sfDef.icon) or WORLD_BUFF_ICON_FALLBACK
+        for _, nodeDef in ipairs(WORLD_BUFF_SONGFLOWER_NODES) do
+            idx = idx + 1
+            local pin = AcquireWorldBuffPin(canvas, idx)
+            pin:SetParent(canvas)
+            pin:SetSize(16, 16)
+            pin:SetFrameLevel(pinLevel)
+            pin:ClearAllPoints()
+            pin:SetPoint("CENTER", canvas, "TOPLEFT", nodeDef.x * cw, -nodeDef.y * ch)
+            pin.pinDef = nodeDef
+            pin.canZoomZone = false
+            pin.icon:SetTexture(sfIcon)
+            pin.activeDot:Hide()
+            if pin.SetBackdropBorderColor then
+                pin:SetBackdropBorderColor(0.32, 0.84, 0.48, 0.95)
+            end
+            pin:Show()
+        end
+    end
+end
+
+local function BuildWorldMapQuickMenu(root)
+    if not root then return end
+    root:CreateTitle("SocialCentral — " .. L["World Buffs"])
+    if root.CreateCheckbox then
+        root:CreateCheckbox(L["Show World Buff pins on World Map (M)"], function()
+            return AreWorldMapPinsEnabled()
+        end, function()
+            if ns.db and ns.db.settings then
+                ns.db.settings.worldBuffsMapPins = not AreWorldMapPinsEnabled()
+            end
+            LFGFrameTab:RefreshWorldMapBuffs()
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+        end)
+        root:CreateCheckbox(L["Show Felwood Songflower node pins"], function()
+            return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSongflowerPins ~= false
+        end, function()
+            if ns.db and ns.db.settings then
+                ns.db.settings.worldBuffsSongflowerPins = not (ns.db.settings.worldBuffsSongflowerPins ~= false)
+            end
+            LFGFrameTab:RefreshWorldMapBuffs()
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+        end)
+        root:CreateCheckbox(L["Alert when capital World Buff cooldown finishes"], function()
+            return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsReadyAlert ~= false
+        end, function()
+            if ns.db and ns.db.settings then
+                ns.db.settings.worldBuffsReadyAlert = not (ns.db.settings.worldBuffsReadyAlert ~= false)
+            end
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+        end)
+    end
+    if root.CreateDivider then root:CreateDivider() end
+    root:CreateButton(L["Disable World Buffs Module (M)"], function()
+        if ns.db and ns.db.settings then
+            ns.db.settings.embedWorldMap = false
+        end
+        LFGFrameTab:RefreshWorldMapBuffs()
+        ns:Emit("SETTINGS_UPDATED")
+        ns:Emit("WORLD_BUFFS_UPDATED")
+        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+        if ns.UI and ns.UI.QueueRefresh then ns.UI:QueueRefresh(false) end
+        ns:Print("%s", L["World Buffs (M) module disabled. Re-enable anytime in Settings (/sc)."])
+    end)
+    root:CreateButton(L["Settings"], function()
+        if ns.Settings and ns.Settings.Open then ns.Settings:Open("radar") end
+    end)
 end
 
 function LFGFrameTab:AttachWorldMapButton()
@@ -8055,7 +9864,7 @@ function LFGFrameTab:AttachWorldMapButton()
         pill,
         L["Help: World Buffs on World Map"],
         L["Displays an official-style summary badge and interactive zone pins for Classic/Forever World Buffs directly on the World Map."],
-        L["Hover pins or the badge for live timers and cooldowns. Left-click to report in chat, Shift-click to open the full tracker, or Right-click the badge to toggle map pins."]
+        L["Hover pins or the badge for live timers and cooldowns. Left-click to open the full Buffs tracker, or Right-click the badge to toggle map pins."]
     )
     wbHelp:SetPoint("RIGHT", pill, "RIGHT", -4, 0)
 
@@ -8091,30 +9900,7 @@ function LFGFrameTab:AttachWorldMapButton()
         if button == "RightButton" then
             if MenuUtil and MenuUtil.CreateContextMenu then
                 MenuUtil.CreateContextMenu(selfPill, function(_, root)
-                    root:CreateTitle(L["World Buffs"])
-                    root:CreateCheckbox(L["Show World Buff pins on World Map (M)"], function()
-                        return AreWorldMapPinsEnabled()
-                    end, function()
-                        if ns.db and ns.db.settings then
-                            ns.db.settings.worldBuffsMapPins = not AreWorldMapPinsEnabled()
-                        end
-                        LFGFrameTab:RefreshWorldMapBuffs()
-                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
-                    end)
-                    root:CreateButton(L["Disable World Buffs Module (M)"], function()
-                        if ns.db and ns.db.settings then
-                            ns.db.settings.embedWorldMap = false
-                        end
-                        LFGFrameTab:RefreshWorldMapBuffs()
-                        ns:Emit("SETTINGS_UPDATED")
-                        ns:Emit("WORLD_BUFFS_UPDATED")
-                        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
-                        if ns.UI and ns.UI.QueueRefresh then ns.UI:QueueRefresh(false) end
-                        ns:Print("%s", L["World Buffs (M) module disabled. Re-enable anytime in Settings (/sc)."])
-                    end)
-                    root:CreateButton(L["Settings"], function()
-                        if ns.Settings and ns.Settings.Open then ns.Settings:Open() end
-                    end)
+                    BuildWorldMapQuickMenu(root)
                 end)
                 return
             end
@@ -8128,16 +9914,37 @@ function LFGFrameTab:AttachWorldMapButton()
             end
             return
         end
-        if IsShiftKeyDown and IsShiftKeyDown() then
-            if ns.UI and ns.UI.ShowHub then
-                ns.UI:ShowHub("buffs")
-            end
-            return
-        end
-        if ns.WorldBuffs and ns.WorldBuffs.OpenChatAnnouncement then
-            ns.WorldBuffs:OpenChatAnnouncement()
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub("buffs")
         end
     end)
+
+    if Theme.CreateOfficialQuickButton then
+        local mapQuickBtn = Theme:CreateOfficialQuickButton(container, {
+            name = "SocialCentralWorldMapQuickBtn",
+            size = 22,
+            title = L["World Buffs (M)"],
+            tooltipAnchor = "ANCHOR_LEFT",
+            getStatusState = function()
+                local s = ns.db and ns.db.settings
+                if s and s.embedWorldMap == false then return "off" end
+                if not AreWorldMapPinsEnabled() then return "partial" end
+                return "active"
+            end,
+            getTooltipLines = function()
+                return {
+                    { left = L["Map pins"], right = AreWorldMapPinsEnabled() and ("|cff3fb950" .. L["On"] .. "|r") or ("|cff8b949e" .. L["Off"] .. "|r") },
+                    L["Toggle World Buffs, Songflower node pins, or disable World Map (M) integration."],
+                }
+            end,
+            buildMenu = BuildWorldMapQuickMenu,
+        })
+        if mapQuickBtn then
+            mapQuickBtn:SetPoint("RIGHT", pill, "LEFT", -4, 0)
+            mapQuickBtn:SetFrameLevel(pill:GetFrameLevel())
+            self.mapQuickBtn = mapQuickBtn
+        end
+    end
 
     local mapBuffRefreshPending = false
     local function ScheduleMapBuffRefresh()
@@ -8238,6 +10045,9 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         if shown or not anyLfgEmbed then
             SyncHostNativeTabs(lfgHost, self.sideTab, anyLfgEmbed, { "ListingTab", "BrowsingTab", "WhoListingTab" })
         end
+        if shown and self.sideTab:IsShown() then
+            SyncRightSideTabHitboxAndLayer(lfgHost, self.sideTab, DiscoverNativeSideTabs(lfgHost), 600)
+        end
     end
     if self.socialTab then
         local socialHost = _G.SocialUIFrame or _G.FriendsFrame
@@ -8254,6 +10064,9 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         if shown or not active then
             SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
         end
+        if shown and self.socialTab:IsShown() then
+            SyncRightSideTabHitboxAndLayer(socialHost, self.socialTab, DiscoverRightSideTabs(socialHost, self.socialTab), 600)
+        end
     end
     if self.guildTab then
         local guildHost = _G.CommunitiesFrame or _G.GuildFrame
@@ -8265,6 +10078,9 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         if shown or not active then
             SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
         end
+        if shown and self.guildTab:IsShown() then
+            SyncRightSideTabHitboxAndLayer(guildHost, self.guildTab, DiscoverRightSideTabs(guildHost, self.guildTab, COMMUNITIES_NATIVE_TABS), 600)
+        end
     end
     if self.charTab then
         local charHost = _G.CharacterFrame
@@ -8272,7 +10088,10 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(charHost)
         UpdateSideTabVisual(self.charTab, active)
         if shown or not active then
-            SyncHostNativeTabs(charHost, self.charTab, active, { "Tab1", "Tab2", "Tab3", "Tab4" })
+            SyncHostNativeTabs(charHost, self.charTab, active, CHARACTER_NATIVE_TABS)
+        end
+        if shown and self.charTab:IsShown() then
+            SyncRightSideTabHitboxAndLayer(charHost, self.charTab, DiscoverRightSideTabs(charHost, self.charTab, CHARACTER_NATIVE_TABS), 600)
         end
     end
     if self.mapPill and _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
@@ -8789,12 +10608,24 @@ function LFGFrameTab:Init()
         LFGFrameTab:RefreshTheme()
     end)
 
-    local function RefreshIfOpen()
+    local refreshQueued = false
+    local syncEmbeddedQueued = false
+    local function RunCoalescedRefresh()
+        refreshQueued = false
         if _G.LFGParentFrame and _G.LFGParentFrame:IsShown() then
             LFGFrameTab:UpdateNativeBridgeBar()
         end
         if LFGFrameTab.active and LFGFrameTab.subPanel and LFGFrameTab.subPanel:IsShown() then
             LFGFrameTab:RefreshData()
+        end
+    end
+    local function RefreshIfOpen()
+        if C_Timer and C_Timer.After then
+            if refreshQueued then return end
+            refreshQueued = true
+            C_Timer.After(0.08, RunCoalescedRefresh)
+        else
+            RunCoalescedRefresh()
         end
     end
 
@@ -8806,7 +10637,6 @@ function LFGFrameTab:Init()
     ns.RegisterEvent(self, "GROUP_ROSTER_UPDATE", RefreshIfOpen)
     ns.RegisterEvent(self, "PARTY_LEADER_CHANGED", RefreshIfOpen)
     ns.RegisterEvent(self, "LFG_LIST_ACTIVE_ENTRY_UPDATE", RefreshIfOpen)
-    local syncEmbeddedQueued = false
     local function SyncEmbeddedIfAnyHostShown()
         local lfgHost = _G.LFGParentFrame
         local socialHost = _G.SocialUIFrame or _G.FriendsFrame
@@ -8820,11 +10650,13 @@ function LFGFrameTab:Init()
             or (mapHost and mapHost.IsShown and mapHost:IsShown())
         then
             if C_Timer and C_Timer.After then
-                if syncEmbeddedQueued then return end
+                if syncEmbeddedQueued or refreshQueued then return end
                 syncEmbeddedQueued = true
-                C_Timer.After(0.12, function()
+                C_Timer.After(0.14, function()
                     syncEmbeddedQueued = false
-                    LFGFrameTab:SyncAllEmbeddedTabStates()
+                    if not refreshQueued then
+                        LFGFrameTab:SyncAllEmbeddedTabStates()
+                    end
                 end)
             else
                 LFGFrameTab:SyncAllEmbeddedTabStates()
@@ -8852,6 +10684,8 @@ function LFGFrameTab:Init()
         LFGFrameTab:AttachCommunitiesUI()
         LFGFrameTab:AttachCharacterUI()
         LFGFrameTab:AttachWorldMapButton()
+        LFGFrameTab:AttachChatButton()
+        LFGFrameTab:AttachProfessionButton()
         if _G.LFGParentFrame and _G.LFGParentFrame.IsShown and _G.LFGParentFrame:IsShown() then
             LFGFrameTab:EnsureSideTab()
         end
@@ -8899,10 +10733,23 @@ function LFGFrameTab:Init()
             or loadedName == "Blizzard_CharacterFrame"
             or loadedName == "Blizzard_UIPanels_Game"
             or loadedName == "Blizzard_WorldMap"
+            or loadedName == "Blizzard_TradeSkillUI"
+            or loadedName == "Blizzard_Professions"
+            or loadedName == "Blizzard_CraftUI"
         then
             QueueTryAttachAll()
         end
     end)
+
+    for _, profEv in ipairs({ "TRADE_SKILL_SHOW", "CRAFT_SHOW" }) do
+        ns.RegisterEvent(self, profEv, function()
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.05, function() LFGFrameTab:AttachProfessionButton() end)
+            else
+                LFGFrameTab:AttachProfessionButton()
+            end
+        end)
+    end
 
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
         LFGFrameTab:SyncAllEmbeddedTabStates()

@@ -482,10 +482,11 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
     if not btn or not btn.label then
         return
     end
-    if btn.SetClipsChildren then
+    if btn.SetClipsChildren and not btn._scClipsInit then
+        btn._scClipsInit = true
         btn:SetClipsChildren(true)
     end
-    local w = btn:GetWidth() or 0
+    local w = btn._scAutoFitW or (btn:GetWidth() or 0)
     local variant = btn._scVariant or "default"
     local padX
     if w < 26 then
@@ -498,16 +499,26 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
         padX = (w < 50) and 4 or 5
     end
     local parent = btn._textLayer or btn
-    if parent.SetClipsChildren then
+    if parent.SetClipsChildren and not parent._scClipsInit then
+        parent._scClipsInit = true
         parent:SetClipsChildren(true)
     end
+    local sig = padX .. ":" .. (xOff or 0) .. ":" .. (yOff or 0)
+    if btn._scTextOffsetSig == sig and btn._scTextOffsetParent == parent then
+        return
+    end
+    btn._scTextOffsetSig = sig
+    btn._scTextOffsetParent = parent
     btn.label:ClearAllPoints()
     btn.label:SetPoint("LEFT", parent, "LEFT", padX + xOff, yOff)
     btn.label:SetPoint("RIGHT", parent, "RIGHT", -padX + xOff, yOff)
-    btn.label:SetJustifyH("CENTER")
-    btn.label:SetWordWrap(false)
-    if btn.label.SetMaxLines then
-        btn.label:SetMaxLines(1)
+    if not btn._scLabelFmtInit then
+        btn._scLabelFmtInit = true
+        btn.label:SetJustifyH("CENTER")
+        btn.label:SetWordWrap(false)
+        if btn.label.SetMaxLines then
+            btn.label:SetMaxLines(1)
+        end
     end
 end
 
@@ -944,11 +955,13 @@ function Theme:AutoFitButton(btn, minWidth, padding, maxWidth)
     if btn._scAutoMax and w > btn._scAutoMax then
         w = btn._scAutoMax
     end
+    w = math.floor(w + 0.5)
+    btn._scAutoFitW = w
     if w > 0 and math.abs((btn:GetWidth() or 0) - w) >= 1 then
         btn:SetWidth(w)
     end
     ApplyButtonColors(btn, false)
-    return btn:GetWidth() or w
+    return btn._scAutoFitW or btn:GetWidth() or w
 end
 
 --- Style an existing BackdropTemplate button with hover/disabled visuals.
@@ -1001,6 +1014,8 @@ function Theme:StyleButton(btn, variant)
         if btn._scAutoMax and w > btn._scAutoMax then
             w = btn._scAutoMax
         end
+        w = math.floor(w + 0.5)
+        btn._scAutoFitW = w
         if w > 0 and math.abs((btn:GetWidth() or 0) - w) >= 1 then
             btn:SetWidth(w)
         end
@@ -1123,11 +1138,19 @@ local function ApplyInputBackdrop(target, focused, hovered, textTarget)
         textColor = p.text
     end
 
-    target:SetBackdrop(BACKDROP_SPEC)
-    target:SetBackdropColor(bg[1], bg[2], bg[3], 1.0)
-    target:SetBackdropBorderColor(border[1], border[2], border[3], 1.0)
-    if textTarget and textTarget.SetTextColor then
-        textTarget:SetTextColor(textColor[1], textColor[2], textColor[3])
+    local styleSig = tostring(p and p.key or "dark") .. ":" .. (focused and "F" or "_") .. (hovered and "H" or "_")
+    if target._scAppliedBackdrop ~= BACKDROP_SPEC then
+        target:SetBackdrop(BACKDROP_SPEC)
+        target._scAppliedBackdrop = BACKDROP_SPEC
+        target._scInputStyleSig = nil
+    end
+    if target._scInputStyleSig ~= styleSig then
+        target._scInputStyleSig = styleSig
+        target:SetBackdropColor(bg[1], bg[2], bg[3], 1.0)
+        target:SetBackdropBorderColor(border[1], border[2], border[3], 1.0)
+        if textTarget and textTarget.SetTextColor then
+            textTarget:SetTextColor(textColor[1], textColor[2], textColor[3])
+        end
     end
 end
 
@@ -2405,6 +2428,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     viewport:SetPoint("TOPLEFT", 2, -2)
     viewport:SetPoint("BOTTOMRIGHT", -14, 2)
     viewport:SetClipsChildren(true)
+    viewport:EnableMouse(true)
     viewport:EnableMouseWheel(true)
     viewport._scLevelOffset = 1
 
@@ -2412,6 +2436,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     track:SetWidth(10)
     track:SetPoint("TOPRIGHT", -3, -4)
     track:SetPoint("BOTTOMRIGHT", -3, 4)
+    track:EnableMouse(true)
     track._scLevelOffset = 2
 
     local upOk, scrollUpBtn = pcall(CreateFrame, "Button", nil, container, "UIPanelScrollUpButtonTemplate")
@@ -2607,17 +2632,29 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
 
         local trackH = track:GetHeight() or 0
         if maxOffset <= 0 or trackH <= 0 or total == 0 then
-            thumb:Hide()
+            if thumb:IsShown() then
+                thumb:Hide()
+            end
+            list._scThumbH = nil
+            list._scThumbPos = nil
         else
-            thumb:Show()
+            if not thumb:IsShown() then
+                thumb:Show()
+            end
             local totalH = total * self.rowHeight
             local ratio = math.min(1, vpH / totalH)
             local thumbH = math.max(24, math.floor(trackH * ratio))
-            thumb:SetHeight(thumbH)
+            if list._scThumbH ~= thumbH then
+                list._scThumbH = thumbH
+                thumb:SetHeight(thumbH)
+            end
             local travel = math.max(1, trackH - thumbH)
-            local pos = (self.offset / maxOffset) * travel
-            thumb:ClearAllPoints()
-            thumb:SetPoint("TOP", track, "TOP", 0, -pos)
+            local pos = math.floor(((self.offset / maxOffset) * travel) + 0.5)
+            if list._scThumbPos ~= pos then
+                list._scThumbPos = pos
+                thumb:ClearAllPoints()
+                thumb:SetPoint("TOP", track, "TOP", 0, -pos)
+            end
         end
     end
 
@@ -3471,4 +3508,142 @@ function Theme:CreateCounterBadge(parent, opts)
     SyncFont(1)
     b:Hide()
     return b
+end
+
+--- Standardized compact [SC] quick-control button anchored beside or inside official Blizzard windows.
+function Theme:CreateOfficialQuickButton(parent, opts)
+    opts = opts or {}
+    local sz = math.max(16, math.min(26, tonumber(opts.size) or 20))
+    local btn = CreateFrame("Button", opts.name, parent, "BackdropTemplate")
+    btn:SetSize(sz, sz)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    if btn.SetClipsChildren then
+        btn:SetClipsChildren(false)
+    end
+
+    local bg = btn:CreateTexture(nil, "BACKGROUND", nil, -6)
+    bg:SetAllPoints()
+    bg:SetTexture(WHITE8X8)
+    bg:SetVertexColor(0.08, 0.08, 0.09, 1.0)
+    btn._solidBg = bg
+
+    local icon = btn:CreateTexture(nil, "ARTWORK", nil, 1)
+    icon:SetPoint("TOPLEFT", btn, "TOPLEFT", 2, -2)
+    icon:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -2, 2)
+    icon:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\icon")
+    icon:SetTexCoord(0.06, 0.94, 0.06, 0.94)
+    btn.icon = icon
+
+    local hl = btn:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+    hl:SetBlendMode("ADD")
+    hl:SetAlpha(0.45)
+    btn.hl = hl
+
+    local dot = btn:CreateTexture(nil, "OVERLAY", nil, 3)
+    dot:SetSize(math.max(6, math.floor(sz * 0.36)), math.max(6, math.floor(sz * 0.36)))
+    dot:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 1, -1)
+    dot:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
+    btn.statusDot = dot
+
+    function btn:SetStatusState(state)
+        self._statusState = state or "active"
+        if self._statusState == "off" then
+            self.statusDot:SetVertexColor(0.55, 0.58, 0.64, 1.0)
+            self.icon:SetDesaturated(true)
+            self.icon:SetAlpha(0.72)
+        elseif self._statusState == "partial" then
+            self.statusDot:SetVertexColor(0.98, 0.76, 0.22, 1.0)
+            self.icon:SetDesaturated(false)
+            self.icon:SetAlpha(0.94)
+        else
+            self.statusDot:SetVertexColor(0.24, 0.88, 0.46, 1.0)
+            self.icon:SetDesaturated(false)
+            self.icon:SetAlpha(1.0)
+        end
+    end
+
+    function btn:RefreshTheme()
+        local p = Theme:GetPalette()
+        local gold = p.textGold or p.accent or { 0.85, 0.68, 0.28, 1.0 }
+        local wbg = p.windowBg or { 0.08, 0.08, 0.09, 1.0 }
+        self._solidBg:SetVertexColor(wbg[1], wbg[2], wbg[3], 1.0)
+        if self.SetBackdrop then
+            self:SetBackdrop({
+                bgFile = WHITE8X8,
+                edgeFile = WHITE8X8,
+                edgeSize = 1,
+                insets = { left = 1, right = 1, top = 1, bottom = 1 },
+            })
+            self:SetBackdropColor(wbg[1], wbg[2], wbg[3], 1.0)
+            self:SetBackdropBorderColor(gold[1], gold[2], gold[3], 0.92)
+        end
+        if type(opts.getStatusState) == "function" then
+            self:SetStatusState(opts.getStatusState())
+        else
+            self:SetStatusState(self._statusState or "active")
+        end
+    end
+
+    btn:SetScript("OnEnter", function(selfBtn)
+        local p = Theme:GetPalette()
+        local gold = p.textGold or p.accent or { 0.95, 0.78, 0.35 }
+        if selfBtn.SetBackdropBorderColor then
+            selfBtn:SetBackdropBorderColor(1.0, 0.88, 0.42, 1.0)
+        end
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(selfBtn, opts.tooltipAnchor or "ANCHOR_RIGHT")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine("SocialCentral — " .. tostring(opts.title or L["Official Window"]), gold[1], gold[2], gold[3])
+        if type(opts.getTooltipLines) == "function" then
+            local lines = opts.getTooltipLines()
+            if type(lines) == "table" then
+                for _, ln in ipairs(lines) do
+                    if type(ln) == "table" then
+                        if ln.right ~= nil then
+                            GameTooltip:AddDoubleLine(tostring(ln.left or ""), tostring(ln.right or ""), ln.lr or 0.78, ln.lg or 0.84, ln.lb or 0.92, ln.rr or 0.92, ln.rg or 0.96, ln.rb or 1.0)
+                        else
+                            GameTooltip:AddLine(tostring(ln.text or ln[1] or ""), ln.r or 0.85, ln.g or 0.88, ln.b or 0.94, true)
+                        end
+                    elseif type(ln) == "string" and ln ~= "" then
+                        GameTooltip:AddLine(ln, 0.85, 0.88, 0.94, true)
+                    end
+                end
+            end
+        end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine(L["Click: Toggle features or disable here"], 0.48, 0.86, 1.0, true)
+        GameTooltip:Show()
+    end)
+
+    btn:SetScript("OnLeave", function(selfBtn)
+        selfBtn:RefreshTheme()
+        if GameTooltip and GameTooltip:IsOwned(selfBtn) then
+            GameTooltip:Hide()
+        end
+    end)
+
+    btn:SetScript("OnClick", function(selfBtn, mouseBtn)
+        if GameTooltip and GameTooltip:IsOwned(selfBtn) then
+            GameTooltip:Hide()
+        end
+        if MenuUtil and MenuUtil.CreateContextMenu and type(opts.buildMenu) == "function" then
+            MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+                opts.buildMenu(root, selfBtn, mouseBtn)
+            end)
+        elseif type(opts.onFallbackClick) == "function" then
+            opts.onFallbackClick(selfBtn, mouseBtn)
+        elseif ns.Settings and ns.Settings.Open then
+            ns.Settings:Open()
+        end
+    end)
+
+    btn:RefreshTheme()
+    Theme:RegisterListener(function()
+        if btn and btn.RefreshTheme then
+            btn:RefreshTheme()
+        end
+    end)
+    return btn
 end

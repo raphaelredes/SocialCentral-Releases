@@ -839,15 +839,49 @@ function Alts:Snapshot(includeBank, force)
         nextItemSeq = nextItemSeq + 1
     end
     local wasResting = (IsResting and Safe.Value(Safe.Call(IsResting)) == true) or false
-    local realmNorm = Compat.Realm()
-    local realmRaw = GetRealmName and Safe.String(Safe.Call(GetRealmName)) or nil
-    local worldType = Compat.DetectWorldType and Compat.DetectWorldType(realmNorm, realmRaw) or nil
+    local durPct = nil
+    if GetInventoryItemDurability then
+        local dCur, dMax = 0, 0
+        for slotId = 1, EQUIP_SLOT_COUNT do
+            local okD, cVal, mVal = pcall(GetInventoryItemDurability, slotId)
+            cVal = okD and Safe.Number(cVal) or nil
+            mVal = okD and Safe.Number(mVal) or nil
+            if cVal and mVal and mVal > 0 then
+                dCur = dCur + cVal
+                dMax = dMax + mVal
+            end
+        end
+        if dMax > 0 then
+            durPct = math.floor((dCur / dMax) * 100 + 0.5)
+        end
+    end
+    local prevValidRealm = type(prev) == "table" and prev.realmName and (not Compat.LooksLikeServerRealm or Compat.LooksLikeServerRealm(prev.realmName))
+    local liveRealm = Compat.Realm()
+    local liveValid = type(liveRealm) == "string" and liveRealm ~= "" and (not Compat.LooksLikeServerRealm or Compat.LooksLikeServerRealm(liveRealm))
+    local realmNorm = (liveValid and liveRealm) or (prevValidRealm and prev.realmName) or liveRealm
+    local liveRaw = GetRealmName and Safe.String(Safe.Call(GetRealmName)) or nil
+    local realmRaw = (liveRaw and (not Compat.LooksLikeServerRealm or Compat.LooksLikeServerRealm(liveRaw))) and liveRaw
+        or (type(prev) == "table" and prev.realmRaw)
+        or liveRaw
+    local worldType = (Compat.DetectWorldType and Compat.DetectWorldType(realmNorm, realmRaw))
+        or (type(prev) == "table" and prev.worldType)
+        or nil
     local realmPool = Compat.RealmPool(realmNorm)
+    local resolvedFirst = (resolved and resolved.firstName) or (type(prev) == "table" and prev.firstName) or name
+    local resolvedSurname = (resolved and resolved.surname)
+    if (not resolvedSurname or resolvedSurname == "") and type(prev) == "table" and type(prev.surname) == "string" and prev.surname ~= ""
+        and type(prev.firstName or prev.name) == "string" and (prev.firstName or prev.name):lower() == tostring(resolvedFirst or name):lower()
+    then
+        resolvedSurname = prev.surname
+    end
+    local resolvedFull = (resolvedSurname and resolvedSurname ~= "") and (tostring(resolvedFirst or name) .. " " .. resolvedSurname)
+        or (resolved and resolved.fullName)
+        or name
     ns.db.alts[key] = {
         name = name,
-        firstName = resolved and resolved.firstName or name,
-        surname = resolved and resolved.surname or nil,
-        fullName = resolved and resolved.fullName or name,
+        firstName = resolvedFirst,
+        surname = resolvedSurname,
+        fullName = resolvedFull,
         realmName = realmNorm,
         realmRaw = realmRaw,
         worldType = worldType,
@@ -861,6 +895,7 @@ function Alts:Snapshot(includeBank, force)
         guid = myGuid or (type(prev) == "table" and prev.guid or nil),
         level = level,
         itemLevel = itemLevel,
+        durabilityPct = durPct,
         xp = xp,
         xpMax = xpMax,
         rested = rested,
@@ -1164,6 +1199,736 @@ function Alts:HasReadyCraftCooldown(altData)
     return false
 end
 
+local RECIPE_FOLD_MAP = {
+    ["á"] = "a", ["à"] = "a", ["â"] = "a", ["ã"] = "a", ["ä"] = "a", ["Á"] = "a", ["À"] = "a", ["Â"] = "a", ["Ã"] = "a", ["Ä"] = "a",
+    ["é"] = "e", ["è"] = "e", ["ê"] = "e", ["ë"] = "e", ["É"] = "e", ["È"] = "e", ["Ê"] = "e", ["Ë"] = "e",
+    ["í"] = "i", ["ì"] = "i", ["î"] = "i", ["ï"] = "i", ["Í"] = "i", ["Ì"] = "i", ["Î"] = "i", ["Ï"] = "i",
+    ["ó"] = "o", ["ò"] = "o", ["ô"] = "o", ["õ"] = "o", ["ö"] = "o", ["Ó"] = "o", ["Ò"] = "o", ["Ô"] = "o", ["Õ"] = "o", ["Ö"] = "o",
+    ["ú"] = "u", ["ù"] = "u", ["û"] = "u", ["ü"] = "u", ["Ú"] = "u", ["Ù"] = "u", ["Û"] = "u", ["Ü"] = "u",
+    ["ç"] = "c", ["Ç"] = "c", ["ñ"] = "n", ["Ñ"] = "n",
+}
+
+local function FoldRecipeText(str)
+    if type(str) ~= "string" or str == "" then return "" end
+    local s = str:gsub("[%z\1-\127\194-\244][\128-\191]*", function(ch)
+        return RECIPE_FOLD_MAP[ch] or ch
+    end)
+    s = s:lower():gsub("[%p]+", " "):gsub("%s+", " ")
+    return Compat.Trim and Compat.Trim(s) or s:match("^%s*(.-)%s*$")
+end
+
+local function NormalizeRecipeLookupName(folded)
+    if not folded or folded == "" then return "" end
+    local s = folded:gsub("^encantamento d[aeo] ", "encantar "):gsub("^encantamento ", "encantar "):gsub("^encantamiento d[aeo] ", "encantar "):gsub("^encantamiento ", "encantar ")
+    s = s:gsub("^formula ", ""):gsub("^recipe ", ""):gsub("^receita ", ""):gsub("^receta ", ""):gsub("^plans ", ""):gsub("^projeto ", ""):gsub("^pattern ", ""):gsub("^molde ", ""):gsub("^schematic ", ""):gsub("^esquema ", ""):gsub("^design ", ""):gsub("^desenho ", "")
+    return Compat.Trim and Compat.Trim(s) or s:match("^%s*(.-)%s*$")
+end
+
+local function NormalizeTradeProfCode(rawName)
+    if type(rawName) ~= "string" or rawName == "" then return "OTHER" end
+    local f = FoldRecipeText(rawName)
+    if f:find("alch", 1, true) or f:find("alquim", 1, true) then return "ALCHEMY"
+    elseif f:find("blacksmith", 1, true) or f:find("ferraria", 1, true) or f:find("herrer", 1, true) then return "BLACKSMITHING"
+    elseif f:find("enchant", 1, true) or f:find("encant", 1, true) then return "ENCHANTING"
+    elseif f:find("engineer", 1, true) or f:find("engenh", 1, true) or f:find("ingenier", 1, true) then return "ENGINEERING"
+    elseif f:find("leatherwork", 1, true) or f:find("courar", 1, true) or f:find("peleter", 1, true) then return "LEATHERWORKING"
+    elseif f:find("tailor", 1, true) or f:find("alfaiat", 1, true) or f:find("sastr", 1, true) then return "TAILORING"
+    elseif f:find("cook", 1, true) or f:find("culin", 1, true) or f:find("cocin", 1, true) then return "COOKING"
+    elseif f:find("first aid", 1, true) or f:find("primeiros socorros", 1, true) or f:find("primeros auxilios", 1, true) then return "FIRST_AID"
+    elseif f:find("jewelcraft", 1, true) or f:find("joalher", 1, true) or f:find("joyer", 1, true) then return "JEWELCRAFTING"
+    elseif f:find("inscrip", 1, true) or f:find("escriv", 1, true) then return "INSCRIPTION"
+    elseif f:find("min", 1, true) or f:find("smelt", 1, true) or f:find("fundic", 1, true) then return "MINING"
+    elseif f:find("fish", 1, true) or f:find("pesc", 1, true) then return "FISHING"
+    elseif f:find("herb", 1, true) or f:find("herbor", 1, true) then return "HERBALISM"
+    end
+    return f:upper():gsub("%s+", "_")
+end
+
+local RECIPE_SUBCLASS_TO_PROF = {
+    [1] = "LEATHERWORKING",
+    [2] = "TAILORING",
+    [3] = "ENGINEERING",
+    [4] = "BLACKSMITHING",
+    [5] = "COOKING",
+    [6] = "ALCHEMY",
+    [7] = "FIRST_AID",
+    [8] = "ENCHANTING",
+    [9] = "FISHING",
+    [10] = "JEWELCRAFTING",
+    [11] = "INSCRIPTION",
+}
+
+local recipeCatalogCache = {}
+local recipeCatalogCacheCount = 0
+
+local function ParseRecipeCatalogRaw(rKey, raw)
+    if type(raw) ~= "string" or raw == "" then return nil end
+    local cached = recipeCatalogCache[rKey]
+    if cached and cached._raw == raw then
+        return cached
+    end
+    local p1, p2, p3, p4, p5, p6, p7, p8 = strsplit("\t", raw)
+    local obj = {
+        _raw = raw,
+        key = rKey,
+        name = (p1 and p1 ~= "") and p1 or rKey,
+        profCode = (p2 and p2 ~= "") and p2 or "OTHER",
+        profDisp = (p3 and p3 ~= "") and p3 or "",
+        itemID = tonumber(p4),
+        spellID = tonumber(p5),
+        quality = tonumber(p6) or 1,
+        icon = tonumber(p7) or ((p7 and p7 ~= "") and p7 or nil),
+        reagentsStr = (p8 and p8 ~= "") and p8 or nil,
+    }
+    if recipeCatalogCacheCount >= 2000 then
+        wipe(recipeCatalogCache)
+        recipeCatalogCacheCount = 0
+    end
+    recipeCatalogCache[rKey] = obj
+    recipeCatalogCacheCount = recipeCatalogCacheCount + 1
+    return obj
+end
+
+local function RecipeCatalogUpsert(rKey, name, profCode, profDisp, itemID, spellID, quality, icon, reagentsStr)
+    if not (ns.db and rKey and rKey ~= "") then return nil end
+    ns.db.recipeCatalog = ns.db.recipeCatalog or {}
+    local existing = ns.db.recipeCatalog[rKey]
+    local prev = existing and ParseRecipeCatalogRaw(rKey, existing) or nil
+    local fName = ((type(name) == "string" and name ~= "") and name or (prev and prev.name) or ""):gsub("[\t\r\n]+", " ")
+    if fName == "" then return nil end
+    local fCode = (type(profCode) == "string" and profCode ~= "") and profCode or (prev and prev.profCode) or "OTHER"
+    local fProf = ((type(profDisp) == "string" and profDisp ~= "") and profDisp or (prev and prev.profDisp) or ""):gsub("[\t\r\n]+", " ")
+    local fItem = tonumber(itemID) or (prev and prev.itemID)
+    local fSpell = tonumber(spellID) or (prev and prev.spellID)
+    local fQual = tonumber(quality) or (prev and prev.quality) or 1
+    local fIcon = icon or (prev and prev.icon)
+    if not fIcon and fItem and C_Item and C_Item.GetItemIconByID then
+        local okIc, idIc = pcall(C_Item.GetItemIconByID, fItem)
+        if okIc and Safe.Value(idIc) then fIcon = Safe.Value(idIc) end
+    end
+    if not fQual and fItem and C_Item and C_Item.GetItemQualityByID then
+        local okQ, qVal = pcall(C_Item.GetItemQualityByID, fItem)
+        if okQ and Safe.Number(qVal) then fQual = Safe.Number(qVal) end
+    end
+    local fReag = (type(reagentsStr) == "string" and reagentsStr ~= "") and reagentsStr:gsub("[\t\r\n]+", "") or (prev and prev.reagentsStr) or ""
+
+    if existing and prev and prev.name == fName and prev.profCode == fCode and (prev.icon or "") == (fIcon or "")
+        and (prev.reagentsStr or "") == fReag and prev.itemID == fItem and prev.spellID == fSpell
+    then
+        return rKey
+    end
+    local packed = table.concat({
+        fName,
+        fCode,
+        fProf,
+        tostring(fItem or ""),
+        tostring(fSpell or ""),
+        tostring(fQual or 1),
+        tostring(fIcon or ""),
+        fReag,
+    }, "\t")
+    if packed ~= existing then
+        ns.db.recipeCatalog[rKey] = packed
+        recipeCatalogCache[rKey] = nil
+    end
+    return rKey
+end
+
+local function FormatReagentsSummary(reagentsStr)
+    if type(reagentsStr) ~= "string" or reagentsStr == "" then return nil end
+    local parts = {}
+    for pair in reagentsStr:gmatch("[^,]+") do
+        local ridStr, qtyStr = pair:match("^(%d+):(%d+)$")
+        local rid = tonumber(ridStr)
+        local qty = tonumber(qtyStr) or 1
+        if rid and rid > 0 then
+            local rName = CatalogLookup(rid)
+            if (not rName or rName == "") and C_Item and C_Item.GetItemNameByID then
+                local okN, iN = pcall(C_Item.GetItemNameByID, rid)
+                rName = okN and Safe.String(iN) or nil
+            end
+            parts[#parts + 1] = ("%dx %s"):format(qty, (rName and rName ~= "") and rName or ("#" .. tostring(rid)))
+        end
+    end
+    if #parts == 0 then return nil end
+    return table.concat(parts, ", ")
+end
+
+local function CompareRecipeAltEntries(a, b)
+    local curKey = CurrentAltKey()
+    local aCur = (a.altKey == curKey)
+    local bCur = (b.altKey == curKey)
+    if aCur ~= bCur then return aCur end
+    return (a.displayName or ""):lower() < (b.displayName or ""):lower()
+end
+
+function Alts:GetRecipeIndex(worldScope, factionFilter)
+    local wantScope = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(worldScope))
+        or ((ns.db and ns.db.settings and Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(ns.db.settings.altsWorldScope)))
+        or ((worldScope == "all") and "all" or "pool")
+    local wantFac = factionFilter
+    if wantFac == nil then
+        wantFac = Compat.PlayerFaction and Compat.PlayerFaction() or "ALL"
+    end
+    local sig = tostring(self._recipeSeq or 0) .. "|" .. tostring(wantScope) .. "|" .. tostring(wantFac)
+    if self._recipeIndexCache and self._recipeIndexSig == sig then
+        return self._recipeIndexCache
+    end
+
+    local byItemID = {}
+    local bySpellID = {}
+    local byFoldedName = {}
+    local byProfCode = {}
+    local altProfs = {}
+    local totalCount = 0
+    local uniqueKeys = {}
+
+    local alts = (ns.Store and ns.Store.GetAltsList) and ns.Store:GetAltsList(wantScope) or {}
+    for _, alt in ipairs(alts) do
+        local sameFac = (wantFac == "ALL") or (not wantFac) or (not alt.faction) or (alt.faction == wantFac)
+        if type(alt) == "table" and sameFac then
+            local disp = alt.fullName or alt.name or alt.key or "?"
+            local profMap = {}
+            if type(alt.professions) == "table" then
+                for _, ap in ipairs(alt.professions) do
+                    if type(ap) == "table" and ap.name and ap.name ~= "" then
+                        local pc = NormalizeTradeProfCode(ap.name)
+                        profMap[pc] = {
+                            profCode = pc,
+                            profName = ap.name,
+                            rank = tonumber(ap.rank) or 0,
+                            maxRank = tonumber(ap.maxRank) or 0,
+                            hasScanned = false,
+                        }
+                    end
+                end
+            end
+            if type(alt.recipes) == "table" then
+                for profCode, rBucket in pairs(alt.recipes) do
+                    local keysStr = type(rBucket) == "table" and rBucket.keys or (type(rBucket) == "string" and rBucket or nil)
+                    local pn = (type(rBucket) == "table" and rBucket.pn) or profCode
+                    if not profMap[profCode] then
+                        profMap[profCode] = {
+                            profCode = profCode,
+                            profName = pn,
+                            rank = (type(rBucket) == "table" and tonumber(rBucket.rank)) or 0,
+                            maxRank = 0,
+                            hasScanned = true,
+                        }
+                    else
+                        profMap[profCode].hasScanned = true
+                        if type(rBucket) == "table" and (tonumber(rBucket.rank) or 0) > 0 then
+                            profMap[profCode].rank = tonumber(rBucket.rank)
+                        end
+                    end
+                    if type(keysStr) == "string" and keysStr ~= "" then
+                        for rKey in keysStr:gmatch("[^,]+") do
+                            local raw = ns.db and ns.db.recipeCatalog and ns.db.recipeCatalog[rKey]
+                            local obj = raw and ParseRecipeCatalogRaw(rKey, raw)
+                            if obj then
+                                totalCount = totalCount + 1
+                                uniqueKeys[rKey] = true
+                                local entry = {
+                                    altKey = alt.key,
+                                    displayName = disp,
+                                    classFile = alt.classFile,
+                                    faction = alt.faction,
+                                    worldType = alt.worldType,
+                                    profCode = obj.profCode or profCode,
+                                    profName = (obj.profDisp ~= "" and obj.profDisp) or pn,
+                                    rKey = rKey,
+                                    recipeName = obj.name,
+                                    itemID = obj.itemID,
+                                    spellID = obj.spellID,
+                                    quality = obj.quality,
+                                    icon = obj.icon,
+                                    reagentsStr = obj.reagentsStr,
+                                }
+                                if entry.itemID and entry.itemID > 0 then
+                                    byItemID[entry.itemID] = byItemID[entry.itemID] or {}
+                                    byItemID[entry.itemID][#byItemID[entry.itemID] + 1] = entry
+                                end
+                                if entry.spellID and entry.spellID > 0 then
+                                    bySpellID[entry.spellID] = bySpellID[entry.spellID] or {}
+                                    bySpellID[entry.spellID][#bySpellID[entry.spellID] + 1] = entry
+                                end
+                                local fName = NormalizeRecipeLookupName(FoldRecipeText(entry.recipeName))
+                                if fName ~= "" then
+                                    byFoldedName[fName] = byFoldedName[fName] or {}
+                                    byFoldedName[fName][#byFoldedName[fName] + 1] = entry
+                                end
+                                byProfCode[entry.profCode] = byProfCode[entry.profCode] or {}
+                                byProfCode[entry.profCode][#byProfCode[entry.profCode] + 1] = entry
+                            end
+                        end
+                    end
+                end
+            end
+            altProfs[alt.key] = {
+                altKey = alt.key,
+                displayName = disp,
+                classFile = alt.classFile,
+                profs = profMap,
+            }
+        end
+    end
+
+    for _, list in pairs(byItemID) do
+        if #list > 1 then table.sort(list, CompareRecipeAltEntries) end
+    end
+    for _, list in pairs(byFoldedName) do
+        if #list > 1 then table.sort(list, CompareRecipeAltEntries) end
+    end
+
+    local uniqueCount = 0
+    for _ in pairs(uniqueKeys) do uniqueCount = uniqueCount + 1 end
+
+    local idx = {
+        byItemID = byItemID,
+        bySpellID = bySpellID,
+        byFoldedName = byFoldedName,
+        byProfCode = byProfCode,
+        altProfs = altProfs,
+        totalInstances = totalCount,
+        uniqueCount = uniqueCount,
+    }
+    self._recipeIndexCache = idx
+    self._recipeIndexSig = sig
+    return idx
+end
+
+function Alts:GetRecipeSummaryStats()
+    local curKey = CurrentAltKey()
+    local curRec = curKey and ns.db and ns.db.alts and ns.db.alts[curKey]
+    local myCount = 0
+    if curRec and type(curRec.recipes) == "table" then
+        for _, bucket in pairs(curRec.recipes) do
+            if type(bucket) == "table" then
+                myCount = myCount + (tonumber(bucket.cnt) or 0)
+            end
+        end
+    end
+    local idx = self:GetRecipeIndex()
+    local altCnt = 0
+    for _, ap in pairs(idx.altProfs or {}) do
+        for _, pInfo in pairs(ap.profs or {}) do
+            if pInfo.hasScanned then
+                altCnt = altCnt + 1
+                break
+            end
+        end
+    end
+    return myCount, (idx.uniqueCount or 0), altCnt
+end
+
+function Alts:GetRecipeCrafters(itemID, itemName, worldScope)
+    local idx = self:GetRecipeIndex(worldScope)
+    local list = (itemID and itemID > 0 and idx.byItemID[itemID]) or nil
+    if (not list or #list == 0) and type(itemName) == "string" and itemName ~= "" then
+        local fName = NormalizeRecipeLookupName(FoldRecipeText(itemName))
+        list = idx.byFoldedName[fName]
+    end
+    return list or {}
+end
+
+function Alts:MatchRecipeScrollItem(itemID, itemName, subClassID, worldScope)
+    if type(itemName) ~= "string" or itemName == "" then
+        return nil, nil
+    end
+    local cleanTitle = Compat.Trim and Compat.Trim(itemName) or itemName
+    local afterColon = cleanTitle:match("^[^:]+:%s*(.+)$") or cleanTitle
+    local fTarget = NormalizeRecipeLookupName(FoldRecipeText(afterColon))
+    if fTarget == "" then return nil, nil end
+
+    local targetProf = subClassID and RECIPE_SUBCLASS_TO_PROF[subClassID] or nil
+    local idx = self:GetRecipeIndex(worldScope)
+    local rawMatches = idx.byFoldedName[fTarget] or {}
+    local knownBy, knownSet = {}, {}
+    for _, m in ipairs(rawMatches) do
+        if (not targetProf or m.profCode == targetProf or m.profCode == "OTHER") and not knownSet[m.altKey] then
+            knownSet[m.altKey] = true
+            knownBy[#knownBy + 1] = m
+        end
+    end
+
+    local missingOn = {}
+    if targetProf then
+        for aKey, aData in pairs(idx.altProfs or {}) do
+            local pInfo = aData.profs and aData.profs[targetProf]
+            if pInfo and not knownSet[aKey] then
+                missingOn[#missingOn + 1] = {
+                    altKey = aKey,
+                    displayName = aData.displayName,
+                    classFile = aData.classFile,
+                    profName = pInfo.profName,
+                    rank = pInfo.rank or 0,
+                    maxRank = pInfo.maxRank or 0,
+                    confirmedMissing = (pInfo.hasScanned == true),
+                }
+            end
+        end
+        table.sort(missingOn, CompareRecipeAltEntries)
+    end
+    if #knownBy == 0 and #missingOn == 0 then
+        return nil, nil
+    end
+    return knownBy, missingOn
+end
+
+function Alts:MatchMyRecipesForQuery(itemID, queryText, maxCount)
+    local curKey = CurrentAltKey()
+    local curRec = curKey and ns.db and ns.db.alts and ns.db.alts[curKey]
+    if not (curRec and type(curRec.recipes) == "table") then
+        return {}
+    end
+    local cap = math.max(1, math.min(8, tonumber(maxCount) or 4))
+    local numId = tonumber(itemID)
+    local fQuery = (type(queryText) == "string" and queryText ~= "") and FoldRecipeText(queryText) or ""
+    if (not numId or numId <= 0) and fQuery == "" then
+        return {}
+    end
+    local out = {}
+    for profCode, bucket in pairs(curRec.recipes) do
+        local keysStr = type(bucket) == "table" and bucket.keys or (type(bucket) == "string" and bucket or nil)
+        if type(keysStr) == "string" and keysStr ~= "" then
+            for rKey in keysStr:gmatch("[^,]+") do
+                local raw = ns.db and ns.db.recipeCatalog and ns.db.recipeCatalog[rKey]
+                local obj = raw and ParseRecipeCatalogRaw(rKey, raw)
+                if obj then
+                    local hit = false
+                    if numId and numId > 0 and obj.itemID == numId then
+                        hit = true
+                    elseif fQuery ~= "" and FoldRecipeText(obj.name):find(fQuery, 1, true) then
+                        hit = true
+                    end
+                    if hit then
+                        out[#out + 1] = {
+                            rKey = rKey,
+                            name = obj.name,
+                            itemID = obj.itemID,
+                            spellID = obj.spellID,
+                            profCode = obj.profCode or profCode,
+                            profDisp = obj.profDisp,
+                        }
+                        if #out >= cap then
+                            return out
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function Alts:SearchAllRecipes(queryText, onlyAltKey, factionFilter, worldScope)
+    local qFold = FoldRecipeText(queryText or "")
+    local alts = (ns.Store and ns.Store.GetAltsList) and ns.Store:GetAltsList(worldScope) or {}
+    local curKey = CurrentAltKey()
+    local wantFac = factionFilter
+    if wantFac == nil then
+        wantFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    elseif wantFac == "ALL" then
+        wantFac = nil
+    end
+
+    local groups = {}
+    for _, alt in ipairs(alts) do
+        local sameFac = (not wantFac) or (not alt.faction) or (alt.faction == wantFac)
+        if type(alt) == "table" and sameFac and (not onlyAltKey or alt.key == onlyAltKey) and type(alt.recipes) == "table" then
+            local matched = {}
+            local seenKeys = {}
+            for profCode, bucket in pairs(alt.recipes) do
+                local keysStr = type(bucket) == "table" and bucket.keys or (type(bucket) == "string" and bucket or nil)
+                local pn = (type(bucket) == "table" and bucket.pn) or profCode
+                if type(keysStr) == "string" and keysStr ~= "" then
+                    for rKey in keysStr:gmatch("[^,]+") do
+                        if not seenKeys[rKey] then
+                            seenKeys[rKey] = true
+                            local raw = ns.db and ns.db.recipeCatalog and ns.db.recipeCatalog[rKey]
+                            local obj = raw and ParseRecipeCatalogRaw(rKey, raw)
+                            if obj then
+                                local profLabel = (obj.profDisp ~= "" and obj.profDisp) or pn or profCode
+                                local reagTxt = FormatReagentsSummary(obj.reagentsStr)
+                                local pass = (qFold == "")
+                                    or FoldRecipeText(obj.name):find(qFold, 1, true)
+                                    or FoldRecipeText(profLabel):find(qFold, 1, true)
+                                    or (reagTxt and FoldRecipeText(reagTxt):find(qFold, 1, true))
+                                if pass then
+                                    local link = obj.itemID and BuildDisplayHyperlink(obj.itemID, nil, obj.name, obj.quality) or nil
+                                    local ic = obj.icon
+                                    if not ic and obj.itemID and C_Item and C_Item.GetItemIconByID then
+                                        local okIc, idIc = pcall(C_Item.GetItemIconByID, obj.itemID)
+                                        if okIc and Safe.Value(idIc) then ic = Safe.Value(idIc) end
+                                    end
+                                    matched[#matched + 1] = {
+                                        itemID = obj.itemID,
+                                        spellID = obj.spellID,
+                                        link = link,
+                                        name = obj.name,
+                                        icon = ic or "Interface\\Icons\\INV_Misc_Note_01",
+                                        quality = obj.quality or 1,
+                                        count = 1,
+                                        _isRecipe = true,
+                                        _recipeKey = rKey,
+                                        _profCode = profCode,
+                                        _profName = profLabel,
+                                        _reagentsSummary = reagTxt,
+                                        _locLabel = profLabel,
+                                    }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            if #matched > 0 then
+                table.sort(matched, function(a, b)
+                    if (a._profName or "") ~= (b._profName or "") then
+                        return (a._profName or "") < (b._profName or "")
+                    end
+                    return (a.name or "") < (b.name or "")
+                end)
+                groups[#groups + 1] = {
+                    altKey = alt.key,
+                    displayName = alt.fullName or alt.name or alt.key or "?",
+                    classFile = alt.classFile,
+                    faction = alt.faction,
+                    worldType = alt.worldType,
+                    realmName = alt.realmName,
+                    realmPool = alt.realmPool,
+                    isCurrent = (alt.key == curKey),
+                    items = matched,
+                }
+            end
+        end
+    end
+    return groups
+end
+
+function Alts:ScanLearnedRecipes(isCraftFrame)
+    if ns.db and ns.db.settings and ns.db.settings.embedProfessionWindow == false then
+        return false
+    end
+    local key = CurrentAltKey()
+    local rec = key and ns.db and ns.db.alts and ns.db.alts[key]
+    if type(rec) ~= "table" then return false end
+
+    local profName, profRank, profMax = nil, 0, 0
+    local capturedKeys = {}
+    local seenNew = {}
+    local isPartialScan = false
+
+    local function PushRecipe(rKey)
+        if rKey and not seenNew[rKey] then
+            seenNew[rKey] = true
+            capturedKeys[#capturedKeys + 1] = rKey
+        end
+    end
+
+    if (not isCraftFrame) and C_TradeSkillUI and C_TradeSkillUI.GetAllRecipeIDs and C_TradeSkillUI.GetRecipeInfo then
+        if C_TradeSkillUI.GetChildProfessionInfo then
+            local okP, pInfo = pcall(C_TradeSkillUI.GetChildProfessionInfo)
+            if okP and type(pInfo) == "table" then
+                profName = Safe.String(pInfo.professionName)
+                profRank = Safe.Number(pInfo.skillLevel) or 0
+                profMax = Safe.Number(pInfo.maxSkillLevel) or 0
+            end
+        end
+        if (not profName or profName == "") and GetTradeSkillLine then
+            local p1, p2, p3 = Safe.Call(GetTradeSkillLine)
+            profName = Safe.String(p1)
+            profRank = Safe.Number(p2) or profRank
+            profMax = Safe.Number(p3) or profMax
+        end
+        local profCode = NormalizeTradeProfCode(profName or "")
+        local okIds, ids = pcall(C_TradeSkillUI.GetAllRecipeIDs)
+        if okIds and type(ids) == "table" and profName and profName ~= "" and profName ~= "UNKNOWN" then
+            for i = 1, math.min(#ids, 900) do
+                local rid = ids[i]
+                local okInfo, rInfo = pcall(C_TradeSkillUI.GetRecipeInfo, rid)
+                if okInfo and type(rInfo) == "table" and rInfo.learned == true then
+                    local rName = Safe.String(rInfo.name)
+                    if rName and rName ~= "" then
+                        local outItemID, icon, qual = nil, Safe.Value(rInfo.icon), 1
+                        local reagentsParts = {}
+                        if C_TradeSkillUI.GetRecipeSchematic then
+                            local okS, schem = pcall(C_TradeSkillUI.GetRecipeSchematic, rid, false)
+                            if okS and type(schem) == "table" then
+                                outItemID = Safe.Number(schem.outputItemID)
+                                icon = icon or Safe.Value(schem.icon)
+                                if type(schem.reagentSlotSchematics) == "table" then
+                                    for rs = 1, math.min(#schem.reagentSlotSchematics, 6) do
+                                        local slot = schem.reagentSlotSchematics[rs]
+                                        local rFirst = slot and type(slot.reagents) == "table" and slot.reagents[1]
+                                        local reagId = rFirst and Safe.Number(rFirst.itemID)
+                                        local qty = slot and Safe.Number(slot.quantityRequired) or 1
+                                        if reagId and reagId > 0 then
+                                            CatalogUpsert(reagId)
+                                            reagentsParts[#reagentsParts + 1] = tostring(reagId) .. ":" .. tostring(math.max(1, qty))
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if (not outItemID or outItemID <= 0) and C_TradeSkillUI.GetRecipeItemLink then
+                            local okL, rLink = pcall(C_TradeSkillUI.GetRecipeItemLink, rid)
+                            local cleanL = okL and Safe.String(rLink) or nil
+                            outItemID = cleanL and tonumber(cleanL:match("item:(%d+)")) or outItemID
+                        end
+                        if outItemID and outItemID > 0 then
+                            local _, _, cIc, cQl = CatalogUpsert(outItemID, nil, rName, icon, nil)
+                            icon = icon or cIc
+                            qual = cQl or 1
+                        end
+                        local spId = Safe.Number(rInfo.recipeID) or Safe.Number(rid)
+                        local rKey = (outItemID and outItemID > 0 and ("i:" .. outItemID))
+                            or (spId and spId > 0 and ("s:" .. spId))
+                            or ("n:" .. FoldRecipeText(rName):sub(1, 38))
+                        PushRecipe(RecipeCatalogUpsert(rKey, rName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")))
+                    end
+                end
+            end
+        end
+    end
+
+    if (not isCraftFrame) and #capturedKeys == 0 and GetNumTradeSkills and GetTradeSkillInfo then
+        local p1, p2, p3 = Safe.Call(GetTradeSkillLine)
+        profName = Safe.String(p1)
+        profRank = Safe.Number(p2) or 0
+        profMax = Safe.Number(p3) or 0
+        local profCode = NormalizeTradeProfCode(profName or "")
+        if GetTradeSkillItemNameFilter then
+            local nf = Safe.String(Safe.Call(GetTradeSkillItemNameFilter))
+            if nf and nf ~= "" then isPartialScan = true end
+        end
+        if profName and profName ~= "" and profName ~= "UNKNOWN" then
+            local numSkills = Safe.Number(Safe.Call(GetNumTradeSkills)) or 0
+            for i = 1, math.min(numSkills, 900) do
+                local okI, sName, sType, _, isExpanded = pcall(GetTradeSkillInfo, i)
+                if okI then
+                    if sType == "header" or sType == "subheader" then
+                        if not isExpanded then isPartialScan = true end
+                    else
+                        sName = Safe.String(sName)
+                        if sName and sName ~= "" then
+                            local outLink = GetTradeSkillItemLink and Safe.String(Safe.Call(GetTradeSkillItemLink, i)) or nil
+                            local recLink = GetTradeSkillRecipeLink and Safe.String(Safe.Call(GetTradeSkillRecipeLink, i)) or nil
+                            local outItemID = outLink and tonumber(outLink:match("item:(%d+)")) or nil
+                            local spId = recLink and (tonumber(recLink:match("enchant:(%d+)")) or tonumber(recLink:match("spell:(%d+)"))) or nil
+                            local icon = GetTradeSkillIcon and Safe.Value(Safe.Call(GetTradeSkillIcon, i)) or nil
+                            local qual = 1
+                            if outItemID and outItemID > 0 then
+                                local _, _, cIc, cQl = CatalogUpsert(outItemID, outLink, sName, icon, nil)
+                                icon = icon or cIc
+                                qual = cQl or 1
+                            end
+                            local reagentsParts = {}
+                            if GetTradeSkillNumReagents and GetTradeSkillReagentItemLink then
+                                local numR = Safe.Number(Safe.Call(GetTradeSkillNumReagents, i)) or 0
+                                for rIdx = 1, math.min(numR, 6) do
+                                    local rl = Safe.String(Safe.Call(GetTradeSkillReagentItemLink, i, rIdx))
+                                    local rId = rl and tonumber(rl:match("item:(%d+)")) or nil
+                                    local _, _, qty = GetTradeSkillReagentInfo and Safe.Call(GetTradeSkillReagentInfo, i, rIdx)
+                                    qty = Safe.Number(qty) or 1
+                                    if rId and rId > 0 then
+                                        CatalogUpsert(rId, rl)
+                                        reagentsParts[#reagentsParts + 1] = tostring(rId) .. ":" .. tostring(math.max(1, qty))
+                                    end
+                                end
+                            end
+                            local rKey = (outItemID and outItemID > 0 and ("i:" .. outItemID))
+                                or (spId and spId > 0 and ("s:" .. spId))
+                                or ("n:" .. FoldRecipeText(sName):sub(1, 38))
+                            PushRecipe(RecipeCatalogUpsert(rKey, sName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if isCraftFrame and GetNumCrafts and GetCraftInfo then
+        local cLine, cRank, cMax = GetCraftDisplaySkillLine and Safe.Call(GetCraftDisplaySkillLine)
+        profName = Safe.String(cLine) or profName
+        profRank = Safe.Number(cRank) or profRank
+        profMax = Safe.Number(cMax) or profMax
+        local profCode = NormalizeTradeProfCode(profName or "ENCHANTING")
+        if profName and profName ~= "" and profName ~= "UNKNOWN" then
+            local numCrafts = Safe.Number(Safe.Call(GetNumCrafts)) or 0
+            for i = 1, math.min(numCrafts, 700) do
+                local okC, cName, _, cType = pcall(GetCraftInfo, i)
+                if okC and cType ~= "header" then
+                    cName = Safe.String(cName)
+                    if cName and cName ~= "" then
+                        local outLink = GetCraftItemLink and Safe.String(Safe.Call(GetCraftItemLink, i)) or nil
+                        local recLink = GetCraftRecipeLink and Safe.String(Safe.Call(GetCraftRecipeLink, i)) or nil
+                        local outItemID = outLink and tonumber(outLink:match("item:(%d+)")) or nil
+                        local spId = recLink and (tonumber(recLink:match("enchant:(%d+)")) or tonumber(recLink:match("spell:(%d+)"))) or nil
+                        local icon = GetCraftIcon and Safe.Value(Safe.Call(GetCraftIcon, i)) or nil
+                        local qual = 1
+                        if outItemID and outItemID > 0 then
+                            local _, _, cIc, cQl = CatalogUpsert(outItemID, outLink, cName, icon, nil)
+                            icon = icon or cIc
+                            qual = cQl or 1
+                        end
+                        local reagentsParts = {}
+                        if GetCraftNumReagents and GetCraftReagentItemLink then
+                            local numR = Safe.Number(Safe.Call(GetCraftNumReagents, i)) or 0
+                            for rIdx = 1, math.min(numR, 6) do
+                                local rl = Safe.String(Safe.Call(GetCraftReagentItemLink, i, rIdx))
+                                local rId = rl and tonumber(rl:match("item:(%d+)")) or nil
+                                local _, _, qty = GetCraftReagentInfo and Safe.Call(GetCraftReagentInfo, i, rIdx)
+                                qty = Safe.Number(qty) or 1
+                                if rId and rId > 0 then
+                                    CatalogUpsert(rId, rl)
+                                    reagentsParts[#reagentsParts + 1] = tostring(rId) .. ":" .. tostring(math.max(1, qty))
+                                end
+                            end
+                        end
+                        local rKey = (outItemID and outItemID > 0 and ("i:" .. outItemID))
+                            or (spId and spId > 0 and ("s:" .. spId))
+                            or ("n:" .. FoldRecipeText(cName):sub(1, 38))
+                        PushRecipe(RecipeCatalogUpsert(rKey, cName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")))
+                    end
+                end
+            end
+        end
+    end
+
+    if not profName or profName == "" or profName == "UNKNOWN" or #capturedKeys == 0 then
+        return false
+    end
+
+    local profCode = NormalizeTradeProfCode(profName)
+    rec.recipes = rec.recipes or {}
+    local prevBucket = rec.recipes[profCode]
+    local prevStr = type(prevBucket) == "table" and prevBucket.keys or ""
+    if isPartialScan and prevStr ~= "" then
+        for oldKey in prevStr:gmatch("[^,]+") do
+            PushRecipe(oldKey)
+        end
+    end
+
+    table.sort(capturedKeys)
+    local joined = table.concat(capturedKeys, ",")
+    local changed = (prevStr ~= joined)
+    rec.recipes[profCode] = {
+        pn = profName,
+        rank = profRank or 0,
+        maxRank = profMax or 0,
+        keys = joined,
+        cnt = #capturedKeys,
+        updatedAt = time(),
+    }
+    if changed then
+        self._recipeSeq = (self._recipeSeq or 0) + 1
+        self._recipeIndexCache = nil
+        ns:Emit("ALTS_UPDATED")
+    end
+    return true
+end
+
 function Alts:ScanTradeSkillCooldowns()
     if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then return end
     local key = CurrentAltKey()
@@ -1348,6 +2113,38 @@ function Alts:CompactSavedAlts()
                     for _, item in ipairs(alt[field]) do
                         local id = self:ParseItemRaw(item)
                         if id then usedIds[id] = true end
+                    end
+                end
+            end
+        end
+    end
+    if type(ns.db.recipeCatalog) == "table" then
+        local usedRecipeKeys = {}
+        for _, alt in pairs(ns.db.alts) do
+            if type(alt) == "table" and type(alt.recipes) == "table" then
+                for _, bucket in pairs(alt.recipes) do
+                    local kStr = type(bucket) == "table" and bucket.keys or (type(bucket) == "string" and bucket or nil)
+                    if type(kStr) == "string" and kStr ~= "" then
+                        for rk in kStr:gmatch("[^,]+") do
+                            usedRecipeKeys[rk] = true
+                        end
+                    end
+                end
+            end
+        end
+        for rk, rRaw in pairs(ns.db.recipeCatalog) do
+            if not usedRecipeKeys[rk] then
+                ns.db.recipeCatalog[rk] = nil
+                recipeCatalogCache[rk] = nil
+            else
+                local rObj = ParseRecipeCatalogRaw(rk, rRaw)
+                if rObj then
+                    if rObj.itemID and rObj.itemID > 0 then usedIds[rObj.itemID] = true end
+                    if type(rObj.reagentsStr) == "string" and rObj.reagentsStr ~= "" then
+                        for ridStr in rObj.reagentsStr:gmatch("(%d+):%d+") do
+                            local rId = tonumber(ridStr)
+                            if rId and rId > 0 then usedIds[rId] = true end
+                        end
                     end
                 end
             end
@@ -1715,25 +2512,76 @@ local itemTooltipRegistered = false
 local function AppendAltItemTooltip(tooltip, data, isLegacyHook)
     if not tooltip or (tooltip ~= GameTooltip and tooltip ~= ItemRefTooltip) then return end
     if tooltip.IsForbidden and tooltip:IsForbidden() then return end
-    if ns.db and ns.db.settings and (ns.db.settings.embedCharacterWindow == false or ns.db.settings.tooltipItemAlts == false) then return end
+    local st = ns.db and ns.db.settings
+    local showOwnCounts = not st or (st.embedCharacterWindow ~= false and st.tooltipItemAlts ~= false)
+    local showRecipesTip = not st or (st.tooltipRecipeAlts ~= false)
+    if not showOwnCounts and not showRecipesTip then return end
 
     local itemID = (type(data) == "table" and tonumber(data.id)) or nil
-    if (not itemID or itemID <= 0) and tooltip.GetItem then
-        local ok, _, link = pcall(tooltip.GetItem, tooltip)
-        if ok and link then
-            local cleanLink = Safe.String(link)
-            itemID = cleanLink and tonumber(cleanLink:match("item:(%d+)")) or nil
+    local tipItemName, tipLink = nil, nil
+    if tooltip.GetItem then
+        local ok, gName, gLink = pcall(tooltip.GetItem, tooltip)
+        if ok then
+            tipItemName = Safe.String(gName)
+            tipLink = Safe.String(gLink)
+            if (not itemID or itemID <= 0) and tipLink then
+                itemID = tonumber(tipLink:match("item:(%d+)")) or nil
+            end
+        end
+    end
+    if (not tipItemName or tipItemName == "") and tooltip.GetName then
+        local tName = tooltip:GetName()
+        local fs1 = tName and _G[tName .. "TextLeft1"]
+        if fs1 and fs1.GetText then
+            tipItemName = Safe.String(fs1:GetText())
         end
     end
     if not itemID or itemID <= 0 or tooltip._scAltItemId == itemID then
         return
     end
+    if (not tipItemName or tipItemName == "") and C_Item and C_Item.GetItemNameByID then
+        local okN, iN = pcall(C_Item.GetItemNameByID, itemID)
+        tipItemName = okN and Safe.String(iN) or nil
+    end
 
-    local rawScope = ns.db and ns.db.settings and ns.db.settings.altsWorldScope
+    local rawScope = st and st.altsWorldScope
     local worldScope = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(rawScope))
         or ((rawScope == "all") and "all" or "pool")
-    local owners = Alts:GetItemOwners(itemID, nil, worldScope)
-    if not owners or #owners == 0 then
+    local owners = showOwnCounts and Alts:GetItemOwners(itemID, nil, worldScope) or nil
+
+    local crafters, guildCrafters, scrollKnown, scrollMissing = nil, nil, nil, nil
+    if showRecipesTip then
+        local _, _, _, classID, subClassID = CatalogLookup(itemID)
+        if classID == nil and GetItemInfoInstant then
+            local okI, _, _, _, _, _, cId, sId = pcall(GetItemInfoInstant, tipLink or itemID)
+            if okI then
+                classID = Safe.Number(cId)
+                subClassID = Safe.Number(sId)
+            end
+        end
+        if classID == 9 then
+            scrollKnown, scrollMissing = Alts:MatchRecipeScrollItem(itemID, tipItemName, subClassID, worldScope)
+        else
+            local foundAlts = Alts:GetRecipeCrafters(itemID, tipItemName, worldScope)
+            if foundAlts and #foundAlts > 0 then
+                crafters = foundAlts
+            end
+            if ns.Clan and ns.Clan.GetCachedRecipeCrafters then
+                local gList = ns.Clan:GetCachedRecipeCrafters(itemID, tipItemName)
+                if gList and #gList > 0 then
+                    guildCrafters = gList
+                end
+            end
+        end
+    end
+
+    local hasOwners = owners and #owners > 0
+    local hasRecipesInfo = (crafters and #crafters > 0)
+        or (guildCrafters and #guildCrafters > 0)
+        or (scrollKnown and #scrollKnown > 0)
+        or (scrollMissing and #scrollMissing > 0)
+
+    if not hasOwners and not hasRecipesInfo then
         tooltip._scAltItemId = itemID
         return
     end
@@ -1743,49 +2591,103 @@ local function AppendAltItemTooltip(tooltip, data, isLegacyHook)
 
     local curPool = (worldScope ~= "pool" and Compat.RealmPool) and Compat.RealmPool(Compat.Realm()) or nil
     local curWorld = (worldScope ~= "pool" and Compat.DetectWorldType) and Compat.DetectWorldType(Compat.Realm()) or nil
-    local grandTotal = 0
-    local shown = 0
-    for _, o in ipairs(owners) do
-        grandTotal = grandTotal + (o.total or 0)
-        if shown < 8 then
-            shown = shown + 1
-            local hex = Compat.ClassHex(o.classFile)
-            local wTag = ""
-            if worldScope ~= "pool" then
-                local oWorld, oPool, oLbl
-                if Compat.GetAltWorldInfo then
-                    oWorld, oPool, oLbl = Compat.GetAltWorldInfo(o)
-                else
-                    oPool = o.realmName and Compat.RealmPool and Compat.RealmPool(o.realmName) or o.realmPool
-                    oWorld = o.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(o.realmName or o.realmPool))
-                    oLbl = oWorld or o.realmName
+    if hasOwners then
+        local grandTotal = 0
+        local shown = 0
+        for _, o in ipairs(owners) do
+            grandTotal = grandTotal + (o.total or 0)
+            if shown < 8 then
+                shown = shown + 1
+                local hex = Compat.ClassHex(o.classFile)
+                local wTag = ""
+                if worldScope ~= "pool" then
+                    local oWorld, oPool, oLbl
+                    if Compat.GetAltWorldInfo then
+                        oWorld, oPool, oLbl = Compat.GetAltWorldInfo(o)
+                    else
+                        oPool = o.realmName and Compat.RealmPool and Compat.RealmPool(o.realmName) or o.realmPool
+                        oWorld = o.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(o.realmName or o.realmPool))
+                        oLbl = oWorld or o.realmName
+                    end
+                    if (oPool and curPool and oPool ~= curPool) or (oWorld and curWorld and oWorld ~= curWorld) then
+                        local wtLabel = oLbl or "?"
+                        local wtCol = (oWorld == "PvP" or oWorld == "RP-PvP") and "|cffd29922" or "|cff58a6ff"
+                        wTag = " " .. wtCol .. "[" .. wtLabel .. "]|r"
+                    end
                 end
-                if (oPool and curPool and oPool ~= curPool) or (oWorld and curWorld and oWorld ~= curWorld) then
-                    local wtLabel = oLbl or "?"
-                    local wtCol = (oWorld == "PvP" or oWorld == "RP-PvP") and "|cffd29922" or "|cff58a6ff"
-                    wTag = " " .. wtCol .. "[" .. wtLabel .. "]|r"
+                local locParts = {}
+                if (o.equipped or 0) > 0 then
+                    table.insert(locParts, L["Eq: %d"]:format(o.equipped))
                 end
+                if (o.bags or 0) > 0 then
+                    table.insert(locParts, L["Bags: %d"]:format(o.bags))
+                end
+                if (o.bank or 0) > 0 then
+                    table.insert(locParts, L["Bank: %d"]:format(o.bank))
+                end
+                local rightTxt = ("|cffffffff%d|r |cff9da7b5(%s)|r"):format(o.total or 0, table.concat(locParts, ", "))
+                tooltip:AddDoubleLine(hex .. (o.displayName or "?") .. "|r" .. wTag, rightTxt)
             end
-            local locParts = {}
-            if (o.equipped or 0) > 0 then
-                table.insert(locParts, L["Eq: %d"]:format(o.equipped))
-            end
-            if (o.bags or 0) > 0 then
-                table.insert(locParts, L["Bags: %d"]:format(o.bags))
-            end
-            if (o.bank or 0) > 0 then
-                table.insert(locParts, L["Bank: %d"]:format(o.bank))
-            end
-            local rightTxt = ("|cffffffff%d|r |cff9da7b5(%s)|r"):format(o.total or 0, table.concat(locParts, ", "))
-            tooltip:AddDoubleLine(hex .. (o.displayName or "?") .. "|r" .. wTag, rightTxt)
+        end
+        if #owners > 8 then
+            tooltip:AddLine("|cff9da7b5" .. L["+%d more characters..."]:format(#owners - 8) .. "|r")
+        end
+        if #owners > 1 or grandTotal > (owners[1].total or 0) then
+            tooltip:AddDoubleLine("|cff9da7b5" .. L["Total (Account)"] .. "|r", "|cffffd24d" .. grandTotal .. "|r")
         end
     end
-    if #owners > 8 then
-        tooltip:AddLine("|cff9da7b5" .. L["+%d more characters..."]:format(#owners - 8) .. "|r")
+
+    if crafters and #crafters > 0 then
+        local cParts = {}
+        for i = 1, math.min(#crafters, 5) do
+            local cr = crafters[i]
+            local hex = Compat.ClassHex(cr.classFile)
+            local pSuffix = (cr.profName and cr.profName ~= "") and (" (" .. cr.profName .. ")") or ""
+            cParts[#cParts + 1] = hex .. (cr.displayName or "?") .. "|r|cff9da7b5" .. pSuffix .. "|r"
+        end
+        if #crafters > 5 then
+            cParts[#cParts + 1] = "|cff9da7b5+" .. tostring(#crafters - 5) .. "|r"
+        end
+        tooltip:AddLine("|cff3fb950" .. L["Craftable by Alt"] .. ":|r " .. table.concat(cParts, ", "), 0.90, 0.96, 0.92, true)
     end
-    if #owners > 1 or grandTotal > (owners[1].total or 0) then
-        tooltip:AddDoubleLine("|cff9da7b5" .. L["Total (Account)"] .. "|r", "|cffffd24d" .. grandTotal .. "|r")
+
+    if guildCrafters and #guildCrafters > 0 then
+        local gParts = {}
+        for i = 1, math.min(#guildCrafters, 5) do
+            local gc = guildCrafters[i]
+            local pSuffix = (gc.profName and gc.profName ~= "") and (" (" .. gc.profName .. ")") or ""
+            gParts[#gParts + 1] = "|cff58a6ff" .. (gc.displayName or "?") .. "|r|cff9da7b5" .. pSuffix .. "|r"
+        end
+        if #guildCrafters > 5 then
+            gParts[#gParts + 1] = "|cff9da7b5+" .. tostring(#guildCrafters - 5) .. "|r"
+        end
+        tooltip:AddLine("|cff58a6ff" .. L["In Guild"] .. ":|r " .. table.concat(gParts, ", "), 0.86, 0.93, 1.0, true)
     end
+
+    if scrollKnown and #scrollKnown > 0 then
+        local kParts = {}
+        for i = 1, math.min(#scrollKnown, 5) do
+            local kr = scrollKnown[i]
+            local hex = Compat.ClassHex(kr.classFile)
+            kParts[#kParts + 1] = hex .. (kr.displayName or "?") .. "|r"
+        end
+        tooltip:AddLine("|cff3fb950" .. L["Recipe already known by"] .. ":|r " .. table.concat(kParts, ", "), 0.72, 0.96, 0.78, true)
+    end
+
+    if scrollMissing and #scrollMissing > 0 then
+        local mParts = {}
+        for i = 1, math.min(#scrollMissing, 5) do
+            local mr = scrollMissing[i]
+            local hex = Compat.ClassHex(mr.classFile)
+            local rankTxt = ((mr.rank or 0) > 0) and (" " .. tostring(mr.rank)) or ""
+            local statusHint = mr.confirmedMissing
+                and (" (" .. (mr.profName or "") .. rankTxt .. ")")
+                or (" (" .. (mr.profName or "") .. " · " .. L["open window to verify"] .. ")")
+            mParts[#mParts + 1] = hex .. (mr.displayName or "?") .. "|r|cff9da7b5" .. statusHint .. "|r"
+        end
+        tooltip:AddLine("|cffffd24d" .. L["Can still be learned by"] .. ":|r " .. table.concat(mParts, ", "), 1.0, 0.90, 0.55, true)
+    end
+
     if isLegacyHook then
         pcall(tooltip.Show, tooltip)
     end
@@ -1826,20 +2728,22 @@ local function RegisterItemTooltipIntegration()
     end
 end
 
-local mailPickerBtn
+local mailPickerBtn, mailQuickBtn
 
 local function EnsureMailRecipientPicker()
     local mailComposeFrame = _G["SendMailFrame"]
     local recipientInput = _G["SendMailNameEditBox"]
     if not (mailComposeFrame and recipientInput) then return end
-    if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then
+    local s = ns.db and ns.db.settings
+    if s and (s.embedCharacterWindow == false or s.embedMailPicker == false) then
         if mailPickerBtn then mailPickerBtn:Hide() end
+        if mailQuickBtn then mailQuickBtn:Hide() end
         return
     end
     if not mailPickerBtn and ns.Theme and ns.Theme.CreateButton then
         local btn = ns.Theme:CreateButton(mailComposeFrame, 78, 18, L["Alts"] .. " v", "default")
         btn:SetFrameLevel(math.max(10, (mailComposeFrame:GetFrameLevel() or 1) + 12))
-        btn:SetPoint("BOTTOMRIGHT", recipientInput, "TOPRIGHT", 0, 3)
+        btn:SetPoint("BOTTOMRIGHT", recipientInput, "TOPRIGHT", -22, 3)
         btn:SetScript("OnEnter", function(selfBtn)
             if not GameTooltip then return end
             GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
@@ -1895,12 +2799,54 @@ local function EnsureMailRecipientPicker()
         end)
         mailPickerBtn = btn
     end
+    if not mailQuickBtn and mailPickerBtn and ns.Theme and ns.Theme.CreateOfficialQuickButton then
+        local qBtn = ns.Theme:CreateOfficialQuickButton(mailComposeFrame, {
+            name = "SocialCentralMailQuickBtn",
+            size = 18,
+            title = L["Official Mailbox (Alts)"],
+            tooltipAnchor = "ANCHOR_TOP",
+            getStatusState = function()
+                local curS = ns.db and ns.db.settings
+                if curS and (curS.embedCharacterWindow == false or curS.embedMailPicker == false) then
+                    return "off"
+                end
+                return "active"
+            end,
+            getTooltipLines = function()
+                return {
+                    L["Quick Select Alt Recipient attached to Blizzard's Mailbox."],
+                }
+            end,
+            buildMenu = function(root)
+                root:CreateTitle("SocialCentral — " .. L["Official Mailbox (Alts)"])
+                root:CreateButton(L["Disable in this window"], function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.embedMailPicker = false
+                    end
+                    EnsureMailRecipientPicker()
+                    ns:Emit("SETTINGS_UPDATED")
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                    ns:Print("%s", L["Disabled in this window. Re-enable anytime in Settings (/sc)."])
+                end)
+                root:CreateButton(L["Settings"], function()
+                    if ns.Settings and ns.Settings.Open then ns.Settings:Open("overview") end
+                end)
+            end,
+        })
+        qBtn:SetFrameLevel(math.max(12, (mailComposeFrame:GetFrameLevel() or 1) + 14))
+        qBtn:SetPoint("BOTTOMRIGHT", recipientInput, "TOPRIGHT", 0, 3)
+        mailQuickBtn = qBtn
+    end
     if mailPickerBtn then
         if ns.Theme and ns.Theme.AutoFitButton then
             ns.Theme:AutoFitButton(mailPickerBtn, 62, 12, 118)
             mailPickerBtn:SetHeight(18)
         end
         mailPickerBtn:Show()
+    end
+    if mailQuickBtn then
+        if mailQuickBtn.RefreshTheme then mailQuickBtn:RefreshTheme() end
+        mailQuickBtn:Show()
     end
 end
 
@@ -2031,7 +2977,8 @@ function Alts:Init()
         self:QueueSnapshot(false, 1.5)
     end)
 
-    for _, tsEvent in ipairs({ "TRADE_SKILL_SHOW", "TRADE_SKILL_UPDATE" }) do
+    for _, tsEvent in ipairs({ "TRADE_SKILL_SHOW", "TRADE_SKILL_UPDATE", "CRAFT_SHOW", "CRAFT_UPDATE" }) do
+        local isCraft = (tsEvent == "CRAFT_SHOW" or tsEvent == "CRAFT_UPDATE")
         ns.RegisterEvent(self, tsEvent, function()
             self._dirtyProfs = true
             self:QueueSnapshot(false, 1.5)
@@ -2040,9 +2987,17 @@ function Alts:Init()
                 C_Timer.After(0.45, function()
                     Alts._cdScanQueued = false
                     Alts:ScanTradeSkillCooldowns()
+                    Alts:ScanLearnedRecipes(isCraft)
+                    if ns.LFGFrameTab and ns.LFGFrameTab.AttachProfessionButton then
+                        ns.LFGFrameTab:AttachProfessionButton()
+                    end
                 end)
             else
                 self:ScanTradeSkillCooldowns()
+                self:ScanLearnedRecipes(isCraft)
+                if ns.LFGFrameTab and ns.LFGFrameTab.AttachProfessionButton then
+                    ns.LFGFrameTab:AttachProfessionButton()
+                end
             end
         end)
     end
@@ -2146,4 +3101,13 @@ function Alts:Init()
             end)
         end
     end
+
+    ns:On("SETTINGS_UPDATED", function()
+        if _G["MailFrame"] and _G["MailFrame"].IsShown and _G["MailFrame"]:IsShown() then
+            EnsureMailRecipientPicker()
+        elseif ns.db and ns.db.settings and (ns.db.settings.embedCharacterWindow == false or ns.db.settings.embedMailPicker == false) then
+            if mailPickerBtn then mailPickerBtn:Hide() end
+            if mailQuickBtn then mailQuickBtn:Hide() end
+        end
+    end)
 end

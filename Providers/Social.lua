@@ -1295,6 +1295,34 @@ function Social:GetDirectoryList(opts)
     local scoreMap = {}
 
     local hasChat = ns.Chat and ns.Chat.IsLookupKeyVerified
+    if srcFilter == "blocked" then
+        local ignList = Store and Store.GetAccountIgnoresList and Store:GetAccountIgnoresList() or {}
+        local dirByLk = Store and Store.socialDirectoryByLookup or {}
+        for _, ign in ipairs(ignList) do
+            local existing = ign.lookupKey and dirByLk[ign.lookupKey]
+            local row = {
+                lookupKey = ign.lookupKey,
+                displayName = (existing and existing.displayName) or ign.name or ign.lookupKey,
+                classFile = existing and existing.classFile or nil,
+                level = existing and existing.level or 0,
+                area = existing and existing.area or "",
+                guild = existing and existing.guild or nil,
+                online = existing and existing.online == true or false,
+                lastSeen = existing and existing.lastSeen or ign.addedAt or 0,
+                sources = existing and existing.sources or { blocked = true },
+                isAccountIgnored = true,
+                ignoreReason = ign.reason,
+                ignoreNote = ign.note,
+                ignoreExpiresAt = ign.expiresAt,
+                ignoreHideChat = ign.hideChat,
+                ignoreAddedAt = ign.addedAt,
+                hasCharacterName = true,
+            }
+            out[#out + 1] = row
+        end
+        return out
+    end
+
     for _, item in pairs(Store.socialDirectory or {}) do
         local key = item.lookupKey
         local meta = key and Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(key)

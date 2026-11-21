@@ -59,6 +59,9 @@ function Group:Scan()
         self.readyCheckActive = false
         self.readyStates = {}
         self._avoidNotified = {}
+        if self.OnActiveRunRosterUpdated then
+            self:OnActiveRunRosterUpdated(false)
+        end
         ns:Emit("GROUP_UPDATED")
         return
     end
@@ -177,9 +180,20 @@ function Group:Scan()
                         local alertKey = guid or parsed.lookupKey
                         if not self._avoidNotified[alertKey] then
                             local meta = Store and Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(parsed.lookupKey)
-                            if meta and meta.flag == "AVOID" then
+                            local ignRec = Store and Store.GetAccountIgnore and Store:GetAccountIgnore(parsed.lookupKey)
+                            if (meta and meta.flag == "AVOID") or ignRec then
                                 self._avoidNotified[alertKey] = true
-                                local noteText = (meta.note and meta.note ~= "") and (L["Note: %s"]:format(meta.note)) or L["In your group! Flagged as Avoid."]
+                                local noteText
+                                if ignRec then
+                                    local rLbl = Store.FormatIgnoreReason and Store:FormatIgnoreReason(ignRec.reason, L) or (ignRec.reason or "")
+                                    if ignRec.note and ignRec.note ~= "" then
+                                        noteText = string.format("%s (%s): %s", L["Account Ignore"], rLbl, ignRec.note)
+                                    else
+                                        noteText = string.format("%s (%s)", L["Account Ignore"], rLbl)
+                                    end
+                                else
+                                    noteText = (meta and meta.note and meta.note ~= "") and (L["Note: %s"]:format(meta.note)) or L["In your group! Flagged as Avoid."]
+                                end
                                 ns:Print("|cffff4d4d[!] %s:|r %s (%s) — %s", L["Avoid Warning"], parsed.displayName, item.role or "", noteText)
                                 if PlaySound and SOUNDKIT and (SOUNDKIT.RAID_WARNING or 8959) then
                                     pcall(PlaySound, SOUNDKIT.RAID_WARNING or 8959, "Master")
@@ -243,6 +257,9 @@ function Group:Scan()
 
     self.members = nextList
     self._compCache = nil
+    if self.OnActiveRunRosterUpdated then
+        self:OnActiveRunRosterUpdated(true)
+    end
     if Compat.IsInGroup() and ns.Clan and ns.Clan.BroadcastGroupInstanceCap then
         ns.Clan:BroadcastGroupInstanceCap(myInst and myInst.used or 0, myInst and myInst.max or 5)
     end
@@ -688,6 +705,9 @@ function Group:ResetDungeonInstances()
     if ResetInstances then
         pcall(ResetInstances)
     end
+    if self._activeRun and self._activeRun.started and self.FinalizeActiveDungeonRun then
+        self:FinalizeActiveDungeonRun("instance_reset", false)
+    end
     if ns.db then
         ns.db._lastInstanceActiveSig = nil
     end
@@ -696,6 +716,1208 @@ function Group:ResetDungeonInstances()
     ns:Emit("GROUP_UPDATED")
     ns:Emit("CLAN_UPDATED")
     return true
+end
+
+-- ============================================================================
+-- Dungeon & Raid Group Run History (Event-Driven, Zero CLEU, Zero Polling)
+-- ============================================================================
+local MAX_DUNGEON_HISTORY = 120
+local MAX_RUN_MEMBERS = 40
+local MAX_RUN_BOSSES = 15
+local EXIT_GRACE_SECONDS = 45
+local LEAVE_GRACE_SECONDS = 12
+local MIN_VALID_RUN_SECONDS = 15
+
+local function FoldDungeonSearchText(s)
+    if type(s) ~= "string" or s == "" then return "" end
+    local out = s:lower()
+    out = out:gsub("[áàâãä]", "a")
+        :gsub("[éèêë]", "e")
+        :gsub("[íìîï]", "i")
+        :gsub("[óòôõö]", "o")
+        :gsub("[úùûü]", "u")
+        :gsub("ç", "c")
+        :gsub("ñ", "n")
+    return out
+end
+
+local function IsInPartyOrRaidInstanceNow()
+    local inInst, instType = Safe.Call(IsInInstance)
+    instType = Safe.String(instType)
+    if inInst == true and (instType == "party" or instType == "raid") then
+        local instName, diffIdNum, diffName, maxPlayers, mapIdNum
+        if GetInstanceInfo then
+            local okInfo, rawName, _, rawDiffId, rawDiffName, rawMaxPlayers, _, _, rawMapId = pcall(GetInstanceInfo)
+            if okInfo then
+                instName = Safe.String(rawName)
+                diffIdNum = Safe.Number(rawDiffId)
+                diffName = Safe.String(rawDiffName)
+                maxPlayers = Safe.Number(rawMaxPlayers)
+                mapIdNum = Safe.Number(rawMapId)
+            end
+        end
+        instName = (instName and instName ~= "") and instName or Compat.CurrentZoneName() or L["Instance"]
+        return true, instType, instName, mapIdNum, diffIdNum, diffName, maxPlayers
+    end
+    return false, nil, nil, nil, nil, nil, nil
+end
+
+local function LookupMemberGuildShort(unit, lookupKey)
+    if unit and GetGuildInfo then
+        local gName = Safe.String(Safe.Call(GetGuildInfo, unit))
+        if gName and gName ~= "" then
+            return gName
+        end
+    end
+    if lookupKey and ns.Store and ns.Store.socialByLookup then
+        local row = ns.Store.socialByLookup[lookupKey]
+        if row and row.guildName and row.guildName ~= "" then
+            return row.guildName
+        end
+    end
+    return nil
+end
+
+local DM_METRIC_DEFS = {
+    { field = "dmg", psField = "dps", enumKey = "DamageDone", fallback = 0 },
+    { field = "heal", psField = "hps", enumKey = "HealingDone", fallback = 2 },
+    { field = "tkn", enumKey = "DamageTaken", fallback = 7 },
+    { field = "intr", enumKey = "Interrupts", fallback = 5 },
+    { field = "disp", enumKey = "Dispels", fallback = 6 },
+    { field = "d", enumKey = "Deaths", fallback = nil },
+}
+
+local function IsNativeDamageMeterAvailable()
+    if not (C_DamageMeter and type(C_DamageMeter.GetCombatSessionFromType) == "function") then
+        return false
+    end
+    if type(C_DamageMeter.IsDamageMeterAvailable) == "function" then
+        local ok, avail = pcall(C_DamageMeter.IsDamageMeterAvailable)
+        if not ok or Safe.Value(avail) == false then
+            return false
+        end
+    end
+    return true
+end
+
+local function ResolveDamageMeterSourceKey(run, src)
+    if type(src) ~= "table" then return nil end
+    local isLocal = Safe.Value(src.isLocalPlayer) == true
+    local guid = Safe.String(src.sourceGUID)
+    local rawName = Safe.String(src.name) or Safe.String(src.unitName)
+    local cls = Safe.String(src.classFilename) or Safe.String(src.unitClassFilename)
+
+    if isLocal or (guid and run and run.myGuid and guid == run.myGuid) then
+        if run and run.myKey then
+            return run.myKey, run.myName or rawName, cls or run.myClass
+        end
+    end
+    if guid and run and run.guidToKey and run.guidToKey[guid] then
+        local gk = run.guidToKey[guid]
+        local mem = run.membersByKey and run.membersByKey[gk]
+        return gk, (mem and mem.n) or rawName, cls or (mem and mem.c)
+    end
+    if rawName and rawName ~= "" and Compat.ParseCharacterName then
+        local parsed = Compat.ParseCharacterName(rawName)
+        if parsed and parsed.lookupKey then
+            if run and run.membersByKey and run.membersByKey[parsed.lookupKey] then
+                return parsed.lookupKey, run.membersByKey[parsed.lookupKey].n or parsed.displayName, cls
+            end
+            if run and run.firstToKey and parsed.firstName then
+                local fk = run.firstToKey[parsed.firstName:lower()]
+                if fk then
+                    local mem = run.membersByKey and run.membersByKey[fk]
+                    return fk, (mem and mem.n) or parsed.displayName, cls or (mem and mem.c)
+                end
+            end
+            return parsed.lookupKey, parsed.displayName, cls
+        end
+    end
+    return nil
+end
+
+local function ReadDamageMeterSessionByKey(run, sessionType)
+    if not IsNativeDamageMeterAvailable() then
+        return nil
+    end
+    local dmTypes = Enum and Enum.DamageMeterType
+    local out = {}
+    local maxDurationSec = 0
+    for i = 1, #DM_METRIC_DEFS do
+        local def = DM_METRIC_DEFS[i]
+        local dmType = (dmTypes and dmTypes[def.enumKey] ~= nil) and dmTypes[def.enumKey] or ((not dmTypes) and def.fallback or nil)
+        if dmType ~= nil then
+            local ok, session = pcall(C_DamageMeter.GetCombatSessionFromType, sessionType, dmType)
+            if ok and type(session) == "table" and type(session.combatSources) == "table" then
+                local sDur = Safe.Number(session.durationSeconds)
+                if sDur and sDur > maxDurationSec then
+                    maxDurationSec = sDur
+                end
+                local seenInMetric = {}
+                for _, src in ipairs(session.combatSources) do
+                    local key, dispName, cls = ResolveDamageMeterSourceKey(run, src)
+                    if key then
+                        local amt = math.max(0, math.floor((Safe.Number(src.totalAmount) or 0) + 0.5))
+                        local ps = math.max(0, math.floor((Safe.Number(src.amountPerSecond) or 0) + 0.5))
+                        if not seenInMetric[key] then
+                            seenInMetric[key] = true
+                            local rec = out[key]
+                            if not rec then
+                                rec = { name = dispName, classFile = cls }
+                                out[key] = rec
+                            end
+                            rec[def.field] = math.max(rec[def.field] or 0, amt)
+                            if def.psField and ps > 0 then
+                                rec[def.psField] = math.max(rec[def.psField] or 0, ps)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out, maxDurationSec
+end
+
+local function SnapshotDungeonRunDamageMeterBaseline(run)
+    if not run then return end
+    run.dmBaselineByKey = ReadDamageMeterSessionByKey(run, (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Overall) or 0) or {}
+    run.dmResetAccumByKey = run.dmResetAccumByKey or {}
+    run.dmPullAccumByKey = run.dmPullAccumByKey or {}
+    run.dmLiveByKey = run.dmLiveByKey or {}
+    run.dmPullDurAccum = run.dmPullDurAccum or 0
+    run.dmBaselineCaptured = true
+end
+
+local function UpdateDungeonRunDamageMeter(run, isPullEnd)
+    if not (run and run.started and IsNativeDamageMeterAvailable()) then
+        return
+    end
+    if not run.dmBaselineCaptured then
+        SnapshotDungeonRunDamageMeterBaseline(run)
+    end
+    local sessOverall = (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Overall) or 0
+    local sessCurrent = (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Current) or 1
+    local overallNow = ReadDamageMeterSessionByKey(run, sessOverall) or {}
+
+    if isPullEnd and run.lastPullMetered ~= (run.pulls or 0) then
+        run.lastPullMetered = run.pulls or 0
+        local currNow, currDur = ReadDamageMeterSessionByKey(run, sessCurrent)
+        if currDur and currDur > 0 then
+            run.dmPullDurAccum = (run.dmPullDurAccum or 0) + currDur
+        end
+        if currNow then
+            run.dmPullAccumByKey = run.dmPullAccumByKey or {}
+            for k, vals in pairs(currNow) do
+                local pa = run.dmPullAccumByKey[k]
+                if not pa then
+                    pa = {}
+                    run.dmPullAccumByKey[k] = pa
+                end
+                for i = 1, #DM_METRIC_DEFS do
+                    local f = DM_METRIC_DEFS[i].field
+                    pa[f] = (pa[f] or 0) + (vals[f] or 0)
+                end
+            end
+        end
+    end
+
+    run.dmLiveByKey = run.dmLiveByKey or {}
+    local allKeys = {}
+    for k in pairs(overallNow) do allKeys[k] = true end
+    for k in pairs(run.dmResetAccumByKey or {}) do allKeys[k] = true end
+    for k in pairs(run.dmPullAccumByKey or {}) do allKeys[k] = true end
+
+    for k in pairs(allKeys) do
+        local ov = overallNow[k]
+        local bs = run.dmBaselineByKey and run.dmBaselineByKey[k]
+        local ra = run.dmResetAccumByKey and run.dmResetAccumByKey[k]
+        local pa = run.dmPullAccumByKey and run.dmPullAccumByKey[k]
+        local live = run.dmLiveByKey[k]
+        if not live then
+            live = {}
+            run.dmLiveByKey[k] = live
+        end
+        for i = 1, #DM_METRIC_DEFS do
+            local f = DM_METRIC_DEFS[i].field
+            local curOv = (ov and ov[f]) or 0
+            local baseOv = (bs and bs[f]) or 0
+            local ovDelta = (curOv >= baseOv) and (curOv - baseOv) or curOv
+            local fromOverall = ((ra and ra[f]) or 0) + ovDelta
+            local fromPulls = (pa and pa[f]) or 0
+            live[f] = math.max(live[f] or 0, fromOverall, fromPulls)
+        end
+    end
+end
+
+local function OnDungeonRunDamageMeterReset()
+    local run = Group._activeRun
+    if not (run and run.started) then return end
+    run.dmResetAccumByKey = run.dmResetAccumByKey or {}
+    for k, live in pairs(run.dmLiveByKey or {}) do
+        local ra = run.dmResetAccumByKey[k]
+        if not ra then
+            ra = {}
+            run.dmResetAccumByKey[k] = ra
+        end
+        for i = 1, #DM_METRIC_DEFS do
+            local f = DM_METRIC_DEFS[i].field
+            ra[f] = math.max(ra[f] or 0, live[f] or 0)
+        end
+    end
+    run.dmBaselineByKey = {}
+end
+
+function Group:FormatCompactNumber(n)
+    local val = Safe.Number(n) or 0
+    if val >= 1000000 then
+        return string.format("%.2fM", val / 1000000)
+    elseif val >= 10000 then
+        return string.format("%.1fK", val / 1000)
+    elseif val >= 1000 then
+        return string.format("%.2fK", val / 1000)
+    end
+    return tostring(math.floor(val + 0.5))
+end
+
+function Group:FormatCopperCompact(copper)
+    local total = math.max(0, math.floor(Safe.Number(copper) or 0))
+    if total == 0 then return "0c" end
+    local g = math.floor(total / 10000)
+    local s = math.floor((total % 10000) / 100)
+    local c = total % 100
+    if g > 0 then
+        return string.format("%dg %ds", g, s)
+    elseif s > 0 then
+        return string.format("%ds %dc", s, c)
+    end
+    return string.format("%dc", c)
+end
+
+function Group:CheckDungeonRunDeaths(targetUnit)
+    local run = self._activeRun
+    if not (run and run.started) then return end
+    local inInst = IsInPartyOrRaidInstanceNow()
+    if not inInst then return end
+
+    local units = {}
+    if type(targetUnit) == "string" and targetUnit ~= "" then
+        units[1] = targetUnit
+    else
+        local inRaid = Compat.IsInRaid and Compat.IsInRaid()
+        if inRaid then
+            local num = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
+            for i = 1, math.min(num, 40) do
+                units[#units + 1] = "raid" .. i
+            end
+        else
+            units[1] = "player"
+            for i = 1, 4 do
+                units[#units + 1] = "party" .. i
+            end
+        end
+    end
+
+    run.deadStateByKey = run.deadStateByKey or {}
+    run.lastDeathAtByKey = run.lastDeathAtByKey or {}
+    local now = time()
+    local newlyDied = false
+
+    for i = 1, #units do
+        local u = units[i]
+        if UnitExists and Safe.Value(UnitExists(u)) == true and (not UnitIsConnected or Safe.Value(UnitIsConnected(u)) ~= false) then
+            local isDead = (UnitIsDeadOrGhost and Safe.Value(Safe.Call(UnitIsDeadOrGhost, u)) == true)
+                and not (UnitIsFeignDeath and Safe.Value(Safe.Call(UnitIsFeignDeath, u)) == true)
+            local key = nil
+            if u == "player" then
+                key = run.myKey
+            else
+                local guid = Safe.String(Safe.Call(UnitGUID, u))
+                if guid and run.guidToKey and run.guidToKey[guid] then
+                    key = run.guidToKey[guid]
+                else
+                    local rawN = Safe.String(Safe.Call(UnitName, u))
+                    local parsed = rawN and Compat.ParseCharacterName and Compat.ParseCharacterName(rawN)
+                    if parsed then
+                        key = (run.membersByKey and run.membersByKey[parsed.lookupKey]) and parsed.lookupKey
+                            or (parsed.firstName and run.firstToKey and run.firstToKey[parsed.firstName:lower()])
+                            or parsed.lookupKey
+                    end
+                end
+            end
+            if key then
+                if isDead and not run.deadStateByKey[key] and (now - (run.lastDeathAtByKey[key] or 0)) >= 4 then
+                    run.lastDeathAtByKey[key] = now
+                    run.totalDeaths = (run.totalDeaths or 0) + 1
+                    newlyDied = true
+                    if key == run.myKey then
+                        run.myDeaths = (run.myDeaths or 0) + 1
+                    elseif run.membersByKey and run.membersByKey[key] then
+                        run.membersByKey[key].deaths = (run.membersByKey[key].deaths or 0) + 1
+                    end
+                end
+                run.deadStateByKey[key] = isDead
+            end
+        end
+    end
+
+    if newlyDied and (now - (run.lastWipeAt or 0)) >= 25 then
+        local presentCount, aliveCount = 0, 0
+        local inRaid = Compat.IsInRaid and Compat.IsInRaid()
+        local checkUnits = {}
+        if inRaid then
+            local num = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
+            for i = 1, math.min(num, 40) do
+                checkUnits[#checkUnits + 1] = "raid" .. i
+            end
+        else
+            checkUnits[1] = "player"
+            for i = 1, 4 do
+                checkUnits[#checkUnits + 1] = "party" .. i
+            end
+        end
+        for i = 1, #checkUnits do
+            local cu = checkUnits[i]
+            if UnitExists and Safe.Value(UnitExists(cu)) == true and (not UnitIsConnected or Safe.Value(UnitIsConnected(cu)) ~= false) then
+                presentCount = presentCount + 1
+                local cDead = (UnitIsDeadOrGhost and Safe.Value(Safe.Call(UnitIsDeadOrGhost, cu)) == true)
+                    and not (UnitIsFeignDeath and Safe.Value(Safe.Call(UnitIsFeignDeath, cu)) == true)
+                if not cDead then
+                    aliveCount = aliveCount + 1
+                end
+            end
+        end
+        if presentCount >= 2 and aliveCount == 0 then
+            run.wipes = (run.wipes or 0) + 1
+            run.lastWipeAt = now
+        end
+    end
+end
+
+function Group:OnDungeonRunXpUpdate(newLevelFromEvent)
+    local run = self._activeRun
+    if not (run and run.started) then return end
+    local curLvl = Safe.Number(newLevelFromEvent) or Safe.Number(Safe.Call(UnitLevel, "player")) or run.lastLevel or 0
+    if curLvl > (run.lastLevel or curLvl) then
+        run.levelsGained = (run.levelsGained or 0) + (curLvl - run.lastLevel)
+        run.lastLevel = curLvl
+        run._xpRolloverPending = true
+    end
+    if newLevelFromEvent ~= nil then
+        -- Wait for PLAYER_XP_UPDATE so UnitXP("player") reflects the post-levelup bar cleanly.
+        return
+    end
+    local curXp = Safe.Number(Safe.Call(UnitXP, "player")) or 0
+    local curMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
+    if run._xpRolloverPending and curXp <= (run.lastXp or curXp) then
+        local prevRemain = math.max(0, (run.lastXpMax or 0) - (run.lastXp or 0))
+        run.xpGained = (run.xpGained or 0) + prevRemain + curXp
+        run._xpRolloverPending = nil
+        run.lastXp = curXp
+        run.lastXpMax = curMax
+    elseif curXp > (run.lastXp or curXp) then
+        run.xpGained = (run.xpGained or 0) + (curXp - run.lastXp)
+        run.lastXp = curXp
+        run.lastXpMax = curMax
+    elseif curMax > 0 and curMax ~= run.lastXpMax then
+        run.lastXpMax = curMax
+    end
+end
+
+function Group:OnDungeonRunMoneyUpdate()
+    local run = self._activeRun
+    if not (run and run.started) then return end
+    local curMoney = GetMoney and Safe.Number(Safe.Call(GetMoney)) or nil
+    if curMoney == nil then return end
+    if run.lastMoney and curMoney > run.lastMoney then
+        run.moneyGained = (run.moneyGained or 0) + (curMoney - run.lastMoney)
+    end
+    run.lastMoney = curMoney
+end
+
+function Group:OnDungeonRunLootEvent(itemMsgOrLink, looterName, isEncounterLoot, itemIdHint)
+    local run = self._activeRun
+    if not (run and run.started) then return end
+    run.loot = run.loot or {}
+    if #run.loot >= 8 then return end
+
+    local itemID = Safe.Number(itemIdHint)
+    local itemName, linkQuality
+    if type(itemMsgOrLink) == "string" and itemMsgOrLink:find("|Hitem:", 1, true) then
+        if not itemID then
+            itemID = tonumber(itemMsgOrLink:match("|Hitem:(%d+)"))
+        end
+        itemName = itemMsgOrLink:match("%[([^%]]+)%]")
+        local colorHex = itemMsgOrLink:match("|cff(%x%x%x%x%x%x)|Hitem:")
+        if colorHex then
+            local low = colorHex:lower()
+            if low == "ff8000" then linkQuality = 5
+            elseif low == "a335ee" then linkQuality = 4
+            elseif low == "0070dd" then linkQuality = 3
+            elseif low == "1eff00" then linkQuality = 2
+            end
+        end
+    end
+    if not itemID or itemID <= 0 then return end
+
+    local q = linkQuality
+    if not q and C_Item and C_Item.GetItemQualityByID then
+        q = Safe.Number(Safe.Call(C_Item.GetItemQualityByID, itemID))
+    end
+    q = q or 1
+    if q < 2 then return end
+    if not isEncounterLoot and q == 2 and #run.loot >= 4 then
+        return
+    end
+
+    if (not itemName or itemName == "") and C_Item and C_Item.GetItemNameByID then
+        itemName = Safe.String(Safe.Call(C_Item.GetItemNameByID, itemID))
+    end
+    if not itemName or itemName == "" then return end
+
+    local cleanWho = Safe.String(looterName)
+    if cleanWho and cleanWho ~= "" and Compat.ParseCharacterName then
+        local pw = Compat.ParseCharacterName(cleanWho)
+        cleanWho = pw and pw.displayName or cleanWho
+    else
+        cleanWho = nil
+    end
+
+    run.lootSeen = run.lootSeen or {}
+    local seenKey = tostring(itemID) .. ":" .. (cleanWho or "")
+    if run.lootSeen[seenKey] then return end
+    run.lootSeen[seenKey] = true
+
+    run.loot[#run.loot + 1] = {
+        id = itemID,
+        n = itemName,
+        q = q,
+        w = cleanWho,
+    }
+end
+
+function Group:IsDungeonRunLogEnabled()
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("group") then
+        return false
+    end
+    if ns.db and ns.db.settings and ns.db.settings.dungeonRunLogEnabled == false then
+        return false
+    end
+    return true
+end
+
+function Group:GetDungeonHistoryTable()
+    if type(SocialCentralDB) ~= "table" then
+        return {}
+    end
+    if type(SocialCentralDB.dungeonHistory) ~= "table" then
+        SocialCentralDB.dungeonHistory = {}
+    end
+    return SocialCentralDB.dungeonHistory
+end
+
+function Group:FormatRunDuration(totalSec)
+    local sec = math.max(0, math.floor(tonumber(totalSec) or 0))
+    local hrs = math.floor(sec / 3600)
+    local mins = math.floor((sec % 3600) / 60)
+    local rem = sec % 60
+    if hrs > 0 then
+        return string.format("%dh %02dm %02ds", hrs, mins, rem)
+    elseif mins > 0 then
+        return string.format("%dm %02ds", mins, rem)
+    end
+    return string.format("%ds", rem)
+end
+
+function Group:GetRunEndReasonLabel(reasonCode)
+    if reasonCode == "member_left" then
+        return L["Member left group"]
+    elseif reasonCode == "left_group" then
+        return L["Left group"]
+    elseif reasonCode == "exited_instance" then
+        return L["Exited instance"]
+    elseif reasonCode == "zone_change" then
+        return L["Entered another instance"]
+    elseif reasonCode == "instance_reset" then
+        return L["Instance reset"]
+    elseif reasonCode == "logout" then
+        return L["Session ended"]
+    end
+    return L["Completed"]
+end
+
+function Group:GetDungeonHistoryCount()
+    local hist = self:GetDungeonHistoryTable()
+    return #hist
+end
+
+function Group:GetActiveDungeonRunSummary()
+    local run = self._activeRun
+    if not run then return nil end
+    local count = 0
+    for _ in pairs(run.membersByKey or {}) do
+        count = count + 1
+    end
+    local totalDmg = 0
+    for _, dm in pairs(run.dmLiveByKey or {}) do
+        totalDmg = totalDmg + (dm.dmg or 0)
+    end
+    return {
+        zone = run.zone,
+        instType = run.instType,
+        difficultyName = run.difficultyName,
+        started = run.started == true,
+        startedAt = run.startedAt,
+        elapsed = run.started and math.max(0, time() - (run.startedAt or time())) or 0,
+        bossKills = run.bossKills or 0,
+        pulls = run.pulls or 0,
+        dmg = totalDmg,
+        memberCount = math.max(1, count),
+    }
+end
+
+function Group:GetDungeonHistory(query, filterMode)
+    local hist = self:GetDungeonHistoryTable()
+    local q = FoldDungeonSearchText(Compat.Trim and Compat.Trim(query or "") or (query or ""))
+    local mode = filterMode or "ALL"
+    local myCharKey = nil
+    if mode == "CHAR" then
+        local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+        local myDisp = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player"))
+        local parsedSelf = myDisp and Compat.ParseCharacterName and Compat.ParseCharacterName(myDisp)
+        myCharKey = parsedSelf and parsedSelf.lookupKey or nil
+    end
+    local out = {}
+    for i = 1, #hist do
+        local rec = hist[i]
+        if type(rec) == "table" then
+            local passMode = true
+            if mode == "DUNGEON" then
+                passMode = (rec.t ~= "raid")
+            elseif mode == "RAID" then
+                passMode = (rec.t == "raid")
+            elseif mode == "CHAR" and myCharKey then
+                passMode = (rec.ck == myCharKey)
+            end
+            if passMode then
+                if q == "" then
+                    out[#out + 1] = rec
+                else
+                    local matched = FoldDungeonSearchText(rec.z or ""):find(q, 1, true) ~= nil
+                        or FoldDungeonSearchText(rec.ch or ""):find(q, 1, true) ~= nil
+                        or FoldDungeonSearchText(rec.bn or ""):find(q, 1, true) ~= nil
+                        or (rec.diff and FoldDungeonSearchText(rec.diff):find(q, 1, true) ~= nil)
+                    if not matched and type(rec.bs) == "table" then
+                        for bIdx = 1, #rec.bs do
+                            if FoldDungeonSearchText(rec.bs[bIdx] or ""):find(q, 1, true) then
+                                matched = true
+                                break
+                            end
+                        end
+                    end
+                    if not matched and type(rec.m) == "table" then
+                        for mIdx = 1, #rec.m do
+                            local mm = rec.m[mIdx]
+                            if mm and (FoldDungeonSearchText(mm.n or ""):find(q, 1, true)
+                                or (mm.g and FoldDungeonSearchText(mm.g):find(q, 1, true)))
+                            then
+                                matched = true
+                                break
+                            end
+                        end
+                    end
+                    if not matched and type(rec.loot) == "table" then
+                        for lIdx = 1, #rec.loot do
+                            local it = rec.loot[lIdx]
+                            if it and FoldDungeonSearchText(it.n or ""):find(q, 1, true) then
+                                matched = true
+                                break
+                            end
+                        end
+                    end
+                    if matched then
+                        out[#out + 1] = rec
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function Group:DeleteDungeonRun(runId)
+    if not runId then return false end
+    local hist = self:GetDungeonHistoryTable()
+    for i = #hist, 1, -1 do
+        if hist[i] and hist[i].id == runId then
+            table.remove(hist, i)
+            ns:Emit("DUNGEON_HISTORY_UPDATED")
+            ns:Emit("GROUP_UPDATED")
+            return true
+        end
+    end
+    return false
+end
+
+function Group:ClearDungeonHistory()
+    local hist = self:GetDungeonHistoryTable()
+    if #hist == 0 then return false end
+    wipe(hist)
+    ns:Emit("DUNGEON_HISTORY_UPDATED")
+    ns:Emit("GROUP_UPDATED")
+    return true
+end
+
+function Group:CaptureActiveRunMembers(isInitial)
+    local run = self._activeRun
+    if not run then return end
+    run.membersByKey = run.membersByKey or {}
+    run.presentKeys = run.presentKeys or {}
+    run.guidToKey = run.guidToKey or {}
+    run.firstToKey = run.firstToKey or {}
+
+    local liveKeys = {}
+    local liveCount = 0
+    local joinedNew = false
+    for _, m in ipairs(self.members or {}) do
+        if m and m.lookupKey then
+            liveCount = liveCount + 1
+            liveKeys[m.lookupKey] = true
+            if m.guid then
+                run.guidToKey[m.guid] = m.lookupKey
+            end
+            local parsedMem = m.displayName and Compat.ParseCharacterName and Compat.ParseCharacterName(m.displayName)
+            if parsedMem and parsedMem.firstName then
+                local fl = parsedMem.firstName:lower()
+                if not run.firstToKey[fl] then
+                    run.firstToKey[fl] = m.lookupKey
+                end
+            end
+            if m.isMe then
+                run.myName = m.displayName or run.myName
+                run.myKey = m.lookupKey or run.myKey
+                run.myClass = m.classFile or run.myClass
+                run.myLevel = m.level or run.myLevel
+                run.myRole = m.role or run.myRole
+                run.myGuid = m.guid or run.myGuid
+            else
+                local rec = run.membersByKey[m.lookupKey]
+                local gName = LookupMemberGuildShort(m.unit, m.lookupKey)
+                if not rec then
+                    local memberCount = 0
+                    for _ in pairs(run.membersByKey) do memberCount = memberCount + 1 end
+                    if memberCount < MAX_RUN_MEMBERS then
+                        run.membersByKey[m.lookupKey] = {
+                            n = m.displayName or m.lookupKey,
+                            k = m.lookupKey,
+                            c = m.classFile,
+                            r = m.role,
+                            l = m.level,
+                            g = gName,
+                            j = (not isInitial and run.started) and true or nil,
+                            lv = nil,
+                        }
+                        if not isInitial and run.started then
+                            joinedNew = true
+                        end
+                    end
+                else
+                    if m.displayName and (not rec.n or (m.displayName:find("%s") and not rec.n:find("%s"))) then
+                        rec.n = m.displayName
+                    end
+                    if m.classFile and not rec.c then rec.c = m.classFile end
+                    if m.role and m.role ~= "NONE" then rec.r = m.role end
+                    if m.level and m.level > (rec.l or 0) then rec.l = m.level end
+                    if gName and not rec.g then rec.g = gName end
+                    rec.lv = nil
+                end
+            end
+        end
+    end
+
+    if not isInitial and run.started then
+        local leftNow = 0
+        for prevKey in pairs(run.presentKeys) do
+            if not liveKeys[prevKey] and prevKey ~= run.myKey then
+                leftNow = leftNow + 1
+                local rec = run.membersByKey[prevKey]
+                if rec then
+                    rec.lv = true
+                end
+            end
+        end
+        if joinedNew then
+            -- Group replaced a leaver and kept going: clear pending leave marker.
+            run.pendingLeaveAt = nil
+            run.leftSinceCombat = 0
+            run._leaveSeq = (run._leaveSeq or 0) + 1
+        elseif leftNow > 0 then
+            local now = time()
+            run.pendingLeaveAt = run.pendingLeaveAt or now
+            run.leftSinceCombat = (run.leftSinceCombat or 0) + leftNow
+            local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+            if run.exitedAt then
+                self:FinalizeActiveDungeonRun("member_left", false)
+                return
+            elseif not inCombat then
+                local isSmallLeft = (run.instType ~= "raid" and liveCount <= 2) or ((run.leftSinceCombat or 0) >= 2)
+                if isSmallLeft then
+                    run._leaveSeq = (run._leaveSeq or 0) + 1
+                    local lSeq = run._leaveSeq
+                    if C_Timer and C_Timer.After then
+                        C_Timer.After(LEAVE_GRACE_SECONDS, function()
+                            local cur = Group._activeRun
+                            if cur == run and cur._leaveSeq == lSeq and cur.started and cur.pendingLeaveAt then
+                                local stillCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+                                if not stillCombat then
+                                    Group:FinalizeActiveDungeonRun("member_left", false)
+                                end
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end
+
+    run.presentKeys = liveKeys
+    if liveCount > (run.peakSize or 0) then
+        run.peakSize = liveCount
+    end
+end
+
+function Group:FinalizeActiveDungeonRun(reason, silent)
+    local run = self._activeRun
+    self._activeRun = nil
+    if not run or not run.started or not self:IsDungeonRunLogEnabled() then
+        return false
+    end
+
+    local now = time()
+    if run.inCombatNow and run.combatStartedAt then
+        run.combatSeconds = (run.combatSeconds or 0) + math.max(1, now - run.combatStartedAt)
+        run.inCombatNow = false
+        run.combatStartedAt = nil
+    end
+    UpdateDungeonRunDamageMeter(run, true)
+
+    local startedAt = run.startedAt or run.enteredAt or now
+    local endedAt
+    local endReason = reason or "completed"
+    if run.pendingLeaveAt and run.pendingLeaveAt >= (run.lastCombatAt or startedAt) then
+        endedAt = run.pendingLeaveAt
+        endReason = "member_left"
+    elseif run.exitedAt and run.exitedAt >= startedAt then
+        endedAt = run.exitedAt
+        endReason = (reason == "left_group") and "left_group" or (reason or "exited_instance")
+    else
+        endedAt = now
+    end
+
+    local duration = math.max(1, endedAt - startedAt)
+    local bossKills = run.bossKills or 0
+    if duration < MIN_VALID_RUN_SECONDS and bossKills == 0 then
+        return false
+    end
+
+    local combatDur = math.max(1, run.combatSeconds or 0, math.floor((run.dmPullDurAccum or 0) + 0.5), 1)
+    if (run.combatSeconds or 0) == 0 and (run.dmPullDurAccum or 0) == 0 then
+        combatDur = duration
+    end
+
+    local dmLive = run.dmLiveByKey or {}
+    local memberList = {}
+    local roleRank = { TANK = 1, HEALER = 2, DAMAGER = 3, NONE = 4 }
+    for _, m in pairs(run.membersByKey or {}) do
+        local mDm = m.k and dmLive[m.k]
+        if not mDm and m.n and Compat.ParseCharacterName then
+            local pm = Compat.ParseCharacterName(m.n)
+            local altK = pm and pm.firstName and run.firstToKey and run.firstToKey[pm.firstName:lower()]
+            mDm = altK and dmLive[altK]
+        end
+        if m.deaths and m.deaths > 0 then
+            m.d = m.deaths
+        end
+        m.deaths = nil
+        if mDm then
+            if (mDm.dmg or 0) > 0 then
+                m.dmg = mDm.dmg
+                m.dps = math.floor((mDm.dmg / combatDur) + 0.5)
+            end
+            if (mDm.heal or 0) > 0 then
+                m.heal = mDm.heal
+                m.hps = math.floor((mDm.heal / combatDur) + 0.5)
+            end
+            if (mDm.tkn or 0) > 0 then m.tkn = mDm.tkn end
+            if (mDm.intr or 0) > 0 then m.intr = mDm.intr end
+            if (mDm.disp or 0) > 0 then m.disp = mDm.disp end
+            if (mDm.d or 0) > (m.d or 0) then m.d = mDm.d end
+        end
+        memberList[#memberList + 1] = m
+    end
+    table.sort(memberList, function(a, b)
+        local ra, rb = roleRank[a.r or "NONE"] or 4, roleRank[b.r or "NONE"] or 4
+        if ra ~= rb then return ra < rb end
+        return (a.n or "") < (b.n or "")
+    end)
+    while #memberList > MAX_RUN_MEMBERS do
+        table.remove(memberList)
+    end
+
+    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local myName = run.myName or (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player")) or "Player"
+    local parsedSelf = Compat.ParseCharacterName and Compat.ParseCharacterName(myName)
+    local myKey = run.myKey or (parsedSelf and parsedSelf.lookupKey)
+    local _, rawMyClass = Safe.Call(UnitClass, "player")
+    local myClass = run.myClass or Safe.String(rawMyClass)
+    local myLevel = run.myLevel or Safe.Number(Safe.Call(UnitLevel, "player"))
+    local realmPool = (Compat.RealmPool and Compat.RealmPool()) or ""
+
+    local myDm = myKey and dmLive[myKey] or nil
+    local totalDmg = (myDm and myDm.dmg) or 0
+    local totalHeal = (myDm and myDm.heal) or 0
+    local totalTaken = (myDm and myDm.tkn) or 0
+    local totalIntr = (myDm and myDm.intr) or 0
+    local totalDisp = (myDm and myDm.disp) or 0
+    local sumDeaths = math.max(run.myDeaths or 0, (myDm and myDm.d) or 0)
+
+    for _, m in ipairs(memberList) do
+        totalDmg = totalDmg + (m.dmg or 0)
+        totalHeal = totalHeal + (m.heal or 0)
+        totalTaken = totalTaken + (m.tkn or 0)
+        totalIntr = totalIntr + (m.intr or 0)
+        totalDisp = totalDisp + (m.disp or 0)
+        sumDeaths = sumDeaths + (m.d or 0)
+    end
+    local totalDeaths = math.max(run.totalDeaths or 0, sumDeaths)
+
+    local dmSummary = nil
+    if totalDmg > 0 or totalHeal > 0 or totalTaken > 0 or totalIntr > 0 or totalDisp > 0 then
+        local myDmg = (myDm and myDm.dmg) or 0
+        local myHeal = (myDm and myDm.heal) or 0
+        dmSummary = {
+            dmg = totalDmg,
+            dps = math.floor((totalDmg / combatDur) + 0.5),
+            heal = totalHeal,
+            hps = math.floor((totalHeal / combatDur) + 0.5),
+            tkn = totalTaken,
+            intr = totalIntr,
+            disp = totalDisp,
+            myDmg = myDmg,
+            myDps = (myDmg > 0) and math.floor((myDmg / combatDur) + 0.5) or 0,
+            myHeal = myHeal,
+            myHps = (myHeal > 0) and math.floor((myHeal / combatDur) + 0.5) or 0,
+            myTkn = (myDm and myDm.tkn) or 0,
+            myIntr = (myDm and myDm.intr) or 0,
+            myDisp = (myDm and myDm.disp) or 0,
+            myD = math.max(run.myDeaths or 0, (myDm and myDm.d) or 0),
+            myRole = run.myRole,
+        }
+    end
+
+    local rec = {
+        id = tostring(startedAt) .. "-" .. tostring(math.random(1000, 9999)),
+        z = run.zone or L["Instance"],
+        t = run.instType or "party",
+        diff = (run.difficultyName and run.difficultyName ~= "") and run.difficultyName or nil,
+        st = startedAt,
+        en = endedAt,
+        dur = duration,
+        cdur = (run.combatSeconds and run.combatSeconds > 0) and run.combatSeconds or nil,
+        pulls = (run.pulls and run.pulls > 0) and run.pulls or nil,
+        bk = bossKills,
+        bn = run.lastBossName,
+        bs = (type(run.bosses) == "table" and #run.bosses > 0) and run.bosses or nil,
+        wipes = (run.wipes and run.wipes > 0) and run.wipes or nil,
+        dth = (totalDeaths > 0) and totalDeaths or nil,
+        xp = (run.xpGained and run.xpGained > 0) and run.xpGained or nil,
+        lvup = (run.levelsGained and run.levelsGained > 0) and run.levelsGained or nil,
+        gold = (run.moneyGained and run.moneyGained > 0) and run.moneyGained or nil,
+        loot = (type(run.loot) == "table" and #run.loot > 0) and run.loot or nil,
+        dm = dmSummary,
+        er = endReason,
+        ch = myName,
+        ck = myKey,
+        cl = myClass,
+        clv = myLevel,
+        rl = realmPool,
+        sz = math.max(#memberList + 1, run.peakSize or (#memberList + 1)),
+        m = memberList,
+    }
+
+    local hist = self:GetDungeonHistoryTable()
+    table.insert(hist, 1, rec)
+    while #hist > MAX_DUNGEON_HISTORY do
+        table.remove(hist)
+    end
+
+    ns:Emit("DUNGEON_HISTORY_UPDATED")
+    ns:Emit("GROUP_UPDATED")
+
+    if not silent then
+        local durTxt = self:FormatRunDuration(duration)
+        local kindLbl = (rec.t == "raid") and L["Raid"] or L["Dungeon"]
+        ns:Print(L["%s logged: %s — %s (%d members). View in /sc runs"]:format(kindLbl, rec.z, durTxt, rec.sz))
+
+        local promptShown = ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("dungeonLogPromptShown")
+        if not promptShown and ns.SocialPanels and ns.SocialPanels.ShowDungeonLogFirstRunPrompt then
+            local showFn = function()
+                if ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("dungeonLogPromptShown") then
+                    return
+                end
+                if ns.SocialPanels and ns.SocialPanels.ShowDungeonLogFirstRunPrompt then
+                    ns.SocialPanels:ShowDungeonLogFirstRunPrompt(rec)
+                end
+            end
+            if ns.RunAfterCombat then
+                ns:RunAfterCombat("dungeon_log_first_prompt", showFn)
+            else
+                showFn()
+            end
+        end
+    end
+
+    return true
+end
+
+function Group:CheckActiveDungeonRunZone()
+    if not self:IsDungeonRunLogEnabled() then
+        self._activeRun = nil
+        return
+    end
+    local inInst, instType, instName, mapId, _, diffName, maxPlayers = IsInPartyOrRaidInstanceNow()
+    local inGroup = Compat.IsInGroup()
+    local run = self._activeRun
+
+    if inInst and inGroup then
+        local sig = tostring(instType) .. ":" .. tostring(mapId or instName)
+        if run and run.sig == sig then
+            -- Returned to same instance (e.g. after corpse run or quick summon): cancel pending exit finalize.
+            run.exitedAt = nil
+            run._exitSeq = (run._exitSeq or 0) + 1
+            if diffName and diffName ~= "" and (not run.difficultyName or run.difficultyName == "") then
+                run.difficultyName = diffName
+            end
+            self:CaptureActiveRunMembers(false)
+            return
+        end
+        if run and run.started then
+            self:FinalizeActiveDungeonRun("zone_change", false)
+        end
+        self._activeRun = {
+            sig = sig,
+            zone = instName,
+            instType = instType,
+            difficultyName = diffName,
+            maxPlayers = maxPlayers,
+            enteredAt = time(),
+            started = false,
+            startedAt = nil,
+            lastCombatAt = nil,
+            combatSeconds = 0,
+            combatStartedAt = nil,
+            inCombatNow = false,
+            pulls = 0,
+            wipes = 0,
+            lastWipeAt = 0,
+            totalDeaths = 0,
+            myDeaths = 0,
+            deadStateByKey = {},
+            lastDeathAtByKey = {},
+            xpGained = 0,
+            levelsGained = 0,
+            lastXp = Safe.Number(Safe.Call(UnitXP, "player")) or 0,
+            lastXpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0,
+            lastLevel = Safe.Number(Safe.Call(UnitLevel, "player")) or 0,
+            moneyGained = 0,
+            lastMoney = Safe.Number(GetMoney and Safe.Call(GetMoney)) or 0,
+            loot = {},
+            lootSeen = {},
+            guidToKey = {},
+            firstToKey = {},
+            myGuid = UnitGUID and Safe.String(Safe.Call(UnitGUID, "player")) or nil,
+            exitedAt = nil,
+            pendingLeaveAt = nil,
+            leftSinceCombat = 0,
+            bossKills = 0,
+            lastBossName = nil,
+            bosses = {},
+            bossSeen = {},
+            membersByKey = {},
+            presentKeys = {},
+            peakSize = 0,
+            _exitSeq = 0,
+            _leaveSeq = 0,
+        }
+        self:CaptureActiveRunMembers(true)
+        SnapshotDungeonRunDamageMeterBaseline(self._activeRun)
+        return
+    end
+
+    if not run then
+        return
+    end
+
+    if not run.started then
+        -- Never pulled an enemy inside the dungeon: discard silently.
+        self._activeRun = nil
+        return
+    end
+
+    if not inGroup then
+        self:FinalizeActiveDungeonRun("left_group", false)
+        return
+    end
+
+    -- Still in group, stepped outside the instance: ignore corpse runs (ghost/dead)!
+    local isDeadOrGhost = UnitIsDeadOrGhost and Safe.Value(Safe.Call(UnitIsDeadOrGhost, "player")) == true
+    if isDeadOrGhost then
+        return
+    end
+
+    run.exitedAt = run.exitedAt or time()
+    if run.pendingLeaveAt then
+        self:FinalizeActiveDungeonRun("member_left", false)
+        return
+    end
+    run._exitSeq = (run._exitSeq or 0) + 1
+    local eSeq = run._exitSeq
+    if C_Timer and C_Timer.After then
+        C_Timer.After(EXIT_GRACE_SECONDS, function()
+            local cur = Group._activeRun
+            if cur == run and cur._exitSeq == eSeq and cur.started and cur.exitedAt then
+                local backIn = IsInPartyOrRaidInstanceNow()
+                if not backIn then
+                    Group:FinalizeActiveDungeonRun("exited_instance", false)
+                end
+            end
+        end)
+    end
+end
+
+function Group:OnActiveRunRosterUpdated(inGroupNow)
+    local run = self._activeRun
+    if not run then
+        if inGroupNow and self:IsDungeonRunLogEnabled() then
+            local inInst = IsInPartyOrRaidInstanceNow()
+            if inInst then
+                self:CheckActiveDungeonRunZone()
+            end
+        end
+        return
+    end
+    if not inGroupNow then
+        if run.started then
+            self:FinalizeActiveDungeonRun("left_group", false)
+        else
+            self._activeRun = nil
+        end
+        return
+    end
+    self:CaptureActiveRunMembers(false)
+end
+
+function Group:OnDungeonRunCombatStart()
+    if not self:IsDungeonRunLogEnabled() then return end
+    local run = self._activeRun
+    if not run then
+        if Compat.IsInGroup() then
+            local inInst = IsInPartyOrRaidInstanceNow()
+            if inInst then
+                self:CheckActiveDungeonRunZone()
+                run = self._activeRun
+            end
+        end
+        if not run then return end
+    end
+    local inInst = IsInPartyOrRaidInstanceNow()
+    if not inInst then return end
+
+    local now = time()
+    run.exitedAt = nil
+    run._exitSeq = (run._exitSeq or 0) + 1
+    run.pendingLeaveAt = nil
+    run.leftSinceCombat = 0
+    run._leaveSeq = (run._leaveSeq or 0) + 1
+
+    if not run.dmBaselineCaptured then
+        SnapshotDungeonRunDamageMeterBaseline(run)
+    end
+
+    if not run.started then
+        run.started = true
+        run.startedAt = now
+        run.lastXp = Safe.Number(Safe.Call(UnitXP, "player")) or run.lastXp or 0
+        run.lastXpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or run.lastXpMax or 0
+        run.lastLevel = Safe.Number(Safe.Call(UnitLevel, "player")) or run.lastLevel or 0
+        run.lastMoney = Safe.Number(GetMoney and Safe.Call(GetMoney)) or run.lastMoney or 0
+        self:CaptureActiveRunMembers(false)
+    end
+
+    if not run.inCombatNow then
+        run.inCombatNow = true
+        run.combatStartedAt = now
+        run.pulls = (run.pulls or 0) + 1
+    end
+    ns:Emit("GROUP_UPDATED")
+end
+
+function Group:OnDungeonRunCombatEnd()
+    local run = self._activeRun
+    if not (run and run.started) then return end
+    local now = time()
+    if run.inCombatNow and run.combatStartedAt then
+        run.combatSeconds = (run.combatSeconds or 0) + math.max(1, now - run.combatStartedAt)
+        run.inCombatNow = false
+        run.combatStartedAt = nil
+    end
+    if not run.exitedAt then
+        run.lastCombatAt = now
+    end
+    UpdateDungeonRunDamageMeter(run, true)
+    self:CheckDungeonRunDeaths()
+    ns:Emit("GROUP_UPDATED")
+end
+
+function Group:OnDungeonRunEncounterStart(encName)
+    self:OnDungeonRunCombatStart()
+    local run = self._activeRun
+    if run and encName and encName ~= "" then
+        run.currentEncounter = encName
+    end
+end
+
+function Group:OnDungeonRunEncounterEnd(encName, success)
+    local run = self._activeRun
+    if not run then return end
+    local now = time()
+    local okKill = Safe.Number(success) == 1
+    if not okKill then
+        if run.started and (now - (run.lastWipeAt or 0)) >= 15 then
+            run.wipes = (run.wipes or 0) + 1
+            run.lastWipeAt = now
+        end
+        UpdateDungeonRunDamageMeter(run, false)
+        ns:Emit("GROUP_UPDATED")
+        return
+    end
+    if not run.started then
+        run.started = true
+        run.startedAt = run.enteredAt or now
+    end
+    run.lastCombatAt = now
+    run.lastBossAt = now
+    run.bossKills = (run.bossKills or 0) + 1
+    local cleanBoss = Safe.String(encName) or run.currentEncounter
+    if cleanBoss and cleanBoss ~= "" then
+        run.lastBossName = cleanBoss
+        if not run.bossSeen[cleanBoss] and #(run.bosses or {}) < MAX_RUN_BOSSES then
+            run.bossSeen[cleanBoss] = true
+            run.bosses[#run.bosses + 1] = cleanBoss
+        end
+    end
+    UpdateDungeonRunDamageMeter(run, false)
+    ns:Emit("GROUP_UPDATED")
 end
 
 function Group:OpenGroupChatAnnouncement()
@@ -733,6 +1955,166 @@ function Group:OpenGroupChatAnnouncement()
     return false
 end
 
+local RAID_BUFF_SPELLS = {
+    FORT = {
+        [1243] = true, [1244] = true, [1245] = true, [2791] = true,
+        [10937] = true, [10938] = true, [21562] = true, [21564] = true,
+    },
+    INT = {
+        [1459] = true, [1460] = true, [1461] = true, [10156] = true,
+        [10157] = true, [23028] = true,
+    },
+    MOTW = {
+        [1126] = true, [5232] = true, [6756] = true, [5234] = true,
+        [8907] = true, [9884] = true, [9885] = true, [21849] = true, [21850] = true,
+    },
+}
+
+local MANA_CLASSES = {
+    PRIEST = true, MAGE = true, WARLOCK = true, DRUID = true,
+    PALADIN = true, SHAMAN = true, HUNTER = true,
+}
+
+local function UnitHasTrackedBuff(unit, buffKey)
+    if not (C_UnitAuras and (C_UnitAuras.GetAuraDataByIndex or C_UnitAuras.GetBuffDataByIndex)) then
+        return true
+    end
+    local spellMap = RAID_BUFF_SPELLS[buffKey]
+    for idx = 1, 40 do
+        local ok, aura
+        if C_UnitAuras.GetAuraDataByIndex then
+            ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, idx, "HELPFUL")
+        else
+            ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, unit, idx)
+        end
+        if not ok or not aura then
+            break
+        end
+        local sid = Safe.Number(aura.spellId)
+        if sid and spellMap and spellMap[sid] then
+            return true
+        end
+        local nm = Safe.String(aura.name)
+        if nm and nm ~= "" then
+            local low = nm:lower()
+            if buffKey == "FORT" and (low:find("fortitude", 1, true) or low:find("entereza", 1, true)) then
+                return true
+            elseif buffKey == "INT" and (low:find("intellect", 1, true) or low:find("brilliance", 1, true) or low:find("intelecto", 1, true) or low:find("brilho", 1, true)) then
+                return true
+            elseif buffKey == "MOTW" and (low:find("wild", 1, true) or low:find("selvagem", 1, true) or low:find("salvaje", 1, true)) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function Group:GetMissingRaidBuffsAudit()
+    local units = { "player" }
+    local inRaid = Compat.IsInRaid and Compat.IsInRaid()
+    if inRaid then
+        local total = GetNumGroupMembers and Safe.Number(Safe.Call(GetNumGroupMembers)) or 0
+        units = {}
+        for i = 1, math.min(total, 40) do
+            units[#units + 1] = "raid" .. i
+        end
+    elseif IsInGroup and Safe.Call(IsInGroup) == true then
+        for i = 1, 4 do
+            local u = "party" .. i
+            if UnitExists and UnitExists(u) then
+                units[#units + 1] = u
+            end
+        end
+    else
+        return { missingCount = 0, detailLines = {}, summaryText = "" }
+    end
+
+    local hasPriest, hasMage, hasDruid = false, false, false
+    local roster = {}
+    for _, u in ipairs(units) do
+        if UnitExists and UnitExists(u) and UnitIsConnected and Safe.Call(UnitIsConnected, u) == true then
+            local _, cls = Safe.Call(UnitClass, u)
+            cls = Safe.String(cls)
+            local rawName = Safe.String(Safe.Call(UnitName, u))
+            local resolved = rawName and Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(u, nil, rawName, true)
+            local disp = (resolved and resolved.fullName) or rawName or "?"
+            if cls == "PRIEST" then hasPriest = true end
+            if cls == "MAGE" then hasMage = true end
+            if cls == "DRUID" then hasDruid = true end
+            local isDead = UnitIsDeadOrGhost and Safe.Call(UnitIsDeadOrGhost, u) == true
+            if not isDead then
+                roster[#roster + 1] = { unit = u, name = disp, classFile = cls }
+            end
+        end
+    end
+
+    local missFort, missInt, missMotw = {}, {}, {}
+    for _, m in ipairs(roster) do
+        if hasPriest and not UnitHasTrackedBuff(m.unit, "FORT") then
+            missFort[#missFort + 1] = m.name
+        end
+        if hasMage and MANA_CLASSES[m.classFile] and not UnitHasTrackedBuff(m.unit, "INT") then
+            missInt[#missInt + 1] = m.name
+        end
+        if hasDruid and not UnitHasTrackedBuff(m.unit, "MOTW") then
+            missMotw[#missMotw + 1] = m.name
+        end
+    end
+
+    local detailLines = {}
+    local draftParts = {}
+    local totalMiss = 0
+    local function pushMiss(lbl, list)
+        if #list > 0 then
+            totalMiss = totalMiss + #list
+            local joined = table.concat(list, ", ")
+            if #list > 6 then
+                joined = table.concat({ list[1], list[2], list[3], list[4], list[5] }, ", ") .. " (+" .. tostring(#list - 5) .. ")"
+            end
+            detailLines[#detailLines + 1] = { buff = lbl, count = #list, players = joined }
+            draftParts[#draftParts + 1] = lbl .. " (" .. tostring(#list) .. ": " .. joined .. ")"
+        end
+    end
+    pushMiss(L["Fortitude"], missFort)
+    pushMiss(L["Arcane Intellect"], missInt)
+    pushMiss(L["Mark of the Wild"], missMotw)
+
+    local summary = ""
+    if #draftParts > 0 then
+        summary = L["Missing Buffs"] .. ": " .. table.concat(draftParts, " | ")
+        if #summary > 235 then
+            summary = summary:sub(1, 232) .. "..."
+        end
+    end
+    return {
+        missingCount = totalMiss,
+        detailLines = detailLines,
+        summaryText = summary,
+    }
+end
+
+function Group:OpenMissingBuffsDraft()
+    local slash = self:GetChannelSlash()
+    if not slash then
+        ns:Print("%s", L["You are not in a group."])
+        return false
+    end
+    local audit = self:GetMissingRaidBuffsAudit()
+    if not audit or audit.missingCount == 0 or audit.summaryText == "" then
+        ns:Print("%s", L["All covered raid buffs are already active on everyone!"])
+        return false
+    end
+    local fullDraft = slash .. audit.summaryText
+    if ChatFrameUtil and ChatFrameUtil.OpenChat then
+        pcall(ChatFrameUtil.OpenChat, fullDraft)
+        return true
+    elseif ChatFrame_OpenChat then
+        pcall(ChatFrame_OpenChat, fullDraft)
+        return true
+    end
+    return false
+end
+
 local function QueueScan()
     if scanQueued then return end
     scanQueued = true
@@ -749,7 +2131,21 @@ local function QueueInstanceEntryCheck()
     C_Timer.After(1.5, function()
         instanceCheckQueued = false
         Group:RecordCurrentInstanceEntry()
+        Group:CheckActiveDungeonRunZone()
     end)
+end
+
+local resetSuccessPattern = nil
+local function IsInstanceResetSystemMessage(msg)
+    if type(msg) ~= "string" or msg == "" then return false end
+    if not resetSuccessPattern and type(_G.INSTANCE_RESET_SUCCESS) == "string" and _G.INSTANCE_RESET_SUCCESS ~= "" then
+        local esc = _G.INSTANCE_RESET_SUCCESS:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+        resetSuccessPattern = "^" .. esc:gsub("%%%%s", ".+") .. "$"
+    end
+    if resetSuccessPattern and msg:find(resetSuccessPattern) then
+        return true
+    end
+    return false
 end
 
 function Group:Init()
@@ -771,10 +2167,113 @@ function Group:Init()
 
     ns.RegisterEvent(self, "ZONE_CHANGED_NEW_AREA", QueueInstanceEntryCheck)
 
+    ns.RegisterEvent(self, "PLAYER_REGEN_DISABLED", function()
+        Group:OnDungeonRunCombatStart()
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
+        Group:OnDungeonRunCombatEnd()
+    end)
+
+    ns.RegisterEvent(self, "ENCOUNTER_START", function(_, _, _, encName)
+        Group:OnDungeonRunEncounterStart(Safe.String(encName))
+    end)
+
+    ns.RegisterEvent(self, "ENCOUNTER_END", function(_, _, _, encName, _, _, success)
+        Group:OnDungeonRunEncounterEnd(Safe.String(encName), success)
+    end)
+
+    ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, rawMsg)
+        if not (Group._activeRun and Group._activeRun.started) then
+            return
+        end
+        local cleanMsg = Safe.String(rawMsg)
+        if cleanMsg and IsInstanceResetSystemMessage(cleanMsg) then
+            Group:FinalizeActiveDungeonRun("instance_reset", false)
+        end
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_LOGOUT", function()
+        if Group._activeRun and Group._activeRun.started then
+            Group:FinalizeActiveDungeonRun("logout", true)
+        end
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_DEAD", function()
+        if Group._activeRun and Group._activeRun.started then
+            Group:CheckDungeonRunDeaths("player")
+        end
+    end)
+
+    ns.RegisterEvent(self, "UNIT_FLAGS", function(_, _, unit)
+        if not (Group._activeRun and Group._activeRun.started) then
+            return
+        end
+        if type(unit) ~= "string" then return end
+        if unit == "player" or unit:sub(1, 5) == "party" or unit:sub(1, 4) == "raid" then
+            Group:CheckDungeonRunDeaths(unit)
+        end
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_XP_UPDATE", function()
+        if Group._activeRun and Group._activeRun.started then
+            Group:OnDungeonRunXpUpdate(nil)
+        end
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_LEVEL_UP", function(_, _, newLevel)
+        if Group._activeRun and Group._activeRun.started then
+            Group:OnDungeonRunXpUpdate(newLevel)
+        end
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_MONEY", function()
+        if Group._activeRun and Group._activeRun.started then
+            Group:OnDungeonRunMoneyUpdate()
+        end
+    end)
+
+    ns.RegisterEvent(self, "ENCOUNTER_LOOT_RECEIVED", function(_, _, _, itemID, itemLink, _, playerName)
+        if Group._activeRun and Group._activeRun.started then
+            Group:OnDungeonRunLootEvent(Safe.String(itemLink), Safe.String(playerName), true, itemID)
+        end
+    end)
+
+    ns.RegisterEvent(self, "CHAT_MSG_LOOT", function(_, _, rawMsg, looterName)
+        if not (Group._activeRun and Group._activeRun.started) then
+            return
+        end
+        local cleanMsg = Safe.String(rawMsg)
+        if cleanMsg and cleanMsg:find("|Hitem:", 1, true) then
+            Group:OnDungeonRunLootEvent(cleanMsg, Safe.String(looterName), false, nil)
+        end
+    end)
+
+    ns.RegisterEvent(self, "DAMAGE_METER_COMBAT_SESSION_UPDATED", function()
+        if Group._activeRun and Group._activeRun.started then
+            UpdateDungeonRunDamageMeter(Group._activeRun, false)
+        end
+    end)
+
+    ns.RegisterEvent(self, "DAMAGE_METER_RESET", function()
+        OnDungeonRunDamageMeterReset()
+    end)
+
     ns.RegisterEvent(self, "READY_CHECK", function()
         Group.readyCheckActive = true
         Group.readyStates = {}
         QueueScan()
+        local s = ns.db and ns.db.settings
+        local modOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("group")
+        if modOn and (not s or s.groupReadyCheckAudit ~= false) then
+            local audit = Group:GetMissingRaidBuffsAudit()
+            if audit and audit.missingCount > 0 and audit.summaryText ~= "" then
+                ns:Print("|cffffd24d[%s]|r %s  |Haddon:SCentral:buffaudit|h|cff58a6ff[%s]|r|h",
+                    L["Ready Check"],
+                    audit.summaryText,
+                    L["Announce Missing Buffs"])
+            end
+        end
     end)
 
     ns.RegisterEvent(self, "READY_CHECK_CONFIRM", function(_, _, unit, confirm)

@@ -67,6 +67,7 @@ function Safe.Call(fn, ...)
 end
 
 local cachedRealm
+local cachedRealmIsLive = false
 
 local function Plain(text)
     return (text:gsub("[%s%-']", "")):lower()
@@ -77,60 +78,71 @@ function Compat.Plain(text)
     return Plain(text)
 end
 
-function Compat.Realm()
-    if cachedRealm and cachedRealm ~= "" then return cachedRealm end
-    local norm = Safe.String(Safe.Call(GetNormalizedRealmName))
-    if norm then
-        cachedRealm = norm
-        return cachedRealm
+local function LooksLikeServerRealm(raw)
+    if type(raw) ~= "string" or raw == "" then return false end
+    local p = Plain(raw)
+    if p == "" then return false end
+    if p:sub(1, 6) == "camwow" then return true end
+    if p:find("realm", 1, true) then return true end
+    if p:match("rppvp$") or p:match("rppve$") or p:match("rpnormal$")
+        or p:match("pvp$") or p:match("pve$") or p:match("normal$") then
+        return true
     end
-    local _, unitRealm = Safe.Call(UnitFullName, "player")
-    unitRealm = Safe.String(unitRealm)
-    if unitRealm then
-        cachedRealm = unitRealm
-        return cachedRealm
-    end
-    local raw = Safe.String(Safe.Call(GetRealmName))
-    if raw then
-        cachedRealm = raw:gsub("[%s%-]", "")
-        return cachedRealm
-    end
-    return ""
+    return false
 end
+
+Compat.LooksLikeServerRealm = LooksLikeServerRealm
 
 local realmPoolCache = {}
 local realmPoolCacheCount = 0
 
--- Collapse numbered Forever shard realms into a single ruleset pool key:
--- "CAMWOWUS1Realm2PvP" and "CAMWOWUS1Realm9PvP" -> "camwowus1realmpvp",
--- while keeping PvE vs PvP (and distinct non-ruleset realm numbers) separated.
-function Compat.RealmPool(realmName)
+-- Collapse numbered Forever shard/cluster realms into a single ruleset pool key:
+-- "CAMWOWUS1Realm6PvP" and "CAMWOWUS2Realm4PvP" -> "camwowrealmpvp",
+-- "CAMWOWUS2Realm1PvE" and "CAMWOWUS1Realm3Normal" -> "camwowrealmpve",
+-- keeping PvE, PvP, RP-PvP, RP-PvE, and RP worlds strictly separated while
+-- surviving dynamic Forever cluster/shard rotations (US1/US2/US3/SA1...).
+local function NormalizeRealmPoolKey(realmName)
     if type(realmName) ~= "string" or realmName == "" then
-        realmName = Compat.Realm()
+        return "default"
     end
-    if realmName == "" then return "default" end
     local cached = realmPoolCache[realmName]
     if cached then return cached end
     local plain = Plain(realmName)
+    if plain == "" then return "default" end
     local key = plain
-    local base, tag = plain:match("^(.-)realm%d+(%a+)$")
-    if tag then
-        if tag == "normal" then
-            tag = "pve"
-        elseif tag == "rpnormal" then
-            tag = "rppve"
+    local function normalizeRulesetTag(t)
+        if t == "normal" then return "pve" end
+        if t == "rpnormal" then return "rppve" end
+        if t == "rppvp" or t == "rppve" or t == "pvp" or t == "pve" or t == "rp" then
+            return t
         end
-        if tag == "rppvp" or tag == "rppve" or tag == "pvp" or tag == "pve" or tag == "rp" then
-            key = (base or "") .. "realm" .. tag
+        return nil
+    end
+    if plain:sub(1, 6) == "camwow" then
+        local rawTag = plain:match("^camwow.-realm%d*(%a+)$")
+            or plain:match("^camwow.-(rppvp)$")
+            or plain:match("^camwow.-(rppve)$")
+            or plain:match("^camwow.-(rpnormal)$")
+            or plain:match("^camwow.-(pvp)$")
+            or plain:match("^camwow.-(pve)$")
+            or plain:match("^camwow.-(normal)$")
+        local normTag = rawTag and normalizeRulesetTag(rawTag) or nil
+        if normTag then
+            key = "camwowrealm" .. normTag
         end
     else
-        local basePlain, tagOnly = plain:match("^(.-)realm(%a+)$")
-        if tagOnly == "normal" then
-            key = (basePlain or "") .. "realmpve"
-        elseif tagOnly == "rpnormal" then
-            key = (basePlain or "") .. "realmrppve"
-        elseif tagOnly == "rppve" or tagOnly == "rppvp" or tagOnly == "pve" or tagOnly == "pvp" or tagOnly == "rp" then
-            key = (basePlain or "") .. "realm" .. tagOnly
+        local base, tag = plain:match("^(.-)realm%d+(%a+)$")
+        if tag then
+            local normTag = normalizeRulesetTag(tag)
+            if normTag then
+                key = (base or "") .. "realm" .. normTag
+            end
+        else
+            local basePlain, tagOnly = plain:match("^(.-)realm(%a+)$")
+            local normTag = tagOnly and normalizeRulesetTag(tagOnly) or nil
+            if normTag then
+                key = (basePlain or "") .. "realm" .. normTag
+            end
         end
     end
     if realmPoolCacheCount >= 64 then
@@ -140,6 +152,177 @@ function Compat.RealmPool(realmName)
     realmPoolCache[realmName] = key
     realmPoolCacheCount = realmPoolCacheCount + 1
     return key
+end
+
+local function IsKnownPlayerSurnameCandidate(cand)
+    if type(cand) ~= "string" or cand == "" then return false end
+    if LooksLikeServerRealm(cand) then return false end
+    local pCand = Plain(cand)
+    if pCand == "" then return false end
+    local db = ns and ns.db
+    local alts = db and db.alts
+    if type(alts) == "table" then
+        local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
+        local myRec = myGuid and alts["guid:" .. myGuid]
+        if type(myRec) == "table" then
+            if type(myRec.surname) == "string" and myRec.surname ~= "" and Plain(myRec.surname) == pCand then
+                return true
+            end
+            if type(myRec.realmName) == "string" and myRec.realmName ~= "" and Plain(myRec.realmName) == pCand and not LooksLikeServerRealm(myRec.realmName) then
+                return true
+            end
+        end
+        local myFirst = Safe.String(Safe.Call(UnitName, "player"))
+        local pFirst = myFirst and Plain(myFirst) or nil
+        for _, rec in pairs(alts) do
+            if type(rec) == "table" and type(rec.surname) == "string" and rec.surname ~= "" then
+                local recFirst = rec.firstName or rec.name
+                if pFirst and type(recFirst) == "string" and Plain(recFirst) == pFirst and Plain(rec.surname) == pCand then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function TryLiveServerRealm()
+    local norm = Safe.String(Safe.Call(GetNormalizedRealmName))
+    if norm and norm ~= "" and not IsKnownPlayerSurnameCandidate(norm) then
+        return norm
+    end
+    local raw = Safe.String(Safe.Call(GetRealmName))
+    if raw and raw ~= "" then
+        local compact = raw:gsub("[%s%-]", "")
+        if compact ~= "" and not IsKnownPlayerSurnameCandidate(compact) then
+            return compact
+        end
+    end
+    -- On Forever (16001), UnitFullName("player") returns (FirstName, Surname) when realm APIs are nil;
+    -- only accept its 2nd return when it unambiguously looks like a real server/realm identifier.
+    local _, unitRealm = Safe.Call(UnitFullName, "player")
+    unitRealm = Safe.String(unitRealm)
+    if unitRealm and unitRealm ~= "" and LooksLikeServerRealm(unitRealm) and not IsKnownPlayerSurnameCandidate(unitRealm) then
+        return unitRealm
+    end
+    return nil
+end
+
+local function CountTableEntries(tbl)
+    if type(tbl) ~= "table" then return 0 end
+    local n = 0
+    for _ in pairs(tbl) do
+        n = n + 1
+    end
+    return n
+end
+
+local function ResolveSavedRealmFallback()
+    local db = ns and ns.db
+    if type(db) ~= "table" then return nil end
+    local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
+    local alts = db.alts
+    local myRec = (myGuid and type(alts) == "table") and alts["guid:" .. myGuid] or nil
+    if type(myRec) == "table" then
+        for _, cand in ipairs({ myRec.realmName, myRec.realmRaw, myRec.realmPool }) do
+            if type(cand) == "string" and cand ~= "" and LooksLikeServerRealm(cand) and not IsKnownPlayerSurnameCandidate(cand) then
+                return (cand:gsub("[%s%-]", ""))
+            end
+        end
+    end
+
+    local myFac
+    if UnitFactionGroup then
+        local ok, eng = pcall(UnitFactionGroup, "player")
+        if ok then
+            eng = Safe.String(eng)
+            if eng == "Horde" or eng == "Alliance" then
+                myFac = eng
+            end
+        end
+    end
+    local myGuild = Safe.String(Safe.Call(GetGuildInfo, "player"))
+        or (type(myRec) == "table" and type(myRec.guild) == "string" and myRec.guild ~= "" and myRec.guild or nil)
+
+    if type(alts) == "table" and myGuild and myGuild ~= "" then
+        for _, rec in pairs(alts) do
+            if type(rec) == "table" and rec.guild == myGuild and (not myFac or not rec.faction or rec.faction == myFac) then
+                for _, cand in ipairs({ rec.realmName, rec.realmRaw, rec.realmPool }) do
+                    if type(cand) == "string" and cand ~= "" and LooksLikeServerRealm(cand) then
+                        return (cand:gsub("[%s%-]", ""))
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback: pick the most populated real-realm saved scope matching this faction so updates/reloads never open an empty phantom world.
+    if myFac then
+        local poolScores = {}
+        local bestPool, bestScore = nil, 0
+        for _, field in ipairs({ "watchlist", "chatHistory", "socialMeta", "addonPeers", "recentCompanions" }) do
+            local root = db[field]
+            if type(root) == "table" then
+                local weight = (field == "watchlist" or field == "chatHistory") and 10 or 3
+                for scopeKey, sub in pairs(root) do
+                    if type(scopeKey) == "string" and type(sub) == "table" then
+                        local pool, fac = scopeKey:match("^([^:]+):(.+)$")
+                        if pool and fac == myFac and LooksLikeServerRealm(pool) then
+                            local normPool = NormalizeRealmPoolKey(pool)
+                            local cnt = CountTableEntries(sub)
+                            if cnt > 0 then
+                                local total = (poolScores[normPool] or 0) + (cnt * weight)
+                                poolScores[normPool] = total
+                                if total > bestScore then
+                                    bestScore = total
+                                    bestPool = normPool
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if bestPool and bestPool ~= "" then
+            return bestPool
+        end
+    end
+    return nil
+end
+
+local cachedCharacterKey
+
+function Compat.InvalidateRealmCache()
+    cachedRealm = nil
+    cachedRealmIsLive = false
+    cachedCharacterKey = nil
+end
+
+function Compat.Realm()
+    if cachedRealm and cachedRealm ~= "" and cachedRealmIsLive then
+        return cachedRealm
+    end
+    local live = TryLiveServerRealm()
+    if live and live ~= "" then
+        cachedRealm = live
+        cachedRealmIsLive = true
+        return cachedRealm
+    end
+    local fallback = ResolveSavedRealmFallback()
+    if fallback and fallback ~= "" then
+        cachedRealm = fallback
+        cachedRealmIsLive = false
+        return cachedRealm
+    end
+    return cachedRealm or ""
+end
+
+function Compat.RealmPool(realmName)
+    if type(realmName) ~= "string" or realmName == "" then
+        realmName = Compat.Realm()
+    end
+    if realmName == "" then return "default" end
+    return NormalizeRealmPoolKey(realmName)
 end
 
 function Compat.DetectWorldType(realmName, rawRealmName)
@@ -201,9 +384,10 @@ end
 function Compat.IsForeverShardLabel(label)
     if type(label) ~= "string" or label == "" then return false end
     local p = Plain(label)
-    if p:match("^camwow%a+%d+realm%d+%a+$") then return true end
+    if p:match("^camwow%a*%d*realm%d*%a+$") then return true end
+    if not LooksLikeServerRealm(label) then return false end
     local own = Compat.Realm()
-    return own ~= "" and Compat.RealmPool(p) == Compat.RealmPool(own)
+    return own ~= "" and LooksLikeServerRealm(own) and Compat.RealmPool(p) == Compat.RealmPool(own)
 end
 
 local cachedEngFaction, cachedLocFaction
@@ -231,10 +415,8 @@ function Compat.ScopeKey()
     return Compat.RealmPool(Compat.Realm()) .. ":" .. Compat.PlayerFaction()
 end
 
-local cachedCharacterKey
-
 function Compat.CharacterKey()
-    if cachedCharacterKey then
+    if cachedCharacterKey and not cachedCharacterKey:find("@default$", 1, false) then
         return cachedCharacterKey
     end
     local name = Safe.String(Safe.Call(UnitName, "player"))
@@ -269,6 +451,36 @@ function Compat.CleanPayloadField(text, maxLen)
         cleaned = cleaned:sub(1, maxLen)
     end
     return cleaned
+end
+
+--- Extract an explicit Main character reference from a public Guild Note (e.g. "Alt de X", "Main: X").
+function Compat.ExtractMainFromGuildNote(rawNote)
+    local note = Compat.CleanInput(rawNote)
+    if not note or note == "" then
+        return nil
+    end
+    local lower = note:lower()
+    local cand = lower:match("alt%s+de%s+([^,;:/%(%)%[%]<>]+)")
+        or lower:match("alt%s+of%s+([^,;:/%(%)%[%]<>]+)")
+        or lower:match("main%s*[:%-=]%s*([^,;:/%(%)%[%]<>]+)")
+        or lower:match("^alt%s*[:%-=]%s*([^,;:/%(%)%[%]<>]+)")
+    if not cand then
+        return nil
+    end
+    local sIdx, eIdx = lower:find(cand, 1, true)
+    local orig = sIdx and eIdx and note:sub(sIdx, eIdx) or cand
+    orig = Compat.Trim(orig):gsub("^%s*(.-)%s*$", "%1")
+    -- Keep at most 2 words (FirstName Surname on Forever) and validate reasonable length.
+    local words = {}
+    for w in orig:gmatch("%S+") do
+        words[#words + 1] = w
+        if #words >= 2 then break end
+    end
+    local joined = table.concat(words, " ")
+    if #joined < 2 or #joined > 28 or joined:find("#", 1, true) or joined:find("%d") then
+        return nil
+    end
+    return joined
 end
 
 -- Compare strict MAJOR.MINOR.PATCH SemVer strings. Returns 1 (a>b), -1 (a<b), or 0.
@@ -326,6 +538,25 @@ local function CopyForeverParsed(entry)
     }
 end
 
+-- Capitalize the first UTF-8 letter of a WoW character name word (ASCII + Latin-1 accented letters).
+-- Preserves intentional inner casing (e.g. "McCree") while fixing manual lowercase input ("aiden" -> "Aiden", "álvaro" -> "Álvaro").
+local function CapitalizeNameWord(word)
+    if type(word) ~= "string" or word == "" then return word end
+    local b1 = word:byte(1)
+    if b1 and b1 >= 97 and b1 <= 122 then
+        return string.char(b1 - 32) .. word:sub(2)
+    end
+    if b1 == 195 and #word >= 2 then
+        local b2 = word:byte(2)
+        if b2 and b2 >= 160 and b2 <= 190 and b2 ~= 183 then
+            return string.char(195, b2 - 32) .. word:sub(3)
+        end
+    end
+    return word
+end
+
+Compat.CapitalizeNameWord = CapitalizeNameWord
+
 -- Strip trailing Forever shard suffixes and accidental duplicated "-Surname" tags
 -- (e.g. "Francisco Camundongo-Camundongo" -> "Francisco Camundongo").
 local function StripForeverSuffixes(cleaned)
@@ -363,30 +594,36 @@ local function ParseCharInternal(raw)
     cleaned = StripForeverSuffixes(cleaned)
 
     local result
-    -- Forever characters can have FirstName + Surname separated by "-" or space.
-    local first, second = cleaned:match("^([^%s%-]+)[%s%-]+([^%s%-]+)$")
+    -- Forever characters use space-separated "FirstName Surname"; hyphenated "Name-Realm" tails strip shards only.
+    local first, sep, second = cleaned:match("^([^%s%-]+)([%s%-]+)([^%s%-]+)$")
     if first and second then
-        if Compat.IsForeverShardLabel(second) then
+        local isHyphenShard = sep:find("-", 1, true) ~= nil and Compat.IsForeverShardLabel(second)
+        local isExplicitSpaceShard = Plain(second):match("^camwow%a*%d*realm%d*%a+$") ~= nil
+        if isHyphenShard or isExplicitSpaceShard then
+            local capFirst = CapitalizeNameWord(first)
             result = {
-                firstName = first,
+                firstName = capFirst,
                 surname = nil,
-                displayName = first,
+                displayName = capFirst,
                 lookupKey = first:lower(),
             }
         else
+            local capFirst = CapitalizeNameWord(first)
+            local capSecond = CapitalizeNameWord(second)
             result = {
-                firstName = first,
-                surname = second,
-                displayName = first .. " " .. second,
+                firstName = capFirst,
+                surname = capSecond,
+                displayName = capFirst .. " " .. capSecond,
                 lookupKey = (first .. "-" .. second):lower(),
             }
         end
     else
         local single = cleaned:match("^([^%s%-]+)$") or cleaned
+        local capSingle = CapitalizeNameWord(single)
         result = {
-            firstName = single,
+            firstName = capSingle,
             surname = nil,
-            displayName = single,
+            displayName = capSingle,
             lookupKey = single:lower(),
         }
     end
@@ -437,19 +674,24 @@ local function ParseForeverInternal(raw)
     cleaned = StripForeverSuffixes(cleaned)
 
     local result
-    local first, second = cleaned:match("^([^%s%-]+)[%s%-]+([^%s%-]+)$")
-    if first and second and not Compat.IsForeverShardLabel(second) then
+    local first, sep, second = cleaned:match("^([^%s%-]+)([%s%-]+)([^%s%-]+)$")
+    local isHyphenShard = first and second and sep:find("-", 1, true) ~= nil and Compat.IsForeverShardLabel(second)
+    local isExplicitSpaceShard = first and second and Plain(second):match("^camwow%a*%d*realm%d*%a+$") ~= nil
+    if first and second and not isHyphenShard and not isExplicitSpaceShard then
+        local capFirst = CapitalizeNameWord(first)
+        local capSecond = CapitalizeNameWord(second)
         result = {
-            firstName = first,
-            surname = second,
-            fullName = first .. " " .. second,
+            firstName = capFirst,
+            surname = capSecond,
+            fullName = capFirst .. " " .. capSecond,
         }
     else
         local single = cleaned:match("^([^%s%-]+)$") or cleaned
+        local capSingle = CapitalizeNameWord(single)
         result = {
-            firstName = single,
+            firstName = capSingle,
             surname = nil,
-            fullName = single,
+            fullName = capSingle,
         }
     end
 
@@ -2059,6 +2301,12 @@ function Compat.IsWindowIntegrationEnabled(winKey)
         return not s or s.embedCharacterWindow ~= false
     elseif winKey == "M" or winKey == "buffs" or winKey == "map" then
         return not s or s.embedWorldMap ~= false
+    elseif winKey == "chatframe" or winKey == "officialchat" then
+        return not s or s.embedOfficialChat ~= false
+    elseif winKey == "mail" or winKey == "sendmail" then
+        return not s or (s.embedCharacterWindow ~= false and s.embedMailPicker ~= false)
+    elseif winKey == "tradeskill" or winKey == "profession" or winKey == "professions" then
+        return not s or s.embedProfessionWindow ~= false
     end
     return true
 end

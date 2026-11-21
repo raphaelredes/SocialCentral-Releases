@@ -356,6 +356,12 @@ function Watchlist:Add(rawName, note)
 
     local cleanNote = Compat.CleanInput(note or "") or ""
     local dirEntry = ns.Social and ns.Social.GetDirectoryEntry and ns.Social:GetDirectoryEntry(parsed.lookupKey)
+    if dirEntry and dirEntry.displayName and dirEntry.displayName ~= "" then
+        local dirParsed = Compat.ParseCharacterName(dirEntry.displayName)
+        if dirParsed and dirParsed.lookupKey == parsed.lookupKey then
+            parsed = dirParsed
+        end
+    end
     local initStatus = "unknown"
     if dirEntry then
         if dirEntry.online and (dirEntry.bnetState == "wow_forever" or (dirEntry.sources and (dirEntry.sources.friend or dirEntry.sources.guild))) then
@@ -1389,15 +1395,26 @@ local function AppendPlayerTooltipLines(tooltip, isLegacyHook)
         guildStance = nil
     end
     local activeLfg = (ns.Clan and ns.Clan.GetActiveLfgForPlayer) and ns.Clan:GetActiveLfgForPlayer(lookupKey) or nil
+    local acctIgn = Store and Store.GetAccountIgnore and Store:GetAccountIgnore(lookupKey) or nil
+    local noteMain = (not (meta and meta.mainName and meta.mainName ~= "") and dirEntry and dirEntry.guildNote and Compat.ExtractMainFromGuildNote)
+        and Compat.ExtractMainFromGuildNote(dirEntry.guildNote) or nil
 
-    if not meta and not wl and not comp and not isPeer and not savedPeer and not guildStance and not linkedAlts and not nativeNote and not activeLfg then
+    if not meta and not noteMain and not acctIgn and not wl and not comp and not isPeer and not savedPeer and not guildStance and not linkedAlts and not nativeNote and not activeLfg then
         return
     end
 
     tooltip._scPlayerKey = lookupKey
     tooltip:AddLine(" ")
 
-    if meta and meta.flag == "AVOID" then
+    if acctIgn then
+        local rLbl = Store.FormatIgnoreReason and Store:FormatIgnoreReason(acctIgn.reason, L) or (acctIgn.reason or "")
+        local remLbl = Store.FormatIgnoreRemaining and Store:FormatIgnoreRemaining(acctIgn.expiresAt, L) or ""
+        local ignLine = "|cffff4d4d[!] " .. L["ACCOUNT IGNORED"] .. " (" .. rLbl .. (remLbl ~= "" and (" · " .. remLbl) or "") .. ")|r"
+        tooltip:AddLine(ignLine, 1.0, 0.30, 0.30)
+        if acctIgn.note and acctIgn.note ~= "" and (not meta or meta.note ~= acctIgn.note) then
+            tooltip:AddLine(L["Note"] .. ": " .. acctIgn.note, 1.0, 0.72, 0.50, true)
+        end
+    elseif meta and meta.flag == "AVOID" then
         tooltip:AddLine("|cffff4d4d[!] " .. L["FLAGGED: AVOID (SocialCentral)"] .. "|r", 1.0, 0.32, 0.32)
     elseif meta and meta.flag == "GOOD" then
         tooltip:AddLine("|cff3fb950[+] " .. L["Recommended Partner (SocialCentral)"] .. "|r", 0.25, 0.88, 0.48)
@@ -1411,10 +1428,16 @@ local function AppendPlayerTooltipLines(tooltip, isLegacyHook)
         tooltip:AddLine(wlText, 1.0, 0.82, 0.42, true)
     end
 
+    if meta and meta.nickname and meta.nickname ~= "" then
+        tooltip:AddDoubleLine(L["Nickname"], "|cffffd24d" .. meta.nickname .. "|r", 0.68, 0.78, 0.90, 1.0, 0.85, 0.35)
+    end
+
+    local resolvedMain = (meta and meta.mainName and meta.mainName ~= "" and meta.mainName) or noteMain
+    if resolvedMain and resolvedMain ~= "" then
+        tooltip:AddDoubleLine(L["Main"], resolvedMain, 0.68, 0.78, 0.90, 0.88, 0.94, 1.0)
+    end
+
     if meta then
-        if meta.mainName and meta.mainName ~= "" then
-            tooltip:AddDoubleLine(L["Main"], meta.mainName, 0.68, 0.78, 0.90, 0.88, 0.94, 1.0)
-        end
         if meta.folder and meta.folder ~= "" then
             tooltip:AddDoubleLine(L["Folder"], meta.folder, 0.68, 0.78, 0.90, 0.75, 0.88, 0.96)
         end
@@ -1589,6 +1612,14 @@ local function RegisterUnitContextMenus()
             end
         end)
 
+        local isAcctIgn = Store and Store.IsAccountIgnored and Store:IsAccountIgnored(parsed.lookupKey or parsed.displayName)
+        local ignLabel = isAcctIgn and ("|cffff4d4d[x]|r " .. L["Edit Account Ignore..."]) or L["Account Ignore..."]
+        rootDescription:CreateButton(ignLabel, function()
+            if ns.SocialPanels and ns.SocialPanels.OpenAccountIgnoreModal then
+                ns.SocialPanels:OpenAccountIgnoreModal(parsed.displayName, parsed.lookupKey)
+            end
+        end)
+
         if radarModOn and ns.SpotterHUD and ns.SpotterHUD.TrackEntry then
             local isTracked = ns.Spotter and ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(parsed.displayName)
             if isTracked and ns.Spotter and ns.Spotter.UntrackPlayer then
@@ -1611,8 +1642,189 @@ local function RegisterUnitContextMenus()
     end
 end
 
-function Watchlist:Init()
-    -- Normalize stored Watchlist entries (Forever FirstName Surname format & clear stale truncation/online flags).
+local popupAlertBanner = nil
+local popupAlertHideSeq = 0
+
+local function HideOfficialPopupAlertBanner()
+    popupAlertHideSeq = popupAlertHideSeq + 1
+    if popupAlertBanner then
+        popupAlertBanner:Hide()
+    end
+end
+
+local function EnsureOfficialPopupAlertBanner()
+    if popupAlertBanner then
+        return popupAlertBanner
+    end
+    local f = CreateFrame("Frame", "SocialCentralPopupAlertBanner", UIParent, "BackdropTemplate")
+    f:Hide()
+    f:SetSize(380, 62)
+    f:SetPoint("TOP", UIParent, "TOP", 0, -140)
+    f:EnableMouse(true)
+    if ns.Theme and ns.Theme.PrepareTopOverlayModal then
+        ns.Theme:PrepareTopOverlayModal(f, 920)
+    else
+        f:SetFrameStrata("FULLSCREEN_DIALOG")
+        f:SetFrameLevel(920)
+        f:SetToplevel(true)
+    end
+    local solidBg = f:CreateTexture(nil, "BACKGROUND", nil, -8)
+    solidBg:SetAllPoints()
+    solidBg:SetTexture("Interface\\Buttons\\WHITE8X8")
+    solidBg:SetVertexColor(0.16, 0.04, 0.05, 1.0)
+    f._solidOpaqueBg = solidBg
+    if f.SetBackdrop then
+        f:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8X8",
+            edgeFile = "Interface\\Buttons\\WHITE8X8",
+            edgeSize = 1,
+            insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        })
+        f:SetBackdropColor(0.16, 0.04, 0.05, 1.0)
+        f:SetBackdropBorderColor(0.95, 0.25, 0.25, 1.0)
+    end
+    if type(UISpecialFrames) == "table" then
+        table.insert(UISpecialFrames, "SocialCentralPopupAlertBanner")
+    end
+
+    local closeBtn = (ns.Theme and ns.Theme.CreateButton) and ns.Theme:CreateButton(f, 20, 20, "X", "default") or CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    closeBtn:SetSize(20, 20)
+    closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
+    closeBtn:SetScript("OnClick", HideOfficialPopupAlertBanner)
+    f.closeBtn = closeBtn
+
+    local quickBtn = (ns.Theme and ns.Theme.CreateOfficialQuickButton) and ns.Theme:CreateOfficialQuickButton(f, {
+        name = "SocialCentralPopupAlertQuickBtn",
+        size = 18,
+        title = L["Preventive Popup Alerts"],
+        tooltipAnchor = "ANCHOR_RIGHT",
+        getStatusState = function()
+            local s = ns.db and ns.db.settings
+            if s and s.socialOfficialPopupAlerts == false then return "off" end
+            return "active"
+        end,
+        getTooltipLines = function()
+            return {
+                L["Displays a warning banner when an Ignored or Avoid-flagged player sends an official Invite, Trade, or Duel."],
+            }
+        end,
+        buildMenu = function(root)
+            root:CreateTitle("SocialCentral — " .. L["Preventive Popup Alerts"])
+            if root.CreateCheckbox then
+                root:CreateCheckbox(L["Warn on official Invite, Trade & Duel popups"], function()
+                    return not ns.db or not ns.db.settings or ns.db.settings.socialOfficialPopupAlerts ~= false
+                end, function()
+                    if ns.db and ns.db.settings then
+                        ns.db.settings.socialOfficialPopupAlerts = not (ns.db.settings.socialOfficialPopupAlerts ~= false)
+                        if ns.db.settings.socialOfficialPopupAlerts == false then
+                            HideOfficialPopupAlertBanner()
+                        end
+                    end
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                end)
+            end
+            if root.CreateDivider then root:CreateDivider() end
+            root:CreateButton(L["Disable in this window"], function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.socialOfficialPopupAlerts = false
+                end
+                HideOfficialPopupAlertBanner()
+                if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                ns:Print("%s", L["Disabled in this window. Re-enable anytime in Settings (/sc)."])
+            end)
+            root:CreateButton(L["Settings"], function()
+                if ns.Settings and ns.Settings.Open then ns.Settings:Open("general") end
+            end)
+        end,
+    }) or nil
+    if quickBtn then
+        quickBtn:SetPoint("RIGHT", closeBtn, "LEFT", -4, 0)
+        f.quickBtn = quickBtn
+    end
+
+    local titleFs = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    titleFs:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -8)
+    titleFs:SetPoint("RIGHT", quickBtn or closeBtn, "LEFT", -6, 0)
+    titleFs:SetJustifyH("LEFT")
+    titleFs:SetWordWrap(false)
+    f.titleFs = titleFs
+
+    local detailFs = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    detailFs:SetPoint("TOPLEFT", titleFs, "BOTTOMLEFT", 0, -4)
+    detailFs:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 8)
+    detailFs:SetJustifyH("LEFT")
+    detailFs:SetJustifyV("TOP")
+    detailFs:SetWordWrap(true)
+    f.detailFs = detailFs
+
+    popupAlertBanner = f
+    return f
+end
+
+local function CheckOfficialPopupAlert(rawName, contextKind)
+    if ns.db and ns.db.settings and ns.db.settings.socialOfficialPopupAlerts == false then
+        return
+    end
+    local cleanRaw = Safe.String(rawName)
+    if not cleanRaw or cleanRaw == "" then return end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(cleanRaw)
+    local disp = (parsed and parsed.displayName) or cleanRaw
+    local lk = (parsed and parsed.lookupKey) or cleanRaw:lower()
+    if Compat.IsMe and Compat.IsMe(disp) then return end
+
+    local acctIgn = Store and Store.GetAccountIgnore and Store:GetAccountIgnore(lk) or nil
+    local sMeta = Store and ((Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(lk)) or (Store.GetSocialMeta and Store:GetSocialMeta(lk))) or nil
+    local isAvoid = (sMeta and sMeta.flag == "AVOID") == true
+    if not acctIgn and not isAvoid then
+        return
+    end
+
+    local ctxLabel = (contextKind == "TRADE" and L["Trade Request"])
+        or (contextKind == "DUEL" and L["Duel Request"])
+        or L["Party Invite"]
+    local reasonStr
+    if acctIgn then
+        local rLbl = Store.FormatIgnoreReason and Store:FormatIgnoreReason(acctIgn.reason, L) or L["Account Ignore"]
+        reasonStr = L["ACCOUNT IGNORED"] .. " (" .. rLbl .. ")" .. ((acctIgn.note and acctIgn.note ~= "") and (" — " .. acctIgn.note) or "")
+    else
+        reasonStr = L["FLAGGED: AVOID (SocialCentral)"] .. ((sMeta and sMeta.note and sMeta.note ~= "") and (" — " .. sMeta.note) or "")
+    end
+
+    ns:Print("|cffff4d4d[! %s]|r %s: %s", ctxLabel, disp, reasonStr)
+    if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING and not (Compat.IsFocusSilenced and Compat.IsFocusSilenced()) then
+        pcall(PlaySound, SOUNDKIT.RAID_WARNING, "Master")
+    end
+
+    local banner = EnsureOfficialPopupAlertBanner()
+    banner.titleFs:SetText("|cffff5555[!] " .. ctxLabel .. ": " .. disp .. "|r")
+    banner.detailFs:SetText("|cffffd24d" .. reasonStr .. "|r")
+    banner:ClearAllPoints()
+    if contextKind == "TRADE" and _G.TradeFrame and _G.TradeFrame.IsShown and _G.TradeFrame:IsShown() then
+        banner:SetPoint("BOTTOM", _G.TradeFrame, "TOP", 0, 8)
+    elseif _G.StaticPopup1 and _G.StaticPopup1.IsShown and _G.StaticPopup1:IsShown() then
+        banner:SetPoint("BOTTOM", _G.StaticPopup1, "TOP", 0, 8)
+    else
+        banner:SetPoint("TOP", UIParent, "TOP", 0, -140)
+    end
+    if banner.quickBtn and banner.quickBtn.RefreshTheme then
+        banner.quickBtn:RefreshTheme()
+    end
+    banner:Show()
+    banner:Raise()
+
+    popupAlertHideSeq = popupAlertHideSeq + 1
+    local mySeq = popupAlertHideSeq
+    if C_Timer and C_Timer.After then
+        C_Timer.After(14, function()
+            if popupAlertHideSeq == mySeq and popupAlertBanner then
+                popupAlertBanner:Hide()
+            end
+        end)
+    end
+end
+
+function Watchlist:NormalizeStoredEntries()
+    -- Normalize stored Watchlist entries (Forever FirstName Surname capitalization & clear stale truncation/online flags).
     local now = time()
     for _, entry in pairs(Store:GetWatchlistTable()) do
         if type(entry) == "table" and entry.displayName then
@@ -1639,6 +1851,12 @@ function Watchlist:Init()
             end
         end
     end
+    Watchlist._wlIndexDirty = true
+    if Store and Store.InvalidateWatchlistIndex then Store:InvalidateWatchlistIndex() end
+end
+
+function Watchlist:Init()
+    self:NormalizeStoredEntries()
 
     RegisterPlayerTooltipIntegration()
     RegisterUnitContextMenus()
@@ -1651,4 +1869,19 @@ function Watchlist:Init()
     ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
         RestoreFriendsFrameEvent()
     end)
+
+    ns.RegisterEvent(self, "PARTY_INVITE_REQUEST", function(_, _, inviterName)
+        CheckOfficialPopupAlert(inviterName, "INVITE")
+    end)
+    ns.RegisterEvent(self, "PARTY_INVITE_CANCEL", HideOfficialPopupAlertBanner)
+    ns.RegisterEvent(self, "DUEL_REQUESTED", function(_, _, challengerName)
+        CheckOfficialPopupAlert(challengerName, "DUEL")
+    end)
+    ns.RegisterEvent(self, "DUEL_FINISHED", HideOfficialPopupAlertBanner)
+    ns.RegisterEvent(self, "TRADE_SHOW", function()
+        local npcResolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName("NPC")
+        local trader = (npcResolved and npcResolved.fullName) or (UnitName and Safe.String(Safe.Call(UnitName, "NPC")))
+        CheckOfficialPopupAlert(trader, "TRADE")
+    end)
+    ns.RegisterEvent(self, "TRADE_CLOSED", HideOfficialPopupAlertBanner)
 end

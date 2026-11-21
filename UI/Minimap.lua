@@ -10,6 +10,7 @@ local RING_TEX = 136430
 local BG_TEX = 136467
 local HIGHLIGHT_TEX = 136477
 local ICON_TEX = "Interface\\AddOns\\SocialCentral\\Media\\icon"
+local ICON_BELL_OFF = "Interface\\AddOns\\SocialCentral\\Media\\bell-off"
 local RADIUS_OFFSET = 8
 
 local button
@@ -18,6 +19,7 @@ local BADGE_CATEGORY_ORDER = { "whisper", "group", "guild", "bnet", "room" }
 local BadgeCluster = {
     testCounts = nil,
     previewCounts = {},
+    previewCountsByThread = {},
     satBadges = {},
     driver = nil,
     phase = "IDLE",
@@ -541,6 +543,13 @@ function BadgeCluster:CollectActiveCategories()
                 end
             end
         end
+        for _, rec in pairs(self.previewCountsByThread) do
+            if type(rec) == "table" and (rec.count or 0) > 0 and rec.cat and counts[rec.cat] ~= nil then
+                if rec.cat == "group" or rec.cat == "guild" or counts[rec.cat] == 0 then
+                    counts[rec.cat] = counts[rec.cat] + rec.count
+                end
+            end
+        end
     end
 
     local items = {}
@@ -860,8 +869,9 @@ function BadgeCluster:SetHovered(isHovered)
 end
 
 function BadgeCluster:ClearSessionPreviewCounts()
-    local hadAny = next(self.previewCounts) ~= nil or self.testCounts ~= nil
+    local hadAny = next(self.previewCounts) ~= nil or next(self.previewCountsByThread) ~= nil or self.testCounts ~= nil
     wipe(self.previewCounts)
+    wipe(self.previewCountsByThread)
     if hadAny then
         return true
     end
@@ -1382,9 +1392,80 @@ function MinimapBtn:NotePreviewFolded(item)
         local s = ns.db and ns.db.settings
         local mirroredTracked = s and s.chatMirrorChannels == true and s.chatChannelUnread == true
         if not mirroredTracked then
-            BadgeCluster.previewCounts[cat] = (BadgeCluster.previewCounts[cat] or 0) + 1
+            local tKey = item.threadKey or item.channelKey
+            if tKey and tKey ~= "" then
+                local rec = BadgeCluster.previewCountsByThread[tKey]
+                if not rec then
+                    rec = { cat = cat, count = 0 }
+                    BadgeCluster.previewCountsByThread[tKey] = rec
+                end
+                rec.count = (rec.count or 0) + 1
+            else
+                BadgeCluster.previewCounts[cat] = (BadgeCluster.previewCounts[cat] or 0) + 1
+            end
             UpdateBadge(true)
         end
+    end
+end
+
+function MinimapBtn:ClearPreviewCountsForThread(threadKey, channelKey, kind)
+    local changed = false
+    if threadKey and BadgeCluster.previewCountsByThread[threadKey] then
+        BadgeCluster.previewCountsByThread[threadKey] = nil
+        changed = true
+    end
+    if channelKey and BadgeCluster.previewCountsByThread[channelKey] then
+        BadgeCluster.previewCountsByThread[channelKey] = nil
+        changed = true
+    end
+    local cat
+    if kind == "BN_WHISPER" then
+        cat = "bnet"
+    elseif kind == "GUILD" or kind == "OFFICER" then
+        cat = "guild"
+    elseif kind == "GROUP" or kind == "PARTY" or kind == "RAID" or kind == "INSTANCE_CHAT" then
+        cat = "group"
+    elseif kind == "ROOM" or kind == "ALLIANCE" then
+        cat = "room"
+    elseif kind == "WHISPER" then
+        cat = "whisper"
+    end
+    if cat and not BadgeCluster.testCounts and (BadgeCluster.previewCounts[cat] or 0) > 0 then
+        BadgeCluster.previewCounts[cat] = nil
+        changed = true
+    end
+    if changed then
+        UpdateBadge(false)
+    end
+end
+
+function MinimapBtn:ClearPreviewCountsForCategory(category)
+    local cat
+    if category == "BN_WHISPER" then
+        cat = "bnet"
+    elseif category == "GUILD" or category == "OFFICER" then
+        cat = "guild"
+    elseif category == "GROUP" or category == "PARTY" or category == "RAID" or category == "INSTANCE_CHAT" then
+        cat = "group"
+    elseif category == "ROOM" or category == "ALLIANCE" then
+        cat = "room"
+    elseif category == "WHISPER" then
+        cat = "whisper"
+    end
+    if not cat then return end
+    local changed = false
+    if (BadgeCluster.previewCounts[cat] or 0) > 0 then
+        BadgeCluster.previewCounts[cat] = nil
+        changed = true
+    end
+    for k, rec in pairs(BadgeCluster.previewCountsByThread) do
+        if type(rec) == "table" and rec.cat == cat then
+            BadgeCluster.previewCountsByThread[k] = nil
+            changed = true
+        end
+    end
+    if changed then
+        UpdateBadge(false)
     end
 end
 
@@ -1394,6 +1475,15 @@ function MinimapBtn:ClearPreviewCounts()
         UpdateBadge(false)
     end
 end
+
+ns:On("CHAT_THREAD_READ", function(info)
+    if type(info) == "table" then
+        MinimapBtn:ClearPreviewCountsForThread(info.threadKey, info.channelKey, info.kind)
+    elseif type(info) == "string" then
+        MinimapBtn:ClearPreviewCountsForThread(info, info, nil)
+    end
+    UpdateBadge(false)
+end)
 
 for _, ev in ipairs({ "CHAT_UPDATED", "CLAN_UPDATED", "SPOTTER_UPDATED", "SETTINGS_CHANGED", "SETTINGS_UPDATED", "ADDON_MESSAGE_NOTIFY" }) do
     ns:On(ev, UpdateBadge)
@@ -1962,6 +2052,12 @@ local function MpApplyThemeToPreview(f)
             Theme:SyncButtonLayers(f.closeBtn)
         end
     end
+    if f.muteNotifBtn and Theme and Theme.StyleButton then
+        Theme:StyleButton(f.muteNotifBtn, "default")
+        if Theme.SyncButtonLayers then
+            Theme:SyncButtonLayers(f.muteNotifBtn)
+        end
+    end
 end
 
 local function MpOpenReplyChat(item)
@@ -2090,7 +2186,7 @@ local function MpRenderItemContent(f, item)
     local nameW = (f.senderLbl.GetUnboundedStringWidth and f.senderLbl:GetUnboundedStringWidth()) or (f.senderLbl.GetStringWidth and f.senderLbl:GetStringWidth()) or 110
     local bodyW = (f.previewLbl.GetUnboundedStringWidth and f.previewLbl:GetUnboundedStringWidth()) or (f.previewLbl.GetStringWidth and f.previewLbl:GetStringWidth()) or 130
     local idealTextW = math.max(nameW + (showQ > 0 and 22 or 4), math.min(bodyW, 206))
-    local computedW = MpClamp(math.ceil(48 + idealTextW + 26), MP_MIN_W, MP_MAX_W)
+    local computedW = MpClamp(math.ceil(48 + idealTextW + 46), MP_MIN_W, MP_MAX_W)
 
     MpApplyThemeToPreview(f)
     return computedW
@@ -2169,6 +2265,11 @@ local function MpApplySlotVisuals(slot, moveP, sizeP, frameAlpha, scAlpha, sende
         local ca = MpClamp(contentAlpha, 0, 1)
         f.closeBtn:SetAlpha(ca)
         f.closeBtn:SetShown(ca > 0.20 and curW > 96)
+    end
+    if f.muteNotifBtn then
+        local ca = MpClamp(contentAlpha, 0, 1)
+        f.muteNotifBtn:SetAlpha(ca)
+        f.muteNotifBtn:SetShown(ca > 0.20 and curW > 116)
     end
     if f.progressTrack and f.progressFill then
         local pa = MpClamp(contentAlpha, 0, 1)
@@ -2386,7 +2487,7 @@ local function MpEnsureSlotFrame(poolIdx)
     -- Clipped text viewport so text never squishes or overflows during expand/collapse
     local contentClip = CreateFrame("Frame", nil, f)
     contentClip:SetPoint("TOPLEFT", f, "TOPLEFT", 48, -6)
-    contentClip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -24, 6)
+    contentClip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -44, 6)
     contentClip:EnableMouse(false)
     contentClip:SetFrameLevel(f:GetFrameLevel() + 3)
     if contentClip.SetClipsChildren then contentClip:SetClipsChildren(true) end
@@ -2422,13 +2523,44 @@ local function MpEnsureSlotFrame(poolIdx)
     local closeBtn = Theme and Theme:CreateButton(f, 16, 16, "X", "default") or CreateFrame("Button", nil, f)
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -5)
     closeBtn:SetFrameLevel(f:GetFrameLevel() + 8)
-    closeBtn:SetHitRectInsets(-4, -4, -4, -4)
+    closeBtn:SetHitRectInsets(-3, -4, -4, -4)
     closeBtn:SetScript("OnClick", function()
         if f._slot then
             MpBeginCollapseSlot(f._slot)
         end
     end)
     f.closeBtn = closeBtn
+
+    local muteNotifBtn = Theme and Theme:CreateButton(f, 16, 16, "", "default") or CreateFrame("Button", nil, f)
+    muteNotifBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
+    muteNotifBtn:SetFrameLevel(f:GetFrameLevel() + 8)
+    muteNotifBtn:SetHitRectInsets(-3, -2, -4, -4)
+    local muteIco = muteNotifBtn:CreateTexture(nil, "OVERLAY", nil, 3)
+    muteIco:SetSize(11, 11)
+    muteIco:SetPoint("CENTER")
+    muteIco:SetTexture(ICON_BELL_OFF)
+    muteIco:SetVertexColor(0.95, 0.72, 0.35)
+    muteNotifBtn.ico = muteIco
+    muteNotifBtn:SetScript("OnClick", function()
+        local cur = f._slot and f._slot.item
+        if cur and MsgPreview.ShowConfirmMutePopup then
+            MsgPreview:ShowConfirmMutePopup(f, cur)
+        end
+    end)
+    muteNotifBtn:SetScript("OnEnter", function(selfBtn)
+        if GameTooltip then
+            local ownerAnchor = (MsgPreview.sideMode == "LEFT") and "ANCHOR_TOPLEFT" or "ANCHOR_TOPRIGHT"
+            GameTooltip:SetOwner(selfBtn, ownerAnchor)
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(L["Silence this notification"], 1, 0.85, 0.35)
+            GameTooltip:AddLine(L["Click to disable this notification (asks confirmation nearby to prevent misclicks)."], 0.85, 0.88, 0.92, true)
+            GameTooltip:Show()
+        end
+    end)
+    muteNotifBtn:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    f.muteNotifBtn = muteNotifBtn
 
     local progressTrack = pillShell:CreateTexture(nil, "BORDER", nil, 2)
     progressTrack:SetHeight(2)
@@ -2493,6 +2625,7 @@ local function MpEnsureSlotFrame(poolIdx)
                     if cur.threadKey and ns.Chat and ns.Chat.MarkThreadRead then
                         root:CreateButton(L["Mark Read"], function()
                             slot.menuPauseUntil = 0
+                            slot._readDismissed = true
                             ns.Chat:MarkThreadRead(cur.threadKey)
                             MpBeginCollapseSlot(slot)
                         end)
@@ -2500,8 +2633,9 @@ local function MpEnsureSlotFrame(poolIdx)
                     root:CreateDivider()
                     root:CreateButton(MpCategoryDisableLabel(cur.category), function()
                         slot.menuPauseUntil = 0
-                        MpDisableCategory(cur.category)
-                        MpBeginCollapseSlot(slot)
+                        if MsgPreview.ShowConfirmMutePopup then
+                            MsgPreview:ShowConfirmMutePopup(self, cur)
+                        end
                     end)
                     root:CreateButton(L["Configure Previews..."], function()
                         slot.menuPauseUntil = 0
@@ -2644,6 +2778,7 @@ function MsgPreview._driveAllSlots(_, dt)
 
     local setupOpen = MsgPreview.setupModal and MsgPreview.setupModal:IsShown()
     local moverOpen = MsgPreview.anchorMover and MsgPreview.anchorMover:IsShown()
+    local confirmOpen = MsgPreview.confirmPopup and MsgPreview.confirmPopup:IsShown()
     if MsgPreview.draggingStack then
         if not (IsMouseButtonDown and IsMouseButtonDown("LeftButton")) then
             MpFinishStackDrag()
@@ -2694,10 +2829,10 @@ function MsgPreview._driveAllSlots(_, dt)
         elseif slot.phase == "HOLD" then
             MpApplySlotVisuals(slot, 1, 1, 1, 0, 1, 1)
             local menuPaused = nowMono < (slot.menuPauseUntil or 0)
-            local hovered = f and (f:IsMouseOver() or (f.closeBtn and f.closeBtn:IsMouseOver()))
+            local hovered = f and (f:IsMouseOver() or (f.closeBtn and f.closeBtn:IsMouseOver()) or (f.muteNotifBtn and f.muteNotifBtn:IsMouseOver()))
             local totalDur = (slot.item and slot.item.duration) or MpGetHoldDuration()
 
-            if not setupOpen and not moverOpen and not MsgPreview.draggingStack and not hovered and not menuPaused then
+            if not setupOpen and not moverOpen and not confirmOpen and not MsgPreview.draggingStack and not hovered and not menuPaused then
                 slot.holdElapsed = slot.holdElapsed + delta
                 local remFrac = MpClamp(1 - (slot.holdElapsed / totalDur), 0, 1)
                 if f and f.progressFill then
@@ -2736,8 +2871,10 @@ function MsgPreview._driveAllSlots(_, dt)
                     doneSlot.frame._slot = nil
                     doneSlot.frame:Hide()
                 end
-                MinimapBtn:PulseArrival(rgb[1], rgb[2], rgb[3])
-                MinimapBtn:NotePreviewFolded(doneSlot.item)
+                if not doneSlot._readDismissed then
+                    MinimapBtn:PulseArrival(rgb[1], rgb[2], rgb[3])
+                    MinimapBtn:NotePreviewFolded(doneSlot.item)
+                end
             end
         end
         MpPromoteFromQueue()
@@ -3437,10 +3574,16 @@ function MsgPreview:ShowTestPreview(variant)
             local kindArg, idxArg, delaySec = sp[1], sp[2], sp[3]
             if delaySec <= 0 or not (C_Timer and C_Timer.After) then
                 self:PushItem(MpBuildSampleItem(kindArg, idxArg), true)
+                if ns.Chat and ns.Chat.PlayMessageNotificationSound then
+                    ns.Chat:PlayMessageNotificationSound("WHISPER", nil, false, "test_preview", "test")
+                end
             else
                 C_Timer.After(delaySec, function()
                     if MsgPreview._queueTestGen == gen then
                         MsgPreview:PushItem(MpBuildSampleItem(kindArg, idxArg), true)
+                        if ns.Chat and ns.Chat.PlayMessageNotificationSound then
+                            ns.Chat:PlayMessageNotificationSound("WHISPER", nil, false, "test_preview", "test")
+                        end
                     end
                 end)
             end
@@ -3454,6 +3597,9 @@ function MsgPreview:ShowTestPreview(variant)
         v = cycleKinds[cycleIdx]
     end
     self:PushItem(MpBuildSampleItem(v, cycleIdx), true)
+    if ns.Chat and ns.Chat.PlayMessageNotificationSound then
+        ns.Chat:PlayMessageNotificationSound("WHISPER", nil, false, "test_preview", "test")
+    end
 end
 
 function MsgPreview:OnIncomingMessage(payload)
@@ -3501,6 +3647,279 @@ function MsgPreview:OnIncomingMessage(payload)
     self:PushItem(payload, false)
 end
 
+local function MpDescribeMuteTarget(item)
+    if not item then return nil end
+    local cat = item.category or "WHISPER"
+    local label = MpCategoryDisableLabel(cat)
+    local desc
+    if cat == "WHISPER" then
+        desc = L["Stop showing minimap message previews for Whispers and Direct Chat."]
+    elseif cat == "BN_WHISPER" then
+        desc = L["Stop showing minimap message previews for Battle.net Friends."]
+    elseif cat == "GROUP" then
+        desc = L["Stop showing minimap message previews for Party, Raid, and Instance chat."]
+    elseif cat == "GUILD" then
+        desc = L["Stop showing minimap message previews for Guild and Officer chat."]
+    elseif cat == "ROOM" then
+        desc = L["Stop showing minimap message previews for Private Rooms and Alliance Chat."]
+    else
+        desc = L["Stop showing minimap message previews for Whispers and Direct Chat."]
+    end
+
+    local playerMuteLabel, playerMuteFn
+    local tKey = item.threadKey or item.channelKey
+    if tKey and tKey ~= "" and ns.Chat and ns.Chat.ToggleThreadMuted then
+        local isMuted = ns.Chat.IsThreadMuted and ns.Chat:IsThreadMuted(tKey)
+        if not isMuted then
+            local senderName = tostring(item.sender or "?")
+            playerMuteLabel = L["Only %s"]:format(senderName)
+            playerMuteFn = function()
+                ns.Chat:ToggleThreadMuted(tKey)
+                MsgPreview:DismissByThread(tKey, tKey, item.bnetAccountID)
+                MinimapBtn:ClearPreviewCountsForThread(tKey, tKey, item.channelKind or item.category)
+                ns:Print(L["Notifications muted for %s."]:format(senderName))
+            end
+        end
+    end
+
+    return {
+        label = label,
+        desc = desc,
+        playerMuteLabel = playerMuteLabel,
+        playerMuteFn = playerMuteFn,
+        disableFn = function()
+            MpDisableCategory(cat)
+            MinimapBtn:ClearPreviewCountsForCategory(cat)
+            for i = #MsgPreview.queue, 1, -1 do
+                if MsgPreview.queue[i] and MsgPreview.queue[i].category == cat then
+                    table.remove(MsgPreview.queue, i)
+                end
+            end
+            for _, slot in ipairs(MsgPreview.activeSlots) do
+                if slot.item and slot.item.category == cat then
+                    slot._readDismissed = true
+                    MpBeginCollapseSlot(slot)
+                end
+            end
+            MpSyncQueueBadges()
+            ns:Print("|cff9da7b5%s|r %s", label, L["disabled. Re-enable anytime in Settings -> Notifications."])
+        end,
+    }
+end
+
+function MsgPreview:ShowConfirmMutePopup(anchorCard, item)
+    if not item then return end
+    local Theme = ns.Theme
+    if not Theme then return end
+    local spec = MpDescribeMuteTarget(item)
+    if not spec then return end
+
+    if not self.confirmPopup then
+        local pop = CreateFrame("Frame", "SocialCentralMsgPreviewConfirmPopup", UIParent, "BackdropTemplate")
+        pop:Hide()
+        pop:SetSize(296, 134)
+        if Theme.PrepareTopOverlayModal then
+            Theme:PrepareTopOverlayModal(pop, 855)
+        else
+            pop:SetFrameStrata("FULLSCREEN_DIALOG")
+            pop:SetFrameLevel(855)
+            pop:SetToplevel(true)
+            pop:SetClampedToScreen(true)
+        end
+        pop:EnableMouse(true)
+        if pop.SetPropagateKeyboardInput then
+            pop:SetPropagateKeyboardInput(true)
+        end
+
+        local solidBg = pop:CreateTexture(nil, "BACKGROUND", nil, -8)
+        solidBg:SetAllPoints()
+        solidBg:SetTexture(MP_WHITE8X8)
+        solidBg:SetVertexColor(0.06, 0.06, 0.08, 1.0)
+        pop._solidOpaqueBg = solidBg
+
+        local ico = pop:CreateTexture(nil, "OVERLAY")
+        ico:SetSize(16, 16)
+        ico:SetPoint("TOPLEFT", 12, -11)
+        ico:SetTexture(ICON_BELL_OFF)
+        ico:SetVertexColor(1.0, 0.72, 0.30)
+
+        local title = pop:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        title:SetPoint("LEFT", ico, "RIGHT", 6, 0)
+        title:SetPoint("RIGHT", pop, "RIGHT", -28, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+        title:SetText(L["Disable this notification?"])
+        pop.titleLbl = title
+
+        local xBtn = Theme:CreateButton(pop, 18, 18, "X", "default")
+        xBtn:SetPoint("TOPRIGHT", -6, -7)
+        xBtn:SetScript("OnClick", function() pop:Hide() end)
+        pop.xBtn = xBtn
+
+        local subLbl = pop:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        subLbl:SetPoint("TOPLEFT", 12, -31)
+        subLbl:SetPoint("TOPRIGHT", -12, -31)
+        subLbl:SetJustifyH("LEFT")
+        subLbl:SetWordWrap(true)
+        pop.subLbl = subLbl
+
+        local confirmBtn = Theme:CreateButton(pop, 108, 22, L["Disable"], "primary")
+        confirmBtn:SetPoint("BOTTOMLEFT", 12, 36)
+        pop.confirmBtn = confirmBtn
+
+        local playerBtn = Theme:CreateButton(pop, 108, 22, "", "default")
+        playerBtn:SetPoint("LEFT", confirmBtn, "RIGHT", 6, 0)
+        pop.playerBtn = playerBtn
+
+        local cancelBtn = Theme:CreateButton(pop, 84, 22, L["Cancel"], "default")
+        cancelBtn:SetPoint("BOTTOMRIGHT", -12, 36)
+        cancelBtn:SetScript("OnClick", function() pop:Hide() end)
+        pop.cancelBtn = cancelBtn
+
+        local dndBtn = Theme:CreateButton(pop, 264, 20, L["Pause All (Do Not Disturb)"], "default")
+        dndBtn:SetPoint("BOTTOMLEFT", 12, 10)
+        dndBtn:SetPoint("BOTTOMRIGHT", -12, 10)
+        dndBtn:SetScript("OnClick", function()
+            pop:Hide()
+            if ns.db and ns.db.settings then
+                ns.db.settings.doNotDisturb = true
+            end
+            ns:Emit("SETTINGS_UPDATED")
+            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+            ns:Print("%s", L["Do Not Disturb active — popups & chimes paused."])
+        end)
+        pop.dndBtn = dndBtn
+
+        pop:SetScript("OnHide", function(selfPop)
+            selfPop._targetItem = nil
+        end)
+        if _G.UISpecialFrames then
+            table.insert(_G.UISpecialFrames, "SocialCentralMsgPreviewConfirmPopup")
+        end
+
+        self.confirmPopup = pop
+    end
+
+    local pop = self.confirmPopup
+    pop._targetItem = item
+    local p = Theme.GetPalette and Theme:GetPalette()
+    if Theme.ApplyBackdrop then
+        Theme:ApplyBackdrop(pop, "window", p)
+    end
+    if p then
+        if pop._solidOpaqueBg then
+            local wb = p.windowBg or { 0.06, 0.06, 0.08, 1.0 }
+            pop._solidOpaqueBg:SetVertexColor(wb[1], wb[2], wb[3], 1.0)
+        end
+        Theme:StyleButton(pop.xBtn, "default")
+        Theme:StyleButton(pop.confirmBtn, "primary")
+        Theme:StyleButton(pop.playerBtn, "default")
+        Theme:StyleButton(pop.cancelBtn, "default")
+    end
+
+    local showDndBtn = not (ns.db and ns.db.settings and ns.db.settings.doNotDisturb == true)
+    if pop.dndBtn then
+        if p then Theme:StyleButton(pop.dndBtn, "default") end
+        pop.dndBtn:SetShown(showDndBtn)
+    end
+    local extraBottom = showDndBtn and 26 or 0
+    pop.confirmBtn:ClearAllPoints()
+    pop.confirmBtn:SetPoint("BOTTOMLEFT", 12, 10 + extraBottom)
+    pop.cancelBtn:ClearAllPoints()
+    pop.cancelBtn:SetPoint("BOTTOMRIGHT", -12, 10 + extraBottom)
+
+    pop.subLbl:SetText(("|cffffd24d%s|r\n|cffd2d9e4%s|r"):format(spec.label or "", spec.desc or ""))
+    local textH = (pop.subLbl.GetStringHeight and pop.subLbl:GetStringHeight()) or 32
+    pop:SetHeight(math.max(108 + extraBottom, math.ceil(36 + textH + 44 + extraBottom)))
+
+    pop.confirmBtn:SetScript("OnClick", function()
+        pop:Hide()
+        if spec.disableFn then
+            spec.disableFn()
+        end
+    end)
+
+    if spec.playerMuteFn and spec.playerMuteLabel then
+        Theme:SetButtonText(pop.playerBtn, spec.playerMuteLabel)
+        Theme:AutoFitButton(pop.playerBtn, 74, 12, 118)
+        pop.playerBtn:ClearAllPoints()
+        pop.playerBtn:SetPoint("LEFT", pop.confirmBtn, "RIGHT", 6, 0)
+        pop.playerBtn:SetScript("OnClick", function()
+            pop:Hide()
+            spec.playerMuteFn()
+        end)
+        pop.playerBtn:Show()
+        Theme:SetButtonText(pop.confirmBtn, L["Disable All"])
+        Theme:AutoFitButton(pop.confirmBtn, 84, 12, 108)
+        Theme:AutoFitButton(pop.cancelBtn, 68, 12, 86)
+        local neededW = (pop.confirmBtn:GetWidth() or 92) + (pop.playerBtn:GetWidth() or 88) + (pop.cancelBtn:GetWidth() or 74) + 38
+        pop:SetWidth(math.max(296, math.min(350, neededW)))
+    else
+        pop.playerBtn:Hide()
+        Theme:SetButtonText(pop.confirmBtn, L["Disable"])
+        Theme:AutoFitButton(pop.confirmBtn, 96, 14, 140)
+        Theme:AutoFitButton(pop.cancelBtn, 80, 14, 110)
+        pop:SetWidth(296)
+    end
+
+    pop:ClearAllPoints()
+    local ref = (anchorCard and anchorCard.IsShown and anchorCard:IsShown() and anchorCard) or button
+    if ref and ref.GetLeft and UIParent and UIParent.GetWidth then
+        local uiW = UIParent:GetWidth() or 1280
+        local popW = pop:GetWidth() or 296
+        local left = ref:GetLeft() or (uiW * 0.5)
+        local right = ref:GetRight() or (uiW * 0.6)
+        if left >= (popW + 14) then
+            pop:SetPoint("TOPRIGHT", ref, "TOPLEFT", -8, 0)
+        elseif (uiW - right) >= (popW + 14) then
+            pop:SetPoint("TOPLEFT", ref, "TOPRIGHT", 8, 0)
+        else
+            pop:SetPoint("TOP", ref, "BOTTOM", 0, -6)
+        end
+    else
+        pop:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
+    end
+    if Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(pop, 855)
+    end
+    pop:Show()
+    pop:Raise()
+end
+
+function MsgPreview:DismissByThread(threadKey, channelKey, bnetAccountID)
+    if not (threadKey or channelKey or bnetAccountID) then return end
+    local function Matches(it)
+        if not it then return false end
+        if threadKey and (it.threadKey == threadKey or it.channelKey == threadKey) then
+            return true
+        end
+        if channelKey and (it.threadKey == channelKey or it.channelKey == channelKey) then
+            return true
+        end
+        if bnetAccountID and it.bnetAccountID and it.bnetAccountID == bnetAccountID then
+            return true
+        end
+        return false
+    end
+
+    local qChanged = false
+    for i = #self.queue, 1, -1 do
+        if Matches(self.queue[i]) then
+            table.remove(self.queue, i)
+            qChanged = true
+        end
+    end
+    for _, slot in ipairs(self.activeSlots) do
+        if Matches(slot.item) then
+            slot._readDismissed = true
+            MpBeginCollapseSlot(slot)
+        end
+    end
+    if qChanged then
+        MpSyncQueueBadges()
+    end
+end
+
 function MsgPreview:Init()
     if self.initialized then return end
     self.initialized = true
@@ -3510,10 +3929,19 @@ function MsgPreview:Init()
         MsgPreview:OnIncomingMessage(payload)
     end)
 
+    ns:On("CHAT_THREAD_READ", function(info)
+        if type(info) == "table" then
+            MsgPreview:DismissByThread(info.threadKey, info.channelKey, info.bnetAccountID)
+        elseif type(info) == "string" then
+            MsgPreview:DismissByThread(info, info, nil)
+        end
+    end)
+
     ns:On("CHAT_UPDATED", function()
         if not (ns.UI and ns.UI.IsChatThreadVisible) then return end
         for _, slot in ipairs(MsgPreview.activeSlots) do
             if slot.item and slot.item.threadKey and ns.UI:IsChatThreadVisible(slot.item.threadKey) then
+                slot._readDismissed = true
                 MpBeginCollapseSlot(slot)
             end
         end

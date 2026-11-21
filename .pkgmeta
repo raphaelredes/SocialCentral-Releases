@@ -9,6 +9,7 @@ ignore:
   - AGENTS.md
   - Assets
   - CODEBASE_INDEX.md
+  - docs
   - README.md
   - SECURITY_POLICY.md
   - scripts

@@ -85,8 +85,11 @@ Search.SYNONYM_GROUPS = {
     { "profile", "perfil", "conta", "account", "cuenta", "personagem", "character", "personaje", "preset", "predefinicao", "padrao", "default", "reset", "redefinir", "restaurar" },
     { "dnd", "perturbe", "disturb", "molestar", "foco", "focus" },
     { "alt", "alts", "ouro", "gold", "oro", "mochila", "bag", "bags", "banco", "bank", "item", "itens", "items", "inventario", "tooltip", "tooltips", "dica", "dicas", "nota", "notas", "note", "notes" },
-    { "watchlist", "who", "cooldown", "recarga", "nearby", "perto", "cerca", "evitar", "avoid", "bloqueado", "blocked", "ignore", "ignorar", "amigo", "amigos", "friend", "friends", "favorito", "favorites" },
-    { "chat", "conversa", "conversas", "conversations", "conversacion", "sala", "salas", "room", "rooms", "mensagem", "mensagens", "message", "messages", "mensaje", "historico", "history", "espelhar", "mirror", "eco", "echo", "spam", "boost", "wts", "update", "atualizacao", "versao", "version", "github" },
+    { "watchlist", "who", "cooldown", "recarga", "nearby", "perto", "cerca", "evitar", "avoid", "bloqueado", "blocked", "bloquear", "block", "ignore", "ignorar", "ignorados", "amigo", "amigos", "friend", "friends", "favorito", "favorites" },
+    { "chat", "conversa", "conversas", "conversations", "conversacion", "sala", "salas", "room", "rooms", "mensagem", "mensagens", "message", "messages", "mensaje", "historico", "history", "espelhar", "mirror", "eco", "echo", "spam", "antispam", "rmt", "flood", "escudo", "shield", "boost", "wts", "update", "atualizacao", "versao", "version", "github", "canal", "canais", "channel", "channels", "correio", "mail", "mailbox", "scroll", "rolagem", "desplazamiento" },
+    { "mention", "mentions", "mencao", "mencoes", "mencion", "menciones", "keyword", "keywords", "palavra", "palavras", "apelido", "apelidos", "nickname", "nicknames", "apodo", "apodos" },
+    { "url", "urls", "link", "links", "enlace", "enlaces", "discord", "copiar", "copy", "copychat", "export", "exportar" },
+    { "recipe", "recipes", "receita", "receitas", "receta", "recetas", "craft", "craftavel", "craftable", "profissao", "profissoes", "profession", "professions", "profesion", "tooltip", "dica" },
 }
 
 Search.synonymLookup = {}
@@ -227,6 +230,7 @@ function Search.IsEntryModuleEnabled(entry)
     elseif modKey == "watch" then return s.moduleWatchlistEnabled ~= false
     elseif modKey == "nearby" then return s.moduleNearbyEnabled ~= false
     elseif modKey == "chat" then return s.moduleChatEnabled ~= false
+    elseif modKey == "officialChat" then return s.embedOfficialChat ~= false
     end
     return true
 end
@@ -894,19 +898,158 @@ local function SetWidgetEnabled(w, enabled)
     end
 end
 
+local function ScrollToSectionHeader(pageFrame, headerFs)
+    local sf = Search.scrollFrame
+    if not (sf and pageFrame and headerFs and pageFrame:IsShown()) then
+        return
+    end
+    local pTop = pageFrame.GetTop and pageFrame:GetTop()
+    local hTop = headerFs.GetTop and headerFs:GetTop()
+    if pTop and hTop then
+        local relY = pTop - hTop
+        local maxRange = (sf.GetVerticalScrollRange and sf:GetVerticalScrollRange()) or 0
+        local destScroll = math.max(0, math.min(maxRange, relY - 14))
+        if sf.SetVerticalScroll then
+            sf:SetVerticalScroll(destScroll)
+        end
+    end
+    local b = Search.beaconFrame
+    if not b then
+        b = CreateFrame("Frame", nil, pageFrame, "BackdropTemplate")
+        b:EnableMouse(false)
+        if b.SetBackdrop then
+            b:SetBackdrop({
+                bgFile = "Interface\\Buttons\\WHITE8X8",
+                edgeFile = "Interface\\Buttons\\WHITE8X8",
+                edgeSize = 2,
+            })
+        end
+        Search.beaconFrame = b
+    end
+    b:SetParent(pageFrame)
+    b:SetFrameLevel(math.max((pageFrame.GetFrameLevel and pageFrame:GetFrameLevel() or 5) + 12, 24))
+    b:ClearAllPoints()
+    b:SetPoint("TOPLEFT", headerFs, "TOPLEFT", -6, 4)
+    b:SetPoint("BOTTOMRIGHT", headerFs, "BOTTOMLEFT", 530, -4)
+    if b.SetBackdropColor then
+        b:SetBackdropColor(1.0, 0.82, 0.22, 0.16)
+        b:SetBackdropBorderColor(1.0, 0.84, 0.24, 0.96)
+    end
+    b:SetAlpha(1)
+    b:Show()
+    local elapsed = 0
+    local dur = 1.8
+    b:SetScript("OnUpdate", function(self, dt)
+        elapsed = elapsed + (dt or 0)
+        if elapsed >= dur or not pageFrame:IsShown() then
+            Search.StopBeacon()
+            return
+        end
+        local wave = 0.55 + 0.45 * math.sin(elapsed * 9.0)
+        local fade = (elapsed > 1.2) and (1 - ((elapsed - 1.2) / 0.6)) or 1.0
+        self:SetAlpha(math.max(0, math.min(1, wave * fade)))
+    end)
+end
+
+local function ReflowPageSectionBar(pageFrame)
+    local bar = pageFrame and pageFrame._scSectionBar
+    if not (bar and pageFrame._scSections and #pageFrame._scSections > 0) then
+        return
+    end
+    local p = ns.Theme and ns.Theme.GetPalette and ns.Theme:GetPalette()
+    if ns.Theme and ns.Theme.ApplyBackdrop then
+        ns.Theme:ApplyBackdrop(bar, "surface", p)
+    end
+    local maxW = math.max(460, ((pageFrame.GetWidth and pageFrame:GetWidth()) or 590) - 24)
+    bar:SetWidth(maxW)
+    local x, y, rowH = 8, -22, 20
+    local innerMax = maxW - 16
+    for idx, sec in ipairs(pageFrame._scSections) do
+        local btn = sec.btn
+        if btn then
+            local lbl = string.format("%d. %s", idx, sec.title or "")
+            ns.Theme:SetButtonText(btn, lbl)
+            ns.Theme:AutoFitButton(btn, 84, 12, math.min(265, innerMax))
+            ns.Theme:StyleButton(btn, "default")
+            local bw = btn:GetWidth() or 110
+            if x > 8 and (x + bw) > innerMax then
+                x = 8
+                y = y - (rowH + 4)
+            end
+            btn:ClearAllPoints()
+            btn:SetPoint("TOPLEFT", bar, "TOPLEFT", x, y)
+            btn:Show()
+            x = x + bw + 5
+        end
+    end
+    bar:SetHeight(math.abs(y) + rowH + 6)
+end
+
+local function EnsurePageSectionBar(pageFrame)
+    if not (pageFrame and pageFrame._isSettingsPage) then
+        return nil
+    end
+    if pageFrame._scSectionBar then
+        return pageFrame._scSectionBar
+    end
+    local bar = CreateFrame("Frame", nil, pageFrame, "BackdropTemplate")
+    bar:SetPoint("TOPLEFT", pageFrame, "TOPLEFT", 10, -4)
+    bar:SetSize(566, 52)
+    local hdr = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hdr:SetPoint("TOPLEFT", bar, "TOPLEFT", 8, -5)
+    hdr:SetText("|cffffd24d" .. L["Quick Jump to Section:"] .. "|r")
+    bar.hdr = hdr
+    pageFrame._scSectionBar = bar
+    pageFrame._scSections = {}
+    syncFns[#syncFns + 1] = function()
+        ReflowPageSectionBar(pageFrame)
+    end
+    return bar
+end
+
 local function AddSectionHeader(parent, text, anchorTo, yOffset, helpTitle, helpWhat, helpHow)
+    local secBar = EnsurePageSectionBar(parent)
     local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     if anchorTo then
         fs:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, yOffset or -16)
+    elseif secBar then
+        fs:SetPoint("TOPLEFT", secBar, "BOTTOMLEFT", 0, yOffset or -12)
     else
         fs:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, yOffset or -8)
     end
-    fs:SetText(text)
+    local secIdx = (parent and parent._scSections) and (#parent._scSections + 1) or nil
+    local displayHeading = secIdx and string.format("%d. %s", secIdx, text or "") or (text or "")
+    fs:SetText(displayHeading)
     if ns.Theme and ns.Theme.DecorateSectionHeader then
         ns.Theme:DecorateSectionHeader(parent, fs, math.min(540, math.max(320, (parent:GetWidth() or 590) - 24)))
     end
     if helpTitle then
         HelpBtn(parent, fs, helpTitle, helpWhat, helpHow)
+    end
+    if secBar and parent._scSections then
+        local jBtn = ns.Theme:CreateButton(secBar, 120, 20, displayHeading, "default")
+        jBtn:SetScript("OnClick", function()
+            ScrollToSectionHeader(parent, fs)
+        end)
+        parent._scSections[#parent._scSections + 1] = {
+            title = text or "",
+            header = fs,
+            btn = jBtn,
+        }
+        if #parent._scSections >= 2 then
+            local topBtn = ns.Theme:CreateButton(parent, 64, 18, "↑ " .. L["Top"], "default")
+            ns.Theme:AutoFitButton(topBtn, 52, 10, 96)
+            topBtn:SetPoint("LEFT", fs, "TOPLEFT", 482, -2)
+            topBtn:SetScript("OnClick", function()
+                if Search.scrollFrame and Search.scrollFrame.SetVerticalScroll then
+                    Search.scrollFrame:SetVerticalScroll(0)
+                end
+            end)
+            syncFns[#syncFns + 1] = function()
+                ns.Theme:StyleButton(topBtn, "default")
+            end
+        end
+        ReflowPageSectionBar(parent)
     end
     Search.buildSectionTitle = text or ""
     Search.buildSectionHelp = {
@@ -914,6 +1057,21 @@ local function AddSectionHeader(parent, text, anchorTo, yOffset, helpTitle, help
         description = helpWhat,
         howText = helpHow,
     }
+    return fs
+end
+
+local function CreateFieldLabel(parent, text, anchorTo, yOffset, helpTitle, helpWhat, helpHow)
+    local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    if anchorTo then
+        fs:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, yOffset or -10)
+    else
+        fs:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, yOffset or -8)
+    end
+    fs:SetText(text)
+    if helpTitle then
+        HelpBtn(parent, fs, helpTitle, helpWhat, helpHow)
+    end
+    Search.SetPendingMeta(text, helpTitle, helpWhat, helpHow)
     return fs
 end
 
@@ -1151,6 +1309,7 @@ local function CollectDisabledNotificationNames()
     if watchOn and s.alerts and s.alerts.toast == false then out[#out + 1] = L["Watchlist Online Alerts"] end
     if chatOn and s.addonMsgToast == false then out[#out + 1] = L["Floating Message Popups"] end
     if chatOn and s.msgPreviewEnabled == false then out[#out + 1] = L["Minimap Message Previews"] end
+    if chatOn and s.mentionAlertsEnabled == false then out[#out + 1] = L["Mentions & Keywords Radar"] end
     if chatOn and s.chatSound == false then out[#out + 1] = L["Chat Sounds (Master)"] end
     if wbOn and s.worldBuffsAlerts == false then out[#out + 1] = L["World Buff Drop Alerts"] end
     if wbOn and s.worldBuffsExpiryAlert == false then out[#out + 1] = L["World Buff Expiry Warning"] end
@@ -1364,10 +1523,19 @@ local function BuildShortcutAutoOpenSection(ov, anchor, deps, refs, NotifySettin
 end
 
 local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSettingsBeforeJump)
+    local profHeader = AddSectionHeader(
+        ov,
+        L["Profile & 1-Click Presets"],
+        nil,
+        -6,
+        L["Help: 1-Click Presets"],
+        L["Instantly switch between Full Suite, Friends & Chat Only, or Ultra-Light (Alts & Notes) presets, then fine-tune any checkbox below."],
+        L["Use 'Ultra-Light' on bank or crafting alts to pause all background scanners, popups, and extra Blizzard window tabs."]
+    )
     local charProfCb = CreateCheckbox(
         ov,
         L["Use separate settings profile for this character"],
-        nil,
+        profHeader,
         -6,
         function() return ns.IsCharProfileEnabled and ns:IsCharProfileEnabled() end,
         function(checked)
@@ -1452,6 +1620,12 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.embedGuildWindow = true
             s.embedCharacterWindow = true
             s.embedWorldMap = true
+            s.embedOfficialChat = true
+            s.embedLfgMirrorBar = true
+            s.embedMailPicker = true
+            s.embedProfessionWindow = true
+            s.tooltipRecipeAlts = true
+            s.guildRecipeReply = true
             s.spotterEnabled = true
             s.moduleWatchlistEnabled = true
             s.moduleNearbyEnabled = true
@@ -1464,6 +1638,11 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.embedGuildWindow = false
             s.embedCharacterWindow = true
             s.embedWorldMap = false
+            s.embedOfficialChat = true
+            s.embedLfgMirrorBar = false
+            s.embedMailPicker = true
+            s.embedProfessionWindow = true
+            s.tooltipRecipeAlts = true
             s.spotterEnabled = false
             s.moduleWatchlistEnabled = true
             s.moduleNearbyEnabled = true
@@ -1476,6 +1655,12 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.embedGuildWindow = false
             s.embedCharacterWindow = true
             s.embedWorldMap = false
+            s.embedOfficialChat = false
+            s.embedLfgMirrorBar = false
+            s.embedMailPicker = false
+            s.embedProfessionWindow = false
+            s.tooltipRecipeAlts = false
+            s.guildRecipeReply = false
             s.spotterEnabled = false
             s.moduleWatchlistEnabled = false
             s.moduleNearbyEnabled = false
@@ -1549,15 +1734,15 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
 
     local winGrid = CreateFrame("Frame", nil, ov)
     winGrid:SetPoint("TOPLEFT", winToggleHeader, "BOTTOMLEFT", 0, -4)
-    winGrid:SetSize(600, 154)
+    winGrid:SetSize(600, 214)
 
     local winLeft = CreateFrame("Frame", nil, winGrid)
     winLeft:SetPoint("TOPLEFT", winGrid, "TOPLEFT", 0, 0)
-    winLeft:SetSize(294, 152)
+    winLeft:SetSize(294, 212)
 
     local winRight = CreateFrame("Frame", nil, winGrid)
     winRight:SetPoint("TOPLEFT", winLeft, "TOPRIGHT", 10, 0)
-    winRight:SetSize(294, 152)
+    winRight:SetSize(294, 212)
 
     refs.winGrid, refs.winLeft, refs.winRight = winGrid, winLeft, winRight
 
@@ -1593,13 +1778,29 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Attaches the My Alts side-tab (gold vault, equipped items, bags, and bank search) inside Blizzard's Character (C) window."],
         L["Uncheck to disable the My Alts module, bag/bank snapshots, and alt item tooltip counts completely."]
     )
-    CreateGridCheckbox(
+    local embMapCb = CreateGridCheckbox(
         winLeft, embCharCb, -4, L["World Buffs on Map (M)"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.embedWorldMap ~= false end,
         function(checked) ns.db.settings.embedWorldMap = checked; NotifySettingChanged("WORLD_BUFFS_UPDATED") end,
         L["Help: Integrate World Map (M)"],
         L["Enables the entire World Buffs module: World Map (M) badge & pins, drop alerts, timers, and guild buff sync."],
         L["Uncheck to turn off the entire World Buffs module and disable all World Buff options in Radar & Map."]
+    )
+    local embOffChatCb = CreateGridCheckbox(
+        winLeft, embMapCb, -4, L["Official Chat (ChatFrame)"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.embedOfficialChat ~= false end,
+        function(checked) ns.db.settings.embedOfficialChat = checked; NotifySettingChanged("CHAT_UPDATED") end,
+        L["Help: Official Chat (ChatFrame)"],
+        L["Master switch for SocialCentral features injected directly into Blizzard's official Chat windows (short channels, sender badges, Copy Chat, fast scroll, and [SC] button)."],
+        L["Uncheck here or click [SC] beside Chat -> 'Disable in this window' to keep Blizzard Chat 100% vanilla."]
+    )
+    CreateGridCheckbox(
+        winLeft, embOffChatCb, -4, L["Official Professions (Recipes)"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.embedProfessionWindow ~= false end,
+        function(checked) ns.db.settings.embedProfessionWindow = checked; NotifySettingChanged("ALTS_UPDATED") end,
+        L["Help: Official Professions (Recipes)"],
+        L["Passively catalogs each character's learned recipes when opening Blizzard's Profession window and attaches the standardized [SC] quick control button."],
+        L["Uncheck here or click [SC] inside any Profession window -> 'Disable in this window' to stop indexing recipes and hide the button."]
     )
 
     local modRadarCb = CreateGridCheckbox(
@@ -1634,13 +1835,21 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Master toggle for SocialCentral Conversations, Private Rooms, and addon chat popups/sounds."],
         L["Uncheck to hide Conversations and disable all addon chat popups and chimes."]
     )
-    CreateGridCheckbox(
+    local modGroupCb = CreateGridCheckbox(
         winRight, modChatCb, -4, L["Group & Companions"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.moduleGroupEnabled ~= false end,
         function(checked) ns.db.settings.moduleGroupEnabled = checked; NotifySettingChanged("GROUP_UPDATED") end,
         L["Help: Group Module"],
         L["Master toggle for the Group tab and automatic Recent Companions recording."],
         L["Uncheck to hide the Group tab and stop recording recent party/raid companions."]
+    )
+    CreateGridCheckbox(
+        winRight, modGroupCb, -4, L["Official Mailbox (Alts)"],
+        function() return not ns.db or not ns.db.settings or ns.db.settings.embedMailPicker ~= false end,
+        function(checked) ns.db.settings.embedMailPicker = checked; NotifySettingChanged() end,
+        L["Help: Official Mailbox (Alts)"],
+        L["Attaches the 'Alts v' recipient selector and standardized [SC] quick toggle directly inside Blizzard's Send Mail window."],
+        L["Uncheck here or click [SC] beside the Mailbox field to keep Blizzard's Send Mail window completely unmodified."]
     )
 
     local autoHideGuildCb = CreateCheckbox(
@@ -1681,197 +1890,10 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Resumes notifications automatically as soon as you step back into the open world."]
     )
 
-    local quickNotifHeader = AddSectionHeader(
-        ov,
-        L["Quick Notification Switches (1-Click Summary)"],
-        autoInstSilCb,
-        -12,
-        L["Help: Quick Notification Summary"],
-        L["Master summary switches to silence or enable SocialCentral popups, sounds, and alerts at a glance without scrolling."],
-        L["Each popup notification also has a crossed-bell icon you can click anytime (with a confirmation popup) to silence just that notification."]
-    )
-
-    local qGrid = CreateFrame("Frame", nil, ov)
-    qGrid:SetPoint("TOPLEFT", quickNotifHeader, "BOTTOMLEFT", 0, -4)
-    qGrid:SetSize(600, 148)
-
-    local qLeft = CreateFrame("Frame", nil, qGrid)
-    qLeft:SetPoint("TOPLEFT", qGrid, "TOPLEFT", 0, 0)
-    qLeft:SetSize(294, 146)
-
-    local qRight = CreateFrame("Frame", nil, qGrid)
-    qRight:SetPoint("TOPLEFT", qLeft, "TOPRIGHT", 10, 0)
-    qRight:SetSize(294, 146)
-
-    refs.qGrid, refs.qLeft, refs.qRight = qGrid, qLeft, qRight
-
-    local qFrOnCb = CreateGridCheckbox(
-        qLeft, nil, -2, L["Friend Online (Toast)"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.friendOnlineAlertToast ~= false end,
-        function(checked) ns.db.settings.friendOnlineAlertToast = checked; NotifySettingChanged() end,
-        L["Help: Friend Online Toast"],
-        L["Displays a compact floating Notification Toast when a tracked Favorite or Friend logs into WoW: Forever."],
-        L["Left-click the toast to jump straight to that friend in the Social tab."]
-    )
-    local qFrOffCb = CreateGridCheckbox(
-        qLeft, qFrOnCb, -4, L["Friend Offline (Toast)"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.friendOfflineAlertToast ~= false end,
-        function(checked) ns.db.settings.friendOfflineAlertToast = checked; NotifySettingChanged() end,
-        L["Help: Friend Disconnect Toast"],
-        L["Displays a compact floating Notification Toast when a friend or tracked player logs off or disconnects from WoW."],
-        L["Left-click the toast to view the player in the Social directory."]
-    )
-    local qWlCb = CreateGridCheckbox(
-        qLeft, qFrOffCb, -4, L["Watchlist Online (Toast)"],
-        function() return not ns.db or not ns.db.settings.alerts or ns.db.settings.alerts.toast ~= false end,
-        function(checked) if ns.db and ns.db.settings and ns.db.settings.alerts then ns.db.settings.alerts.toast = checked end; NotifySettingChanged() end,
-        L["Help: Watchlist Toast Alert"],
-        L["Displays a compact floating Notification Toast at the top of the screen when a watched player transitions online (outside muted rows)."],
-        L["Uncheck to stop floating Watchlist toasts globally, or click the bell icon beside any name in the Social/Watchlist window (O) to mute per player."]
-    )
-    local qAddonCb = CreateGridCheckbox(
-        qLeft, qWlCb, -4, L["Addon Messages (Toast)"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgToast ~= false end,
-        function(checked) ns.db.settings.addonMsgToast = checked; NotifySettingChanged() end,
-        L["Help: Floating Notification Toast"],
-        L["Displays a compact, draggable 100%-opaque pill near the top of your screen when a peer messages you via the addon or sends a room invite."],
-        L["Left-click the pill to jump directly to the conversation (deferred automatically after combat), hover to pause, or right-click to dismiss."]
-    )
-
-    local qChatSndCb = CreateGridCheckbox(
-        qRight, nil, -2, L["Chat Sounds (Master)"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.chatSound ~= false end,
-        function(checked) ns.db.settings.chatSound = checked; NotifySettingChanged("CHAT_UPDATED") end,
-        L["Help: Chat Sound Alert"],
-        L["Master switch for incoming conversation sound chimes across SocialCentral."],
-        L["Uncheck to mute all SocialCentral conversation chimes without affecting muted individual threads."]
-    )
-    local qWbCb = CreateGridCheckbox(
-        qRight, qChatSndCb, -4, L["World Buff Alerts"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsAlerts ~= false end,
-        function(checked) ns.db.settings.worldBuffsAlerts = checked; NotifySettingChanged() end,
-        L["Help: World Buff Drop Alerts"],
-        L["Prints a local chat notification whenever an NPC announces the turn-in of Onyxia, Nefarian, Rend Blackhand, or Hakkar heads in town."],
-        L["Alerts you ~6 to 15 seconds before the buff lands so you have time to log in or reposition."]
-    )
-    local qClanLfgCb = CreateGridCheckbox(
-        qRight, qWbCb, -4, L["Clan LFG Alerts"],
-        function() return ns.db and ns.db.settings and ns.db.settings.clanLfgAlertEnabled == true end,
-        function(checked) ns.db.settings.clanLfgAlertEnabled = checked; NotifySettingChanged("CLAN_UPDATED") end,
-        L["Help: Clan Dungeon Alerts"],
-        L["Notifies you in chat (with optional sound and clickable Whisper/Clan links) whenever a guildmate looks for a Dungeon group."],
-        L["Uncheck to stop Guild LFG notifications while still seeing listings inside Group Finder (I)."]
-    )
-    CreateGridCheckbox(
-        qRight, qClanLfgCb, -4, L["Group Avoid Warnings"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.groupAvoidAlert ~= false end,
-        function(checked) ns.db.settings.groupAvoidAlert = checked; NotifySettingChanged() end,
-        L["Help: Group Avoid Warning"],
-        L["Immediately alerts you with a warning toast and chat notice if someone on your Avoid list or linked alts enters your party or raid."],
-        L["Allows you to address toxic encounters or leave before dungeons and raids start."]
-    )
-
-    local bulkActionRow = CreateFrame("Frame", nil, ov)
-    bulkActionRow:SetPoint("TOPLEFT", qGrid, "BOTTOMLEFT", 0, -6)
-    bulkActionRow:SetSize(600, 28)
-
-    local testOvBtn = ns.Theme:CreateButton(bulkActionRow, 150, 24, L["Test Notification Toast"], "default")
-    ns.Theme:AutoFitButton(testOvBtn, 128, 16, 200)
-    testOvBtn:SetPoint("LEFT", bulkActionRow, "LEFT", 0, 0)
-    testOvBtn:SetScript("OnClick", function()
-        if ns.NotificationToast and ns.NotificationToast.ShowTestNotification then
-            ns.NotificationToast:ShowTestNotification()
-        end
-    end)
-
-    local muteAllPopupsBtn = ns.Theme:CreateButton(bulkActionRow, 156, 24, L["Mute All Popups"], "default")
-    ns.Theme:AutoFitButton(muteAllPopupsBtn, 130, 16, 210)
-    muteAllPopupsBtn:SetPoint("LEFT", testOvBtn, "RIGHT", 8, 0)
-    muteAllPopupsBtn:SetScript("OnClick", function()
-        local s = ns.db and ns.db.settings
-        if s then
-            s.friendOnlineAlertToast = false
-            s.friendOfflineAlertToast = false
-            s.addonMsgToast = false
-            s.msgPreviewEnabled = false
-            s.worldBuffsAlerts = false
-            s.worldBuffsExpiryAlert = false
-            s.clanLfgAlertEnabled = false
-            s.clanEventAlertEnabled = false
-            s.clanSignupAlertEnabled = false
-            s.clanEventReminders = false
-            s.spotterScoutAlert = false
-            s.spotterAutoShowHUD = false
-            if s.alerts then s.alerts.toast = false end
-        end
-        if ns.NotificationToast and ns.NotificationToast.DismissAll then
-            ns.NotificationToast:DismissAll()
-        end
-        if ns.MinimapPreview and ns.MinimapPreview.Dismiss then
-            ns.MinimapPreview:Dismiss(false)
-        end
-        NotifySettingChanged("CLAN_UPDATED")
-        for _, sync in ipairs(syncFns) do sync() end
-    end)
-
-    local enablePopupsBtn = ns.Theme:CreateButton(bulkActionRow, 164, 24, L["Restore Popups"], "primary")
-    ns.Theme:AutoFitButton(enablePopupsBtn, 130, 16, 210)
-    enablePopupsBtn:SetPoint("LEFT", muteAllPopupsBtn, "RIGHT", 8, 0)
-    enablePopupsBtn:SetScript("OnClick", function()
-        local s = ns.db and ns.db.settings
-        if s then
-            s.friendOnlineAlertToast = true
-            s.friendOfflineAlertToast = true
-            s.addonMsgToast = true
-            s.msgPreviewEnabled = true
-            s.msgPreviewPromptAnswered = true
-            s.worldBuffsAlerts = true
-            s.worldBuffsExpiryAlert = true
-            s.clanLfgAlertEnabled = true
-            s.clanSignupAlertEnabled = true
-            s.clanEventReminders = true
-            s.spotterScoutAlert = true
-            s.groupAvoidAlert = true
-            s.spotterAutoShowHUD = true
-            s.doNotDisturb = false
-            if s.alerts then s.alerts.toast = true end
-        end
-        NotifySettingChanged("CLAN_UPDATED")
-        for _, sync in ipairs(syncFns) do sync() end
-    end)
-
-    HelpBtn(
-        bulkActionRow,
-        enablePopupsBtn,
-        L["Help: Quick Popup Controls"],
-        L["Quickly test notification positioning, silence social floating popups (while keeping Group Avoid safety warnings), or restore all notification popups in 1 click."],
-        L["Click 'Mute All Popups' to uncheck popup alerts, or use 'Do Not Disturb' above to pause without overwriting your checkboxes."]
-    )
-    Search.Register({
-        kind = "action",
-        title = L["Mute All Popups"],
-        actionLabel = L["Mute All Popups"],
-        widget = muteAllPopupsBtn,
-        helpTitle = L["Help: Quick Popup Controls"],
-        description = L["Quickly test notification positioning, silence social floating popups (while keeping Group Avoid safety warnings), or restore all notification popups in 1 click."],
-        howText = L["Click 'Mute All Popups' to uncheck popup alerts, or use 'Do Not Disturb' above to pause without overwriting your checkboxes."],
-        onTrigger = function() muteAllPopupsBtn:Click() end,
-    })
-    Search.Register({
-        kind = "action",
-        title = L["Restore Popups"],
-        actionLabel = L["Restore Popups"],
-        widget = enablePopupsBtn,
-        helpTitle = L["Help: Quick Popup Controls"],
-        description = L["Quickly test notification positioning, silence social floating popups (while keeping Group Avoid safety warnings), or restore all notification popups in 1 click."],
-        howText = L["Click 'Mute All Popups' to uncheck popup alerts, or use 'Do Not Disturb' above to pause without overwriting your checkboxes."],
-        onTrigger = function() enablePopupsBtn:Click() end,
-    })
-
     local winHeader = AddSectionHeader(
         ov,
         L["Official Game Windows (Native Tabs)"],
-        bulkActionRow,
+        autoInstSilCb,
         -12,
         L["Help: Official Game Windows"],
         L["SocialCentral features live directly inside Blizzard's native windows via side-tabs and toolbar buttons. Use this Settings window for configuration and quick shortcuts."],
@@ -1889,6 +1911,7 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         { mod = "alts", label = L["My Alts (C)"], variant = "default" },
         { mod = "chat", label = L["Conversations (Chat)"], variant = "default" },
         { mod = "buffs", label = L["World Buffs (M)"], variant = "default" },
+        { mod = "runs", label = L["Dungeon & Raid Log"], variant = "default" },
         { mod = "hub", label = L["Unified Hub (/sc hub)"], variant = "default" },
     }
     local jumpButtons = {}
@@ -1902,6 +1925,12 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
                     ns.UI:ShowHub()
                 elseif ns.UI then
                     ns.UI:Toggle()
+                end
+            elseif spec.mod == "runs" then
+                if ns.UI and ns.UI.OpenGroupRunsView then
+                    ns.UI:OpenGroupRunsView()
+                elseif ns.UI and ns.UI.ShowHub then
+                    ns.UI:ShowHub("group")
                 end
             elseif ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
                 ns.LFGFrameTab:OpenOfficialModule(spec.mod)
@@ -1919,11 +1948,17 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         for _, item in ipairs(jumpButtons) do
             local modOk = (item.mod == "hub")
                 or (item.mod == "chat" and ((not Compat or not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")))
-                or (item.mod ~= "chat" and ((not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled(item.mod)))
+                or (item.mod == "runs" and ((not Compat or not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("group")))
+                or (item.mod ~= "chat" and item.mod ~= "runs" and ((not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled(item.mod)))
             if not modOk then
                 item.btn:Hide()
             else
                 item.btn:Show()
+                if item.mod == "runs" then
+                    local rCnt = ns.Group and ns.Group.GetDungeonHistoryCount and ns.Group:GetDungeonHistoryCount() or 0
+                    ns.Theme:SetButtonText(item.btn, rCnt > 0 and (L["Dungeon & Raid Log"] .. " (" .. tostring(rCnt) .. ")") or L["Dungeon & Raid Log"])
+                    ns.Theme:AutoFitButton(item.btn, 118, 18, 250)
+                end
                 local bw = math.min(maxW, math.max(96, item.btn:GetWidth() or 140))
                 if x > 0 and (x + bw) > maxW then
                     x = 0
@@ -1937,17 +1972,71 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         jumpGrid:SetSize(maxW, math.abs(y) + rowH + 2)
     end
 
-    AddDeps(deps.defaultBtns, testOvBtn, muteAllPopupsBtn)
-    AddDeps(deps.primaryBtns, enablePopupsBtn)
+    local runLogHeader = AddSectionHeader(
+        ov,
+        L["Dungeon & Raid Group Log"],
+        jumpGrid,
+        -12,
+        L["Help: Dungeon & Raid Log"],
+        L["Passively records started dungeon and raid groups, teammate names, roles, bosses defeated, and total run time from the first enemy pulled until the run ends."],
+        L["View anytime in /sc -> Dungeon & Raid Log (or /sc runs). Uses zero combat-log scanning and keeps up to 80 compact runs so PC impact stays negligible."]
+    )
+    Search.SetPendingMeta({
+        keywords = "dungeon raid masmorra historico log group tempo run duration",
+    })
+    local runLogCb = CreateCheckbox(
+        ov,
+        L["Record started dungeon & raid groups (teammates & total time)"],
+        runLogHeader,
+        -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.dungeonRunLogEnabled ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then
+                ns.db.settings.dungeonRunLogEnabled = checked
+            end
+            NotifySettingChanged("GROUP_UPDATED")
+        end,
+        L["Help: Record Dungeon & Raid Log"],
+        L["Automatically saves each dungeon or raid that actually enters combat, storing teammate names, classes, roles, bosses, and duration from the 1st enemy pulled until a member leaves or the run finishes."],
+        L["Uncheck to pause recording. Already recorded runs remain available in the Dungeon & Raid Log until you clear them."]
+    )
+    local openRunsBtn = ns.Theme:CreateButton(ov, 186, 22, L["Open Dungeon & Raid Log"], "primary")
+    ns.Theme:AutoFitButton(openRunsBtn, 160, 18, 260)
+    openRunsBtn:SetPoint("TOPLEFT", runLogCb, "BOTTOMLEFT", 24, -6)
+    openRunsBtn:SetScript("OnClick", function()
+        CloseSettingsBeforeJump()
+        if ns.UI and ns.UI.OpenGroupRunsView then
+            ns.UI:OpenGroupRunsView()
+        elseif ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub("group")
+        end
+    end)
+    HelpBtn(
+        ov,
+        openRunsBtn,
+        L["Help: Dungeon & Raid Log"],
+        L["Opens your searchable progression history of started dungeon and raid groups with all teammates and run times."],
+        L["You can also open this view anytime via '/sc runs' or from the Group tab inside the main SocialCentral window."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Open Dungeon & Raid Log"],
+        actionLabel = L["Open Dungeon & Raid Log"],
+        keywords = "dungeon raid masmorra historico log group tempo run duration",
+        widget = openRunsBtn,
+        helpTitle = L["Help: Dungeon & Raid Log"],
+        description = L["Opens your searchable progression history of started dungeon and raid groups with all teammates and run times."],
+        howText = L["You can also open this view anytime via '/sc runs' or from the Group tab inside the main SocialCentral window."],
+        onTrigger = function() openRunsBtn:Click() end,
+    })
+
+    AddDeps(deps.primaryBtns, openRunsBtn)
+    AddDeps(deps.group, runLogCb, openRunsBtn)
     refs.presetBtns = {
         { mode = "full", btn = presetFullBtn },
         { mode = "social", btn = presetSocialBtn },
         { mode = "ultralight", btn = presetLiteBtn },
     }
-    AddDeps(deps.wb, qWbCb)
-    AddDeps(deps.guild, qClanLfgCb)
-    AddDeps(deps.watch, qWlCb)
-    AddDeps(deps.chat, qAddonCb, qChatSndCb)
 end
 
 local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySettingChanged)
@@ -2162,28 +2251,10 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         end
     end)
 
-    local testQueueMpBtn = ns.Theme:CreateButton(mpBtnRow, 134, 22, L["Test Queue (4)"], "default")
-    ns.Theme:AutoFitButton(testQueueMpBtn, 108, 14, 180)
-    testQueueMpBtn:SetPoint("LEFT", testMpBtn, "RIGHT", 6, 0)
-    testQueueMpBtn:SetScript("OnClick", function()
-        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
-            ns.MinimapPreview:ShowTestPreview("queue")
-        end
-    end)
-
-    local setupMpBtn = ns.Theme:CreateButton(mpBtnRow, 146, 22, L["Open Setup Prompt"], "default")
-    ns.Theme:AutoFitButton(setupMpBtn, 118, 14, 195)
-    setupMpBtn:SetPoint("LEFT", testQueueMpBtn, "RIGHT", 6, 0)
-    setupMpBtn:SetScript("OnClick", function()
-        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
-            ns.MinimapPreview:ShowTestPreview("setup")
-        end
-    end)
-
     HelpBtn(
-        mpBtnRow, setupMpBtn, L["Help: Test Minimap Preview"],
-        L["Plays a live sample message preview beside your Minimap (with expand and close-to-SC-icon animation) or re-opens the first-time setup assistant."],
-        L["You can also test specific channels anytime using '/sc preview whisper', 'bnet', 'group', 'guild', or 'setup'."]
+        mpBtnRow, testMpBtn, L["Help: Test Minimap Preview"],
+        L["Plays a live sample message preview beside your Minimap with expand and close-to-SC-icon animation."],
+        L["You can also test specific channels anytime using '/sc preview whisper', 'bnet', 'group', or 'guild'."]
     )
 
     Search.Register({
@@ -2192,39 +2263,11 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         actionLabel = L["Test Minimap Preview"],
         widget = testMpBtn,
         helpTitle = L["Help: Test Minimap Preview"],
-        description = L["Plays a live sample message preview beside your Minimap (with expand and close-to-SC-icon animation) or re-opens the first-time setup assistant."],
-        howText = L["You can also test specific channels anytime using '/sc preview whisper', 'bnet', 'group', 'guild', or 'setup'."],
+        description = L["Plays a live sample message preview beside your Minimap with expand and close-to-SC-icon animation."],
+        howText = L["You can also test specific channels anytime using '/sc preview whisper', 'bnet', 'group', or 'guild'."],
         onTrigger = function()
             if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
                 ns.MinimapPreview:ShowTestPreview("")
-            end
-        end,
-    })
-    Search.Register({
-        kind = "action",
-        title = L["Test Queue (4)"],
-        actionLabel = L["Test Queue (4)"],
-        widget = testQueueMpBtn,
-        helpTitle = L["Help: Preview Max Visible"],
-        description = L["Sets how many message previews can appear stacked simultaneously beside your Minimap (1 to 3 rows, newest at the bottom)."],
-        howText = L["Any additional incoming messages wait cleanly in a queue (+N) and rise smoothly into view as soon as the top preview finishes and returns to the SC icon."],
-        onTrigger = function()
-            if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
-                ns.MinimapPreview:ShowTestPreview("queue")
-            end
-        end,
-    })
-    Search.Register({
-        kind = "action",
-        title = L["Open Setup Prompt"],
-        actionLabel = L["Open Setup Prompt"],
-        widget = setupMpBtn,
-        helpTitle = L["Help: Minimap Message Preview Setup"],
-        description = L["Shows a compact animated preview with the sender's icon and opening words on the left side of your Minimap whenever a matching message arrives, then closes back into the SC icon."],
-        howText = L["Choose which message types should trigger previews and whether to automatically silence them inside Dungeons, Raids, Battlegrounds, or Combat. You can change this anytime in Settings -> Notifications."],
-        onTrigger = function()
-            if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
-                ns.MinimapPreview:ShowTestPreview("setup")
             end
         end,
     })
@@ -2286,8 +2329,8 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         end,
     })
 
-    AddDeps(deps.defaultBtns, testMpBtn, testQueueMpBtn, setupMpBtn, moveMpPosBtn, resetMpPosBtn)
-    AddDeps(deps.chat, mpMasterCb, mpWhisperCb, mpBNetCb, mpGroupCb, mpGuildCb, mpRoomsCb, mpSilDngCb, mpSilRaidCb, mpSilPvpCb, mpSilCombatCb, durLbl, durStep, maxVisLbl, maxVisStep, testMpBtn, testQueueMpBtn, setupMpBtn, moveMpPosBtn, resetMpPosBtn)
+    AddDeps(deps.defaultBtns, testMpBtn, moveMpPosBtn, resetMpPosBtn)
+    AddDeps(deps.chat, mpMasterCb, mpWhisperCb, mpBNetCb, mpGroupCb, mpGuildCb, mpRoomsCb, mpSilDngCb, mpSilRaidCb, mpSilPvpCb, mpSilCombatCb, durLbl, durStep, maxVisLbl, maxVisStep, testMpBtn, moveMpPosBtn, resetMpPosBtn)
     return mpPosRow
 end
 
@@ -2319,37 +2362,226 @@ local function BuildMinimapBadgeStyleControls(nf, anchorTo, deps, NotifySettingC
         end
     end)
 
-    local testFusionBtn = ns.Theme:CreateButton(nf, 152, 22, L["Test Fusion Badge"], "default")
-    ns.Theme:AutoFitButton(testFusionBtn, 134, 16, 210)
-    testFusionBtn:SetPoint("TOPLEFT", styleRow, "BOTTOMLEFT", 0, -6)
-    testFusionBtn:SetScript("OnClick", function()
-        if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
-            ns.MinimapPreview:ShowTestPreview("badge fusion")
+    AddDeps(deps.chat, styleLbl, styleRow)
+    return styleRow
+end
+
+local function BuildMentionsSettingsSection(nf, anchorTo, deps, NotifySettingChanged)
+    local mentionHeader = AddSectionHeader(
+        nf,
+        L["Mentions & Keywords Radar"],
+        anchorTo,
+        -14,
+        L["Help: Mentions & Keywords Radar"],
+        L["Passively alerts you with a Notification Toast and logs messages in the Mentions Radar whenever your name, personal nicknames, or custom keywords appear in selected chat channels."],
+        L["Separate multiple entries with commas (e.g. 'Onyxia, Crusader, Portal, Tank'). Respects Do Not Disturb and Auto-Silence in Instances."]
+    )
+
+    local enableCb = CreateCheckbox(
+        nf, L["Enable Mentions & Keywords Radar"], mentionHeader, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.mentionAlertsEnabled ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.mentionAlertsEnabled = checked end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Mentions & Keywords Radar"],
+        L["Passively alerts you with a Notification Toast and logs messages in the Mentions Radar whenever your name, personal nicknames, or custom keywords appear in selected chat channels."],
+        L["Separate multiple entries with commas (e.g. 'Onyxia, Crusader, Portal, Tank'). Respects Do Not Disturb and Auto-Silence in Instances."]
+    )
+
+    local soundCb = CreateCheckbox(
+        nf, L["Play audio chime on mention or keyword match"], enableCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.mentionSound ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.mentionSound = checked end
+        end,
+        L["Help: Mention Sound"],
+        L["Plays a subtle audio chime whenever a monitored mention or custom keyword is detected in chat."],
+        L["Uncheck for silent visual toast and Mentions Radar logging only."]
+    )
+
+    local nickRow = CreateFrame("Frame", nil, nf)
+    nickRow:SetPoint("TOPLEFT", soundCb, "BOTTOMLEFT", 0, -6)
+    nickRow:SetSize(540, 44)
+    local nickLbl = nickRow:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    nickLbl:SetPoint("TOPLEFT", 2, 0)
+    nickLbl:SetPoint("TOPRIGHT", -4, 0)
+    nickLbl:SetJustifyH("LEFT")
+    nickLbl:SetText(L["Personal nicknames / alt names (comma-separated):"])
+    local nickIn = ns.Theme:CreateEditBox(nickRow, { width = 320, height = 22, maxLetters = 160, clearButton = true })
+    nickIn:SetPoint("TOPLEFT", nickLbl, "BOTTOMLEFT", 0, -4)
+    nickIn:SetScript("OnEnterPressed", function(selfBox)
+        if ns.db and ns.db.settings then ns.db.settings.mentionNicknames = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
+        selfBox:ClearFocus()
+    end)
+    nickIn:SetScript("OnEditFocusLost", function(selfBox)
+        if ns.db and ns.db.settings then ns.db.settings.mentionNicknames = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
+    end)
+    HelpBtn(nickRow, nickIn, L["Help: Mention Nicknames"], L["Extra personal nicknames or alt names to watch for in addition to your current character's first name."], L["Separate entries with commas (e.g. 'Rapha, MainName'). Matching is case- and accent-insensitive."])
+    Search.Register({
+        kind = "input",
+        title = L["Personal nicknames / alt names (comma-separated):"],
+        widget = nickIn,
+        helpTitle = L["Help: Mention Nicknames"],
+        description = L["Extra personal nicknames or alt names to watch for in addition to your current character's first name."],
+        howText = L["Separate entries with commas (e.g. 'Rapha, MainName'). Matching is case- and accent-insensitive."],
+    })
+    syncFns[#syncFns + 1] = function()
+        if not nickIn:HasFocus() then
+            nickIn:SetText((ns.db and ns.db.settings and ns.db.settings.mentionNicknames) or "")
+        end
+    end
+
+    local kwRow = CreateFrame("Frame", nil, nf)
+    kwRow:SetPoint("TOPLEFT", nickRow, "BOTTOMLEFT", 0, -6)
+    kwRow:SetSize(540, 44)
+    local kwLbl = kwRow:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    kwLbl:SetPoint("TOPLEFT", 2, 0)
+    kwLbl:SetPoint("TOPRIGHT", -4, 0)
+    kwLbl:SetJustifyH("LEFT")
+    kwLbl:SetText(L["Custom monitored keywords (comma-separated):"])
+    local kwIn = ns.Theme:CreateEditBox(kwRow, { width = 320, height = 22, maxLetters = 200, clearButton = true })
+    kwIn:SetPoint("TOPLEFT", kwLbl, "BOTTOMLEFT", 0, -4)
+    kwIn:SetScript("OnEnterPressed", function(selfBox)
+        if ns.db and ns.db.settings then ns.db.settings.mentionKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
+        selfBox:ClearFocus()
+    end)
+    kwIn:SetScript("OnEditFocusLost", function(selfBox)
+        if ns.db and ns.db.settings then ns.db.settings.mentionKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
+    end)
+    HelpBtn(kwRow, kwIn, L["Help: Custom Monitored Keywords"], L["Watch selected chat channels for custom words or short phrases such as bosses, dungeons, enchants, or portals."], L["Separate keywords with commas (e.g. 'Onyxia, Crusader, Portal, BRD'). Matching ignores accents and capitalization."])
+    Search.Register({
+        kind = "input",
+        title = L["Custom monitored keywords (comma-separated):"],
+        widget = kwIn,
+        helpTitle = L["Help: Custom Monitored Keywords"],
+        description = L["Watch selected chat channels for custom words or short phrases such as bosses, dungeons, enchants, or portals."],
+        howText = L["Separate keywords with commas (e.g. 'Onyxia, Crusader, Portal, BRD'). Matching ignores accents and capitalization."],
+    })
+    syncFns[#syncFns + 1] = function()
+        if not kwIn:HasFocus() then
+            kwIn:SetText((ns.db and ns.db.settings and ns.db.settings.mentionKeywords) or "")
+        end
+    end
+
+    local chGuildCb = CreateCheckbox(
+        nf, L["Monitor Guild & Officer chat for mentions/keywords"], kwRow, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.mentionWatchGuild ~= false end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.mentionWatchGuild = checked end end,
+        L["Help: Monitor Guild Mentions"],
+        L["Checks incoming Guild and Officer messages for your name, nicknames, and custom keywords."],
+        L["Keep enabled so you never miss guildmates calling for you."]
+    )
+    local chGroupCb = CreateCheckbox(
+        nf, L["Monitor Party, Raid & Instance chat for mentions/keywords"], chGuildCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.mentionWatchGroup ~= false end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.mentionWatchGroup = checked end end,
+        L["Help: Monitor Group Mentions"],
+        L["Checks incoming Party, Raid, and Instance messages for your name, nicknames, and custom keywords."],
+        L["Useful when raid leaders call your name or role in chat."]
+    )
+    local chSayCb = CreateCheckbox(
+        nf, L["Monitor Say & Yell for mentions/keywords"], chGroupCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.mentionWatchSayYell ~= false end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.mentionWatchSayYell = checked end end,
+        L["Help: Monitor Say & Yell Mentions"],
+        L["Checks nearby Say and Yell messages for your name, nicknames, and custom keywords."],
+        L["Great for noticing nearby players talking to you in cities or dungeons."]
+    )
+    local chPubCb = CreateCheckbox(
+        nf, L["Monitor Public channels (Trade/General/World) for mentions/keywords"], chSayCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.mentionWatchPublic ~= false end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.mentionWatchPublic = checked end end,
+        L["Help: Monitor Public Channel Mentions"],
+        L["Checks Trade, General, World, and LFG channels for your name, nicknames, and custom keywords (automatically skipping blocked/spam messages)."],
+        L["Add keywords like 'Crusader' or 'Onyxia' above to get instant alerts from busy city chats."]
+    )
+
+    local testRow = CreateFrame("Frame", nil, nf)
+    testRow:SetSize(540, 26)
+    testRow:SetPoint("TOPLEFT", chPubCb, "BOTTOMLEFT", 0, -6)
+    local testBtn = ns.Theme:CreateButton(testRow, 160, 22, L["Test Mention Alert"], "default")
+    ns.Theme:AutoFitButton(testBtn, 136, 16, 220)
+    testBtn:SetPoint("LEFT", testRow, "LEFT", 4, 0)
+    testBtn:SetScript("OnClick", function()
+        if ns.Chat and ns.Chat.TriggerTestMention then
+            ns.Chat:TriggerTestMention()
+        end
+    end)
+    HelpBtn(testRow, testBtn, L["Help: Test Mention Alert"], L["Sends a local sample mention to preview the Notification Toast, chime, and Mentions Radar log."], L["Zero network messages are sent; purely local preview."])
+    Search.Register({
+        kind = "action",
+        title = L["Test Mention Alert"],
+        actionLabel = L["Test Mention Alert"],
+        widget = testBtn,
+        helpTitle = L["Help: Test Mention Alert"],
+        description = L["Sends a local sample mention to preview the Notification Toast, chime, and Mentions Radar log."],
+        howText = L["Zero network messages are sent; purely local preview."],
+        onTrigger = function() testBtn:Click() end,
+    })
+
+    AddDeps(deps.chat, enableCb, soundCb, nickLbl, nickIn, kwLbl, kwIn, chGuildCb, chGroupCb, chSayCb, chPubCb, testBtn)
+    AddDeps(deps.defaultBtns, testBtn)
+    return testRow
+end
+
+local function BuildChatSoundCooldownControls(nf, anchorTo, deps, NotifySettingChanged)
+    local cdLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    cdLbl:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 4, -6)
+    cdLbl:SetText(L["Minimum interval between message sounds (anti-spam):"])
+    HelpBtn(
+        nf, cdLbl, L["Help: Message Sound Cooldown"],
+        L["Prevents rapid spam from repeating the message notification sound. No new message chime will play until at least this many seconds have passed (6 seconds by default, 3 seconds minimum)."],
+        L["Applies globally and per sender across Whispers, Battle.net, Rooms, Mentions, and mirrored Guild/Group chat."]
+    )
+    Search.SetPendingMeta(
+        L["Minimum interval between message sounds (anti-spam):"],
+        L["Help: Message Sound Cooldown"],
+        L["Prevents rapid spam from repeating the message notification sound. No new message chime will play until at least this many seconds have passed (6 seconds by default, 3 seconds minimum)."],
+        L["Applies globally and per sender across Whispers, Battle.net, Rooms, Mentions, and mirrored Guild/Group chat."]
+    )
+    local cdStep = CreateStepperRow(
+        nf, cdLbl, -4, 3, 30, "s",
+        function()
+            local v = ns.db and ns.db.settings and tonumber(ns.db.settings.chatSoundCooldown) or 6
+            if v < 3 then v = 3 end
+            return v
+        end,
+        function(val)
+            if ns.db and ns.db.settings then
+                ns.db.settings.chatSoundCooldown = math.max(3, math.floor(tonumber(val) or 6))
+                NotifySettingChanged("CHAT_UPDATED")
+            end
+        end
+    )
+
+    local testSoundBtn = ns.Theme:CreateButton(nf, 160, 22, L["Test Message Sound"], "default")
+    ns.Theme:AutoFitButton(testSoundBtn, 140, 16, 220)
+    testSoundBtn:SetPoint("LEFT", cdStep._scPlus or cdStep, "RIGHT", 16, 0)
+    testSoundBtn:SetScript("OnClick", function()
+        if ns.Chat and ns.Chat.PlayTestNotificationSound then
+            ns.Chat:PlayTestNotificationSound()
         end
     end)
     HelpBtn(
-        nf, testFusionBtn, L["Help: Test Fusion Badge"],
-        L["Plays the live multi-color fusion animation on your Minimap icon with sample Whisper (pink), Group (blue), and Guild (green) counters."],
-        L["Hover over the SC minimap icon after fusion to see the numbers split cleanly around the icon, or type '/sc preview clear' to reset."]
+        nf, testSoundBtn, L["Help: Test Message Sound"],
+        L["Plays the incoming message notification chime so you can verify your volume and anti-spam interval."],
+        L["Click repeatedly to confirm the anti-spam cooldown prevents rapid re-triggering within the chosen interval."]
     )
     Search.Register({
         kind = "action",
-        title = L["Test Fusion Badge"],
-        actionLabel = L["Test Fusion Badge"],
-        widget = testFusionBtn,
-        helpTitle = L["Help: Test Fusion Badge"],
-        description = L["Plays the live multi-color fusion animation on your Minimap icon with sample Whisper (pink), Group (blue), and Guild (green) counters."],
-        howText = L["Hover over the SC minimap icon after fusion to see the numbers split cleanly around the icon, or type '/sc preview clear' to reset."],
-        onTrigger = function()
-            if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
-                ns.MinimapPreview:ShowTestPreview("badge fusion")
-            end
-        end,
+        title = L["Test Message Sound"],
+        actionLabel = L["Test Message Sound"],
+        widget = testSoundBtn,
+        helpTitle = L["Help: Test Message Sound"],
+        description = L["Plays the incoming message notification chime so you can verify your volume and anti-spam interval."],
+        howText = L["Click repeatedly to confirm the anti-spam cooldown prevents rapid re-triggering within the chosen interval."],
+        onTrigger = function() testSoundBtn:Click() end,
     })
 
-    AddDeps(deps.defaultBtns, testFusionBtn)
-    AddDeps(deps.chat, styleLbl, styleRow, testFusionBtn)
-    return testFusionBtn
+    AddDeps(deps.defaultBtns, testSoundBtn)
+    AddDeps(deps.chat, cdLbl, cdStep, testSoundBtn)
+    return cdStep
 end
 
 local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
@@ -2385,6 +2617,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
             s.addonMsgToast = true
             s.msgPreviewEnabled = true
             s.msgPreviewPromptAnswered = true
+            s.mentionAlertsEnabled = true
             s.worldBuffsAlerts = true
             s.worldBuffsExpiryAlert = true
             s.clanLfgAlertEnabled = true
@@ -2565,30 +2798,6 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         onTrigger = function() resetToastPosBtn:Click() end,
     })
 
-    local viewToastTutBtn = ns.Theme:CreateButton(toastResetRow, 150, 22, L["Toast Tutorial"], "default")
-    ns.Theme:AutoFitButton(viewToastTutBtn, 126, 16, 210)
-    viewToastTutBtn:SetPoint("LEFT", rtpHelp or resetToastPosBtn, "RIGHT", 12, 0)
-    viewToastTutBtn:SetScript("OnClick", function()
-        if ns.NotificationToast and ns.NotificationToast.ShowTutorial then
-            ns.NotificationToast:ShowTutorial(true)
-        end
-    end)
-    HelpBtn(
-        toastResetRow, viewToastTutBtn, L["Floating Notifications & Pagination"],
-        L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
-        L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."]
-    )
-    Search.Register({
-        kind = "action",
-        title = L["Toast Tutorial"],
-        actionLabel = L["Toast Tutorial"],
-        widget = viewToastTutBtn,
-        helpTitle = L["Floating Notifications & Pagination"],
-        description = L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
-        howText = L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
-        onTrigger = function() viewToastTutBtn:Click() end,
-    })
-
     local toastDurLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     toastDurLbl:SetPoint("TOPLEFT", toastResetRow, "BOTTOMLEFT", 4, -6)
     toastDurLbl:SetText(L["Notification toast display duration (seconds):"])
@@ -2739,30 +2948,6 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         onTrigger = function() testToastBtn:Click() end,
     })
 
-    local testToastMultiBtn = ns.Theme:CreateButton(nf, 196, 22, L["Test Toast Pagination (3)"], "default")
-    ns.Theme:AutoFitButton(testToastMultiBtn, 166, 18, 260)
-    testToastMultiBtn:SetPoint("LEFT", ttHelp or testToastBtn, "RIGHT", 12, 0)
-    testToastMultiBtn:SetScript("OnClick", function()
-        if ns.NotificationToast and ns.NotificationToast.ShowTestNotification then
-            ns.NotificationToast:ShowTestNotification("queue")
-        end
-    end)
-    HelpBtn(
-        nf, testToastMultiBtn, L["Floating Notifications & Pagination"],
-        L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
-        L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."]
-    )
-    Search.Register({
-        kind = "action",
-        title = L["Test Toast Pagination (3)"],
-        actionLabel = L["Test Toast Pagination (3)"],
-        widget = testToastMultiBtn,
-        helpTitle = L["Floating Notifications & Pagination"],
-        description = L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."],
-        howText = L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
-        onTrigger = function() testToastMultiBtn:Click() end,
-    })
-
     local chatSettingsHeader = AddSectionHeader(
         nf, L["Conversations & Sound Alerts"], testToastBtn, -14,
         L["Help: Conversations & Sounds"],
@@ -2777,8 +2962,9 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Master switch for incoming conversation sound chimes across SocialCentral."],
         L["Uncheck to mute all SocialCentral conversation chimes without affecting muted individual threads."]
     )
+    local chatSoundCdRow = BuildChatSoundCooldownControls(nf, chatSoundCb, deps, NotifySettingChanged)
     local chatSoundWhispersCb = CreateCheckbox(
-        nf, L["Play chime on Whispers & Battle.net"], chatSoundCb, -6,
+        nf, L["Play chime on Whispers & Battle.net"], chatSoundCdRow, -6,
         function() return ns.db and ns.db.settings.chatSoundWhispers ~= false end,
         function(checked) ns.db.settings.chatSoundWhispers = checked end,
         L["Help: Whisper Sounds"],
@@ -2849,8 +3035,8 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["When checked, clicking Send or pressing Enter in Conversations sends Whispers, Battle.net, Guild, and Group messages immediately without needing a second Enter."],
         L["Strictly triggered only by your manual Send click/Enter outside combat or boss chat lockdowns; safely falls back to pre-filling the chat bar when restricted."]
     )
-    AddDeps(deps.defaultBtns, unmuteAlertsBtn, unmutePlayersBtn, resetToastPosBtn, viewToastTutBtn, testToastBtn, testToastMultiBtn)
-    AddDeps(deps.chat, addonToastCb, resetToastPosBtn, viewToastTutBtn, toastDurLbl, toastDurStep, testToastMultiBtn, addonEchoCb, addonEchoSentCb, addonFlashCb, chatSoundCb, chatSoundWhispersCb, chatSoundRoomsCb, chatSoundAllianceCb, chatSoundGuildCb, chatSoundGroupCb, chatMirrorCb, chatChannelUnreadCb, addonDirectCb, chatDirectOfficialCb)
+    AddDeps(deps.defaultBtns, unmuteAlertsBtn, unmutePlayersBtn, resetToastPosBtn, testToastBtn)
+    AddDeps(deps.chat, addonToastCb, resetToastPosBtn, toastDurLbl, toastDurStep, addonEchoCb, addonEchoSentCb, addonFlashCb, chatSoundCb, chatSoundWhispersCb, chatSoundRoomsCb, chatSoundAllianceCb, chatSoundGuildCb, chatSoundGroupCb, chatMirrorCb, chatChannelUnreadCb, addonDirectCb, chatDirectOfficialCb)
 
     local guildAlertsHeader = AddSectionHeader(
         nf, L["Guild, LFG & World Buff Alerts"], chatDirectOfficialCb, -14,
@@ -2980,7 +3166,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Shows chat, sound, and popup alerts when a guildmate shares an Enemy Scout sighting."],
         L["Uncheck to mute shared Guild Scout alerts without disabling your own Target Radar."]
     )
-    CreateCheckbox(
+    local avoidGrpCb = CreateCheckbox(
         nf, L["Warn in chat and toast if an Avoided player joins your party/raid"], scoutAlertCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.groupAvoidAlert ~= false end,
         function(checked) ns.db.settings.groupAvoidAlert = checked; NotifySettingChanged() end,
@@ -2988,6 +3174,8 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Immediately alerts you with a warning toast and chat notice if someone on your Avoid list or linked alts enters your party or raid."],
         L["Allows you to address toxic encounters or leave before dungeons and raids start."]
     )
+
+    BuildMentionsSettingsSection(nf, avoidGrpCb, deps, NotifySettingChanged)
 
     AddDeps(deps.wb, buffAlertCb, buffSoundCb, buffExpiryCb)
     AddDeps(deps.guild, clanLfgAlertCb, clanLfgDngOnlyCb, clanLfgNearLevelCb, clanLfgAlertSoundCb, clanFilterLbl, clanFilterInput, clanEventAlertCb, clanSignupAlertCb, clanEventRemindersCb, scoutAlertCb)
@@ -3016,8 +3204,33 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         L["Automatically opens the floating Target Radar HUD when a flagged player appears while you are out of combat."],
         L["Close the HUD manually at any time or use '/sc radar' to toggle it."]
     )
+
+    local spotterDurLbl = CreateFieldLabel(
+        rd,
+        L["Target Radar toast display duration (seconds):"],
+        spotterAutoHudCb,
+        -8,
+        L["Help: Target Radar Toast Duration"],
+        L["Controls how many seconds a detected target stays visible on the floating Target Radar toast before disappearing automatically (10 seconds by default)."],
+        L["Adjust from 5 to 60 seconds. Selecting the target in-game or hovering over the Radar toast pauses the countdown automatically, and leaving the area via teleport or Hearthstone clears it immediately."]
+    )
+    local spotterDurStep = CreateStepperRow(
+        rd, spotterDurLbl, -4, 5, 60, "s",
+        function()
+            local v = ns.db and ns.db.settings and tonumber(ns.db.settings.spotterToastDuration)
+            return (v and v >= 5) and math.min(60, math.floor(v + 0.5)) or 10
+        end,
+        function(val)
+            if ns.db and ns.db.settings then
+                ns.db.settings.spotterToastDuration = math.max(5, math.min(60, math.floor(tonumber(val) or 10)))
+                NotifySettingChanged()
+            end
+        end,
+        1
+    )
+
     local spotterPlateArrowCb = CreateCheckbox(
-        rd, L["Show animated red arrow above Radar target nameplate (when visible)"], spotterAutoHudCb, -6,
+        rd, L["Show animated red arrow above Radar target nameplate (when visible)"], spotterDurStep, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNameplateArrow ~= false end,
         function(checked) ns.db.settings.spotterNameplateArrow = checked; NotifySettingChanged() end,
         L["Help: Animated Target Nameplate Arrow"],
@@ -3040,8 +3253,39 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         L["Displays a high-contrast, thick-outlined banner with your selected target's name, level, guild, and stance right above their head whenever their nameplate is shown."],
         L["Keep enabled so clicking any player or target makes their overhead name unmistakable; press Shift+V / V if nameplates are hidden."]
     )
+    local spotterIgnoreGroupCb = CreateCheckbox(
+        rd, L["Ignore current Party/Raid members on automatic Target Radar"], spotterTargetHighlightCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterIgnoreGroup ~= false end,
+        function(checked) ns.db.settings.spotterIgnoreGroup = checked; NotifySettingChanged() end,
+        L["Help: Spotter Ignore Group"],
+        L["Hides automatic Target Radar popups for players who are already in your current Party or Raid group."],
+        L["Recommended to keep checked to avoid screen clutter during dungeons and raids."]
+    )
+    local spotterSoundCb = CreateCheckbox(
+        rd, L["Play alert chime on Enemy / Ally Clan sighting"], spotterIgnoreGroupCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterSound ~= false end,
+        function(checked) ns.db.settings.spotterSound = checked; NotifySettingChanged() end,
+        L["Help: Spotter Sound"],
+        L["Plays a distinct alert chime when an Enemy, Ally, or Same-Clan player triggers a Spotter notification."],
+        L["Uncheck for silent visual alerts only."]
+    )
+    local spotterLockCb = CreateCheckbox(
+        rd, L["Lock Target Radar HUD position"], spotterSoundCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.spotterLockHUD == true end,
+        function(checked) ns.db.settings.spotterLockHUD = checked; NotifySettingChanged() end,
+        L["Help: Lock Target Radar HUD"],
+        L["Prevents accidental dragging of the floating Target Radar pill during gameplay."],
+        L["Check after placing Target Radar where you want it on screen."]
+    )
+
+    local catHeader = AddSectionHeader(
+        rd, L["Radar Monitored Categories"], spotterLockCb, -14,
+        L["Help: Radar Monitored Categories"],
+        L["Choose which social and guild diplomacy categories automatically appear on your floating Target Radar when spotted nearby."],
+        L["Uncheck any category you prefer not to track on screen; you can still track individual players manually via right-click."]
+    )
     local spotterEnemyCb = CreateCheckbox(
-        rd, L["Notify when an Enemy Clan player appears on screen"], spotterTargetHighlightCb, -6,
+        rd, L["Notify when an Enemy Clan player appears on screen"], catHeader, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.spotterNotifyEnemy ~= false end,
         function(checked) ns.db.settings.spotterNotifyEnemy = checked; NotifySettingChanged() end,
         L["Help: Spotter Enemy Alerts"],
@@ -3070,7 +3314,7 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         function(checked) ns.db.settings.spotterNotifyFriends = checked; NotifySettingChanged() end,
         L["Help: Spotter Friends Radar"],
         L["Displays WoW Friends and Battle.net Friends on Target Radar and shows range when selected."],
-        L["Combine with 'Ignore Party/Raid members' below to hide friends once you already invited them into your group."]
+        L["Combine with 'Ignore Party/Raid members' above to hide friends once you already invited them into your group."]
     )
     local spotterBlockedCb = CreateCheckbox(
         rd, L["Notify when a Blocked or Avoided player appears nearby"], spotterFriendsCb, -6,
@@ -3088,36 +3332,12 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         L["Highlights and notifies when one of your own guildmates appears on screen."],
         L["Uncheck if you only want notifications for Ally or Enemy guilds."]
     )
-    local spotterIgnoreGroupCb = CreateCheckbox(
-        rd, L["Ignore current Party/Raid members on automatic Target Radar"], spotterSameCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterIgnoreGroup ~= false end,
-        function(checked) ns.db.settings.spotterIgnoreGroup = checked; NotifySettingChanged() end,
-        L["Help: Spotter Ignore Group"],
-        L["Hides automatic Target Radar popups for players who are already in your current Party or Raid group."],
-        L["Recommended to keep checked to avoid screen clutter during dungeons and raids."]
-    )
-    local spotterSoundCb = CreateCheckbox(
-        rd, L["Play alert chime on Enemy / Ally Clan sighting"], spotterIgnoreGroupCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.spotterSound ~= false end,
-        function(checked) ns.db.settings.spotterSound = checked; NotifySettingChanged() end,
-        L["Help: Spotter Sound"],
-        L["Plays a distinct alert chime when an Enemy, Ally, or Same-Clan player triggers a Spotter notification."],
-        L["Uncheck for silent visual alerts only."]
-    )
-    local spotterLockCb = CreateCheckbox(
-        rd, L["Lock Target Radar HUD position"], spotterSoundCb, -6,
-        function() return ns.db and ns.db.settings and ns.db.settings.spotterLockHUD == true end,
-        function(checked) ns.db.settings.spotterLockHUD = checked; NotifySettingChanged() end,
-        L["Help: Lock Target Radar HUD"],
-        L["Prevents accidental dragging of the floating Target Radar pill during gameplay."],
-        L["Check after placing Target Radar where you want it on screen."]
-    )
 
     local buffsHeader = AddSectionHeader(
-        rd, L["World Buffs (Classic & Forever)"], spotterLockCb, -14,
+        rd, L["World Buffs (Classic & Forever)"], spotterSameCb, -14,
         L["Help: World Buffs"],
-        L["Tracks active Classic World Buffs, detects city drop announcements in real time, and lets you report your current buffs to party, raid, or guild."],
-        L["Click 'Post in Chat' to pre-fill your buffs into chat, or browse the list to check sources, drop timers, and WoW Forever raid-suppression rules."]
+        L["Tracks active Classic World Buffs, detects city drop announcements in real time, and lets you monitor drop timers and server rules."],
+        L["Browse the Buffs list to check active timers, buff sources, and WoW Forever raid-suppression rules."]
     )
     local buffMapPinsCb = CreateCheckbox(
         rd, L["Show World Buff pins on World Map (M)"], buffsHeader, -6,
@@ -3130,10 +3350,31 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         L["Shows interactive World Buff pins at Classic/Forever drop zones and open-world sources directly on the World Map (M)."],
         L["Leave checked to see buff spots directly on the map with hover tooltips, or uncheck to keep only the compact corner summary badge."]
     )
+    local songPinsCb = CreateCheckbox(
+        rd, L["Show Felwood Songflower node pins on World Map (M)"], buffMapPinsCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSongflowerPins ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.worldBuffsSongflowerPins = checked end
+            if ns.LFGFrameTab and ns.LFGFrameTab.RefreshWorldMapBuffs then ns.LFGFrameTab:RefreshWorldMapBuffs() end
+        end,
+        L["Help: Felwood Songflower Map Pins"],
+        L["Shows all Cleansed Songflower spawn locations directly inside Blizzard's Felwood World Map alongside Darkmoon Faire location pins."],
+        L["Toggle anytime from here or via the [SC] button on the World Map (M)."]
+    )
+    local readyWbCb = CreateCheckbox(
+        rd, L["Alert outside combat when capital World Buff cooldown finishes"], songPinsCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsReadyAlert ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.worldBuffsReadyAlert = checked end
+        end,
+        L["Help: Capital World Buff Ready Alerts"],
+        L["Dispatches a chat line and notification toast outside combat right as a tracked Onyxia, Nefarian, Rend, or Might of Stormwind cooldown resets to Ready."],
+        L["Works passively using your locally observed or guild-synced World Buff drop timestamps."]
+    )
 
     local openRadarBtn = ns.Theme:CreateButton(rd, 178, 24, L["Open Target Radar"], "primary")
     ns.Theme:AutoFitButton(openRadarBtn, 150, 18, 240)
-    openRadarBtn:SetPoint("TOPLEFT", buffMapPinsCb, "BOTTOMLEFT", 4, -10)
+    openRadarBtn:SetPoint("TOPLEFT", readyWbCb, "BOTTOMLEFT", 4, -10)
     openRadarBtn:SetScript("OnClick", function()
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then ns.SpotterHUD:Toggle() end
     end)
@@ -3152,33 +3393,6 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
     end)
     HelpBtn(rd, openBuffsBtn, L["Help: Open World Buffs Tracker"], L["Opens the World Buffs tab in SocialCentral to view active buffs, drop timers, and classic buff sources."], L["Click to review all classic world buffs and their status in WoW Forever."])
 
-    local viewTutorialBtn = ns.Theme:CreateButton(rd, 210, 24, L["View Nameplate Tutorial"], "default")
-    ns.Theme:AutoFitButton(viewTutorialBtn, 180, 20, 280)
-    viewTutorialBtn:SetPoint("TOPLEFT", openRadarBtn, "BOTTOMLEFT", 0, -8)
-    viewTutorialBtn:SetScript("OnClick", function()
-        if ns.db and ns.db.settings then ns.db.settings.spotterPlateTutorialShown = false end
-        if ns.SpotterHUD and ns.SpotterHUD.ShowNameplateTutorial then ns.SpotterHUD:ShowNameplateTutorial(true) end
-    end)
-    HelpBtn(rd, viewTutorialBtn, L["Help: Nameplate Tutorial"], L["Opens the quick visual guide showing how to toggle friendly (Shift+V) and enemy (V) nameplates so the Radar arrow and badges appear over targets."], L["Click anytime to review how nameplate shortcuts work alongside Target Radar."])
-
-    local viewRadarTutorialBtn = ns.Theme:CreateButton(rd, 210, 24, L["View Radar Tutorial"], "default")
-    ns.Theme:AutoFitButton(viewRadarTutorialBtn, 170, 20, 260)
-    viewRadarTutorialBtn:SetPoint("LEFT", viewTutorialBtn, "RIGHT", 32, 0)
-    viewRadarTutorialBtn:SetScript("OnClick", function()
-        if ns.db and ns.db.settings then ns.db.settings.spotterRadarTutorialShown = false end
-        if ns.SpotterHUD and ns.SpotterHUD.ShowRadarTutorial then ns.SpotterHUD:ShowRadarTutorial(true) end
-    end)
-    HelpBtn(rd, viewRadarTutorialBtn, L["Help: Radar Tutorial"], L["Opens the quick visual guide explaining how Target Radar proximity tracking, range display, and click-to-target work."], L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."])
-    Search.Register({
-        kind = "action",
-        title = L["Open Target Radar"],
-        actionLabel = L["Open Target Radar"],
-        widget = openRadarBtn,
-        helpTitle = L["Help: Open Target Radar"],
-        description = L["Manually opens the Target Radar HUD to test target tracking and range display."],
-        howText = L["Click this button or type '/sc radar' to show or hide the floating radar."],
-        onTrigger = function() openRadarBtn:Click() end,
-    })
     Search.Register({
         kind = "action",
         title = L["Open World Buffs Tracker"],
@@ -3189,36 +3403,17 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         howText = L["Click to review all classic world buffs and their status in WoW Forever."],
         onTrigger = function() openBuffsBtn:Click() end,
     })
-    Search.Register({
-        kind = "action",
-        title = L["View Nameplate Tutorial"],
-        actionLabel = L["View Nameplate Tutorial"],
-        widget = viewTutorialBtn,
-        helpTitle = L["Help: Nameplate Tutorial"],
-        description = L["Opens the quick visual guide showing how to toggle friendly (Shift+V) and enemy (V) nameplates so the Radar arrow and badges appear over targets."],
-        howText = L["Click anytime to review how nameplate shortcuts work alongside Target Radar."],
-        onTrigger = function() viewTutorialBtn:Click() end,
-    })
-    Search.Register({
-        kind = "action",
-        title = L["View Radar Tutorial"],
-        actionLabel = L["View Radar Tutorial"],
-        widget = viewRadarTutorialBtn,
-        helpTitle = L["Help: Radar Tutorial"],
-        description = L["Opens the quick visual guide explaining how Target Radar proximity tracking, range display, and click-to-target work."],
-        howText = L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."],
-        onTrigger = function() viewRadarTutorialBtn:Click() end,
-    })
 
     local resetRadarTabBtn = ns.Theme:CreateButton(rd, 190, 22, L["Restore Defaults (This Tab)"], "default")
     ns.Theme:AutoFitButton(resetRadarTabBtn, 160, 16, 250)
-    resetRadarTabBtn:SetPoint("TOPLEFT", viewTutorialBtn, "BOTTOMLEFT", 0, -12)
+    resetRadarTabBtn:SetPoint("TOPLEFT", openRadarBtn, "BOTTOMLEFT", 0, -12)
     resetRadarTabBtn:SetScript("OnClick", function()
         local function DoReset()
             local s = ns.db and ns.db.settings
             if s then
                 s.spotterEnabled = true
                 s.spotterAutoShowHUD = true
+                s.spotterToastDuration = 10
                 s.spotterNameplateArrow = true
                 s.spotterNameplateBadges = true
                 s.spotterNameplateTargetHighlight = true
@@ -3233,6 +3428,8 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
                 s.spotterLockHUD = false
                 s.embedWorldMap = true
                 s.worldBuffsMapPins = true
+                s.worldBuffsSongflowerPins = true
+                s.worldBuffsReadyAlert = true
             end
             NotifySettingChanged("WORLD_BUFFS_UPDATED")
             for _, sync in ipairs(syncFns) do sync() end
@@ -3250,13 +3447,472 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         end
     end)
 
-    AddDeps(deps.defaultBtns, openBuffsBtn, viewTutorialBtn, viewRadarTutorialBtn, resetRadarTabBtn)
+    AddDeps(deps.defaultBtns, openBuffsBtn, resetRadarTabBtn)
     AddDeps(deps.primaryBtns, openRadarBtn)
-    AddDeps(deps.wb, buffMapPinsCb, openBuffsBtn)
-    AddDeps(deps.radar, spotterAutoHudCb, spotterPlateArrowCb, spotterBadgesCb, spotterTargetHighlightCb, spotterEnemyCb, spotterAllyCb, spotterWatchlistCb, spotterFriendsCb, spotterBlockedCb, spotterSameCb, spotterIgnoreGroupCb, spotterSoundCb, spotterLockCb, openRadarBtn, viewTutorialBtn, viewRadarTutorialBtn)
+    AddDeps(deps.wb, buffMapPinsCb, songPinsCb, readyWbCb, openBuffsBtn)
+    AddDeps(deps.radar, spotterAutoHudCb, spotterDurLbl, spotterDurStep, spotterPlateArrowCb, spotterBadgesCb, spotterTargetHighlightCb, spotterEnemyCb, spotterAllyCb, spotterWatchlistCb, spotterFriendsCb, spotterBlockedCb, spotterSameCb, spotterIgnoreGroupCb, spotterSoundCb, spotterLockCb, openRadarBtn)
 end
 
-local function BuildGeneralTab(gn, deps)
+local function BuildOfficialChatSettingsSection(gn, anchorTo, deps, NotifySettingChanged)
+    local offChatHeader = AddSectionHeader(
+        gn,
+        L["Official Chat & Quick [SC] Controls"],
+        anchorTo,
+        -14,
+        L["Help: Official Chat Enhancements"],
+        L["Controls SocialCentral enhancements directly inside Blizzard's official Chat windows (short channels, clickable sender tags, EditBox history, fast mouse wheel scroll, Copy Official Chat, and the quick [SC] control button)."],
+        L["Every feature below can be toggled here or directly via the standardized [SC] button beside Blizzard's Official Chat, Mailbox, and Group Finder (I)."]
+    )
+
+    local embOfficialChatCb = CreateCheckbox(
+        gn, L["Enable Official Chat Enhancements (ChatFrame)"], offChatHeader, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.embedOfficialChat ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.embedOfficialChat = checked end
+            if NotifySettingChanged then NotifySettingChanged("CHAT_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CHAT_UPDATED") end
+        end,
+        L["Help: Master Official Chat Toggle"],
+        L["Master switch for SocialCentral features injected directly into Blizzard's official Chat windows."],
+        L["Uncheck to return Blizzard's Chat frames to 100% vanilla while keeping all settings ready to re-enable anytime."]
+    )
+
+    local quickBtnCb = CreateCheckbox(
+        gn, L["Show quick [SC] control button beside Official Chat"], embOfficialChatCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.officialChatQuickButton ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialChatQuickButton = checked end
+            if NotifySettingChanged then NotifySettingChanged() else ns:Emit("SETTINGS_UPDATED") end
+        end,
+        L["Help: Quick [SC] Chat Button"],
+        L["Shows the standardized [SC] quick-menu button beside Blizzard's main Chat frame so you can toggle Short Channels, Sender Badges, History, or Copy Chat in 1 click."],
+        L["You can also right-click the button to hide it anytime and re-enable it right here."]
+    )
+
+    local shortChanCb = CreateCheckbox(
+        gn, L["Shorten public channel names in Official Chat ([LFG], [Trade], [Defense])"], quickBtnCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.officialChatShortChannels ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialChatShortChannels = checked end
+            if NotifySettingChanged then NotifySettingChanged() else ns:Emit("SETTINGS_UPDATED") end
+        end,
+        L["Help: Short Official Channels"],
+        L["Replaces verbose channel prefixes such as [LookingForGroup] or [General - Stormwind City] with compact [LFG], [General], and [Defense] tags inside official chat."],
+        L["Applies cleanly via Blizzard's message filter with zero UI taint."]
+    )
+
+    local senderTagsCb = CreateCheckbox(
+        gn, L["Show [Lv], [Main], and [+]/[AVOID] sender tags in Official Chat"], shortChanCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.officialChatSenderTags ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialChatSenderTags = checked end
+            if NotifySettingChanged then NotifySettingChanged() else ns:Emit("SETTINGS_UPDATED") end
+        end,
+        L["Help: Official Sender Badges"],
+        L["Prepends cached [Lv.X], linked [Main], and saved [+] Good / [AVOID] reputation badges beside known players directly in Blizzard's chat window."],
+        L["Reads strictly from already-known guild, friend, or Social notes memory (zero automatic /who queries)."]
+    )
+
+    local editHistCb = CreateCheckbox(
+        gn, L["Remember typed Official Chat history across /reload (Alt+Up / Down)"], senderTagsCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.officialChatEditHistory ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialChatEditHistory = checked end
+            if NotifySettingChanged then NotifySettingChanged() else ns:Emit("SETTINGS_UPDATED") end
+        end,
+        L["Help: Persistent EditBox History"],
+        L["Saves your last 25 sent lines per character (excluding Battle.net tokens for privacy) so you can recall them with Up/Down arrows even after reloading UI."],
+        L["Uncheck anytime to stop saving chat bar history across reloads."]
+    )
+
+    local fastScrollCb = CreateCheckbox(
+        gn, L["Fast scroll in Official Chat (Shift+Wheel top/bottom, Ctrl+Wheel page)"], editHistCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.officialChatFastScroll ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialChatFastScroll = checked end
+            if NotifySettingChanged then NotifySettingChanged() else ns:Emit("SETTINGS_UPDATED") end
+        end,
+        L["Help: Fast Official Chat Scroll"],
+        L["Lets you jump straight to the top or bottom of official chat with Shift+MouseWheel, or scroll 4 lines at a time with Ctrl+MouseWheel."],
+        L["Disable anytime if you prefer standard single-line WoW mousewheel scrolling."]
+    )
+
+    local copyChatRow = CreateFrame("Frame", nil, gn)
+    copyChatRow:SetSize(540, 26)
+    copyChatRow:SetPoint("TOPLEFT", fastScrollCb, "BOTTOMLEFT", 0, -6)
+
+    local copyChatBtn = ns.Theme:CreateButton(copyChatRow, 176, 22, L["Copy Official Chat"], "default")
+    ns.Theme:AutoFitButton(copyChatBtn, 150, 16, 220)
+    copyChatBtn:SetPoint("LEFT", copyChatRow, "LEFT", 4, 0)
+    copyChatBtn:SetScript("OnClick", function()
+        if ns.Chat and ns.Chat.OpenCopyOfficialChat then
+            ns.Chat:OpenCopyOfficialChat(50, 1)
+        end
+    end)
+    HelpBtn(
+        copyChatRow,
+        copyChatBtn,
+        L["Help: Copy Official Chat"],
+        L["Opens a clean Ctrl+C copy window containing the most recent lines rendered in Blizzard's main Official Chat window."],
+        L["You can also use '/sc copychat' (or '/sc copychat 80' to choose how many lines) or click the [SC] button beside Official Chat."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Copy Official Chat"],
+        actionLabel = L["Copy Official Chat"],
+        widget = copyChatBtn,
+        helpTitle = L["Help: Copy Official Chat"],
+        description = L["Opens a clean Ctrl+C copy window containing the most recent lines rendered in Blizzard's main Official Chat window."],
+        howText = L["You can also use '/sc copychat' (or '/sc copychat 80' to choose how many lines) or click the [SC] button beside Official Chat."],
+        onTrigger = function() copyChatBtn:Click() end,
+    })
+
+    AddDeps(deps.officialChat, quickBtnCb, shortChanCb, senderTagsCb, editHistCb, fastScrollCb, copyChatBtn)
+    AddDeps(deps.defaultBtns, copyChatBtn)
+    return copyChatRow
+end
+
+local function BuildChatShieldSettingsSection(gn, anchorTo, deps)
+    local shieldHeader = AddSectionHeader(
+        gn,
+        L["Chat Shield, Account Ignores & Clickable Links"],
+        anchorTo,
+        -14,
+        L["Help: Chat Shield & Account Ignores"],
+        L["Protects your chat across all characters with an unlimited Account Ignore list, optional public Anti-Spam Shield, and 1-click copyable Discord/Web links."],
+        L["Every filtered message is logged transparently in the Filtered Chat Log so nothing legitimate is ever lost silently."]
+    )
+
+    local hideIgnCb = CreateCheckbox(
+        gn, L["Hide official WoW chat messages from Account-Ignored players"], shieldHeader, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.accountIgnoreHideChat ~= false end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.accountIgnoreHideChat = checked end end,
+        L["Help: Hide Account Ignore Chat"],
+        L["Automatically hides messages in Blizzard's chat windows from anyone on your unlimited Account Ignore list without consuming WoW's 50-slot per-character ignore cap."],
+        L["Keep checked to keep ignored spammers and toxic players silent across all your alts."]
+    )
+
+    local antiSpamCb = CreateCheckbox(
+        gn, L["Enable Public Chat Anti-Spam Shield (RMT / gold-sellers / boost spam)"], hideIgnCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.chatAntiSpamEnabled == true end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.chatAntiSpamEnabled = checked end end,
+        L["Help: Public Chat Anti-Spam Shield"],
+        L["Locally hides gold-selling advertisements, RMT/boost spam, and custom blocked phrases from public channels (Trade, General, World, Say, Yell, stranger whispers)."],
+        L["Never blocks Friends, Battle.net Friends, Guildmates, or Group members. Check 'Filtered Chat Log' anytime to review hidden messages."]
+    )
+
+    local floodCb = CreateCheckbox(
+        gn, L["Suppress repeated identical public messages (flood) from strangers"], antiSpamCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.chatAntiSpamBlockFlood ~= false end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.chatAntiSpamBlockFlood = checked end end,
+        L["Help: Anti-Flood Shield"],
+        L["When Anti-Spam Shield is active, hides duplicate identical messages sent by the same stranger in public channels within 45 seconds."],
+        L["Reduces wall-of-text repetition in Trade and World channels without affecting guild or party chat."]
+    )
+
+    local spamKwRow = CreateFrame("Frame", nil, gn)
+    spamKwRow:SetPoint("TOPLEFT", floodCb, "BOTTOMLEFT", 0, -6)
+    spamKwRow:SetSize(540, 44)
+    local spamKwLbl = spamKwRow:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    spamKwLbl:SetPoint("TOPLEFT", 2, 0)
+    spamKwLbl:SetPoint("TOPRIGHT", -4, 0)
+    spamKwLbl:SetJustifyH("LEFT")
+    spamKwLbl:SetText(L["Custom blocked words for Anti-Spam Shield (comma-separated):"])
+    local spamKwIn = ns.Theme:CreateEditBox(spamKwRow, { width = 320, height = 22, maxLetters = 200, clearButton = true })
+    spamKwIn:SetPoint("TOPLEFT", spamKwLbl, "BOTTOMLEFT", 0, -4)
+    spamKwIn:SetScript("OnEnterPressed", function(selfBox)
+        if ns.db and ns.db.settings then ns.db.settings.chatAntiSpamKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
+        selfBox:ClearFocus()
+    end)
+    spamKwIn:SetScript("OnEditFocusLost", function(selfBox)
+        if ns.db and ns.db.settings then ns.db.settings.chatAntiSpamKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
+    end)
+    HelpBtn(spamKwRow, spamKwIn, L["Help: Custom Anti-Spam Words"], L["Add extra words or short phrases to hide in public channels when Anti-Spam Shield is enabled."], L["Separate entries with commas (e.g. 'gdkp, boost, carry'). Ignored for Friends, Guild, and Group members."])
+    Search.Register({
+        kind = "input",
+        title = L["Custom blocked words for Anti-Spam Shield (comma-separated):"],
+        widget = spamKwIn,
+        helpTitle = L["Help: Custom Anti-Spam Words"],
+        description = L["Add extra words or short phrases to hide in public channels when Anti-Spam Shield is enabled."],
+        howText = L["Separate entries with commas (e.g. 'gdkp, boost, carry'). Ignored for Friends, Guild, and Group members."],
+    })
+    syncFns[#syncFns + 1] = function()
+        if not spamKwIn:HasFocus() then
+            spamKwIn:SetText((ns.db and ns.db.settings and ns.db.settings.chatAntiSpamKeywords) or "")
+        end
+    end
+
+    local urlsCb = CreateCheckbox(
+        gn, L["Make Discord invites and web URLs clickable to copy"], spamKwRow, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.chatClickableUrls ~= false end,
+        function(checked) if ns.db and ns.db.settings then ns.db.settings.chatClickableUrls = checked end; ns:Emit("CHAT_UPDATED") end,
+        L["Help: Clickable URLs"],
+        L["Turns Discord invite links (discord.gg/...) and web URLs (https://...) into clickable links in both SocialCentral Conversations and official WoW chat."],
+        L["Click any highlighted link to open SocialCentral's Copy Link popup ready for Ctrl+C."]
+    )
+
+    local actRow = CreateFrame("Frame", nil, gn)
+    actRow:SetSize(540, 26)
+    actRow:SetPoint("TOPLEFT", urlsCb, "BOTTOMLEFT", 0, -6)
+
+    local btnManageIgn = ns.Theme:CreateButton(actRow, 176, 22, L["Manage Account Ignores"], "default")
+    ns.Theme:AutoFitButton(btnManageIgn, 150, 16, 220)
+    btnManageIgn:SetPoint("LEFT", actRow, "LEFT", 4, 0)
+    btnManageIgn:SetScript("OnClick", function()
+        if ns.NavigateToModule then
+            ns:NavigateToModule("social", { socialFilter = "blocked" })
+        end
+    end)
+    local hIgn = HelpBtn(actRow, btnManageIgn, L["Help: Manage Account Ignores"], L["Opens the Social directory filtered directly to your Account Ignores list where you can view reasons, timers, add new blocks, or unblock players."], L["You can also use /sc ignore <name> anytime."])
+    Search.Register({
+        kind = "action",
+        title = L["Manage Account Ignores"],
+        actionLabel = L["Manage Account Ignores"],
+        widget = btnManageIgn,
+        helpTitle = L["Help: Manage Account Ignores"],
+        description = L["Opens the Social directory filtered directly to your Account Ignores list where you can view reasons, timers, add new blocks, or unblock players."],
+        howText = L["You can also use /sc ignore <name> anytime."],
+        onTrigger = function() btnManageIgn:Click() end,
+    })
+
+    local btnFiltLog = ns.Theme:CreateButton(actRow, 160, 22, L["Filtered Chat Log"], "default")
+    ns.Theme:AutoFitButton(btnFiltLog, 136, 16, 200)
+    btnFiltLog:SetPoint("LEFT", hIgn or btnManageIgn, "RIGHT", 12, 0)
+    btnFiltLog:SetScript("OnClick", function()
+        if ns.SocialPanels and ns.SocialPanels.OpenFilteredChatModal then
+            ns.SocialPanels:OpenFilteredChatModal()
+        end
+    end)
+    HelpBtn(actRow, btnFiltLog, L["Help: Filtered Chat Log"], L["Shows every message hidden this session by your Account Ignore list or the optional Public Anti-Spam Shield so nothing legitimate is ever lost silently."], L["Click any row to copy the message, edit/remove an Account Ignore, or block a spammer permanently."])
+    Search.Register({
+        kind = "action",
+        title = L["Filtered Chat Log"],
+        actionLabel = L["Filtered Chat Log"],
+        widget = btnFiltLog,
+        helpTitle = L["Help: Filtered Chat Log"],
+        description = L["Shows every message hidden this session by your Account Ignore list or the optional Public Anti-Spam Shield so nothing legitimate is ever lost silently."],
+        howText = L["Click any row to copy the message, edit/remove an Account Ignore, or block a spammer permanently."],
+        onTrigger = function() btnFiltLog:Click() end,
+    })
+
+    AddDeps(deps.defaultBtns, btnManageIgn, btnFiltLog)
+    return actRow
+end
+
+local function BuildLfgSettingsSection(gn, anchorTo, deps, NotifySettingChanged)
+    local lfgBulletinCb = CreateCheckbox(
+        gn, L["Group LFG listings by Dungeon/Raid (Bulletin Board Mode)"], anchorTo, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.lfgBulletinMode ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.lfgBulletinMode = checked end
+            if NotifySettingChanged then NotifySettingChanged("CLAN_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CLAN_UPDATED") end
+        end,
+        L["Help: Bulletin Board Mode"],
+        L["Organizes Group Finder (I) Browse results under collapsible dungeon, raid, and quest headers with live group counts and open-slot totals."],
+        L["Click any header to collapse or expand that dungeon, or right-click a header to toggle Official Chat LFG Watchers."]
+    )
+
+    local lfgFullCb = CreateCheckbox(
+        gn, L["Hide full LFG groups (or 0 open slots for my filtered role)"], lfgBulletinCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.lfgHideFullGroups ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.lfgHideFullGroups = checked end
+            if NotifySettingChanged then NotifySettingChanged("CLAN_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CLAN_UPDATED") end
+        end,
+        L["Help: Hide Full Groups"],
+        L["Automatically hides LFM group listings that have already reached maximum capacity or have 0 open slots for the role filter you selected."],
+        L["Keep checked to focus on groups you can actually join, or uncheck anytime from Settings or the Group Finder [SC] button."]
+    )
+
+    local lfgLockCb = CreateCheckbox(
+        gn, L["Hide dungeons and raids where I already have a Saved Lockout"], lfgFullCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.lfgHideSavedLockouts == true end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.lfgHideSavedLockouts = checked end
+            if NotifySettingChanged then NotifySettingChanged("CLAN_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CLAN_UPDATED") end
+        end,
+        L["Help: Hide Saved Lockouts"],
+        L["Suppresses group listings for raids or dungeons that already show an active Saved instance lockout on your current character."],
+        L["Your own active listings remain visible so you can still manage them cleanly."]
+    )
+
+    local lfgWatchCb = CreateCheckbox(
+        gn, L["Alert in Official Chat when Watched Dungeon or Raid groups appear"], lfgLockCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.lfgWatchersEnabled ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.lfgWatchersEnabled = checked end
+            if ns.Clan and ns.Clan.SyncOfficialLfgEvents then ns.Clan:SyncOfficialLfgEvents() end
+            if NotifySettingChanged then NotifySettingChanged("CLAN_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CLAN_UPDATED") end
+        end,
+        L["Help: LFG Watchers in Official Chat"],
+        L["When you Watch any dungeon or raid from the Group Finder [SC] button or activity header, matching Official LFG or chat groups print a discreet chat alert with [Apply (/w)] and [View in LFG] links."],
+        L["Right-click any dungeon header or open the [SC] button in Group Finder (I) to choose which dungeons to watch."]
+    )
+
+    local tplRow = CreateFrame("Frame", nil, gn)
+    tplRow:SetPoint("TOPLEFT", lfgWatchCb, "BOTTOMLEFT", 0, -6)
+    tplRow:SetSize(490, 26)
+    local tplBtn = ns.Theme:CreateButton(tplRow, 240, 22, L["Edit LFG Apply Whisper Template (/w)..."], "default")
+    ns.Theme:AutoFitButton(tplBtn, 240, 22, 450)
+    tplBtn:SetPoint("LEFT", tplRow, "LEFT", 4, 0)
+    tplBtn:SetScript("OnClick", function()
+        if ns.LFGFrameTab and ns.LFGFrameTab.OpenWhisperTemplateModal then
+            ns.LFGFrameTab:OpenWhisperTemplateModal()
+        end
+    end)
+    HelpBtn(
+        tplRow, tplBtn,
+        L["Help: LFG Apply Whisper Template"],
+        L["Customize the whisper text automatically prepared when you Quick Apply or click [Apply (/w)] from Group Finder or Official Chat Watchers."],
+        L["Supports {level}, {class}, {role}, and {activity} placeholders. Leave blank to use SocialCentral's default automatic template."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Edit LFG Apply Whisper Template (/w)..."],
+        actionLabel = L["Edit LFG Apply Whisper Template (/w)..."],
+        widget = tplBtn,
+        helpTitle = L["Help: LFG Apply Whisper Template"],
+        description = L["Customize the whisper text automatically prepared when you Quick Apply or click [Apply (/w)] from Group Finder or Official Chat Watchers."],
+        howText = L["Supports {level}, {class}, {role}, and {activity} placeholders. Leave blank to use SocialCentral's default automatic template."],
+        onTrigger = function() tplBtn:Click() end,
+    })
+
+    AddDeps(deps.lfg, lfgBulletinCb, lfgFullCb, lfgLockCb, lfgWatchCb, tplBtn)
+    AddDeps(deps.defaultBtns, tplBtn)
+    return tplRow
+end
+
+local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySettingChanged)
+    local extHdr = AddSectionHeader(
+        gn,
+        L["Social (O), Watchlist (/who) & Nearby"],
+        anchorTo,
+        -14,
+        L["Help: Extended Official Integrations"],
+        L["Configures collapsible Social folders, preventive warnings on official popups, /who scanning mode, Nearby retention, Ready Check buff audits, and SC1 backup/restore."],
+        L["Every option here can also be toggled directly via the [SC] button beside each official Blizzard window."]
+    )
+
+    local folderCb = CreateCheckbox(
+        gn, L["Group Social list by collapsible colored folders (O)"], extHdr, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.socialGroupByFolder ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.socialGroupByFolder = checked end
+            if NotifySettingChanged then NotifySettingChanged("SOCIAL_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("SOCIAL_UPDATED") end
+        end,
+        L["Help: Collapsible Social Folders"],
+        L["Organizes your Social (O) friend directory into collapsible folder headers (Custom Folders, Favorites, Online Friends, and Offline)."],
+        L["Click any folder header inside Friends/Social (O) to collapse or expand it; searching automatically shows all matches."]
+    )
+
+    local popupWarnCb = CreateCheckbox(
+        gn, L["Show warning banner on official Invite, Trade & Duel from Avoid/Ignored"], folderCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.socialOfficialPopupAlerts ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.socialOfficialPopupAlerts = checked end
+        end,
+        L["Help: Preventive Popup Alerts"],
+        L["Displays a high-contrast red alert banner above official WoW Party Invite, Trade, and Duel popups whenever the sender is Account-Ignored or flagged Avoid."],
+        L["Includes your saved ignore reason and personal note so you never accept a group or trade by mistake."]
+    )
+
+    local rcAuditCb = CreateCheckbox(
+        gn, L["Show missing Raid/Dungeon buff audit alert on Blizzard Ready Check"], popupWarnCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.groupReadyCheckAudit ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.groupReadyCheckAudit = checked end
+        end,
+        L["Help: Ready Check Buff Auditor"],
+        L["When a Blizzard Ready Check starts, scans online group members for missing Fortitude, Arcane Intellect (Mana), and Mark of the Wild (when a caster is present)."],
+        L["Prints a local summary with a clickable [Announce Missing Buffs] chat draft link — also accessible anytime via 'Audit Buffs' in O -> Group."]
+    )
+
+    local whoHeader = CreateFieldLabel(
+        gn, L["/who mode"], rcAuditCb, -10,
+        L["Help: /who Mode"],
+        L["Controls how manual /who responses are captured silently without interrupting your gameplay."],
+        L["Choose 'Silent UI' (hides Blizzard Friends popup outside combat) or 'Chat Filter' (parses chat lines cleanly without touching FriendsFrame)."]
+    )
+    local whoRow = CreateChoiceRow(gn, whoHeader, -6, {
+        { value = "silent_ui", label = L["Silent UI (no Friends popup outside combat)"], width = 272 },
+        { value = "chat_filter", label = L["Chat filter (zero touch on FriendsFrame)"], width = 272 },
+    }, function()
+        return ns.db and ns.db.settings.whoMode or "silent_ui"
+    end, function(val)
+        ns.db.settings.whoMode = val
+    end)
+
+    local cdHeader = CreateFieldLabel(
+        gn, L["/who cooldown (seconds)"], whoRow, -10,
+        L["Help: /who Cooldown"],
+        L["Enforces a minimum waiting interval (5 to 30 seconds) between manual /who clicks so servers never throttle or flag requests."],
+        L["Use '-' and '+' to adjust. Blizzard servers lock /who if queried too rapidly; 6s or higher is safest."]
+    )
+    local cdRow = CreateStepperRow(gn, cdHeader, -6, 5, 30, "s", function()
+        return ns.db and ns.db.settings.whoCooldown or 6
+    end, function(val)
+        ns.db.settings.whoCooldown = val
+    end)
+
+    local nearbyHeader = CreateFieldLabel(
+        gn, L["Nearby retention (minutes)"], cdRow, -10,
+        L["Help: Nearby Retention"],
+        L["Defines how many minutes passive friendly Nearby sightings remain listed before expiring automatically."],
+        L["Adjust from 5 to 60 minutes with '-' and '+'. Older sightings are pruned cleanly to save memory."]
+    )
+    local nearbyRow = CreateStepperRow(gn, nearbyHeader, -6, 5, 60, "min", function()
+        return ns.db and ns.db.settings.nearbyRetentionMin or 15
+    end, function(val)
+        ns.db.settings.nearbyRetentionMin = val
+        ns:Emit("NEARBY_UPDATED")
+    end)
+
+    local histHeader = CreateFieldLabel(
+        gn, L["Character Whisper history per thread (0 = off)"], nearbyRow, -10,
+        L["Help: Whisper History Limit"],
+        L["Saves the last N lines per Character Whisper locally (0 to 60 lines). Battle.net Real IDs and BattleTags are never persisted to disk."],
+        L["Use '-' and '+' in steps of 10. Set to 0 if you want session-only whispers without SavedVariables history."]
+    )
+    local histRow = CreateStepperRow(gn, histHeader, -6, 0, 60, L["lines"], function()
+        return ns.db and ns.db.settings.chatHistoryLimit or 30
+    end, function(val)
+        ns.db.settings.chatHistoryLimit = val
+        ns:Emit("CHAT_UPDATED")
+    end, 10)
+
+    local expRow = CreateFrame("Frame", nil, gn)
+    expRow:SetPoint("TOPLEFT", histRow, "BOTTOMLEFT", 0, -8)
+    expRow:SetSize(490, 26)
+    local expBtn = ns.Theme:CreateButton(expRow, 260, 22, L["Export / Import Social Notes & Ignores..."], "default")
+    ns.Theme:AutoFitButton(expBtn, 250, 22, 450)
+    expBtn:SetPoint("LEFT", expRow, "LEFT", 4, 0)
+    expBtn:SetScript("OnClick", function()
+        if ns.SocialPanels and ns.SocialPanels.OpenSocialExportImportModal then
+            ns.SocialPanels:OpenSocialExportImportModal(false)
+        end
+    end)
+    HelpBtn(
+        expRow, expBtn,
+        L["Help: Export / Import Social Data"],
+        L["Generates a compact backup string containing your Account Ignores, Social Cards (nicknames, folders, notes, Good/Avoid flags), and Watchlist entries (no BattleTags saved)."],
+        L["Click to export a copyable SC1 backup string or paste one to merge ignores, notes, and Watchlist contacts safely."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Export / Import Social Notes & Ignores..."],
+        actionLabel = L["Export / Import Social Notes & Ignores..."],
+        widget = expBtn,
+        helpTitle = L["Help: Export / Import Social Data"],
+        description = L["Generates a compact backup string containing your Account Ignores, Social Cards (nicknames, folders, notes, Good/Avoid flags), and Watchlist entries (no BattleTags saved)."],
+        howText = L["Click to export a copyable SC1 backup string or paste one to merge ignores, notes, and Watchlist contacts safely."],
+        onTrigger = function() expBtn:Click() end,
+    })
+
+    AddDeps(deps.nearby, nearbyRow)
+    AddDeps(deps.defaultBtns, expBtn)
+    return expRow
+end
+
+local function BuildGeneralTab(gn, deps, NotifySettingChanged)
     local langHeader = AddSectionHeader(
         gn, L["Language"], nil, -6,
         L["Help: Language"],
@@ -3377,7 +4033,7 @@ local function BuildGeneralTab(gn, deps)
         L["Enable after positioning your Minimap button where you want it."]
     )
 
-    local minimapClickHeader = AddSectionHeader(
+    local minimapClickHeader = CreateFieldLabel(
         gn, L["Minimap Left-Click behavior"], lockCb, -10,
         L["Help: Minimap Left-Click"],
         L["Chooses what happens when you left-click the Minimap button or Addon Compartment icon."],
@@ -3393,61 +4049,10 @@ local function BuildGeneralTab(gn, deps)
         ns.db.settings.minimapLeftClickAction = val
     end)
 
-    local whoHeader = AddSectionHeader(
-        gn, L["/who mode"], minimapClickRow, -12,
-        L["Help: /who Mode"],
-        L["Controls how manual /who responses are captured silently without interrupting your gameplay."],
-        L["Choose 'Silent UI' (hides Blizzard Friends popup outside combat) or 'Chat Filter' (parses chat lines cleanly without touching FriendsFrame)."]
-    )
-    local whoRow = CreateChoiceRow(gn, whoHeader, -6, {
-        { value = "silent_ui", label = L["Silent UI (no Friends popup outside combat)"], width = 272 },
-        { value = "chat_filter", label = L["Chat filter (zero touch on FriendsFrame)"], width = 272 },
-    }, function()
-        return ns.db and ns.db.settings.whoMode or "silent_ui"
-    end, function(val)
-        ns.db.settings.whoMode = val
-    end)
-
-    local cdHeader = AddSectionHeader(
-        gn, L["/who cooldown (seconds)"], whoRow, -10,
-        L["Help: /who Cooldown"],
-        L["Enforces a minimum waiting interval (5 to 30 seconds) between manual /who clicks so servers never throttle or flag requests."],
-        L["Use '-' and '+' to adjust. Blizzard servers lock /who if queried too rapidly; 6s or higher is safest."]
-    )
-    local cdRow = CreateStepperRow(gn, cdHeader, -6, 5, 30, "s", function()
-        return ns.db and ns.db.settings.whoCooldown or 6
-    end, function(val)
-        ns.db.settings.whoCooldown = val
-    end)
-
-    local nearbyHeader = AddSectionHeader(
-        gn, L["Nearby retention (minutes)"], cdRow, -10,
-        L["Help: Nearby Retention"],
-        L["Defines how many minutes passive friendly Nearby sightings remain listed before expiring automatically."],
-        L["Adjust from 5 to 60 minutes with '-' and '+'. Older sightings are pruned cleanly to save memory."]
-    )
-    local nearbyRow = CreateStepperRow(gn, nearbyHeader, -6, 5, 60, "min", function()
-        return ns.db and ns.db.settings.nearbyRetentionMin or 15
-    end, function(val)
-        ns.db.settings.nearbyRetentionMin = val
-        ns:Emit("NEARBY_UPDATED")
-    end)
-
-    local histHeader = AddSectionHeader(
-        gn, L["Character Whisper history per thread (0 = off)"], nearbyRow, -10,
-        L["Help: Whisper History Limit"],
-        L["Saves the last N lines per Character Whisper locally (0 to 60 lines). Battle.net Real IDs and BattleTags are never persisted to disk."],
-        L["Use '-' and '+' in steps of 10. Set to 0 if you want session-only whispers without SavedVariables history."]
-    )
-    local histRow = CreateStepperRow(gn, histHeader, -6, 0, 60, L["lines"], function()
-        return ns.db and ns.db.settings.chatHistoryLimit or 30
-    end, function(val)
-        ns.db.settings.chatHistoryLimit = val
-        ns:Emit("CHAT_UPDATED")
-    end, 10)
+    local socialSectionBottom = BuildExtendedSocialSettingsSection(gn, minimapClickRow, deps, NotifySettingChanged)
 
     local tooltipsHeader = AddSectionHeader(
-        gn, L["Tooltips & Item Inventory Counts"], histRow, -12,
+        gn, L["Tooltips & Item Inventory Counts"], socialSectionBottom, -14,
         L["Help: Tooltips Integration"],
         L["Enhances official item and player tooltips with account-wide alt item counts and saved Social Card notes, Red Flags, and recent companions."],
         L["Toggle either tooltip helper below at any time without affecting Blizzard performance or combat safety."]
@@ -3460,8 +4065,16 @@ local function BuildGeneralTab(gn, deps)
         L["Displays which characters on this realm pool own the hovered item across Equipped, Bags, and Bank, plus the account total."],
         L["Hover any item in bags, chat, bank, or auction house to see alt inventory counts instantly."]
     )
+    local tooltipRecipeAltsCb = CreateCheckbox(
+        gn, L["Show 'Craftable by Alt / Guild' and Recipe hints in tooltips"], tooltipItemAltsCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.tooltipRecipeAlts ~= false end,
+        function(checked) ns.db.settings.tooltipRecipeAlts = checked end,
+        L["Help: Craftable & Recipe Tooltips"],
+        L["Shows directly on Blizzard item tooltips which Alt or Guildmate can craft the hovered item, and whether a hovered Recipe scroll is already learned or needed by an Alt."],
+        L["Open each character's Profession window once so SocialCentral indexes their recipes for Auction House, Bags, Mail, and Chat links."]
+    )
     local tooltipPlayerNotesCb = CreateCheckbox(
-        gn, L["Show Social Notes, Red Flags & Companion history in tooltips"], tooltipItemAltsCb, -6,
+        gn, L["Show Social Notes, Red Flags & Companion history in tooltips"], tooltipRecipeAltsCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.tooltipPlayerNotes ~= false end,
         function(checked) ns.db.settings.tooltipPlayerNotes = checked end,
         L["Help: Player Tooltip Notes"],
@@ -3470,7 +4083,7 @@ local function BuildGeneralTab(gn, deps)
     )
 
     local guildToolsHeader = AddSectionHeader(
-        gn, L["Guild Sync, LFG Tools & Updates"], tooltipPlayerNotesCb, -12,
+        gn, L["Guild Sync, LFG Tools & Updates"], tooltipPlayerNotesCb, -14,
         L["Help: Guild Sync & LFG Tools"],
         L["Opt-in guild communication, Group Finder automation-free helpers, and peer version checks."],
         L["Keep opt-in sync off for 100% local play, or turn on to share guild status/LFG/events with teammates."]
@@ -3483,8 +4096,26 @@ local function BuildGeneralTab(gn, deps)
         L["Enables encrypted-free opt-in guild addon messages (SCentral1) to share Status Tags, Event Calls, and Dungeon/Raid Signups with guildmates."],
         L["Leave unchecked for 100% local Clan tracking, or enable to sync tags and event calls safely with guildmates who also use SocialCentral."]
     )
+    local guildRecipeReplyCb = CreateCheckbox(
+        gn, L["Answer online Guild Recipe Searches (requires Clan Sync)"], clanSyncCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.guildRecipeReply ~= false end,
+        function(checked) ns.db.settings.guildRecipeReply = checked; ns:Emit("SETTINGS_UPDATED") end,
+        L["Help: Guild Recipe Replies"],
+        L["Allows your character to reply quietly (Trickle rate-limited) when a guildmate clicks 'Ask Guild' inside Guild Professions (J) looking for a learned recipe."],
+        L["Requires 'Enable Clan guild sync (opt-in)' above; never sends replies in combat or floods guild chat."]
+    )
+    local greenWallCb = CreateCheckbox(
+        gn, L["Mirror Alliance Chat in Official Chat (/ali)"], guildRecipeReplyCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.clanOfficialGreenWall ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.clanOfficialGreenWall = checked end
+        end,
+        L["Help: GreenWall Official Alliance Chat"],
+        L["Prints Allied Guild chat messages directly inside Blizzard's main Official Chat window with <Guild> tags and clickable player whisper links."],
+        L["Use '/ali <message>' or '/al <message>' directly from Blizzard chat to reply to your Guild Alliance."]
+    )
     local guildFinderCb = CreateCheckbox(
-        gn, L["Detect LFM calls in Guild chat (opt-in, read-only)"], clanSyncCb, -6,
+        gn, L["Detect LFM calls in Guild chat (opt-in, read-only)"], greenWallCb, -6,
         function() return ns.db and ns.db.settings.guildChatFinder end,
         function(checked) ns.db.settings.guildChatFinder = checked; ns:Emit("CLAN_UPDATED") end,
         L["Help: Guild LFM Detector"],
@@ -3534,8 +4165,20 @@ local function BuildGeneralTab(gn, deps)
         L["Hides booster advertisements, real-money sales (WTS/GDKP/carry services), and repetitive commercial spam from Group Finder and chat scans."],
         L["Keep checked for a clean, legitimate dungeon and raid group recruitment feed."]
     )
+    local lfgMirrorCb = CreateCheckbox(
+        gn, L["Show Official Tab 1 Mirror Bar in Group Finder (I)"], lfgAntiSpamCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.embedLfgMirrorBar ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.embedLfgMirrorBar = checked end
+            if NotifySettingChanged then NotifySettingChanged("CLAN_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CLAN_UPDATED") end
+        end,
+        L["Help: Official LFG Tab 1 Mirror Bar"],
+        L["Displays the compact SocialCentral quick-mirror bar and standardized [SC] control button below Blizzard's Group Finder (I) Browse tab."],
+        L["You can toggle this anytime from here or via the [SC] button directly on Blizzard's Group Finder bar."]
+    )
+    local lfgExtraAnchor = BuildLfgSettingsSection(gn, lfgMirrorCb, deps, NotifySettingChanged)
     local verCb = CreateCheckbox(
-        gn, L["Check for addon updates (DBM-style peer alerts)"], lfgAntiSpamCb, -6,
+        gn, L["Check for addon updates (DBM-style peer alerts)"], lfgExtraAnchor, -6,
         function() return ns.db and ns.db.settings.versionCheck ~= false end,
         function(checked) if ns.db and ns.db.settings then ns.db.settings.versionCheck = checked end end,
         L["Help: Update Check & GitHub"],
@@ -3562,11 +4205,13 @@ local function BuildGeneralTab(gn, deps)
         onTrigger = function() updateLinkBtn:Click() end,
     })
 
+    local officialChatAnchor = BuildOfficialChatSettingsSection(gn, updateLinkBtn, deps, NotifySettingChanged)
+    BuildChatShieldSettingsSection(gn, officialChatAnchor, deps)
+
     AddDeps(deps.defaultBtns, langReloadBtn, themePickerBtn, resetPosBtn, updateLinkBtn)
-    AddDeps(deps.guild, clanSyncCb, guildFinderCb, autoStatusCb, clanAutoCloseLfgCb)
-    AddDeps(deps.lfg, globalChatLfgCb, lfgDraftCb, lfgAntiSpamCb)
+    AddDeps(deps.guild, clanSyncCb, guildRecipeReplyCb, greenWallCb, guildFinderCb, autoStatusCb, clanAutoCloseLfgCb)
+    AddDeps(deps.lfg, globalChatLfgCb, lfgDraftCb, lfgAntiSpamCb, lfgMirrorCb)
     AddDeps(deps.alts, tooltipItemAltsCb)
-    AddDeps(deps.nearby, nearbyRow)
 end
 
 function Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHeights, catTabs, catButtons)
@@ -3701,6 +4346,22 @@ function Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHei
     end)
 end
 
+local rootContainer
+local subPanels = {}
+
+local function DockRootContainer(hostFrame, tabId)
+    if not (rootContainer and hostFrame) then return end
+    if rootContainer:GetParent() ~= hostFrame then
+        rootContainer:SetParent(hostFrame)
+        rootContainer:ClearAllPoints()
+        rootContainer:SetAllPoints(hostFrame)
+    end
+    rootContainer:Show()
+    if tabId and selectCategoryTabFn then
+        selectCategoryTabFn(tabId)
+    end
+end
+
 local function BuildPanel()
     if panelBuilt then
         return
@@ -3709,10 +4370,13 @@ local function BuildPanel()
     EnsurePanelFrame()
     wipe(syncFns)
 
+    rootContainer = CreateFrame("Frame", nil, panel)
+    rootContainer:SetAllPoints(panel)
+
     -- Top Fixed Header, Category Navigation Tabs & Pinned Search Bar
-    local headerArea = CreateFrame("Frame", nil, panel)
-    headerArea:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, -10)
-    headerArea:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -12, -10)
+    local headerArea = CreateFrame("Frame", nil, rootContainer)
+    headerArea:SetPoint("TOPLEFT", rootContainer, "TOPLEFT", 12, -10)
+    headerArea:SetPoint("TOPRIGHT", rootContainer, "TOPRIGHT", -12, -10)
     headerArea:SetHeight(110)
 
     local title = headerArea:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
@@ -3732,20 +4396,20 @@ local function BuildPanel()
     tabBar:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", 0, -40)
     tabBar:SetHeight(26)
 
-    local scrollFrame = CreateFrame("ScrollFrame", "SocialCentralSettingsScroll", panel, "UIPanelScrollFrameTemplate")
+    local scrollFrame = CreateFrame("ScrollFrame", "SocialCentralSettingsScroll", rootContainer, "UIPanelScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", headerArea, "BOTTOMLEFT", -6, -4)
-    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -28, 6)
+    scrollFrame:SetPoint("BOTTOMRIGHT", rootContainer, "BOTTOMRIGHT", -28, 6)
 
     local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(610, 1120)
+    content:SetSize(610, 1220)
     scrollFrame:SetScrollChild(content)
 
     local pages = {}
     local pageHeights = {
-        overview = 1120,
-        notifications = 2360,
-        radar = 800,
-        general = 1320,
+        overview = 1220,
+        notifications = 2940,
+        radar = 980,
+        general = 2210,
     }
     local catTabs = {
         { id = "overview", label = L["Summary & Windows"] },
@@ -3757,6 +4421,7 @@ local function BuildPanel()
 
     for _, spec in ipairs(catTabs) do
         local pFrame = CreateFrame("Frame", nil, content)
+        pFrame._isSettingsPage = true
         pFrame:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
         pFrame:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, 0)
         pFrame:SetHeight(pageHeights[spec.id] or 900)
@@ -3854,6 +4519,8 @@ local function BuildPanel()
         social = { _scModKey = "social" },
         watch = { _scModKey = "watch" },
         chat = { _scModKey = "chat" },
+        officialChat = { _scModKey = "officialChat" },
+        group = { _scModKey = "group" },
         alts = { _scModKey = "alts" },
         nearby = { _scModKey = "nearby" },
         defaultBtns = {},
@@ -3868,7 +4535,7 @@ local function BuildPanel()
     Search.SetBuildContext("radar", L["Radar & Map"], 3)
     BuildRadarTab(pages.radar, deps, NotifySettingChanged, CloseSettingsBeforeJump)
     Search.SetBuildContext("general", L["General & Tools"], 4)
-    BuildGeneralTab(pages.general, deps)
+    BuildGeneralTab(pages.general, deps, NotifySettingChanged)
 
     syncFns[#syncFns + 1] = function()
         local badgeParts = {}
@@ -3957,6 +4624,8 @@ local function BuildPanel()
             watch = not s or s.moduleWatchlistEnabled ~= false,
             nearby = not s or s.moduleNearbyEnabled ~= false,
             chat = not s or s.moduleChatEnabled ~= false,
+            officialChat = not s or s.embedOfficialChat ~= false,
+            group = not s or s.moduleGroupEnabled ~= false,
         }
         for bucket, enabled in pairs(modStates) do
             for _, w in ipairs(deps[bucket]) do
@@ -3966,7 +4635,11 @@ local function BuildPanel()
     end
 
     scrollFrame:SetScript("OnSizeChanged", function(self)
-        local w = math.max(500, (self:GetWidth() or 600) - 10)
+        local w = math.floor(math.max(500, (self:GetWidth() or 600) - 10) + 0.5)
+        if self._scLastW == w then
+            return
+        end
+        self._scLastW = w
         content:SetWidth(w)
         local colW = math.floor((w - 22) * 0.5)
         refs.winGrid:SetWidth(w - 8)
@@ -3977,9 +4650,6 @@ local function BuildPanel()
             refs.scAutoLeft:SetWidth(colW)
             refs.scAutoRight:SetWidth(colW)
         end
-        refs.qGrid:SetWidth(w - 8)
-        refs.qLeft:SetWidth(colW)
-        refs.qRight:SetWidth(colW)
         for _, sync in ipairs(syncFns) do
             sync()
         end
@@ -3993,7 +4663,7 @@ local function BuildPanel()
 
     if ns.Theme and ns.Theme.RegisterListener then
         ns.Theme:RegisterListener(function()
-            if panel and panel:IsShown() then
+            if rootContainer and rootContainer:IsVisible() then
                 for _, sync in ipairs(syncFns) do sync() end
                 if Search.query ~= "" then
                     Search.RenderResults()
@@ -4024,6 +4694,7 @@ function SettingsMod:Register()
     EnsurePanelFrame()
     panel:HookScript("OnShow", function()
         BuildPanel()
+        DockRootContainer(panel, nil)
         for _, sync in ipairs(syncFns) do
             sync()
         end
@@ -4033,21 +4704,64 @@ function SettingsMod:Register()
     end)
 
     ns:On("SETTINGS_UPDATED", function()
-        if panel and panel:IsShown() then
+        if rootContainer and rootContainer:IsVisible() then
             SettingsMod:Refresh()
         end
     end)
     ns.RegisterEvent(panel, "PLAYER_GUILD_UPDATE", function(_, _, unit)
-        if (not unit or unit == "player") and panel and panel:IsShown() then
+        if (not unit or unit == "player") and rootContainer and rootContainer:IsVisible() then
             SettingsMod:Refresh()
         end
     end)
 
+    local subSpecs = {
+        { id = "overview", label = L["Summary & Windows"] },
+        { id = "notifications", label = L["Notifications"] },
+        { id = "radar", label = L["Radar & Map"] },
+        { id = "general", label = L["General & Tools"] },
+    }
+
     if Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
         category = Settings.RegisterCanvasLayoutCategory(panel, "SocialCentral")
         Settings.RegisterAddOnCategory(category)
+        if Settings.RegisterCanvasLayoutSubcategory then
+            for _, spec in ipairs(subSpecs) do
+                local subFrame = CreateFrame("Frame", "SocialCentralSettingsSub_" .. spec.id, UIParent)
+                subFrame.name = spec.label
+                subFrame.parent = "SocialCentral"
+                subFrame:HookScript("OnShow", function()
+                    BuildPanel()
+                    DockRootContainer(subFrame, spec.id)
+                    for _, sync in ipairs(syncFns) do
+                        sync()
+                    end
+                    if Search.query ~= "" then
+                        Search.RenderResults()
+                    end
+                end)
+                pcall(Settings.RegisterCanvasLayoutSubcategory, category, subFrame, spec.label)
+                subPanels[#subPanels + 1] = subFrame
+            end
+        end
     elseif InterfaceOptions_AddCategory then
         InterfaceOptions_AddCategory(panel)
+        for _, spec in ipairs(subSpecs) do
+            local subFrame = CreateFrame("Frame", "SocialCentralSettingsSub_" .. spec.id, UIParent)
+            subFrame.name = spec.label
+            subFrame.parent = "SocialCentral"
+            subFrame:HookScript("OnShow", function()
+                BuildPanel()
+                DockRootContainer(subFrame, spec.id)
+                for _, sync in ipairs(syncFns) do
+                    sync()
+                end
+                if Search.query ~= "" then
+                    Search.RenderResults()
+                end
+            end)
+            pcall(InterfaceOptions_AddCategory, subFrame)
+            subPanels[#subPanels + 1] = subFrame
+        end
     end
 end
 
@@ -4057,6 +4771,7 @@ function SettingsMod:Open(tabId)
         self:Register()
     end
     BuildPanel()
+    DockRootContainer(panel, tabId)
     if tabId and selectCategoryTabFn then
         selectCategoryTabFn(tabId)
     elseif tabId then
@@ -4081,7 +4796,8 @@ function SettingsMod:Toggle()
     end
     local isShown = (_G.SettingsPanel and _G.SettingsPanel.IsShown and _G.SettingsPanel:IsShown())
         or (_G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown())
-    local panelVisible = panel and panel.IsVisible and panel:IsVisible()
+    local panelVisible = (panel and panel.IsVisible and panel:IsVisible())
+        or (rootContainer and rootContainer.IsVisible and rootContainer:IsVisible())
     if isShown and panelVisible then
         for _, sp in ipairs({ _G.SettingsPanel, _G.InterfaceOptionsFrame }) do
             if sp and sp.IsShown and sp:IsShown() then

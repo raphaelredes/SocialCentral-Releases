@@ -17,11 +17,15 @@ local function NowServerTime()
 end
 
 local function GetBuffShardScope()
+    local pool = Compat.RealmPool and Compat.RealmPool()
+    if type(pool) == "string" and pool ~= "" and pool ~= "default" then
+        return pool
+    end
     local realm = Compat.Realm and Compat.Realm()
     if type(realm) == "string" and realm ~= "" then
         return realm
     end
-    return (Compat.RealmPool and Compat.RealmPool()) or "forever"
+    return "forever"
 end
 
 local WorldBuffs = {
@@ -620,6 +624,50 @@ function WorldBuffs:CheckExpiringBuffAlerts()
                             ts = time(),
                             priority = 1,
                         })
+                    end
+                end
+            end
+        end
+    end
+    if not s or s.worldBuffsReadyAlert ~= false then
+        self._warnedReadyCds = self._warnedReadyCds or {}
+        local myFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+        local nowSrv = NowServerTime()
+        local readyDefs = {
+            { id = "dragonslayer_ony", name = L["Onyxia (Rallying Cry)"], cd = 21600, faction = "Both" },
+            { id = "dragonslayer_nef", name = L["Nefarian (Rallying Cry)"], cd = 28800, faction = "Both" },
+            { id = "warchief", name = L["Warchief's Blessing (Rend)"], cd = 10800, faction = "Horde" },
+            { id = "stormwind", name = L["Might of Stormwind"], cd = 10800, faction = "Alliance" },
+        }
+        for _, rDef in ipairs(readyDefs) do
+            if rDef.faction == "Both" or not myFaction or rDef.faction == myFaction then
+                local lastDrop = self:GetLastDropTime(rDef.id)
+                if lastDrop and lastDrop > 0 then
+                    local elapsed = nowSrv - lastDrop
+                    if elapsed >= rDef.cd and elapsed <= (rDef.cd + 300) then
+                        local sig = rDef.id .. ":" .. tostring(lastDrop)
+                        if not self._warnedReadyCds[sig] then
+                            if inCombat then
+                                if not nextDelay or 10 < nextDelay then nextDelay = 10 end
+                            else
+                                self._warnedReadyCds[sig] = true
+                                ns:Print(L["[World Buff Ready] %s cooldown just finished — can drop anytime!"]:format(rDef.name))
+                                ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                                    id = "wbready:" .. sig,
+                                    kind = "WORLDBUFF",
+                                    sourceTag = L["World Buff Ready"],
+                                    sender = rDef.name,
+                                    text = L["RESET / READY: Can drop at any time!"],
+                                    ts = time(),
+                                    priority = 1,
+                                })
+                            end
+                        end
+                    elseif elapsed > 0 and elapsed < rDef.cd then
+                        local remCd = (rDef.cd - elapsed) + 2
+                        if not nextDelay or remCd < nextDelay then
+                            nextDelay = remCd
+                        end
                     end
                 end
             end

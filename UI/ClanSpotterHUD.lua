@@ -342,6 +342,8 @@ end
 
 local function HandleTargetClick(entry)
     if not entry then return end
+    entry.toastShownAt = time()
+    entry.lastSeen = entry.toastShownAt
     SpotterHUD.focusedKey = entry.key
     if SpotterHUD.interactionOpen and SpotterHUD.interactionKey == entry.key then
         -- Keep open or toggle if user clicked again after already opening
@@ -409,6 +411,8 @@ end
 
 local function ApplySpotterFocusEntry(entry, idx)
     if not entry then return end
+    entry.toastShownAt = time()
+    entry.lastSeen = entry.toastShownAt
     SpotterHUD.cycleIndex = idx
     SpotterHUD.focusedKey = entry.key
     if SpotterHUD.interactionOpen then

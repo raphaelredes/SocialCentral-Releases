@@ -11,10 +11,12 @@ local Spotter = {
     visibleUnits = {},   -- [unitToken] = key
     alertCooldowns = {}, -- [key] = timestamp
     dismissedUntil = {}, -- [key] = timestamp when [X] dismiss expires
+    toastExpiredUntil = {}, -- [key] = timestamp when auto-expired toast cooldown ends
     manualTracked = {},  -- [key] = true when user requested Track on Radar
     manualTrackedStance = {}, -- [key] = fallback stance for manual tracking
     lastAlert = nil,
     lastScopeToken = nil,
+    _lastActiveZone = nil,
     plateBadges = setmetatable({}, { __mode = "k" }), -- [plateFrame] = badgeFrame
     targetArrowFrame = nil,
     _pruneTimerActive = false,
@@ -60,6 +62,7 @@ local chatCooldownCount = 0
 local activePlatesByUnit = {}
 local activePlateUnitByGuid = {}
 local activePlateCount = 0
+local pendingPlateUnits = {}
 local groupMemberByGuid = {}
 local groupMemberByKey = {}
 local groupCacheDirty = true
@@ -196,10 +199,9 @@ local function IsGroupUnitToken(unit)
 end
 
 local MAX_TARGETS = 24
-local RETENTION_SECONDS = 12
-local MANUAL_RETENTION_SECONDS = 60
+local DEFAULT_TOAST_DURATION_SECONDS = 10
 local DISMISS_COOLDOWN_SECONDS = 180
-local PRUNE_INTERVAL = 3.0
+local PRUNE_INTERVAL = 1.0
 local CHAT_SIGHTING_COOLDOWN = 12.0
 local INSPECT_BATCH_LIMIT = 6
 local INSPECT_SLICE_INTERVAL = 0.15
@@ -207,6 +209,28 @@ local ENEMY_ALERT_COOLDOWN = 120
 local FRIENDLY_ALERT_COOLDOWN = 180
 local TARGET_ARROW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\arrow"
 local TARGET_GLOW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\toast-glow"
+
+local TELEPORT_SPELL_IDS = {
+    [8690] = true,  -- Hearthstone
+    [556] = true,   -- Astral Recall
+    [3561] = true,  -- Teleport: Stormwind
+    [3562] = true,  -- Teleport: Ironforge
+    [3563] = true,  -- Teleport: Undercity
+    [3565] = true,  -- Teleport: Darnassus
+    [3566] = true,  -- Teleport: Thunder Bluff
+    [3567] = true,  -- Teleport: Orgrimmar
+    [18960] = true, -- Teleport: Moonglade
+    [23453] = true, -- Ultrasafe Transporter: Gadgetzan
+    [23442] = true, -- Dimensional Ripper - Everlook
+}
+
+local function GetSpotterToastDuration()
+    local v = ns.db and ns.db.settings and tonumber(ns.db.settings.spotterToastDuration)
+    if v and v >= 3 then
+        return math.min(120, math.floor(v + 0.5))
+    end
+    return DEFAULT_TOAST_DURATION_SECONDS
+end
 
 local ITEM_RANGES = {
     { range = 8, item = 8149 },                     -- Voodoo Charm
@@ -427,6 +451,14 @@ local function RebuildPositiveIndex()
             local ignName = Safe.String(Safe.Call(getIgnName, i))
             if ignName and ignName ~= "" then
                 AddPositiveCandidate(ignName, nil, posIgnoreKeys, posIgnoreFirsts, allowBlocked)
+            end
+        end
+    end
+
+    if store and store.GetAccountIgnoresList then
+        for _, ign in ipairs(store:GetAccountIgnoresList()) do
+            if ign and ign.lookupKey and ign.lookupKey ~= "" then
+                AddPositiveCandidate(ign.name or ign.lookupKey, nil, posIgnoreKeys, posIgnoreFirsts, allowBlocked, ign.lookupKey)
             end
         end
     end
@@ -1675,6 +1707,12 @@ local function MigrateEntryStateKey(self, oldKey, newKey, entry)
         end
         self.dismissedUntil[oldKey] = nil
     end
+    if self.toastExpiredUntil[oldKey] ~= nil then
+        if not self.toastExpiredUntil[newKey] or self.toastExpiredUntil[oldKey] > self.toastExpiredUntil[newKey] then
+            self.toastExpiredUntil[newKey] = self.toastExpiredUntil[oldKey]
+        end
+        self.toastExpiredUntil[oldKey] = nil
+    end
     if self.manualTracked[oldKey] then
         self.manualTracked[newKey] = true
         self.manualTracked[oldKey] = nil
@@ -1996,7 +2034,10 @@ function Spotter:FocusTarget(key)
         return false
     end
 
-    entry.lastSeen = time()
+    local now = time()
+    entry.lastSeen = now
+    entry.toastShownAt = now
+    self.toastExpiredUntil[entry.key] = nil
     local alert = {
         key = entry.key,
         stance = entry.stance,
@@ -2308,7 +2349,13 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
 
     local existingEntry = self.entries[key] or trackedByGuid
     local now = time()
-    local isDismissed = (not self.manualTracked[key]) and self.dismissedUntil[key] and now < self.dismissedUntil[key]
+    if skipCooldown then
+        self.toastExpiredUntil[key] = nil
+    end
+    local isDismissed = (not self.manualTracked[key]) and (
+        (self.dismissedUntil[key] and now < self.dismissedUntil[key])
+        or ((not skipCooldown) and self.toastExpiredUntil[key] and now < self.toastExpiredUntil[key])
+    )
     local isIgnoredGroup = ShouldIgnoreGroupUnit(unit, key, guid)
 
     local checkFirst = resolved and resolved.firstName or rawUnitName
@@ -2403,10 +2450,14 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
         entry = {
             key = key,
             firstSeen = now,
+            toastShownAt = now,
         }
         isNewOrChanged = true
     elseif entry.stance ~= stance or not entry._alertEvaluated then
+        entry.toastShownAt = now
         isNewOrChanged = true
+    elseif skipCooldown then
+        entry.toastShownAt = now
     end
     entry.key = key
     self.entries[key] = entry
@@ -2566,7 +2617,10 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     if not key or key == "" then return nil end
 
     local now = time()
-    if (not self.manualTracked[key]) and self.dismissedUntil[key] and now < self.dismissedUntil[key] then
+    if (not self.manualTracked[key]) and (
+        (self.dismissedUntil[key] and now < self.dismissedUntil[key])
+        or (self.toastExpiredUntil[key] and now < self.toastExpiredUntil[key])
+    ) then
         return nil
     end
     if ShouldIgnoreGroupUnit(nil, key, cleanGuid) then
@@ -2625,9 +2679,11 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         entry = {
             key = key,
             firstSeen = now,
+            toastShownAt = now,
         }
         isNewOrChanged = true
     elseif entry.stance ~= stance or not entry._alertEvaluated then
+        entry.toastShownAt = now
         isNewOrChanged = true
     end
     entry.key = key
@@ -2954,6 +3010,7 @@ function Spotter:Clear(silent)
     wipe(self.visibleUnits)
     wipe(self.alertCooldowns)
     wipe(self.dismissedUntil)
+    wipe(self.toastExpiredUntil)
     wipe(self.manualTracked)
     wipe(self.manualTrackedStance)
     wipe(chatCooldown)
@@ -2974,6 +3031,49 @@ function Spotter:Clear(silent)
     end
 
     if not silent then
+        ns:Emit("SPOTTER_UPDATED")
+    end
+end
+
+function Spotter:ClearTargetsOnLocationChange()
+    local hadEntries = next(self.entries) ~= nil
+    wipe(self.entries)
+    wipe(self.entryByGuid)
+    wipe(self.visibleUnits)
+    wipe(self.toastExpiredUntil)
+    wipe(self.manualTracked)
+    wipe(self.manualTrackedStance)
+    wipe(activePlatesByUnit)
+    wipe(activePlateUnitByGuid)
+    activePlateCount = 0
+    wipe(pendingPlateUnits)
+    wipe(chatCooldown)
+    chatCooldownCount = 0
+    wipe(inspectQueue)
+    wipe(inspectQueuedSet)
+    inspectQueueHead = 1
+    inspectQueueTail = 0
+    inspectQueueTimerActive = false
+    wipe(unknownRetryUnits)
+    unknownRetryCount = 0
+    InvalidateBystanderCache()
+    self.lastAlert = nil
+    HideAllPlateBadges()
+    if self.targetArrowFrame then
+        self.targetArrowFrame:Hide()
+    end
+    if ns.SpotterHUD then
+        ns.SpotterHUD.focusedKey = nil
+        ns.SpotterHUD.interactionOpen = false
+        ns.SpotterHUD.interactionKey = nil
+        ns.SpotterHUD._compassEntry = nil
+        ns.SpotterHUD._lastCompassEntryKey = nil
+        ns.SpotterHUD.manualPinnedEmpty = false
+        if ns.SpotterHUD.Hide then
+            ns.SpotterHUD:Hide()
+        end
+    end
+    if hadEntries then
         ns:Emit("SPOTTER_UPDATED")
     end
 end
@@ -3115,9 +3215,10 @@ function Spotter:CleanupAbsentTargets(silent)
     local now = time()
     local changed = false
 
-    for uTok, _ in pairs(self.visibleUnits) do
+    for uTok, uKey in pairs(self.visibleUnits) do
         local exists = Safe.Value(Safe.Call(UnitExists, uTok))
-        if exists ~= true then
+        local mappedEntry = uKey and self.entries[uKey] or nil
+        if exists ~= true or not mappedEntry or not UnitMatchesEntry(uTok, mappedEntry) then
             self.visibleUnits[uTok] = nil
             HidePlateBadge(uTok, nil)
             changed = true
@@ -3128,6 +3229,11 @@ function Spotter:CleanupAbsentTargets(silent)
     for key, exp in pairs(self.dismissedUntil) do
         if now >= exp then
             self.dismissedUntil[key] = nil
+        end
+    end
+    for key, exp in pairs(self.toastExpiredUntil) do
+        if now >= exp then
+            self.toastExpiredUntil[key] = nil
         end
     end
 
@@ -3145,10 +3251,13 @@ function Spotter:CleanupAbsentTargets(silent)
     local fGuid = fExists and Safe.String(Safe.Call(UnitGUID, "focus")) or nil
     local mGuid = mExists and Safe.String(Safe.Call(UnitGUID, "mouseover")) or nil
 
+    local toastDur = GetSpotterToastDuration()
+    local curZone = Compat.CurrentZoneName and Compat.CurrentZoneName() or nil
+    local hudFrame = ns.SpotterHUD and ns.SpotterHUD.frame
+    local hudHovered = hudFrame and hudFrame:IsShown() and hudFrame.IsMouseOver and hudFrame:IsMouseOver() == true
+    local hudDrawerOpen = ns.SpotterHUD and ns.SpotterHUD.interactionOpen == true
+
     for key, entry in pairs(self.entries) do
-        local isManual = self.manualTracked[key] == true
-        local maxRetention = entry.dead and 3 or (isManual and MANUAL_RETENTION_SECONDS or RETENTION_SECONDS)
-        local isRecent = (now - (entry.lastSeen or now)) <= maxRetention
         local isCurTarget = false
         if tExists then
             if entry.guid and tGuid then
@@ -3173,12 +3282,44 @@ function Spotter:CleanupAbsentTargets(silent)
                 isCurMouseover = UnitMatchesEntry("mouseover", entry)
             end
         end
-        local keep = entry.onScreen
-            or isCurTarget
-            or isCurFocus
-            or isCurMouseover
-            or isRecent
+
+        local isHudFocused = hudHovered or (hudDrawerOpen and (not ns.SpotterHUD.interactionKey or ns.SpotterHUD.interactionKey == key))
+        if isCurTarget or isCurFocus or isCurMouseover or isHudFocused then
+            entry.toastShownAt = now
+            entry.lastSeen = now
+        end
+
+        local zoneLeft = (curZone and curZone ~= "" and entry.zone and entry.zone ~= "" and entry.zone ~= curZone)
+            and not entry.onScreen
+            and not isCurTarget
+            and not isCurFocus
+            and not isCurMouseover
+
+        local toastAge = now - (entry.toastShownAt or entry.firstSeen or entry.lastSeen or now)
+        local seenAge = now - (entry.lastSeen or now)
+        local toastWithinDur = (toastAge < toastDur) and (entry.onScreen or seenAge <= toastDur)
+
+        local keep
+        if zoneLeft then
+            keep = false
+        elseif entry.dead and seenAge > 3 and not isCurTarget then
+            keep = false
+        elseif isCurTarget or isCurFocus or isCurMouseover or isHudFocused then
+            keep = true
+        else
+            keep = toastWithinDur
+        end
+
         if not keep then
+            if toastAge >= toastDur and not zoneLeft then
+                self.toastExpiredUntil[key] = now + math.max(45, toastDur * 3)
+            end
+            for uTok, uKey in pairs(self.visibleUnits) do
+                if uKey == key then
+                    self.visibleUnits[uTok] = nil
+                    HidePlateBadge(uTok, nil)
+                end
+            end
             if entry.guid then
                 self.entryByGuid[entry.guid] = nil
             end
@@ -3192,8 +3333,11 @@ function Spotter:CleanupAbsentTargets(silent)
         end
     end
 
-    if changed and not silent then
-        ns:Emit("SPOTTER_UPDATED")
+    if changed then
+        RecomputeOnScreenFlags()
+        if not silent then
+            ns:Emit("SPOTTER_UPDATED")
+        end
     end
     self:UpdateFocusedPlateMarker()
     return changed
@@ -3298,6 +3442,7 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     if not targetMacroName then return nil end
 
     self.dismissedUntil[key] = nil
+    self.toastExpiredUntil[key] = nil
     self.alertCooldowns[key] = nil
     self.manualTracked[key] = true
     if forcedStance then
@@ -3350,6 +3495,7 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
 
     local now = time()
     local entry = self.entries[key] or { key = key, firstSeen = now }
+    entry.toastShownAt = now
     self.entries[key] = entry
     if cleanGuid and cleanGuid ~= "" then
         self.entryByGuid[cleanGuid] = entry
@@ -3432,6 +3578,7 @@ function Spotter:RegisterEvents()
             "BN_FRIEND_INFO_CHANGED",
             "PLAYER_ENTERING_WORLD",
             "ZONE_CHANGED_NEW_AREA",
+            "UNIT_SPELLCAST_SUCCEEDED",
             "CHAT_MSG_SAY",
             "CHAT_MSG_YELL",
             "CHAT_MSG_EMOTE",
@@ -3485,7 +3632,6 @@ local function ScheduleReindexRefresh(allowVisiblePlateRefresh)
     end)
 end
 
-local pendingPlateUnits = {}
 local plateRecheckQueued = false
 local function FlushPendingPlateRechecks()
     plateRecheckQueued = false
@@ -3516,7 +3662,7 @@ function Spotter:Init()
 
     if not self._eventFrame then
         local ef = CreateFrame("Frame")
-        ef:SetScript("OnEvent", function(_, event, arg1, arg2, _, _, _, _, _, _, _, _, _, arg12)
+        ef:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, _, _, _, _, _, _, _, _, arg12)
             if not Spotter:IsEnabled() then
                 return
             end
@@ -3635,25 +3781,48 @@ function Spotter:Init()
                 end
             elseif event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA" then
                 inInstanceCached = nil
+                local curZone = Compat.CurrentZoneName and Compat.CurrentZoneName() or ""
                 if event == "PLAYER_ENTERING_WORLD" then
-                    wipe(activePlatesByUnit)
-                    wipe(activePlateUnitByGuid)
-                    activePlateCount = 0
-                    HideAllPlateBadges()
-                    if Spotter.targetArrowFrame then
-                        Spotter.targetArrowFrame:Hide()
-                    end
-                    wipe(chatCooldown)
-                    chatCooldownCount = 0
-                    InvalidateBystanderCache()
+                    Spotter._lastActiveZone = (curZone ~= "" and curZone) or Spotter._lastActiveZone
+                    Spotter:ClearTargetsOnLocationChange()
                     MarkPositiveIndexDirty()
                     groupCacheDirty = true
                     if C_Timer and C_Timer.After then
                         C_Timer.After(0.6, function()
                             if Spotter:IsEnabled() then
+                                Spotter._lastActiveZone = (Compat.CurrentZoneName and Compat.CurrentZoneName()) or Spotter._lastActiveZone
                                 Spotter:RefreshVisibleNameplates(false)
                             end
                         end)
+                    end
+                else
+                    local prevZone = Spotter._lastActiveZone
+                    if curZone ~= "" then
+                        Spotter._lastActiveZone = curZone
+                    end
+                    if (prevZone and prevZone ~= "" and curZone ~= "" and prevZone ~= curZone) or next(Spotter.entries) ~= nil then
+                        Spotter:ClearTargetsOnLocationChange()
+                        if C_Timer and C_Timer.After then
+                            C_Timer.After(0.4, function()
+                                if Spotter:IsEnabled() then
+                                    Spotter:RefreshVisibleNameplates(false)
+                                end
+                            end)
+                        end
+                    end
+                end
+            elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+                if arg1 == "player" then
+                    local spellId = Safe.Number(arg3) or Safe.Number(arg2)
+                    if spellId and TELEPORT_SPELL_IDS[spellId] then
+                        Spotter:ClearTargetsOnLocationChange()
+                        if C_Timer and C_Timer.After then
+                            C_Timer.After(0.8, function()
+                                if Spotter:IsEnabled() then
+                                    Spotter:RefreshVisibleNameplates(false)
+                                end
+                            end)
+                        end
                     end
                 end
             elseif event == "CHAT_MSG_SAY" or event == "CHAT_MSG_YELL" or event == "CHAT_MSG_EMOTE" or event == "CHAT_MSG_TEXT_EMOTE" then
@@ -3715,6 +3884,7 @@ function Spotter:Init()
         ns:On("SOCIAL_UPDATED", OnSocialOrDiplomacyChanged)
         ns:On("WATCHLIST_UPDATED", OnSocialOrDiplomacyChanged)
         ns:On("CLAN_DIPLOMACY_UPDATED", OnSocialOrDiplomacyChanged)
+        ns:On("ACCOUNT_IGNORES_UPDATED", OnSocialOrDiplomacyChanged)
     end
 
     if self:IsEnabled() then

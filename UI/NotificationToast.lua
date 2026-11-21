@@ -85,6 +85,7 @@ local KIND_RGB = {
     FRIEND_OFFLINE   = { 0.62, 0.66, 0.72 },
     WATCHLIST_ONLINE = { 0.40, 0.94, 0.48 },
     AVOID_ALERT      = { 1.00, 0.30, 0.30 },
+    MENTION          = { 1.00, 0.80, 0.24 },
     VERSION_UPDATE   = { 1.00, 0.78, 0.20 },
 }
 
@@ -255,6 +256,10 @@ local function NavigateForItem(item)
     elseif k == "RMI" then
         if ns.NavigateToModule then
             ns:NavigateToModule("chat", { pendingRoomId = item.roomId })
+        end
+    elseif k == "MENTION" then
+        if ns.NavigateToModule then
+            ns:NavigateToModule("chat", { threadKey = item.threadKey or "mentions:radar" })
         end
     else
         if ns.NavigateToModule then
@@ -846,11 +851,6 @@ function Toast:EnsureFrame(index)
             Toast:DismissItem(item)
             return
         end
-        if item and item.buffDef and ns.WorldBuffs and ns.WorldBuffs.OpenIndividualBuffAnnouncement then
-            ns.WorldBuffs:OpenIndividualBuffAnnouncement(item.buffDef)
-        elseif ns.WorldBuffs and ns.WorldBuffs.OpenChatAnnouncement then
-            ns.WorldBuffs:OpenChatAnnouncement()
-        end
         if item then
             Toast:DismissItem(item)
         end
@@ -966,9 +966,8 @@ local function RenderItemOnFrame(f, item, showNav)
     f.itemData = item
 
     local isInvite = (item.kind == "RMI" and item.roomId and item.roomId ~= "")
-    local isBuffAction = (item.kind == "WORLDBUFF" and item.buffDef ~= nil)
     local isLfgAction = (item.kind == "CLAN_LFG" and item.sender and item.sender ~= "")
-    local hasActionRow = isInvite or isBuffAction or isLfgAction
+    local hasActionRow = isInvite or isLfgAction
     local navOffset = showNav and NAV_H or 0
     f:SetWidth(TOAST_WIDTH)
 
@@ -1096,15 +1095,6 @@ local function RenderItemOnFrame(f, item, showNav)
         f.declineBtn:SetPoint("LEFT", f.acceptBtn, "RIGHT", 6, 0)
         f.declineBtn:Show()
         if f.buffAnnounceBtn then f.buffAnnounceBtn:Hide() end
-        f.actionRow:Show()
-    elseif isBuffAction then
-        f.acceptBtn:Hide()
-        f.declineBtn:Hide()
-        if f.buffAnnounceBtn then
-            Theme:SetButtonText(f.buffAnnounceBtn, L["Announce in Chat"])
-            Theme:AutoFitButton(f.buffAnnounceBtn, 120, 16, 210)
-            f.buffAnnounceBtn:Show()
-        end
         f.actionRow:Show()
     elseif isLfgAction then
         f.acceptBtn:Hide()
@@ -1649,6 +1639,19 @@ local function DescribeDisableTarget(item)
                 EmitDisabledFeedback(L["Group Avoid Warnings"], function(it) return it and it.kind == "AVOID_ALERT" end)
             end,
         }
+    elseif k == "MENTION" then
+        return {
+            label = L["Mentions & Keywords Radar"],
+            desc = L["Stop alerting when your name, nickname, or custom keywords appear in chat."],
+            playerMuteLabel = playerMuteLabel,
+            playerMuteFn = playerMuteFn,
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.mentionAlertsEnabled = false
+                end
+                EmitDisabledFeedback(L["Mentions & Keywords Radar"], function(it) return it and it.kind == "MENTION" end)
+            end,
+        }
     elseif k == "VERSION_UPDATE" then
         return {
             label = L["Addon Update Alerts"],
@@ -2170,6 +2173,39 @@ function Toast:Init()
             while #Toast.queue > 0 and #Toast.activeItems < MAX_QUEUE do
                 table.insert(Toast.activeItems, table.remove(Toast.queue, 1))
             end
+            Toast:LayoutStack()
+        end
+    end)
+
+    ns:On("CHAT_THREAD_READ", function(info)
+        local tKey = type(info) == "table" and info.threadKey or (type(info) == "string" and info) or nil
+        local cKey = type(info) == "table" and info.channelKey or tKey
+        local bnId = type(info) == "table" and info.bnetAccountID or nil
+        if not (tKey or cKey or bnId) then return end
+        local function Matches(it)
+            if not it then return false end
+            if tKey and it.threadKey == tKey then return true end
+            if cKey and it.threadKey == cKey then return true end
+            if bnId and it.bnetAccountID and it.bnetAccountID == bnId then return true end
+            return false
+        end
+        for i = #Toast.queue, 1, -1 do
+            if Matches(Toast.queue[i]) then
+                table.remove(Toast.queue, i)
+            end
+        end
+        local changed = false
+        for i = #Toast.activeItems, 1, -1 do
+            local cur = Toast.activeItems[i]
+            if Matches(cur) then
+                if Toast.confirmPopup and Toast.confirmPopup:IsShown() and Toast.confirmPopup._targetItem == cur then
+                    Toast.confirmPopup:Hide()
+                end
+                table.remove(Toast.activeItems, i)
+                changed = true
+            end
+        end
+        if changed then
             Toast:LayoutStack()
         end
     end)

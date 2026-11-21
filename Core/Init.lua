@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.22"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.22" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.23"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.23" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -110,6 +110,8 @@ local DEFAULTS = {
         clanEventReminders = true,   -- show 15m and 5m notifications before confirmed Guild/Calendar events
         autoStatusInstance = false, -- opt-in contextual activity tag out-of-combat
         chatSound = true,           -- master chime toggle for direct/room conversations
+        chatSoundCooldown = 6,      -- minimum seconds between message notification sounds (default 6s, anti-spam floor >= 3s)
+        chatSoundCooldownDefault6Migrated = false, -- one-time upgrade from initial 3s default to 6s default
         chatSoundWhispers = true,   -- chime on Character & Battle.net whispers
         chatSoundRooms = true,      -- chime on Addon Private Chat Room messages & invites
         chatSoundAlliance = true,   -- chime on Alliance chat addon messages
@@ -121,6 +123,30 @@ local DEFAULTS = {
         chatHistoryLimit = 30,      -- local lines kept per character conversation thread
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
         chatDirectOfficialSend = true, -- send official /w, Battle.net, and guild/group replies in 1 click from Conversations (hardware-event only)
+        mentionAlertsEnabled = true, -- Mentions & Custom Keyword Radar in chat
+        mentionSound = true,        -- play subtle chime on mention/keyword match
+        mentionNicknames = "",      -- comma-separated personal nicknames / alt names
+        mentionKeywords = "",       -- comma-separated custom keywords to watch in chat
+        mentionWatchGuild = true,   -- monitor Guild & Officer chat for mentions/keywords
+        mentionWatchGroup = true,   -- monitor Party, Raid & Instance chat for mentions/keywords
+        mentionWatchSayYell = true, -- monitor Say & Yell for mentions/keywords
+        mentionWatchPublic = true,  -- monitor Public channels (Trade/General/World/LFG) for mentions/keywords
+        accountIgnoreHideChat = true, -- hide official WoW chat messages from Account-Ignored players
+        chatAntiSpamEnabled = false, -- opt-in public chat Anti-Spam Shield (RMT/gold-sellers/boost spam)
+        chatAntiSpamBlockFlood = true, -- block repeated identical public messages by strangers within 45s
+        chatAntiSpamKeywords = "",  -- optional comma-separated custom blocked words for Anti-Spam Shield
+        chatClickableUrls = true,   -- make Discord & web URLs clickable to open the Copy Link dialog
+        embedOfficialChat = true,   -- master toggle for Official Chat (ChatFrame) enhancements & quick [SC] button
+        officialChatQuickButton = true, -- show standardized quick [SC] control button beside Official Chat
+        officialChatShortChannels = true, -- shorten verbose public channel labels in official chat
+        officialChatSenderTags = true, -- append cached [Lv], [Main], [+]/[Avoid] tags in official chat
+        officialChatEditHistory = true, -- preserve typed EditBox lines across reloads (never saves BattleTags)
+        officialChatFastScroll = true, -- Shift+Wheel top/bottom & Ctrl+Wheel fast page scroll in official chat
+        embedLfgMirrorBar = true,   -- show bottom SocialCentral mirror bar on Group Finder (I) Official Tab 1
+        embedMailPicker = true,     -- show Alts quick-picker & [SC] toggle inside Blizzard SendMailFrame
+        embedProfessionWindow = true, -- passively catalog learned recipes & show [SC] toggle on official Profession windows
+        tooltipRecipeAlts = true,   -- show Craftable by Alt / Recipe known / Guild crafter inside item tooltips
+        guildRecipeReply = true,    -- answer on-demand CRQ recipe queries from guildmates when Clan Sync is on
         addonMsgToast = true,       -- show compact floating toast pill when addon messages arrive
         toastDuration = 6,          -- seconds each notification toast stays visible before disappearing (default 6s)
         toastTutorialShown = false, -- one-time account-wide tutorial shown when first notification toast appears
@@ -156,6 +182,7 @@ local DEFAULTS = {
         spotterIgnoreGroup = true,     -- ignore current party/raid members from automatic radar popups
         spotterSound = true,        -- subtle chime when an Enemy/Ally/Watchlist player appears
         spotterAutoShowHUD = true,  -- auto-open floating HUD pill on flagged sighting (out of combat)
+        spotterToastDuration = 10,  -- seconds each Target Radar target toast stays visible before auto-dismissing (default 10s)
         spotterPromptAnswered = true, -- keep HUD clutter-free without unsolicited confirmation popups
         spotterLockHUD = false,     -- lock target HUD position against accidental dragging
         spotterNameplateArrow = true, -- show animated red arrow above focused/selected target nameplate when visible
@@ -199,6 +226,12 @@ local DEFAULTS = {
         lfgAutoApplyDraft = true,   -- pre-fill your Level, Class & Role when whispering LFG posts
         lfgAntiSpam = true,         -- filter WTS/GDKP/boost spam from public LFG channels
         lfgHideAvoidEnemy = false,  -- hide LFG posts from Avoid-flagged or Enemy Guild leaders
+        lfgBulletinMode = true,     -- group LFG browse results under collapsible canonical Dungeon/Raid headers
+        lfgHideSavedLockouts = false, -- hide dungeons/raids where the active character is already saved
+        lfgHideFullGroups = true,   -- hide groups that are already 5/5 or have 0 open slots for your filtered role
+        lfgWatchersEnabled = true,  -- print clickable Official Chat alerts when watched dungeons/keywords appear
+        lfgWatchedActivities = {},  -- [canonicalKey] = displayLabel for active Dungeon/Raid Watchers
+        lfgWhisperTemplate = "",    -- optional custom LFG apply whisper template ({level}, {class}, {role}, {ilvl}, {activity})
         lfgBrowseCategory = "ALL",  -- last chosen Browse category ("ALL" | "DUNGEONS" | "RAIDS" | "QUESTS" | "PVP" | "CUSTOM")
         lfgBrowseSource = "ALL",    -- last chosen Browse source filter
         lfgBrowseRole = "MINE",     -- last chosen Browse role filter ("MINE" by default)
@@ -206,8 +239,16 @@ local DEFAULTS = {
         lfgBrowseSelectedActivities = {}, -- [catId] = { [actKey] = true } persisted checked activities
         officialLfgSyncMode = "GUILD_ALLIES", -- "GUILD_ALLIES" | "GUILD_ONLY" | "OFF"
         groupAvoidAlert = true,     -- warn in chat and toast if an Avoided player enters your party or raid
+        dungeonRunLogEnabled = true, -- passively record started dungeon/raid groups, teammates & run duration (zero CLEU)
+        dungeonLogPromptShown = false, -- one-time account-wide reminder after finishing the first dungeon or raid
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
         worldBuffsExpiryAlert = true, -- warn out of combat when an active World Buff has < 5 minutes left
+        socialGroupByFolder = true,  -- organize O -> Social into collapsible colored folder sections
+        socialOfficialPopupAlerts = true, -- show warning banner on official Invite, Trade & Duel popups from Ignored/Avoid players
+        clanOfficialGreenWall = true, -- mirror Alliance Guild chat into Blizzard Official Chat (ChatFrame1)
+        groupReadyCheckAudit = true,  -- show missing Raid/Dungeon buff audit alert on Blizzard Ready Check
+        worldBuffsSongflowerPins = true, -- show Felwood Songflower node pins on Blizzard World Map (M)
+        worldBuffsReadyAlert = true,  -- notify outside combat when tracked capital World Buff cooldowns finish
     },
     window = {
         point = nil,
@@ -216,21 +257,26 @@ local DEFAULTS = {
     },
     windowPositions = {},            -- [windowKey] = { dx, dy } center-normalized positions across all frames
     accountTutorials = {},           -- [tutorialKey] = true account-wide one-time tutorial completion flags (never repeated on alts)
+    accountIgnores = {},             -- [lookupKey] = { name, reason, note, addedAt, expiresAt, hideChat } unlimited account-wide ignores (zero BattleTag/Real ID)
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
     itemCatalog = {},              -- [itemID] = "name\ticon\tquality\tclassID\tsubClassID" shared across all alts
+    recipeCatalog = {},            -- [recipeKey] = "name\tprofCode\tprofDisplay\titemID\tspellID\tquality\ticon\treagents" shared across alts
+    guildRecipes = {},             -- [guildScopeKey] = bounded observed guildmate recipe matches (character names only)
     clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
     socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note, flag, favorite } }
     friendPresence = {},           -- [scopeKey] = { [lookupKey] = { lastSeen, lastArea, lastClass, lastLevel, favorite } } (strictly zero BattleTag/Real ID)
     recentCompanions = {},         -- [scopeKey] = { [lookupKey] = { name, classFile, level, zone, role, lastSeen } }
     locationShareAllow = {},       -- [scopeKey] = { [lookupKey] = true } permanently approved live map-tracking peers (char keys only, zero BattleTag/Real ID)
     chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
+    chatEditHistory = {},          -- bounded persistent official EditBox typed lines (never stores BattleTags/Real IDs)
     chatRooms = {},                -- [scopeKey] = { [roomId] = { id, name, owner, scope, members } }
     addonPeers = {},               -- [scopeKey] = { [lookupKey] = { displayName, version, lastSeenAt } } (strictly WoW char names, zero Real ID)
     worldBuffsDrops = {},          -- [realmPool] = { [buffId] = timestamp }
     worldBuffsHistory = {},        -- [realmPool] = { [buffId] = { [hour0..23] = count } }
     worldBuffsPersonal = {},       -- [charKey] = { saygeAt = ts, saygePlayed = playedSec }
     instanceRuns = {},             -- [i] = { sig, name, instType, enteredAt, charName, classFile }
+    dungeonHistory = {},           -- [i] = { id, z, t, st, en, dur, bk, bn, er, ch, cl, rl, m = { ... } } (capped at 80 runs)
 }
 
 local function DeepCopyValue(val)
@@ -326,6 +372,17 @@ local function HandleSlash(raw)
         elseif ns.UI and ns.UI.OpenTab then
             ns.UI:OpenTab(cmd)
         end
+    elseif cmd == "recipes" or cmd == "recipe" or cmd == "crafts" or cmd == "receitas" or cmd == "receita" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("alts") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
+        ns:NavigateToModule("alts", {
+            altSubTab = "items",
+            altBagSource = "recipes",
+            altAllAlts = true,
+            altSearch = rest or "",
+        })
     elseif cmd == "buffs" or cmd == "buff" or cmd == "wbuffs" then
         if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("buffs") then
             ns:Print("%s", L["This module is disabled in Settings."])
@@ -404,6 +461,53 @@ local function HandleSlash(raw)
         if ns.MinimapPreview and ns.MinimapPreview.ShowTestPreview then
             ns.MinimapPreview:ShowTestPreview(rest)
         end
+    elseif cmd == "mentions" or cmd == "keywords" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("chat") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
+        if rest == "config" or rest == "edit" then
+            if ns.SocialPanels and ns.SocialPanels.OpenMentionKeywordsModal then
+                ns.SocialPanels:OpenMentionKeywordsModal()
+            end
+        elseif rest == "test" then
+            if ns.Chat and ns.Chat.TriggerTestMention then
+                ns.Chat:TriggerTestMention()
+            end
+        else
+            ns:NavigateToModule("chat", { threadKey = "mentions:radar" })
+        end
+    elseif cmd == "ignore" or cmd == "block" then
+        if ns.SocialPanels and ns.SocialPanels.OpenAccountIgnoreModal then
+            local targetName = (rest and rest ~= "") and rest or nil
+            if not targetName and UnitExists and UnitIsPlayer and UnitExists("target") and UnitIsPlayer("target") then
+                local resolved = ns.Compat and ns.Compat.ResolveUnitFullName and ns.Compat.ResolveUnitFullName("target", nil, nil, true)
+                targetName = (resolved and resolved.fullName) or (UnitName and ns.Safe and ns.Safe.String(ns.Safe.Call(UnitName, "target")))
+            end
+            ns.SocialPanels:OpenAccountIgnoreModal(targetName, targetName)
+        end
+    elseif cmd == "spam" or cmd == "filtered" then
+        if ns.SocialPanels and ns.SocialPanels.OpenFilteredChatModal then
+            ns.SocialPanels:OpenFilteredChatModal()
+        end
+    elseif cmd == "export" or cmd == "import" or cmd == "backup" then
+        if ns.SocialPanels and ns.SocialPanels.OpenSocialExportImportModal then
+            ns.SocialPanels:OpenSocialExportImportModal(cmd == "import")
+        end
+    elseif cmd == "copychat" or cmd == "copy" then
+        if ns.Chat and ns.Chat.OpenCopyOfficialChat then
+            ns.Chat:OpenCopyOfficialChat(tonumber(rest))
+        end
+    elseif cmd == "runs" or cmd == "dungeons" or cmd == "masmorras" or cmd == "historico" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("group") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
+        if ns.UI and ns.UI.OpenGroupRunsView then
+            ns.UI:OpenGroupRunsView()
+        elseif ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub("group")
+        end
     elseif cmd == "resetpos" or cmd == "reset" then
         if ns.Theme and ns.Theme.ResetAllWindowPositions then
             ns.Theme:ResetAllWindowPositions()
@@ -423,15 +527,24 @@ local function HandleSlash(raw)
         if ModOn("lfg") then ns:Print("  |cffffd200/sc lfg|r — %s", L["Looking for Group (I)"]) end
         if ModOn("chat") then ns:Print("  |cffffd200/sc chat|r — %s", L["Open Conversations"]) end
         if ModOn("clan") then ns:Print("  |cffffd200/al <msg>|r — %s", L["Alliance / Clan Chat"]) end
-        if ModOn("group") then ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"]) end
+        if ModOn("group") then
+            ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"])
+            ns:Print("  |cffffd200/sc runs|r — %s", L["Dungeon & Raid Log"])
+        end
         if ModOn("buffs") then ns:Print("  |cffffd200/sc buffs|r — %s", L["World Buffs"]) end
         if ModOn("clan") then ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"]) end
+        if ModOn("alts") then ns:Print("  |cffffd200/sc recipes [item]|r — %s", L["Search Alt & Guild Recipes"]) end
         ns:Print("  |cffffd200/sc hub|r — %s", L["Unified Hub (/sc hub)"])
         if ModOn("radar") then ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"]) end
         ns:Print("  |cffffd200/sc toast [invite|friend|watchlist|buff|queue|clear]|r — %s", L["Test Notification Toast"])
         if ModOn("chat") then
             ns:Print("  |cffffd200/sc preview [whisper|bnet|group|guild|room|queue|setup|clear]|r — %s", L["Test Minimap Preview"])
+            ns:Print("  |cffffd200/sc mentions [config|test]|r — %s", L["Mentions & Keywords Radar"])
+            ns:Print("  |cffffd200/sc spam|r — %s", L["Filtered Chat Log"])
         end
+        ns:Print("  |cffffd200/sc copychat [N]|r — %s", L["Copy Official Chat"])
+        ns:Print("  |cffffd200/sc ignore [name]|r — %s", L["Account Ignore"])
+        ns:Print("  |cffffd200/sc export|r — %s", L["Export / Import Social Data"])
         if ModOn("watchlist") then
             ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
             ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Watchlist character"])
@@ -454,6 +567,7 @@ local ACCOUNT_TUTORIAL_KEYS = {
     "spotterRadarTutorialShown",
     "msgPreviewPromptAnswered",
     "themeChosen",
+    "dungeonLogPromptShown",
 }
 
 local function SyncAccountWideTutorialFlags()
@@ -571,6 +685,12 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.msgPreviewDefault6Migrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.chatSoundCooldownDefault6Migrated ~= true then
+        if SocialCentralDB.settings.chatSoundCooldown == 3 then
+            SocialCentralDB.settings.chatSoundCooldown = 6
+        end
+        SocialCentralDB.settings.chatSoundCooldownDefault6Migrated = true
+    end
     if SocialCentralDB.settings and SocialCentralDB.settings.toastBelowChatMigrated ~= true then
         if type(SocialCentralDB.windowPositions) == "table" then
             SocialCentralDB.windowPositions["notification_toast"] = nil
@@ -588,6 +708,12 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
                     SocialCentralCharDB.settings.msgPreviewDuration = 6
                 end
                 SocialCentralCharDB.settings.msgPreviewDefault6Migrated = true
+            end
+            if SocialCentralCharDB.settings.chatSoundCooldownDefault6Migrated ~= true then
+                if SocialCentralCharDB.settings.chatSoundCooldown == 3 then
+                    SocialCentralCharDB.settings.chatSoundCooldown = 6
+                end
+                SocialCentralCharDB.settings.chatSoundCooldownDefault6Migrated = true
             end
         end
         SocialCentralDB.settings = SocialCentralCharDB.settings
@@ -682,6 +808,8 @@ ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
     SlashCmdList.SOCIALCENTRAL = HandleSlash
 
     SLASH_SOCIALCENTRAL_AL1 = "/al"
+    SLASH_SOCIALCENTRAL_AL2 = "/ali"
+    SLASH_SOCIALCENTRAL_AL3 = "/ally"
     SlashCmdList.SOCIALCENTRAL_AL = function(msg)
         local text = msg and msg:match("^%s*(.-)%s*$") or ""
         HandleSlash("al " .. text)
@@ -697,6 +825,7 @@ ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
     if ns.SetupOfficialChatConfigToggle then
         ns:SetupOfficialChatConfigToggle()
     end
+    ns._bootScopeKey = ns.Compat and ns.Compat.ScopeKey and ns.Compat.ScopeKey() or nil
 
     ns.UnregisterEvent(boot, "PLAYER_LOGIN")
 end)
@@ -829,6 +958,28 @@ end
 
 ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
     ns.UnregisterEvent(boot, "PLAYER_ENTERING_WORLD")
+    if ns.Compat and ns.Compat.InvalidateRealmCache then
+        ns.Compat.InvalidateRealmCache()
+    end
+    if ns.Store and ns.Store.InvalidateScopeCaches then
+        ns.Store:InvalidateScopeCaches()
+    end
+    local liveScope = ns.Compat and ns.Compat.ScopeKey and ns.Compat.ScopeKey() or nil
+    if liveScope and liveScope ~= "" and liveScope ~= ns._bootScopeKey then
+        ns._bootScopeKey = liveScope
+        if ns.Store and ns.Store.NormalizeLegacyRealmScopes then
+            pcall(ns.Store.NormalizeLegacyRealmScopes, ns.Store)
+        end
+        if ns.Chat and ns.Chat.LoadSavedHistory then
+            pcall(ns.Chat.LoadSavedHistory, ns.Chat)
+        end
+        if ns.Watchlist and ns.Watchlist.NormalizeStoredEntries then
+            pcall(ns.Watchlist.NormalizeStoredEntries, ns.Watchlist)
+        end
+        for _, ev in ipairs({ "WATCHLIST_UPDATED", "CHAT_UPDATED", "SOCIAL_UPDATED", "CLAN_UPDATED", "WORLD_BUFFS_UPDATED" }) do
+            ns:Emit(ev)
+        end
+    end
     if ns.Compat and ns.Compat.SyncRosterForeverNames then
         ns.Compat.SyncRosterForeverNames(false, true)
     end
@@ -929,6 +1080,12 @@ function ns:NavigateToModule(modName, opts)
     if (opts.socialFilter or opts.socialSearch or opts.watchlistSearch ~= nil) and ns.UI and ns.UI.SetSocialNavigation then
         ns.UI:SetSocialNavigation(opts)
     end
+    if (opts.altSubTab or opts.altBagSource or opts.altSearch ~= nil) and ns.UI and ns.UI.SetAltsNavigation then
+        ns.UI:SetAltsNavigation(opts)
+    end
+    if opts.clanProfQuery ~= nil and ns.UI and ns.UI.SetClanProfessionQuery then
+        ns.UI:SetClanProfessionQuery(opts.clanProfQuery)
+    end
     if (opts.clanRightView == "browse" or opts.clanRightView == "lfg") and modName == "lfg" and ns.LFGFrameTab then
         ns.LFGFrameTab.viewMode = "browse"
         if opts.lfgSelectKey and opts.lfgSelectKey ~= "" then
@@ -994,6 +1151,21 @@ if EventRegistry and EventRegistry.RegisterCallback then
             if ns.UI and ns.UI.OpenUpdateModal then
                 ns.UI:OpenUpdateModal()
             end
+        elseif link:find("addon:SCentral:lfgapply:", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("lfg") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
+            local payload = link:match("addon:SCentral:lfgapply:([^|]+)")
+            if payload and payload ~= "" then
+                local who, act = payload:match("^([^:]+):(.*)$")
+                who = who or payload
+                if ns.LFGFrameTab and ns.LFGFrameTab.QuickApplyToPlayer then
+                    ns.LFGFrameTab:QuickApplyToPlayer(who, nil, (act and act ~= "") and act or nil)
+                elseif ns.Compat and ns.Compat.Whisper then
+                    ns.Compat.Whisper(who)
+                end
+            end
         elseif link:find("addon:SCentral:clanlfg", 1, true) then
             if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("lfg") then
                 ns:Print("%s", L["This module is disabled in Settings."])
@@ -1057,6 +1229,31 @@ if EventRegistry and EventRegistry.RegisterCallback then
             local noteId = link:match("addon:SCentral:delnote:([^|]+)")
             if noteId and noteId ~= "" and ns.Chat and ns.Chat.DeletePersonalNote then
                 ns.Chat:DeletePersonalNote(noteId)
+            end
+        elseif link:find("addon:SCentral:url:", 1, true) then
+            local encoded = link:match("addon:SCentral:url:([^|]+)")
+            if encoded and encoded ~= "" and ns.UI and ns.UI.OpenCopyModal then
+                local decoded = (ns.Chat and ns.Chat.DecodeUrlLink) and ns.Chat:DecodeUrlLink(encoded) or encoded
+                ns.UI:OpenCopyModal(decoded, L["Copy Link"], L["Press Ctrl+C to copy this link to your clipboard."])
+            end
+        elseif link:find("addon:SCentral:mentions", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("chat") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
+            ns:NavigateToModule("chat", { threadKey = "mentions:radar" })
+        elseif link:find("addon:SCentral:whisper:", 1, true) then
+            local target = link:match("addon:SCentral:whisper:([^|]+)")
+            if target and target ~= "" and ns.Compat and ns.Compat.Whisper then
+                ns.Compat.Whisper(target)
+            end
+        elseif link:find("addon:SCentral:buffaudit", 1, true) then
+            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("group") then
+                ns:Print("%s", L["This module is disabled in Settings."])
+                return
+            end
+            if ns.Group and ns.Group.OpenMissingBuffsDraft then
+                ns.Group:OpenMissingBuffsDraft()
             end
         elseif link:find("addon:SCentral:room:", 1, true) then
             local roomId = link:match("addon:SCentral:room:([^|]+)")

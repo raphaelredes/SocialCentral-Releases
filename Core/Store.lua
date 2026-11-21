@@ -22,16 +22,46 @@ local Store = {
 
 ns.Store = Store
 
-function Store:GetWatchlistTable()
-    local root = ns.db and ns.db.watchlist
-    if not root then return {} end
+function Store:EnsureScopedBucket(root, trackedField)
+    if type(root) ~= "table" then return {} end
     local scope = Compat.ScopeKey()
+    if (type(root[scope]) ~= "table" or next(root[scope]) == nil)
+        and self.NormalizeLegacyRealmScopes
+        and not self._normalizingScopes
+    then
+        self._autoRescuedScopes = self._autoRescuedScopes or {}
+        local tag = tostring(trackedField or "scope") .. "|" .. scope
+        if not self._autoRescuedScopes[tag] then
+            self._autoRescuedScopes[tag] = true
+            for k, v in pairs(root) do
+                if k ~= scope and type(v) == "table" and next(v) ~= nil then
+                    self._normalizingScopes = true
+                    self:NormalizeLegacyRealmScopes()
+                    self._normalizingScopes = false
+                    scope = Compat.ScopeKey()
+                    break
+                end
+            end
+        end
+    end
     if type(root[scope]) ~= "table" then root[scope] = {} end
     return root[scope]
 end
 
+function Store:InvalidateScopeCaches()
+    self._clanScopeGuild = nil
+    self._clanScopeCached = nil
+    self._wlIndexDirty = true
+    self._socialFoldersCache = nil
+    self._linkedAltsDirty = true
+end
+
+function Store:GetWatchlistTable()
+    return self:EnsureScopedBucket(ns.db and ns.db.watchlist, "watchlist")
+end
+
 local CLAN_PEER_TTL = 12 * 3600
-local CLAN_EVENT_TTL = 24 * 3600
+local CLAN_EVENT_TTL = 14 * 86400
 local normalizedClanBuckets = setmetatable({}, { __mode = "k" })
 
 function Store:GetClanScopeData(forcePrune)
@@ -319,7 +349,11 @@ local function AltMatchesWorldScope(key, info, currentKey, curPool, curWorldType
     if wantScope:sub(1, 6) == "world:" then
         return infoWorld == wantScope:sub(7)
     elseif wantScope:sub(1, 5) == "pool:" then
-        return infoPool == wantScope:sub(6)
+        local targetPool = wantScope:sub(6)
+        if Compat.RealmPool then
+            targetPool = Compat.RealmPool(targetPool)
+        end
+        return infoPool == targetPool
     end
     if key == currentKey then
         return true
@@ -678,6 +712,7 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
         end
         if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
             if trustedSurnameSource then
+                entry.firstName = parsed.firstName or entry.firstName
                 entry.surname = parsed.surname
                 entry.displayName = parsed.displayName
                 entry.observedCandidate = nil
@@ -691,6 +726,13 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
                 -- Passive nearby/chat sighting: suggest candidate without permanently hijacking FirstName-only entry.
                 entry.observedCandidate = parsed.displayName
             end
+        elseif trustedSurnameSource and parsed.displayName and parsed.displayName ~= "" and entry.displayName
+            and entry.displayName ~= parsed.displayName and entry.displayName:lower() == parsed.displayName:lower()
+        then
+            entry.firstName = parsed.firstName or entry.firstName
+            entry.surname = parsed.surname or entry.surname
+            entry.displayName = parsed.displayName
+            self._wlIndexDirty = true
         end
         if obsOnline then
             local wasExpired = (entry._expiredOnline == true)
@@ -739,15 +781,11 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
     end
 end
 
-local MAX_RECENT_COMPANIONS = 40
-local COMPANION_TTL = 7 * 86400
+local MAX_RECENT_COMPANIONS = 120
+local COMPANION_TTL = 365 * 86400
 
 function Store:GetSocialMetaTable()
-    local root = ns.db and ns.db.socialMeta
-    if not root then return {} end
-    local scope = Compat.ScopeKey()
-    if type(root[scope]) ~= "table" then root[scope] = {} end
-    return root[scope]
+    return self:EnsureScopedBucket(ns.db and ns.db.socialMeta, "socialMeta")
 end
 
 local function NormalizeMetaKey(rawNameOrKey)
@@ -779,6 +817,7 @@ function Store:GetResolvedSocialMeta(rawNameOrKey)
     return {
         folder = (direct.folder and direct.folder ~= "") and direct.folder or mainMeta.folder,
         mainName = direct.mainName,
+        nickname = (direct.nickname and direct.nickname ~= "") and direct.nickname or mainMeta.nickname,
         note = (direct.note and direct.note ~= "") and direct.note or mainMeta.note,
         flag = direct.flag or mainMeta.flag,
         favorite = (direct.favorite == true) or (mainMeta.favorite == true) or nil,
@@ -801,6 +840,13 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
         local cleanMain = Compat.CleanInput(patch.mainName)
         rec.mainName = cleanMain or nil
     end
+    if patch.nickname ~= nil then
+        local cleanNick = Compat.CleanInput(patch.nickname)
+        if cleanNick and #cleanNick > 28 then
+            cleanNick = cleanNick:sub(1, 28)
+        end
+        rec.nickname = cleanNick or nil
+    end
     if patch.note ~= nil then
         local cleanNote = Compat.CleanInput(patch.note)
         rec.note = cleanNote or nil
@@ -821,7 +867,7 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
     if patch.notifyGuild ~= nil then
         rec.notifyGuild = (patch.notifyGuild == true) and true or nil
     end
-    if not rec.folder and not rec.mainName and not rec.note and not rec.flag and not rec.favorite and not rec.notifyMuted and not rec.notifyGuild then
+    if not rec.folder and not rec.mainName and not rec.nickname and not rec.note and not rec.flag and not rec.favorite and not rec.notifyMuted and not rec.notifyGuild then
         tbl[key] = nil
     else
         rec.updatedAt = time()
@@ -841,6 +887,220 @@ function Store:SetSocialFlag(rawNameOrKey, flagVal)
     local cur = self:GetSocialMeta(rawNameOrKey)
     local nextFlag = (cur and cur.flag == flagVal) and "" or (flagVal or "")
     return self:SetSocialMeta(rawNameOrKey, { flag = nextFlag })
+end
+
+local VALID_IGNORE_REASONS = {
+    SPAM = true,
+    SCAM = true,
+    NINJA = true,
+    TOXIC = true,
+    OTHER = true,
+}
+
+function Store:GetAccountIgnoresTable()
+    if not ns.db then return {} end
+    if type(ns.db.accountIgnores) ~= "table" then
+        ns.db.accountIgnores = {}
+    end
+    return ns.db.accountIgnores
+end
+
+function Store:PruneExpiredAccountIgnores(silent)
+    local tbl = self:GetAccountIgnoresTable()
+    local now = time()
+    local pruned = false
+    for key, rec in pairs(tbl) do
+        if type(rec) ~= "table" or (type(rec.expiresAt) == "number" and rec.expiresAt > 0 and now >= rec.expiresAt) then
+            tbl[key] = nil
+            pruned = true
+        end
+    end
+    if pruned and not silent then
+        ns:Emit("ACCOUNT_IGNORES_UPDATED")
+        ns:Emit("SOCIAL_UPDATED")
+        ns:Emit("CHAT_UPDATED")
+    end
+    return pruned
+end
+
+function Store:GetAccountIgnore(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return nil end
+    local tbl = self:GetAccountIgnoresTable()
+    local rec = tbl[key]
+    if type(rec) == "table" then
+        if type(rec.expiresAt) == "number" and rec.expiresAt > 0 and time() >= rec.expiresAt then
+            tbl[key] = nil
+            return nil
+        end
+        return rec, key
+    end
+    local meta = self:GetSocialMeta(key)
+    if meta and meta.mainName and meta.mainName ~= "" then
+        local mainKey = NormalizeMetaKey(meta.mainName)
+        if mainKey and mainKey ~= key and type(tbl[mainKey]) == "table" then
+            local mRec = tbl[mainKey]
+            if type(mRec.expiresAt) == "number" and mRec.expiresAt > 0 and time() >= mRec.expiresAt then
+                tbl[mainKey] = nil
+                return nil
+            end
+            return mRec, mainKey
+        end
+    end
+    return nil
+end
+
+function Store:IsAccountIgnored(rawNameOrKey)
+    return self:GetAccountIgnore(rawNameOrKey) ~= nil
+end
+
+function Store:SetAccountIgnore(rawNameOrKey, opts)
+    if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" then return nil end
+    -- Strictly refuse BattleTags / Real ID KStrings to preserve privacy rules
+    if rawNameOrKey:find("#", 1, true) or rawNameOrKey:find("|K", 1, true) then
+        return nil
+    end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(rawNameOrKey)
+    local key = (parsed and parsed.lookupKey) or NormalizeMetaKey(rawNameOrKey)
+    if not key or key == "" then return nil end
+    if Compat.IsMe and Compat.IsMe((parsed and parsed.displayName) or rawNameOrKey) then
+        return nil
+    end
+
+    opts = type(opts) == "table" and opts or {}
+    local tbl = self:GetAccountIgnoresTable()
+    local prev = type(tbl[key]) == "table" and tbl[key] or {}
+    local reason = type(opts.reason) == "string" and opts.reason:upper() or prev.reason or "OTHER"
+    if not VALID_IGNORE_REASONS[reason] then
+        reason = "OTHER"
+    end
+    local cleanName = (opts.name and Compat.CleanInput and Compat.CleanInput(opts.name))
+        or (parsed and parsed.displayName)
+        or prev.name
+        or rawNameOrKey
+    local cleanNote
+    if opts.note ~= nil then
+        cleanNote = (Compat.CleanInput and Compat.CleanInput(opts.note)) or ""
+    else
+        cleanNote = prev.note or ""
+    end
+    local now = time()
+    local expiresAt = prev.expiresAt or 0
+    if opts.expiresAt ~= nil then
+        expiresAt = tonumber(opts.expiresAt) or 0
+    elseif opts.durationSec ~= nil then
+        local dur = tonumber(opts.durationSec) or 0
+        expiresAt = (dur > 0) and (now + dur) or 0
+    end
+    local hideChat = (opts.hideChat ~= nil) and (opts.hideChat == true) or (prev.hideChat ~= false)
+
+    tbl[key] = {
+        name = cleanName,
+        reason = reason,
+        note = cleanNote ~= "" and cleanNote or nil,
+        addedAt = prev.addedAt or now,
+        updatedAt = now,
+        expiresAt = expiresAt,
+        hideChat = hideChat,
+    }
+
+    -- Keep Social Meta synchronized with AVOID flag so Group/LFG/Radar warnings work seamlessly
+    local curMeta = self:GetSocialMeta(key)
+    local metaPatch = { flag = "AVOID" }
+    if cleanNote ~= "" and (not curMeta or not curMeta.note or curMeta.note == "") then
+        metaPatch.note = cleanNote
+    end
+    self:SetSocialMeta(key, metaPatch)
+
+    ns:Emit("ACCOUNT_IGNORES_UPDATED")
+    ns:Emit("CHAT_UPDATED")
+    return tbl[key]
+end
+
+function Store:RemoveAccountIgnore(rawNameOrKey, clearAvoidFlag)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return false end
+    local tbl = self:GetAccountIgnoresTable()
+    if tbl[key] == nil then
+        return false
+    end
+    tbl[key] = nil
+    if clearAvoidFlag then
+        local curMeta = self:GetSocialMeta(key)
+        if curMeta and curMeta.flag == "AVOID" then
+            self:SetSocialMeta(key, { flag = "" })
+        end
+    end
+    ns:Emit("ACCOUNT_IGNORES_UPDATED")
+    ns:Emit("SOCIAL_UPDATED")
+    ns:Emit("WATCHLIST_UPDATED")
+    ns:Emit("GROUP_UPDATED")
+    ns:Emit("CLAN_UPDATED")
+    ns:Emit("CHAT_UPDATED")
+    return true
+end
+
+function Store:GetAccountIgnoresList()
+    self:PruneExpiredAccountIgnores(true)
+    local tbl = self:GetAccountIgnoresTable()
+    local out = {}
+    for key, rec in pairs(tbl) do
+        if type(rec) == "table" then
+            out[#out + 1] = {
+                lookupKey = key,
+                name = rec.name or key,
+                reason = rec.reason or "OTHER",
+                note = rec.note,
+                addedAt = rec.addedAt or 0,
+                expiresAt = rec.expiresAt or 0,
+                hideChat = rec.hideChat ~= false,
+            }
+        end
+    end
+    table.sort(out, function(a, b)
+        if (a.addedAt or 0) ~= (b.addedAt or 0) then
+            return (a.addedAt or 0) > (b.addedAt or 0)
+        end
+        return (a.name or ""):lower() < (b.name or ""):lower()
+    end)
+    return out
+end
+
+function Store:GetAccountIgnoresCount()
+    self:PruneExpiredAccountIgnores(true)
+    local count = 0
+    for _ in pairs(self:GetAccountIgnoresTable()) do
+        count = count + 1
+    end
+    return count
+end
+
+function Store:FormatIgnoreReason(reasonCode, Ltbl)
+    local L = Ltbl or ns.L or {}
+    local r = type(reasonCode) == "string" and reasonCode:upper() or "OTHER"
+    if r == "SPAM" then return L["Spammer"] or "Spammer"
+    elseif r == "SCAM" then return L["Scammer"] or "Scammer"
+    elseif r == "NINJA" then return L["Ninja Loot"] or "Ninja Loot"
+    elseif r == "TOXIC" then return L["Toxic"] or "Toxic"
+    end
+    return L["Other"] or "Other"
+end
+
+function Store:FormatIgnoreRemaining(expiresAt, Ltbl)
+    local L = Ltbl or ns.L or {}
+    local exp = tonumber(expiresAt) or 0
+    if exp <= 0 then
+        return L["Permanent"] or "Permanent"
+    end
+    local rem = exp - time()
+    if rem <= 0 then
+        return L["Expired"] or "Expired"
+    elseif rem < 3600 then
+        return string.format(L["%dm left"] or "%dm left", math.max(1, math.floor(rem / 60)))
+    elseif rem < 86400 then
+        return string.format(L["%dh left"] or "%dh left", math.max(1, math.floor(rem / 3600)))
+    end
+    return string.format(L["%dd left"] or "%dd left", math.max(1, math.floor(rem / 86400)))
 end
 
 function Store:GetSocialFolders()
@@ -995,15 +1255,14 @@ function Store:MigrateSocialSurnameRecords(firstName, lookupKey)
     end
 end
 
-local MAX_FRIEND_PRESENCE = 250
-local FRIEND_PRESENCE_TTL = 180 * 86400
+local MAX_FRIEND_PRESENCE = 600
+local FRIEND_PRESENCE_TTL = 730 * 86400
 
 function Store:GetFriendPresenceTable(forcePrune)
     local root = ns.db and ns.db.friendPresence
     if not root then return {} end
+    local tbl = self:EnsureScopedBucket(root, "friendPresence")
     local scope = Compat.ScopeKey()
-    if type(root[scope]) ~= "table" then root[scope] = {} end
-    local tbl = root[scope]
     self._presencePruneAt = self._presencePruneAt or {}
     local nowT = GetTime and GetTime() or 0
     local lastAt = self._presencePruneAt[scope]
@@ -1163,9 +1422,8 @@ end
 function Store:GetRecentCompanionsTable(forcePrune)
     local root = ns.db and ns.db.recentCompanions
     if not root then return {} end
+    local tbl = self:EnsureScopedBucket(root, "recentCompanions")
     local scope = Compat.ScopeKey()
-    if type(root[scope]) ~= "table" then root[scope] = {} end
-    local tbl = root[scope]
     self._companionPruneAt = self._companionPruneAt or {}
     local nowT = GetTime and GetTime() or 0
     local lastAt = self._companionPruneAt[scope]
@@ -1252,6 +1510,9 @@ end
 function Store:GetPlayerAffinityScore(rawNameOrKey, nowTs)
     local key = NormalizeMetaKey(rawNameOrKey)
     if not key then return 0 end
+    if self:IsAccountIgnored(key) then
+        return -1000
+    end
     local now = nowTs or time()
     local score = 0
     local meta = self:GetResolvedSocialMeta(key)
@@ -1332,31 +1593,184 @@ local function CompactOrPruneClanBucket(bucket, scopeKey, nowTs)
     end
 end
 
-local function MergeMissingEntries(dst, src)
+local function MergeMissingEntries(dst, src, fieldKind)
     if type(dst) ~= "table" or type(src) ~= "table" then return end
     for k, v in pairs(src) do
         if dst[k] == nil then
             dst[k] = v
+        elseif type(dst[k]) == "table" and type(v) == "table" then
+            local cur = dst[k]
+            if fieldKind == "chatHistory" then
+                if type(v.lines) == "table" and #v.lines > 0 then
+                    cur.lines = type(cur.lines) == "table" and cur.lines or {}
+                    local seen = {}
+                    for i = 1, #cur.lines do
+                        local ln = cur.lines[i]
+                        if type(ln) == "table" then
+                            seen[tostring(ln.ts or 0) .. "|" .. tostring(ln.sender or "") .. "|" .. tostring(ln.text or "")] = true
+                        end
+                    end
+                    local added = false
+                    for i = 1, #v.lines do
+                        local ln = v.lines[i]
+                        if type(ln) == "table" then
+                            local sig = tostring(ln.ts or 0) .. "|" .. tostring(ln.sender or "") .. "|" .. tostring(ln.text or "")
+                            if not seen[sig] then
+                                seen[sig] = true
+                                cur.lines[#cur.lines + 1] = ln
+                                added = true
+                            end
+                        end
+                    end
+                    if added then
+                        table.sort(cur.lines, function(a, b)
+                            return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0)
+                        end)
+                    end
+                end
+                cur.updatedAt = math.max(tonumber(cur.updatedAt) or 0, tonumber(v.updatedAt) or 0)
+                if not cur.faction and v.faction then cur.faction = v.faction end
+                if not cur.targetName and v.targetName then cur.targetName = v.targetName end
+            elseif fieldKind == "watchlist" then
+                if v.favorite == true then cur.favorite = true end
+                if v.notifyMuted == true then cur.notifyMuted = true end
+                if (not cur.note or cur.note == "") and v.note and v.note ~= "" then cur.note = v.note end
+                if (not cur.group or cur.group == "") and v.group and v.group ~= "" then cur.group = v.group end
+                if (not cur.guid or cur.guid == "") and v.guid and v.guid ~= "" then cur.guid = v.guid end
+                if (not cur.guild or cur.guild == "") and v.guild and v.guild ~= "" then cur.guild = v.guild end
+                if (not cur.classFile or cur.classFile == "") and v.classFile and v.classFile ~= "" then cur.classFile = v.classFile end
+                if (tonumber(v.addedAt) or 0) > 0 and ((tonumber(cur.addedAt) or 0) == 0 or v.addedAt < cur.addedAt) then
+                    cur.addedAt = v.addedAt
+                end
+                if v.displayName and v.displayName ~= "" and Compat and Compat.ParseCharacterName then
+                    local vp = Compat.ParseCharacterName(v.displayName)
+                    if vp and vp.displayName then
+                        cur.displayName = vp.displayName
+                        cur.firstName = vp.firstName or cur.firstName
+                        cur.surname = vp.surname or cur.surname
+                    end
+                end
+            else
+                for sk, sv in pairs(v) do
+                    if cur[sk] == nil or cur[sk] == "" then
+                        cur[sk] = sv
+                    end
+                end
+            end
         end
     end
 end
 
---- Consolidate split sub-realm shard keys (e.g. camwowus1realm6pvp -> camwowus1realmpvp)
+--- Consolidate split sub-realm/cluster shard keys (e.g. camwowus1realm6pvp / camwowus2realmpvp -> camwowrealmpvp),
+--- repair surname-corrupted Forever alt/scope buckets (e.g. "camarada:Horde" -> "camwowrealmpvp:Horde"),
+--- recover character scopes if Forever rotates/renames backend realms (matched via immutable player GUID),
 --- and pack legacy guild roster snapshots to eliminate SavedVariables & boot memory bloat.
 function Store:NormalizeLegacyRealmScopes()
     if not (ns.db and Compat and Compat.RealmPool) then return end
     local nowTs = time()
+    local isValidRealmFn = Compat.LooksLikeServerRealm
+    local plainFn = Compat.Plain
 
+    -- Step 1: Repair alt entries whose realmName/realmPool was previously polluted by a Forever surname (non-realm token)
+    -- and collect known surname keys so orphaned surname-named scopes are always rescued safely.
+    local surnamePoolSet = {}
+    local validByGuildFaction = {}
+    local bestFactionPool = {}
     if type(ns.db.alts) == "table" then
         for _, info in pairs(ns.db.alts) do
             if type(info) == "table" then
-                local srcPool = info.realmName or info.realmPool
-                if type(srcPool) == "string" and srcPool ~= "" then
-                    local norm = Compat.RealmPool(srcPool)
-                    if norm and norm ~= "" then
-                        info.realmPool = norm
+                if type(info.surname) == "string" and info.surname ~= "" then
+                    local sp = plainFn and plainFn(info.surname) or info.surname:lower()
+                    if sp ~= "" and (not isValidRealmFn or not isValidRealmFn(info.surname)) then
+                        surnamePoolSet[sp] = true
                     end
                 end
+                local candRealm = info.realmName or info.realmRaw or info.realmPool
+                if type(candRealm) == "string" and candRealm ~= "" and (not isValidRealmFn or isValidRealmFn(candRealm)) then
+                    local norm = Compat.RealmPool(candRealm)
+                    if norm and norm ~= "" and norm ~= "default" then
+                        info.realmPool = norm
+                        local fac = info.faction or ""
+                        if type(info.guild) == "string" and info.guild ~= "" then
+                            local gk = fac .. "::" .. info.guild
+                            if not validByGuildFaction[gk] or (info.lastActive or 0) > (validByGuildFaction[gk].lastActive or 0) then
+                                validByGuildFaction[gk] = {
+                                    realmName = info.realmName,
+                                    realmRaw = info.realmRaw,
+                                    worldType = info.worldType,
+                                    realmPool = norm,
+                                    lastActive = info.lastActive or 0,
+                                }
+                            end
+                        end
+                        if fac ~= "" then
+                            if not bestFactionPool[fac] or (info.lastActive or 0) > (bestFactionPool[fac].lastActive or 0) then
+                                bestFactionPool[fac] = {
+                                    realmName = info.realmName,
+                                    realmRaw = info.realmRaw,
+                                    worldType = info.worldType,
+                                    realmPool = norm,
+                                    lastActive = info.lastActive or 0,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        for _, info in pairs(ns.db.alts) do
+            if type(info) == "table" then
+                local rName = info.realmName
+                local hasValidRealm = type(rName) == "string" and rName ~= "" and (not isValidRealmFn or isValidRealmFn(rName))
+                local matchesOwnSurname = type(rName) == "string" and rName ~= "" and type(info.surname) == "string" and info.surname ~= ""
+                    and ((plainFn and plainFn(rName) or rName:lower()) == (plainFn and plainFn(info.surname) or info.surname:lower()))
+                local isPollutedBySurname = (not hasValidRealm) and ((not info.realmRaw or info.realmRaw == "") or matchesOwnSurname)
+                if isPollutedBySurname then
+                    -- If realmName actually holds the stripped Forever surname (e.g. "Camarada"), restore fullName/surname.
+                    if type(rName) == "string" and rName ~= "" then
+                        local rp = plainFn and plainFn(rName) or rName:lower()
+                        if rp ~= "" then
+                            surnamePoolSet[rp] = true
+                        end
+                        if (not info.surname or info.surname == "") and type(info.firstName or info.name) == "string" and (info.firstName or info.name) ~= "" then
+                            local capS = Compat.CapitalizeNameWord and Compat.CapitalizeNameWord(rName) or rName
+                            local capF = Compat.CapitalizeNameWord and Compat.CapitalizeNameWord(info.firstName or info.name) or (info.firstName or info.name)
+                            info.firstName = capF
+                            info.surname = capS
+                            info.fullName = capF .. " " .. capS
+                        end
+                    end
+                    local fac = info.faction or ""
+                    local repair = (type(info.guild) == "string" and info.guild ~= "") and validByGuildFaction[fac .. "::" .. info.guild] or nil
+                    if not repair and fac ~= "" and bestFactionPool[fac] then
+                        repair = bestFactionPool[fac]
+                    end
+                    if repair then
+                        info.realmName = repair.realmName
+                        info.realmRaw = repair.realmRaw or info.realmRaw
+                        info.worldType = repair.worldType or info.worldType
+                        info.realmPool = repair.realmPool
+                    end
+                end
+            end
+        end
+    end
+
+    -- Inspect live character GUID after repairing surname-polluted alt entries so Compat.Realm() resolves cleanly.
+    local safeStr = ns.Safe and ns.Safe.String
+    local safeCall = ns.Safe and ns.Safe.Call
+    local myGuid = (safeStr and safeCall and UnitGUID) and safeStr(safeCall(UnitGUID, "player")) or nil
+    local liveRealm = Compat.Realm and Compat.Realm() or ""
+    local livePool = (liveRealm ~= "") and Compat.RealmPool(liveRealm) or nil
+    local liveFaction = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    local prevGuidPool = nil
+    if myGuid and myGuid ~= "" and type(ns.db.alts) == "table" then
+        local existingAlt = ns.db.alts["guid:" .. myGuid]
+        if type(existingAlt) == "table" then
+            local rawOld = existingAlt.realmPool or existingAlt.realmName
+            if type(rawOld) == "string" and rawOld ~= "" and (not isValidRealmFn or isValidRealmFn(rawOld)) then
+                prevGuidPool = Compat.RealmPool(rawOld)
             end
         end
     end
@@ -1365,6 +1779,149 @@ function Store:NormalizeLegacyRealmScopes()
         "watchlist", "socialMeta", "friendPresence", "recentCompanions",
         "observedAlts", "locationShareAllow", "chatHistory", "chatRooms", "addonPeers",
     }
+
+    local function mergeClanBucketData(dst, src)
+        if type(dst) ~= "table" or type(src) ~= "table" then return end
+        if (not dst.myTag or dst.myTag == "" or dst.myTag == "NONE") and src.myTag and src.myTag ~= "" and src.myTag ~= "NONE" then
+            dst.myTag = src.myTag
+        end
+        if (not dst.myNote or dst.myNote == "") and src.myNote and src.myNote ~= "" then
+            dst.myNote = src.myNote
+        end
+        if (not dst.myProf1 or dst.myProf1 == "" or dst.myProf1 == "NONE") and src.myProf1 and src.myProf1 ~= "" and src.myProf1 ~= "NONE" then
+            dst.myProf1 = src.myProf1
+            dst.myProf1Rank = src.myProf1Rank or dst.myProf1Rank
+        end
+        if (not dst.myProf2 or dst.myProf2 == "" or dst.myProf2 == "NONE") and src.myProf2 and src.myProf2 ~= "" and src.myProf2 ~= "NONE" then
+            dst.myProf2 = src.myProf2
+            dst.myProf2Rank = src.myProf2Rank or dst.myProf2Rank
+        end
+        if (not dst.myCraftNote or dst.myCraftNote == "") and src.myCraftNote and src.myCraftNote ~= "" then
+            dst.myCraftNote = src.myCraftNote
+        end
+        MergeMissingEntries(dst.peers, src.peers)
+        MergeMissingEntries(dst.events, src.events)
+        MergeMissingEntries(dst.lfg, src.lfg)
+        if type(src.recipesCache) == "table" then
+            dst.recipesCache = type(dst.recipesCache) == "table" and dst.recipesCache or {}
+            MergeMissingEntries(dst.recipesCache, src.recipesCache)
+        end
+        if type(dst.diplomacy) == "table" and type(src.diplomacy) == "table" then
+            MergeMissingEntries(dst.diplomacy.guilds, src.diplomacy.guilds)
+            if (tonumber(src.diplomacy.rev) or 0) > (tonumber(dst.diplomacy.rev) or 0) then
+                dst.diplomacy.rev = src.diplomacy.rev
+                dst.diplomacy.updatedAt = src.diplomacy.updatedAt
+                dst.diplomacy.updatedBy = src.diplomacy.updatedBy
+            end
+        end
+        if type(src.clanInfo) == "table" and (type(dst.clanInfo) ~= "table" or (tonumber(src.clanInfo.rev) or 0) > (tonumber(dst.clanInfo.rev) or 0)) then
+            dst.clanInfo = src.clanInfo
+        end
+        if type(src.hierarchy) == "table" and (type(dst.hierarchy) ~= "table" or (tonumber(src.hierarchy.rev) or 0) > (tonumber(dst.hierarchy.rev) or 0)) then
+            dst.hierarchy = src.hierarchy
+        end
+        if type(src.alliance) == "table" then
+            if type(dst.alliance) ~= "table" then
+                dst.alliance = src.alliance
+            else
+                if src.alliance.enabled == true then dst.alliance.enabled = true end
+                if (not dst.alliance.name or dst.alliance.name == "") and src.alliance.name and src.alliance.name ~= "" then
+                    dst.alliance.name = src.alliance.name
+                end
+                if (not dst.alliance.token or dst.alliance.token == "") and src.alliance.token and src.alliance.token ~= "" then
+                    dst.alliance.token = src.alliance.token
+                end
+                MergeMissingEntries(dst.alliance.whitelist, src.alliance.whitelist)
+                MergeMissingEntries(dst.alliance.managers, src.alliance.managers)
+                MergeMissingEntries(dst.alliance.alliedGuilds, src.alliance.alliedGuilds)
+            end
+        end
+    end
+
+    local function migratePoolScope(oldPool, newPool, onlyFaction)
+        if not oldPool or not newPool or oldPool == "" or newPool == "" or oldPool == newPool or newPool == "default" then
+            return
+        end
+        for _, field in ipairs(scopedKeys) do
+            local root = ns.db[field]
+            if type(root) == "table" then
+                local toMove = nil
+                for scopeKey, sub in pairs(root) do
+                    if type(scopeKey) == "string" then
+                        local pool, rest = scopeKey:match("^([^:]+):(.+)$")
+                        if pool == oldPool and rest and (not onlyFaction or rest == onlyFaction) then
+                            toMove = toMove or {}
+                            toMove[scopeKey] = { target = newPool .. ":" .. rest, data = sub }
+                        end
+                    end
+                end
+                if toMove then
+                    for oldKey, item in pairs(toMove) do
+                        if type(item.data) == "table" then
+                            if type(root[item.target]) ~= "table" then
+                                root[item.target] = item.data
+                            else
+                                MergeMissingEntries(root[item.target], item.data, field)
+                            end
+                        end
+                        root[oldKey] = nil
+                    end
+                end
+            end
+        end
+        if type(ns.db.clan) == "table" then
+            local clanToMove = nil
+            for scopeKey, bucket in pairs(ns.db.clan) do
+                if type(scopeKey) == "string" then
+                    local pool, rest = scopeKey:match("^([^:]+):(.+)$")
+                    local fac = rest and rest:match("^([^:]+)")
+                    if pool == oldPool and rest and (not onlyFaction or fac == onlyFaction) then
+                        clanToMove = clanToMove or {}
+                        clanToMove[scopeKey] = { target = newPool .. ":" .. rest, data = bucket }
+                    end
+                end
+            end
+            if clanToMove then
+                for oldKey, item in pairs(clanToMove) do
+                    if type(item.data) == "table" then
+                        local dst = ns.db.clan[item.target]
+                        if type(dst) ~= "table" then
+                            ns.db.clan[item.target] = item.data
+                        else
+                            mergeClanBucketData(dst, item.data)
+                        end
+                    end
+                    ns.db.clan[oldKey] = nil
+                end
+            end
+        end
+        for _, wbField in ipairs({ "worldBuffsDrops", "worldBuffsHistory" }) do
+            local wbRoot = ns.db[wbField]
+            if type(wbRoot) == "table" then
+                local wbMove = nil
+                for poolKey, sub in pairs(wbRoot) do
+                    if type(poolKey) == "string" and (poolKey == oldPool or (plainFn and plainFn(poolKey) == oldPool)) then
+                        wbMove = wbMove or {}
+                        wbMove[poolKey] = sub
+                    end
+                end
+                if wbMove then
+                    for oldKey, sub in pairs(wbMove) do
+                        if type(sub) == "table" then
+                            if type(wbRoot[newPool]) ~= "table" then
+                                wbRoot[newPool] = sub
+                            else
+                                MergeMissingEntries(wbRoot[newPool], sub)
+                            end
+                        end
+                        wbRoot[oldKey] = nil
+                    end
+                end
+            end
+        end
+    end
+
+    -- Step 2: Consolidate all numbered/regional Forever shards (camwowus1realmpvp -> camwowrealmpvp).
     for _, field in ipairs(scopedKeys) do
         local root = ns.db[field]
         if type(root) == "table" then
@@ -1388,7 +1945,7 @@ function Store:NormalizeLegacyRealmScopes()
                         if type(root[item.target]) ~= "table" then
                             root[item.target] = item.data
                         else
-                            MergeMissingEntries(root[item.target], item.data)
+                            MergeMissingEntries(root[item.target], item.data, field)
                         end
                     end
                     root[oldKey] = nil
@@ -1422,14 +1979,313 @@ function Store:NormalizeLegacyRealmScopes()
                     if type(dst) ~= "table" then
                         ns.db.clan[item.target] = item.data
                     else
-                        MergeMissingEntries(dst.events, item.data.events)
-                        if type(dst.diplomacy) == "table" and type(item.data.diplomacy) == "table" then
-                            MergeMissingEntries(dst.diplomacy.guilds, item.data.diplomacy.guilds)
-                        end
+                        mergeClanBucketData(dst, item.data)
                     end
                 end
                 ns.db.clan[oldKey] = nil
             end
         end
     end
+
+    for _, wbField in ipairs({ "worldBuffsDrops", "worldBuffsHistory" }) do
+        local wbRoot = ns.db[wbField]
+        if type(wbRoot) == "table" then
+            local wbMove = nil
+            for poolKey, sub in pairs(wbRoot) do
+                if type(poolKey) == "string" then
+                    local normPool = Compat.RealmPool(poolKey)
+                    if normPool and normPool ~= "" and normPool ~= poolKey then
+                        wbMove = wbMove or {}
+                        wbMove[poolKey] = { target = normPool, data = sub }
+                    end
+                end
+            end
+            if wbMove then
+                for oldKey, item in pairs(wbMove) do
+                    if type(item.data) == "table" then
+                        if type(wbRoot[item.target]) ~= "table" then
+                            wbRoot[item.target] = item.data
+                        else
+                            MergeMissingEntries(wbRoot[item.target], item.data)
+                        end
+                    end
+                    wbRoot[oldKey] = nil
+                end
+            end
+        end
+    end
+
+    -- Step 3: Self-healing rescue of any orphaned "default" or surname-corrupted scopes (e.g. "camarada:Horde")
+    -- back into the canonical real-world pool so upgrades or Forever shard hiccups never hide user history.
+    local rescueTargetPool = (livePool and livePool ~= "" and livePool ~= "default" and (not isValidRealmFn or isValidRealmFn(livePool)))
+        and livePool
+        or (liveFaction and bestFactionPool[liveFaction] and bestFactionPool[liveFaction].realmPool)
+        or nil
+
+    if rescueTargetPool and rescueTargetPool ~= "" and rescueTargetPool ~= "default" then
+        for badPool in pairs(surnamePoolSet) do
+            if badPool ~= rescueTargetPool and (not isValidRealmFn or not isValidRealmFn(badPool)) then
+                migratePoolScope(badPool, rescueTargetPool, nil)
+            end
+        end
+        if liveFaction then
+            migratePoolScope("default", rescueTargetPool, liveFaction)
+            if prevGuidPool and prevGuidPool ~= "" and prevGuidPool ~= "default" and prevGuidPool ~= rescueTargetPool then
+                local oldWt = Compat.DetectWorldType and Compat.DetectWorldType(prevGuidPool) or nil
+                local curWt = Compat.DetectWorldType and Compat.DetectWorldType(rescueTargetPool) or nil
+                local rulesetCompatible = (oldWt == curWt) or (oldWt == nil) or (curWt == nil)
+                if rulesetCompatible then
+                    migratePoolScope(prevGuidPool, rescueTargetPool, liveFaction)
+                end
+            end
+        end
+    end
+
+    if type(ns.db.worldBuffsPersonal) == "table" then
+        local persMove = nil
+        for charKey, rec in pairs(ns.db.worldBuffsPersonal) do
+            if type(charKey) == "string" and type(rec) == "table" then
+                local cName, pool = charKey:match("^(.+)@([^@]+)$")
+                if cName and pool then
+                    local normPool = Compat.RealmPool(pool)
+                    if (pool == "default" or surnamePoolSet[pool] or (isValidRealmFn and not isValidRealmFn(pool))) and rescueTargetPool then
+                        normPool = rescueTargetPool
+                    end
+                    if normPool and normPool ~= "" and normPool ~= pool then
+                        persMove = persMove or {}
+                        persMove[charKey] = { target = cName .. "@" .. normPool, data = rec }
+                    end
+                end
+            end
+        end
+        if persMove then
+            for oldKey, item in pairs(persMove) do
+                if type(ns.db.worldBuffsPersonal[item.target]) ~= "table" then
+                    ns.db.worldBuffsPersonal[item.target] = item.data
+                else
+                    MergeMissingEntries(ns.db.worldBuffsPersonal[item.target], item.data)
+                end
+                ns.db.worldBuffsPersonal[oldKey] = nil
+            end
+        end
+    end
+
+    -- Rescues orphaned generic "::guild" clan placeholder bucket once the live guild name is known.
+    local activeGuild = (self.guildInfo and self.guildInfo.inGuild and self.guildInfo.name)
+        or (IsInGuild and ns.Safe and ns.Safe.Value(IsInGuild()) == true and GetGuildInfo and ns.Safe.String(ns.Safe.Call(GetGuildInfo, "player")))
+        or nil
+    if type(ns.db.clan) == "table" and activeGuild and activeGuild ~= "" and liveFaction and rescueTargetPool then
+        local placeholderKey = rescueTargetPool .. ":" .. liveFaction .. "::guild"
+        local realGuildKey = rescueTargetPool .. ":" .. liveFaction .. "::" .. (plainFn and plainFn(activeGuild) or activeGuild:lower())
+        if placeholderKey ~= realGuildKey and type(ns.db.clan[placeholderKey]) == "table" then
+            if type(ns.db.clan[realGuildKey]) ~= "table" then
+                ns.db.clan[realGuildKey] = ns.db.clan[placeholderKey]
+            else
+                mergeClanBucketData(ns.db.clan[realGuildKey], ns.db.clan[placeholderKey])
+            end
+            ns.db.clan[placeholderKey] = nil
+        end
+    end
+
+    self:InvalidateScopeCaches()
+    if self.PruneExpiredAccountIgnores then
+        self:PruneExpiredAccountIgnores(true)
+    end
+end
+
+local function EscapeExportField(raw)
+    local s = tostring(raw or "")
+    s = s:gsub("%%", "%%25"):gsub("~", "%%7E"):gsub("\r", " "):gsub("\n", " ")
+    return s
+end
+
+local function UnescapeExportField(raw)
+    if type(raw) ~= "string" then return "" end
+    local s = raw:gsub("%%7[Ee]", "~"):gsub("%%25", "%%")
+    return s
+end
+
+local function SplitTildeLine(line)
+    local out = {}
+    local startIdx = 1
+    while true do
+        local pos = line:find("~", startIdx, true)
+        if not pos then
+            out[#out + 1] = UnescapeExportField(line:sub(startIdx))
+            break
+        end
+        out[#out + 1] = UnescapeExportField(line:sub(startIdx, pos - 1))
+        startIdx = pos + 1
+    end
+    return out
+end
+
+function Store:ExportSocialDataString()
+    local lines = { "SC1" }
+    local igCount, metaCount, wlCount = 0, 0, 0
+
+    local igTbl = self:GetAccountIgnoresTable()
+    local igKeys = {}
+    for k in pairs(igTbl) do igKeys[#igKeys + 1] = k end
+    table.sort(igKeys)
+    local now = time()
+    for _, k in ipairs(igKeys) do
+        local r = igTbl[k]
+        if type(r) == "table" and (not r.expiresAt or r.expiresAt == 0 or r.expiresAt > now)
+            and not tostring(k):find("#", 1, true) and not tostring(r.name or ""):find("#", 1, true) then
+            lines[#lines + 1] = table.concat({
+                "I",
+                EscapeExportField(k),
+                EscapeExportField(r.name or k),
+                EscapeExportField(r.reason or "OTHER"),
+                tostring(tonumber(r.expiresAt) or 0),
+                (r.hideChat ~= false) and "1" or "0",
+                EscapeExportField(r.note or ""),
+            }, "~")
+            igCount = igCount + 1
+        end
+    end
+
+    local metaTbl = self:GetSocialMetaTable()
+    local metaKeys = {}
+    for k in pairs(metaTbl) do metaKeys[#metaKeys + 1] = k end
+    table.sort(metaKeys)
+    for _, k in ipairs(metaKeys) do
+        local m = metaTbl[k]
+        if type(m) == "table" and not tostring(k):find("#", 1, true) then
+            lines[#lines + 1] = table.concat({
+                "M",
+                EscapeExportField(k),
+                EscapeExportField(m.flag or ""),
+                m.favorite and "1" or "0",
+                EscapeExportField(m.nickname or ""),
+                EscapeExportField(m.mainName or ""),
+                EscapeExportField(m.folder or ""),
+                EscapeExportField(m.note or ""),
+            }, "~")
+            metaCount = metaCount + 1
+        end
+    end
+
+    local wlTbl = self:GetWatchlistTable()
+    local wlKeys = {}
+    for k in pairs(wlTbl) do wlKeys[#wlKeys + 1] = k end
+    table.sort(wlKeys)
+    for _, k in ipairs(wlKeys) do
+        local w = wlTbl[k]
+        if type(w) == "table" and not tostring(k):find("#", 1, true) then
+            lines[#lines + 1] = table.concat({
+                "W",
+                EscapeExportField(k),
+                EscapeExportField(w.displayName or w.firstName or k),
+                EscapeExportField(w.group or ""),
+                w.favorite and "1" or "0",
+                EscapeExportField(w.note or ""),
+            }, "~")
+            wlCount = wlCount + 1
+        end
+    end
+
+    return table.concat(lines, "\n"), igCount, metaCount, wlCount
+end
+
+function Store:ImportSocialDataString(rawStr)
+    if type(rawStr) ~= "string" then
+        return false, 0, 0, 0
+    end
+    local sawHeader = false
+    local igCount, metaCount, wlCount = 0, 0, 0
+    local now = time()
+    local wlTbl = self:GetWatchlistTable()
+
+    for line in rawStr:gmatch("[^\r\n]+") do
+        local trimmed = Compat.Trim(line)
+        if trimmed == "SC1" then
+            sawHeader = true
+        elseif sawHeader and trimmed ~= "" then
+            local parts = SplitTildeLine(trimmed)
+            local recType = parts[1]
+            local rawKey = parts[2]
+            if rawKey and rawKey ~= "" and not rawKey:find("#", 1, true) and not rawKey:find("|K", 1, true) then
+                if recType == "I" then
+                    local dispName = parts[3] or rawKey
+                    local reason = parts[4] or "OTHER"
+                    local expiresAt = tonumber(parts[5]) or 0
+                    local hideChat = (parts[6] ~= "0")
+                    local note = parts[7] or ""
+                    if (expiresAt == 0 or expiresAt > now) and not (Compat.IsMe and Compat.IsMe(dispName)) then
+                        local res = self:SetAccountIgnore(rawKey, {
+                            name = dispName,
+                            reason = reason,
+                            expiresAt = expiresAt,
+                            hideChat = hideChat,
+                            note = note ~= "" and note or nil,
+                        })
+                        if res then igCount = igCount + 1 end
+                    end
+                elseif recType == "M" then
+                    local flag = parts[3] or ""
+                    local fav = (parts[4] == "1")
+                    local nick = parts[5] or ""
+                    local mainName = parts[6] or ""
+                    local folder = parts[7] or ""
+                    local note = parts[8] or ""
+                    local patch = {}
+                    if flag == "GOOD" or flag == "AVOID" then patch.flag = flag end
+                    if fav then patch.favorite = true end
+                    if nick ~= "" then patch.nickname = nick end
+                    if mainName ~= "" then patch.mainName = mainName end
+                    if folder ~= "" then patch.folder = folder end
+                    if note ~= "" then patch.note = note end
+                    if next(patch) ~= nil then
+                        local curMeta = self:GetSocialMeta(rawKey) or {}
+                        if curMeta.flag and not patch.flag then patch.flag = curMeta.flag end
+                        if curMeta.favorite and not patch.favorite then patch.favorite = curMeta.favorite end
+                        if self:SetSocialMeta(rawKey, patch) then
+                            metaCount = metaCount + 1
+                        end
+                    end
+                elseif recType == "W" and Compat.ParseCharacterName then
+                    local disp = parts[3] or rawKey
+                    local grp = parts[4] or ""
+                    local fav = (parts[5] == "1")
+                    local note = parts[6] or ""
+                    if not (Compat.IsMe and Compat.IsMe(disp)) then
+                        local parsed = Compat.ParseCharacterName(disp)
+                        if parsed and parsed.lookupKey then
+                            local existing = wlTbl[parsed.lookupKey]
+                            if not existing then
+                                wlTbl[parsed.lookupKey] = {
+                                    id = parsed.lookupKey,
+                                    displayName = parsed.displayName,
+                                    firstName = parsed.firstName,
+                                    surname = parsed.surname,
+                                    status = "unknown",
+                                    group = (grp ~= "") and grp or nil,
+                                    favorite = fav and true or nil,
+                                    note = (note ~= "") and note or nil,
+                                    addedAt = now,
+                                }
+                                wlCount = wlCount + 1
+                            else
+                                if (not existing.note or existing.note == "") and note ~= "" then existing.note = note end
+                                if (not existing.group or existing.group == "") and grp ~= "" then existing.group = grp end
+                                if fav then existing.favorite = true end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if not sawHeader then
+        return false, 0, 0, 0
+    end
+    self:InvalidateWatchlistIndex()
+    ns:Emit("SOCIAL_UPDATED")
+    ns:Emit("WATCHLIST_UPDATED")
+    ns:Emit("ACCOUNT_IGNORES_UPDATED")
+    ns:Emit("CHAT_UPDATED")
+    return true, igCount, metaCount, wlCount
 end
