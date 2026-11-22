@@ -51,6 +51,9 @@ local Clan = {
 }
 
 local function PlayClanAlertSound(self, kit)
+    if Compat.IsFocusSilenced and Compat.IsFocusSilenced() then
+        return
+    end
     local nowMono = GetTime and GetTime() or time()
     if (nowMono - (self.lastClanSoundAt or 0)) < 2.5 then
         return
@@ -60,6 +63,121 @@ local function PlayClanAlertSound(self, kit)
         self.lastClanSoundAt = nowMono
         pcall(PlaySound, resolvedKit, "Master")
     end
+end
+
+local function TruncateUtf8Bytes(str, maxBytes)
+    if type(str) ~= "string" then return "" end
+    if #str <= maxBytes then return str end
+    if maxBytes <= 0 then return "" end
+    local cut = maxBytes
+    local nextB = str:byte(cut + 1)
+    if nextB and nextB >= 128 and nextB <= 191 then
+        while cut > 0 do
+            local b = str:byte(cut)
+            if b and b >= 128 and b <= 191 then
+                cut = cut - 1
+            else
+                cut = cut - 1
+                break
+            end
+        end
+    end
+    if cut <= 0 then return "" end
+    return str:sub(1, cut)
+end
+
+local function DaysInCalendarMonth(y, m)
+    y = tonumber(y) or 2026
+    m = tonumber(m) or 1
+    if m == 2 then
+        if (y % 4 == 0 and y % 100 ~= 0) or (y % 400 == 0) then
+            return 29
+        end
+        return 28
+    elseif m == 4 or m == 6 or m == 9 or m == 11 then
+        return 30
+    end
+    return 31
+end
+
+local function CivilDays(y, m, d)
+    y = tonumber(y) or 2026
+    m = tonumber(m) or 1
+    d = tonumber(d) or 1
+    if m <= 2 then
+        y = y - 1
+    end
+    local era = math.floor(y / 400)
+    local yoe = y - era * 400
+    local doy = math.floor((153 * (m + (m > 2 and -3 or 9)) + 2) / 5) + d - 1
+    local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+    return era * 146097 + doe - 719468
+end
+
+local function GetCurrentCalendarParts()
+    local today = (C_DateAndTime and C_DateAndTime.GetCurrentCalendarTime and Safe.Call(C_DateAndTime.GetCurrentCalendarTime)) or date("*t")
+    local y = tonumber(today and today.year) or 2026
+    local m = tonumber(today and today.month) or 1
+    local d = tonumber(today and (today.monthDay or today.day)) or 1
+    local hr = tonumber(today and today.hour) or 0
+    local mn = tonumber(today and (today.minute or today.min)) or 0
+    return y, m, d, hr, mn
+end
+
+local function ExtractEventClockTime(trimmed)
+    if type(trimmed) ~= "string" or trimmed == "" then
+        return nil, nil
+    end
+    local low = trimmed:lower()
+    local hour, minute = nil, nil
+
+    local hStr, mStr = trimmed:match("(%d%d?):(%d%d)")
+    if hStr then
+        hour = tonumber(hStr)
+        minute = tonumber(mStr) or 0
+    else
+        local hh, mm = trimmed:match("(%d%d?)[Hh](%d%d)")
+        if hh then
+            hour = tonumber(hh)
+            minute = tonumber(mm) or 0
+        else
+            -- Strip dd/mm(/yyyy) date tokens first so "21h 15/06" never parses "15" as minutes.
+            local noDate = trimmed:gsub("%d%d?/%d%d?/?%d*", " ")
+            local nh, nm = noDate:match("(%d%d?)%s*[Hh]%s*(%d%d?)")
+            if nh then
+                hour = tonumber(nh)
+                minute = tonumber(nm) or 0
+            else
+                local bareH = noDate:match("(%d%d?)%s*[Hh]%f[%W]")
+                    or noDate:match("(%d%d?)%s*[Hh][Rr][Ss]?%f[%W]")
+                    or noDate:match("(%d%d?)%s*[Hh][Ss]%f[%W]")
+                    or noDate:match("(%d%d?)%s*[Hh][Oo][Rr][Aa][Ss]?%f[%W]")
+                    or noDate:lower():match("(%d%d?)%s*[ap]m%f[%W]")
+                if bareH then
+                    hour = tonumber(bareH)
+                    minute = 0
+                end
+            end
+        end
+    end
+
+    if not hour then
+        return nil, nil
+    end
+    if (low:find("%d%s*pm%f[%W]") or low:find("%f[%w]pm%f[%W]")) and hour < 12 then
+        hour = hour + 12
+    elseif (low:find("%d%s*am%f[%W]") or low:find("%f[%w]am%f[%W]")) and hour == 12 then
+        hour = 0
+    end
+    return hour, minute
+end
+
+local function IsVisibleClanEvent(self, evt)
+    if type(evt) ~= "table" then return false end
+    if evt.isAlliedEvent and evt.originGuild and evt.originGuild ~= "" and not self:IsAlliedEventSharingMutual(evt.originGuild) then
+        return false
+    end
+    return true
 end
 
 local function RecordClanThrottleStrike(self)
@@ -389,38 +507,6 @@ function Clan:SendGuildSync(payload)
     return TransmitAddonMessage(self, payload, "GUILD", false)
 end
 
-local VALID_WB_SYNC_IDS = {
-    dragonslayer_ony = true,
-    dragonslayer_nef = true,
-    warchief = true,
-    stormwind = true,
-    zandalar = true,
-}
-
-function Clan:SendWorldBuffSync(syncId, ts)
-    if not VALID_WB_SYNC_IDS[syncId] then return false end
-    local stamp = math.floor(tonumber(ts) or 0)
-    if stamp <= 0 then return false end
-    local shard = Compat.CleanPayloadField and Compat.CleanPayloadField((Compat.Realm and Compat.Realm()) or "", 40) or ""
-    local payload = shard ~= ""
-        and ("WB~%s~%d~%s"):format(syncId, stamp, shard)
-        or ("WB~%s~%d"):format(syncId, stamp)
-    return TransmitAddonMessage(self, payload, "GUILD", false)
-end
-
-function Clan:RequestWorldBuffCatchup()
-    if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("buffs") then return false end
-    if not (ns.db and ns.db.settings and ns.db.settings.clanSync) then return false end
-    if self.isStoppedThisSession or self:IsMessagingLocked() then return false end
-    if not (IsInGuild and IsInGuild()) then return false end
-    local monoNow = GetTime and GetTime() or 0
-    if self._lastWbCatchupReqAt and (monoNow - self._lastWbCatchupReqAt) < 45 then
-        return false
-    end
-    self._lastWbCatchupReqAt = monoNow
-    return self:SendGuildSync("WBR~" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24))
-end
-
 function Clan:CheckAutoCloseFullDungeonLFG()
     if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then
         return false
@@ -461,9 +547,12 @@ function Clan:CheckAutoCloseFullDungeonLFG()
         local newBracket
         if oldNote:find("%[%d/5%s*·") or oldNote:find("Need:", 1, true) then
             local counts = (ns.Group and ns.Group.GetSummaryCounts and ns.Group:GetSummaryCounts()) or { total = numMembers, TANK = 0, HEALER = 0, DAMAGER = 0 }
-            local needT = math.max(0, 1 - (counts.TANK or 0))
-            local needH = math.max(0, 1 - (counts.HEALER or 0))
-            local needD = math.max(0, 3 - (counts.DAMAGER or 0))
+            local openSlots = math.max(0, 5 - numMembers)
+            local needT = math.min(openSlots, math.max(0, 1 - (counts.TANK or 0)))
+            openSlots = openSlots - needT
+            local needH = math.min(openSlots, math.max(0, 1 - (counts.HEALER or 0)))
+            openSlots = openSlots - needH
+            local needD = math.min(openSlots, math.max(0, 3 - (counts.DAMAGER or 0)))
             local needParts = {}
             if needT > 0 then needParts[#needParts + 1] = needT .. "T" end
             if needH > 0 then needParts[#needParts + 1] = needH .. "H" end
@@ -1009,6 +1098,43 @@ local function IsDungeonLFGText(text, category)
     return low:find("%+%d+") ~= nil
 end
 
+local function ScheduleStatusLfgFollowup(self, seq, wantLfg, hadLfg)
+    if not (C_Timer and C_Timer.After) then return end
+    if not (ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild()) then return end
+    local minInt = (self.MIN_SEND_INTERVAL or 5) + 0.15
+    local mono = GetTime and GetTime() or 0
+    local waitSec = math.max(minInt, minInt - (mono - (self.lastSyncSentAt or 0)))
+    C_Timer.After(waitSec, function()
+        if seq ~= Clan._statusFollowupSeq then return end
+        if Clan.isStoppedThisSession or Clan:IsMessagingLocked() then return end
+        if not (ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild()) then return end
+        local elapsed = (GetTime and GetTime() or 0) - (Clan.lastSyncSentAt or 0)
+        if elapsed < (Clan.MIN_SEND_INTERVAL or 5) then
+            ScheduleStatusLfgFollowup(Clan, seq, wantLfg, hadLfg)
+            return
+        end
+        local b = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+        local _, curKey = ResolveSelfIdentity()
+        if wantLfg then
+            local curLfg = b and b.lfg and curKey and b.lfg[curKey]
+            if type(curLfg) == "table" then
+                local payload = ("LFG~%s~%s~%s~%s~%d~%d~%s"):format(
+                    ns.version or "0.0.0",
+                    curLfg.mode or "LFG",
+                    curLfg.role or "ANY",
+                    Compat.CleanPayloadField(curLfg.activity or "", 40),
+                    tonumber(curLfg.keyLvl) or 0,
+                    tonumber(curLfg.ilvl) or 0,
+                    Compat.CleanPayloadField(curLfg.note or "", 44)
+                )
+                Clan:SendGuildSync(payload)
+            end
+        elseif hadLfg and not (b and b.lfg and curKey and b.lfg[curKey]) then
+            Clan:SendGuildSync("LFX")
+        end
+    end)
+end
+
 function Clan:SetMyStatus(tagId, note)
     if not IsValidTag(tagId) then tagId = "NONE" end
     local bucket = Store:GetClanScopeData()
@@ -1016,10 +1142,15 @@ function Clan:SetMyStatus(tagId, note)
     bucket.myTag = tagId
     bucket.myNote = cleanNote
 
+    self._statusFollowupSeq = (self._statusFollowupSeq or 0) + 1
+    local seq = self._statusFollowupSeq
+
     local sent = self:SendGuildSync("TAG~" .. (ns.version or "0.0.0") .. "~" .. tagId .. "~" .. cleanNote)
     local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
     local myName = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player"))
     local myParsed = myName and Compat.ParseCharacterName(myName)
+    local wantLfg = false
+    local hadLfg = false
     if myParsed then
         bucket.lfg = bucket.lfg or {}
         if tagId == "LFG" or tagId == "MPLUS" or tagId == "RAID" or tagId == "PVP" then
@@ -1042,12 +1173,11 @@ function Clan:SetMyStatus(tagId, note)
                 isDungeon = (tagId == "LFG" or tagId == "MPLUS" or IsDungeonLFGText(act, nil)),
                 updatedAt = time(),
             }
-            local payload = ("LFG~%s~LFG~%s~%s~%d~%d~%s"):format(ns.version or "0.0.0", role, act:sub(1, 40), keyLvl, iLvl, cleanNote)
-            self:SendGuildSync(payload)
+            wantLfg = true
         else
             if bucket.lfg[myParsed.lookupKey] then
                 bucket.lfg[myParsed.lookupKey] = nil
-                self:SendGuildSync("LFX")
+                hadLfg = true
             end
             if self.externalLFG and self.externalLFG[myParsed.lookupKey] then
                 self.externalLFG[myParsed.lookupKey] = nil
@@ -1055,10 +1185,26 @@ function Clan:SetMyStatus(tagId, note)
             end
         end
     end
-    if (ns.db and ns.db.settings and ns.db.settings.clanSync) and not sent and IsInGuild and IsInGuild() then
+    if sent and (wantLfg or hadLfg) then
+        ScheduleStatusLfgFollowup(self, seq, wantLfg, hadLfg)
+    elseif (not sent) and (ns.db and ns.db.settings and ns.db.settings.clanSync) and IsInGuild and IsInGuild() then
         local waitRem = math.ceil(math.max(0, self.MIN_SEND_INTERVAL - (GetTime() - (self.lastSyncSentAt or 0))))
         if waitRem > 0 then
             ns:Print(L["Status saved locally; guild broadcast ready in %ds."]:format(waitRem))
+        end
+        if C_Timer and C_Timer.After then
+            local mono = GetTime and GetTime() or 0
+            local tagWait = math.max(0.25, (self.MIN_SEND_INTERVAL or 5) + 0.15 - (mono - (self.lastSyncSentAt or 0)))
+            C_Timer.After(tagWait, function()
+                if seq ~= Clan._statusFollowupSeq then return end
+                if Clan.isStoppedThisSession or Clan:IsMessagingLocked() then return end
+                local b = Store and Store.GetClanScopeData and Store:GetClanScopeData()
+                if not b then return end
+                local tSent = Clan:SendGuildSync("TAG~" .. (ns.version or "0.0.0") .. "~" .. (b.myTag or "NONE") .. "~" .. Compat.CleanPayloadField(b.myNote or "", 36))
+                if tSent and (wantLfg or hadLfg) then
+                    ScheduleStatusLfgFollowup(Clan, seq, wantLfg, hadLfg)
+                end
+            end)
         end
     end
     ns:Emit("CLAN_UPDATED")
@@ -1131,7 +1277,7 @@ local function IsSenderConfirmedInGuild(lookupKey)
             local cleanName = Safe.String(fullName)
             if cleanName then
                 if Compat.ParseCharacterFields then
-                    local _, _, lKey = Compat.ParseCharacterFields(cleanName)
+                    local lKey = Compat.ParseCharacterFields(cleanName)
                     if lKey == lookupKey then
                         return true
                     end
@@ -1149,9 +1295,23 @@ end
 
 local function DrainIntelQueue()
     Clan._intelDrainScheduled = false
-    if Clan.isStoppedThisSession or Clan:IsMessagingLocked() then
+    if Clan.isStoppedThisSession then
+        wipe(Clan.intelQueue)
         return
     end
+    local locked, lockReason = Clan:IsMessagingLocked()
+    if locked then
+        if #Clan.intelQueue > 0 then
+            if lockReason == "combat" then
+                Clan._intelDrainPendingCombat = true
+            elseif lockReason == "lockdown" and C_Timer and C_Timer.After then
+                Clan._intelDrainScheduled = true
+                C_Timer.After(4.0, DrainIntelQueue)
+            end
+        end
+        return
+    end
+    Clan._intelDrainPendingCombat = false
     if Clan.backoffUntil and (GetTime and GetTime() or 0) < Clan.backoffUntil then
         if #Clan.intelQueue > 0 and C_Timer and C_Timer.After then
             Clan._intelDrainScheduled = true
@@ -1262,8 +1422,8 @@ function Clan:IsGuildLeader()
     if C_GuildInfo and C_GuildInfo.GetGuildRankOrder and UnitGUID then
         local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
         if myGuid then
-            local rank = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
-            if rank == 0 then
+            local rankOrder = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
+            if rankOrder == 1 then
                 return true
             end
         end
@@ -1293,8 +1453,7 @@ function Clan:GetMemberGuildRank(lookupKey)
                 if cleanName then
                     local lKey
                     if Compat.ParseCharacterFields then
-                        local _, _, k = Compat.ParseCharacterFields(cleanName)
-                        lKey = k
+                        lKey = Compat.ParseCharacterFields(cleanName)
                     else
                         local p = Compat.ParseCharacterName(cleanName)
                         lKey = p and p.lookupKey
@@ -1367,7 +1526,10 @@ function Clan:CanInviteToGuild(rankIndexOverride)
     if myIdx == nil and C_GuildInfo and C_GuildInfo.GetGuildRankOrder and UnitGUID then
         local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
         if myGuid then
-            myIdx = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
+            local rankOrder = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
+            if rankOrder and rankOrder >= 1 then
+                myIdx = rankOrder - 1
+            end
         end
     end
     if myIdx == 0 then
@@ -1436,7 +1598,10 @@ function Clan:GetSelfGuildRank()
     if inGuild and myIdx == nil and C_GuildInfo and C_GuildInfo.GetGuildRankOrder and UnitGUID then
         local myGuid = Safe.String(Safe.Call(UnitGUID, "player"))
         if myGuid then
-            myIdx = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
+            local rankOrder = Safe.Number(Safe.Call(C_GuildInfo.GetGuildRankOrder, myGuid))
+            if rankOrder and rankOrder >= 1 then
+                myIdx = rankOrder - 1
+            end
         end
     end
     if inGuild and (not myName or myName == "") and myIdx ~= nil and GuildControlGetRankName then
@@ -1707,7 +1872,7 @@ function Clan:PromoteMember(lookupKey, targetName, targetGuid)
         return false
     end
     if C_GuildInfo and C_GuildInfo.SetGuildRankOrder and guid and curIdx and curIdx > 1 then
-        local nextOrder = curIdx - 1
+        local nextOrder = curIdx
         local allowed = (not C_GuildInfo.IsGuildRankAssignmentAllowed) or Safe.Value(Safe.Call(C_GuildInfo.IsGuildRankAssignmentAllowed, guid, nextOrder)) == true
         if allowed then
             local ok = pcall(C_GuildInfo.SetGuildRankOrder, guid, nextOrder)
@@ -1746,7 +1911,7 @@ function Clan:DemoteMember(lookupKey, targetName, targetGuid)
     local ranks = self:GetGuildRanks()
     local maxIdx = (#ranks > 0) and (#ranks - 1) or 9
     if C_GuildInfo and C_GuildInfo.SetGuildRankOrder and guid and curIdx ~= nil and curIdx < maxIdx then
-        local nextOrder = curIdx + 1
+        local nextOrder = curIdx + 2
         local allowed = (not C_GuildInfo.IsGuildRankAssignmentAllowed) or Safe.Value(Safe.Call(C_GuildInfo.IsGuildRankAssignmentAllowed, guid, nextOrder)) == true
         if allowed then
             local ok = pcall(C_GuildInfo.SetGuildRankOrder, guid, nextOrder)
@@ -1773,10 +1938,11 @@ function Clan:SetMemberRank(lookupKey, targetGuid, targetRankIndex)
     end
     local _, _, resolvedGuid = self:GetMemberGuildRank(lookupKey)
     local guid = targetGuid or resolvedGuid
-    local order = tonumber(targetRankIndex)
-    if not (guid and order and order >= 1) then
+    local targetIdx = tonumber(targetRankIndex)
+    if not (guid and targetIdx and targetIdx >= 1) then
         return false
     end
+    local order = targetIdx + 1
     if C_GuildInfo and C_GuildInfo.SetGuildRankOrder then
         if C_GuildInfo.IsGuildRankAssignmentAllowed and Safe.Value(Safe.Call(C_GuildInfo.IsGuildRankAssignmentAllowed, guid, order)) ~= true then
             ns:Print(L["Your guild rank cannot assign that rank."])
@@ -1805,7 +1971,7 @@ function Clan:SetMemberPublicNote(lookupKey, rawNote)
         ns:Print(L["Guild roster not loaded yet."])
         return false
     end
-    local noteText = (Compat.CleanInput and Compat.CleanInput(rawNote or "") or tostring(rawNote or "")):sub(1, 31)
+    local noteText = TruncateUtf8Bytes(Compat.CleanInput and Compat.CleanInput(rawNote or "") or tostring(rawNote or ""), 31)
     local ok = false
     if C_GuildInfo and C_GuildInfo.SetNote then
         ok = pcall(C_GuildInfo.SetNote, rosterIdx, noteText, true)
@@ -1903,9 +2069,6 @@ function Clan:IsMemberAllianceAuthorized(lookupKey)
     if not (IsInGuild and IsInGuild()) then
         return false
     end
-    if self:IsGuildLeader() then
-        return true
-    end
     local bucket = Store:GetClanScopeData()
     local all = bucket.alliance
     if not all or not all.enabled then
@@ -1914,23 +2077,29 @@ function Clan:IsMemberAllianceAuthorized(lookupKey)
     if all.accessMode == "ALL" then
         return true
     end
-    if not lookupKey then
+    if not lookupKey or lookupKey == "" then
+        if self:IsGuildLeader() then
+            return true
+        end
         local _, myKey = ResolveSelfIdentity()
         lookupKey = myKey
+    elseif Compat.IsMe and Compat.IsMe(lookupKey) and self:IsGuildLeader() then
+        return true
     end
-    if lookupKey then
+    if lookupKey and lookupKey ~= "" then
         if all.managers and all.managers[lookupKey] == true then
             return true
         end
         if all.whitelist and all.whitelist[lookupKey] == true then
             return true
         end
+        local mRankIdx = self:GetMemberGuildRank(lookupKey)
+        if mRankIdx == 0 then
+            return true
+        end
         local minRank = bucket.hierarchy and tonumber(bucket.hierarchy.allianceMinRank)
-        if minRank and minRank >= 0 then
-            local mRankIdx = self:GetMemberGuildRank(lookupKey)
-            if mRankIdx ~= nil and mRankIdx <= minRank then
-                return true
-            end
+        if minRank and minRank >= 0 and mRankIdx ~= nil and mRankIdx <= minRank then
+            return true
         end
     end
     return false
@@ -1942,19 +2111,27 @@ function Clan:GetGuildMembersWithAllianceStatus()
     local all = bucket.alliance or {}
     local wl = all.whitelist or {}
     local mgrs = all.managers or {}
+    local minRank = bucket.hierarchy and tonumber(bucket.hierarchy.allianceMinRank)
 
     local _, myKey = ResolveSelfIdentity()
 
     if type(Store.social) == "table" then
         for _, m in pairs(Store.social) do
             if type(m) == "table" and m.sources and m.sources.guild == true and m.lookupKey then
+                local mRankIdx = m.rankIndex
+                if mRankIdx == nil and Store.guildRosterRanks and Store.guildRosterRanks[m.lookupKey] then
+                    mRankIdx = Store.guildRosterRanks[m.lookupKey].rankIndex
+                end
+                local byRank = (mRankIdx == 0) or (minRank ~= nil and minRank >= 0 and mRankIdx ~= nil and mRankIdx <= minRank)
                 table.insert(out, {
                     lookupKey = m.lookupKey,
                     displayName = m.displayName or m.name or "?",
                     classFile = m.classFile,
                     level = m.level or 0,
                     rank = m.rankName or m.rank or "",
-                    authorized = (all.accessMode == "ALL") or (wl[m.lookupKey] == true) or (mgrs[m.lookupKey] == true),
+                    rankIndex = mRankIdx,
+                    authorized = (all.accessMode == "ALL") or (wl[m.lookupKey] == true) or (mgrs[m.lookupKey] == true) or byRank,
+                    isEffectiveAuthorized = (all.enabled == true) and ((all.accessMode == "ALL") or (wl[m.lookupKey] == true) or (mgrs[m.lookupKey] == true) or byRank),
                     isManager = mgrs[m.lookupKey] == true,
                     isSelf = (m.lookupKey == myKey),
                 })
@@ -2570,7 +2747,7 @@ function Clan:SetGuildStance(rawGuildName, stance, reason, faction, shareEvents)
             ns.version or "0.0.0",
             nextRev,
             cleanStance,
-            key:sub(1, 32),
+            key:sub(1, 40),
             dip.guilds[key].name,
             cleanFaction,
             dip.guilds[key].reason or "",
@@ -2606,7 +2783,7 @@ function Clan:RemoveGuildDiplomacy(guildKey)
     if not existing.localOnly then
         local tok = ComputeGuildScopeToken()
         if tok ~= "" and ns.db and ns.db.settings and ns.db.settings.clanSync then
-            EnqueueIntelPacket(("CDEL~%s~%s~%d~%s"):format(tok, ns.version or "0.0.0", nextRev, guildKey:sub(1, 32)))
+            EnqueueIntelPacket(("CDEL~%s~%s~%d~%s"):format(tok, ns.version or "0.0.0", nextRev, guildKey:sub(1, 40)))
         end
     end
 
@@ -2659,7 +2836,7 @@ function Clan:BroadcastDeltaIntel(peerInfoRev, peerDipRev, peerHirRev, peerAllcR
 
     if self:CanManageAlliance() then
         local allCfg = self:GetAllianceConfig()
-        if allCfg and allCfg.enabled and (peerAllcRev == nil or (allCfg.rev or 0) > peerAllcRev) then
+        if allCfg and (allCfg.enabled or (allCfg.rev or 0) > 0) and (peerAllcRev == nil or (allCfg.rev or 0) > peerAllcRev) then
             EnqueueIntelPacket(("ALLC~%s~%d~%s~%s~%s~%s"):format(
                 tok,
                 allCfg.rev or 0,
@@ -2681,7 +2858,7 @@ function Clan:BroadcastDeltaIntel(peerInfoRev, peerDipRev, peerHirRev, peerAllcR
                     ns.version or "0.0.0",
                     g.rev or 0,
                     g.stance or "NEUTRAL",
-                    (g.key or ""):sub(1, 32),
+                    (g.key or ""):sub(1, 40),
                     Compat.CleanPayloadField(g.name or "", 40),
                     Compat.CleanPayloadField(g.faction or "", 12),
                     Compat.CleanPayloadField(g.reason or "", 48),
@@ -3308,7 +3485,7 @@ function Clan:GetOpenEventsCount()
     local bucket = Store:GetClanScopeData()
     local count = 0
     for _, evt in pairs(bucket.events) do
-        if type(evt) == "table" and evt.isOpen ~= false then
+        if type(evt) == "table" and evt.isOpen ~= false and IsVisibleClanEvent(self, evt) then
             count = count + 1
         end
     end
@@ -3631,7 +3808,7 @@ function Clan:PublishProfessionsToGuildNote(customNote)
     local function ShortProf(pid, rankStr)
         local key = PROF_ID_TO_KEY[pid]
         local lbl = (key and L[key]) or pid
-        if lbl and #lbl > 12 then lbl = lbl:sub(1, 12) end
+        if lbl and #lbl > 12 then lbl = TruncateUtf8Bytes(lbl, 12) end
         if rankStr and rankStr ~= "" then
             local cur = rankStr:match("^(%d+)")
             if cur then return lbl .. " " .. cur end
@@ -3654,7 +3831,7 @@ function Clan:PublishProfessionsToGuildNote(customNote)
         noteText = table.concat(parts, "/")
     end
     if #noteText > 31 then
-        noteText = noteText:sub(1, 31)
+        noteText = TruncateUtf8Bytes(noteText, 31)
     end
 
     local targetIdx = nil
@@ -3746,6 +3923,10 @@ function Clan:GetProfessionsList(query, profFilter, sourceFilter)
         local cur = entries[key]
         if cur then
             if data.isSelf then cur.isSelf = true end
+            if data.isAlt and not cur.isSelf then cur.isAlt = true end
+            if data.altGuild and data.altGuild ~= "" and (not cur.altGuild or cur.altGuild == "") then
+                cur.altGuild = data.altGuild
+            end
             if data.online then cur.online = true end
             if p1 ~= "NONE" and (cur.prof1 == "NONE" or (data.priority or 0) >= (cur.priority or 0)) then
                 cur.prof1 = p1
@@ -4496,7 +4677,7 @@ function Clan:MaybeTriggerLfgWatcher(item, sourceType)
     local lfgLink = "|Haddon:SCentral:clanlfg:" .. tostring(lookupKey) .. "|h|cfff2c94c[" .. L["View in LFG"] .. "]|r|h"
     ns:Print(("|cff3fb950[%s]|r |cffffd24d[%s]|r %s: %s %s %s"):format(L["LFG Watcher Alert"], actLabel, nameCol, cleanMsg, applyLink, lfgLink))
 
-    local silenceCombat = ns.Compat and ns.Compat.IsAlertSilenced and ns.Compat:IsAlertSilenced("sound")
+    local silenceCombat = Compat.IsFocusSilenced and Compat.IsFocusSilenced(lookupKey or displayName)
     if s.clanLfgAlertSound ~= false and not silenceCombat then
         PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
     end
@@ -4842,36 +5023,41 @@ end
 function Clan:RefreshGameCalendar(force)
     if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then return false end
     if not C_Calendar then return false end
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        return false
+    end
     local monoNow = GetTime and GetTime() or time()
     if C_Calendar.OpenCalendar and (force or (monoNow - (self.lastCalendarRefreshAt or 0)) >= 30) then
-        if not ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) then
-            self.lastCalendarRefreshAt = monoNow
-            pcall(C_Calendar.OpenCalendar)
-        end
+        self.lastCalendarRefreshAt = monoNow
+        pcall(C_Calendar.OpenCalendar)
     end
 
-    local today = (C_DateAndTime and C_DateAndTime.GetCurrentCalendarTime and Safe.Call(C_DateAndTime.GetCurrentCalendarTime)) or date("*t")
-    local baseDay = tonumber(today and (today.monthDay or today.day)) or 1
-    local baseMonth = tonumber(today and today.month) or 1
-    local baseYear = tonumber(today and today.year) or 2026
+    local baseYear, baseMonth, baseDay = GetCurrentCalendarParts()
 
     local monthInfo = C_Calendar.GetMonthInfo and Safe.Call(C_Calendar.GetMonthInfo, 0)
     local calMonth = Safe.Number(monthInfo and monthInfo.month)
     local calYear = Safe.Number(monthInfo and monthInfo.year)
-    if (not calMonth or calMonth ~= baseMonth or calYear ~= baseYear) and C_Calendar.SetAbsMonth then
+    if force == true and (not calMonth or calMonth ~= baseMonth or calYear ~= baseYear) and C_Calendar.SetAbsMonth then
         pcall(C_Calendar.SetAbsMonth, baseMonth, baseYear)
         monthInfo = C_Calendar.GetMonthInfo and Safe.Call(C_Calendar.GetMonthInfo, 0)
     end
-    local numDaysInMonth = Safe.Number(monthInfo and monthInfo.numDays) or 31
+    local numDaysInMonth = Safe.Number(monthInfo and monthInfo.numDays) or DaysInCalendarMonth(baseYear, baseMonth)
 
     local found = {}
     if C_Calendar.GetNumDayEvents and C_Calendar.GetDayEvent then
         for delta = 0, 14 do
             local mOffset = 0
             local dayNum = baseDay + delta
+            local evMonth = baseMonth
+            local evYear = baseYear
             if dayNum > numDaysInMonth then
                 mOffset = 1
                 dayNum = dayNum - numDaysInMonth
+                evMonth = baseMonth + 1
+                if evMonth > 12 then
+                    evMonth = 1
+                    evYear = evYear + 1
+                end
             end
             local nEvents = Safe.Number(Safe.Call(C_Calendar.GetNumDayEvents, mOffset, dayNum)) or 0
             for idx = 1, nEvents do
@@ -4881,13 +5067,12 @@ function Clan:RefreshGameCalendar(force)
                     local title = Safe.String(ev.title) or ""
                     local isRelevant = calType == "GUILD_EVENT" or calType == "GUILD_ANNOUNCEMENT" or calType == "PLAYER" or calType == "RAID_LOCKOUT"
                     if isRelevant and title ~= "" then
-                        local targetTm = date("*t", time() + ((tonumber(delta) or 0) * 86400))
                         table.insert(found, {
                             title = title,
                             calendarType = calType,
                             monthOffset = mOffset,
-                            month = (targetTm and targetTm.month) or nil,
-                            year = (targetTm and targetTm.year) or nil,
+                            month = evMonth,
+                            year = evYear,
                             monthDay = dayNum,
                             dayDelta = delta,
                             hour = Safe.Number(ev.startTime and ev.startTime.hour) or 0,
@@ -4969,15 +5154,15 @@ function Clan:GetActiveGroupQuests()
             local info = Safe.Call(_G.C_QuestLog.GetInfo, i)
             if type(info) == "table" then
                 local title = Safe.String(info.title)
-                local isHdr = Safe.Boolean(info.isHeader) == true
-                local isHidden = Safe.Boolean(info.isHidden) == true
+                local isHdr = Safe.Bool(info.isHeader) == true
+                local isHidden = Safe.Bool(info.isHidden) == true
                 if isHdr then
                     currentZone = (title and title ~= "") and title or currentZone
                 elseif not isHidden and title and title ~= "" then
                     local qId = Safe.Number(info.questID) or 0
                     local lvl = Safe.Number(info.level) or 0
                     local sugGroup = Safe.Number(info.suggestedGroup) or 0
-                    local isComp = Safe.Boolean(info.isComplete) == true
+                    local isComp = Safe.Bool(info.isComplete) == true
                     local tagId, tagName = nil, nil
                     if qId > 0 and _G.C_QuestLog.GetQuestTagInfo then
                         local tInfo = Safe.Call(_G.C_QuestLog.GetQuestTagInfo, qId)
@@ -5004,14 +5189,14 @@ function Clan:GetActiveGroupQuests()
             local ok, rTitle, rLvl, rSug, rHdr, _, rComp, _, rQid = pcall(_G.GetQuestLogTitle, i)
             if ok then
                 local title = Safe.String(rTitle)
-                local isHdr = Safe.Boolean(rHdr) == true
+                local isHdr = (Safe.Bool(rHdr) == true) or (Safe.Number(rHdr) == 1)
                 if isHdr then
                     currentZone = (title and title ~= "") and title or currentZone
                 elseif title and title ~= "" then
                     local qId = Safe.Number(rQid) or 0
                     local lvl = Safe.Number(rLvl) or 0
                     local sugGroup = Safe.Number(rSug) or 0
-                    local isComp = (Safe.Number(rComp) == 1) or (Safe.Boolean(rComp) == true)
+                    local isComp = (Safe.Number(rComp) == 1) or (Safe.Bool(rComp) == true)
                     local tagId, tagName = nil, nil
                     if qId > 0 and _G.GetQuestTagInfo then
                         local rId, rName = Safe.Call(_G.GetQuestTagInfo, qId)
@@ -5070,10 +5255,11 @@ function Clan:GetMotdEventSuggestion()
             end
         end
     end
-    local datePart, timePart = cleanMotd:match("(%d%d?/%d%d?)%s*[AaÀà]?[Ss]?%s*[Ll]?[Aa]?[Ss]?%s*@?%-?%s*(%d%d?[:Hh]%d?%d?)")
+    local motdForMatch = cleanMotd:gsub("À", "A"):gsub("à", "a"):gsub("Á", "A"):gsub("á", "a")
+    local datePart, timePart = motdForMatch:match("(%d%d?/%d%d?)%s*[Aa]?[Ss]?%s*[Ll]?[Aa]?[Ss]?%s*@?%-?%s*(%d%d?[:Hh]%d?%d?)")
     if not datePart then
         local bareHour
-        datePart, bareHour = cleanMotd:match("(%d%d?/%d%d?)%s*[AaÀà]?[Ss]?%s*[Ll]?[Aa]?[Ss]?%s*@?%-?%s*(%d%d?)%s+[Hh][OoRrAaSs]*")
+        datePart, bareHour = motdForMatch:match("(%d%d?/%d%d?)%s*[Aa]?[Ss]?%s*[Ll]?[Aa]?[Ss]?%s*@?%-?%s*(%d%d?)%s+[Hh][OoRrAaSs]*")
         if datePart and bareHour then
             timePart = bareHour .. ":00"
         end
@@ -5082,7 +5268,7 @@ function Clan:GetMotdEventSuggestion()
     if datePart and timePart then
         dateHit = datePart .. " " .. timePart
     else
-        dateHit = cleanMotd:match("(%d%d?/%d%d?%s*%d?%d?:?%d?%d?)") or cleanMotd:match("(%d%d?:%d%d)")
+        dateHit = cleanMotd:match("(%d%d?/%d%d?%s*%d?%d?:?%d?%d?)") or cleanMotd:match("(%d%d?:%d%d)") or cleanMotd:match("%f[%d](%d%d?[Hh]%d?%d?)%f[%W]")
     end
     local titleSeg = cleanMotd:match("[Ee][Vv][Ee][Nn][Tt][Oo]?:?%s*(.+)") or cleanMotd
     titleSeg = Compat.CleanPayloadField(titleSeg, 38)
@@ -5190,43 +5376,18 @@ function Clan:SetGuildMOTD(rawText)
     return true
 end
 
-local function DaysInCalendarMonth(y, m)
-    y = tonumber(y) or 2026
-    m = tonumber(m) or 1
-    if m == 2 then
-        if (y % 4 == 0 and y % 100 ~= 0) or (y % 400 == 0) then
-            return 29
-        end
-        return 28
-    elseif m == 4 or m == 6 or m == 9 or m == 11 then
-        return 30
-    end
-    return 31
-end
-
 function Clan:ParseEventWhenDateTime(whenText)
     local text = Safe.String(whenText) or ""
     local trimmed = Compat.Trim(text)
-    local nowTm = date("*t", time())
+    local cy, cm, cd = GetCurrentCalendarParts()
     local hour, minute = 20, 0
 
-    local hStr, mStr = trimmed:match("(%d%d?):(%d%d)")
-    if hStr then
-        hour = tonumber(hStr) or 20
-        minute = tonumber(mStr) or 0
-    else
-        local hh, mm = trimmed:match("(%d%d?)%s*[Hh]%s*(%d%d?)")
-        if hh then
-            hour = tonumber(hh) or 20
-            minute = tonumber(mm) or 0
-        else
-            local bareH = trimmed:match("(%d%d?)%s+[Hh][OoRrAaSs]*")
-            if bareH then
-                hour = tonumber(bareH) or 20
-                minute = 0
-            end
-        end
+    local pHour, pMin = ExtractEventClockTime(trimmed)
+    if pHour then
+        hour = pHour
+        minute = pMin or 0
     end
+    if hour == 24 then hour = 0 end
     if hour < 0 then hour = 0 elseif hour > 23 then hour = 23 end
     if minute < 0 then minute = 0 elseif minute > 59 then minute = 59 end
 
@@ -5238,36 +5399,21 @@ function Clan:ParseEventWhenDateTime(whenText)
         local dStr, moStr, yStr = trimmed:match("(%d%d?)/(%d%d?)/?(%d*)")
         local tDay = dStr and tonumber(dStr)
         local tMonth = moStr and tonumber(moStr)
-        if tDay and tMonth and tDay >= 1 and tDay <= 31 and tMonth >= 1 and tMonth <= 12 and nowTm then
+        if tDay and tMonth and tDay >= 1 and tDay <= 31 and tMonth >= 1 and tMonth <= 12 then
             local tYear = (yStr and yStr ~= "" and tonumber(yStr)) or nil
             if tYear and tYear < 100 then
                 tYear = 2000 + tYear
             elseif not tYear then
-                tYear = nowTm.year
-                if tMonth < nowTm.month or (tMonth == nowTm.month and tDay < nowTm.day) then
+                tYear = cy
+                if tMonth < cm or (tMonth == cm and tDay < cd) then
                     tYear = tYear + 1
                 end
             end
             local maxDay = DaysInCalendarMonth(tYear, tMonth)
             if tDay > maxDay then tDay = maxDay end
-            local cy, cm, cd = nowTm.year, nowTm.month, nowTm.day
-            if (tYear > cy) or (tYear == cy and (tMonth > cm or (tMonth == cm and tDay >= cd))) then
-                local delta = 0
-                while (cy < tYear or cm < tMonth or cd < tDay) and delta < 366 do
-                    delta = delta + 1
-                    cd = cd + 1
-                    if cd > DaysInCalendarMonth(cy, cm) then
-                        cd = 1
-                        cm = cm + 1
-                        if cm > 12 then
-                            cm = 1
-                            cy = cy + 1
-                        end
-                    end
-                end
-                if cy == tYear and cm == tMonth and cd == tDay then
-                    dayOffset = delta
-                end
+            local delta = CivilDays(tYear, tMonth, tDay) - CivilDays(cy, cm, cd)
+            if delta >= 0 and delta < 366 then
+                dayOffset = delta
             end
         end
     end
@@ -5432,6 +5578,7 @@ function Clan:PostLFG(mode, role, activity, keyLvl, note, clanOnly, forceIsDunge
 
     local bucket = Store:GetClanScopeData()
     bucket.lfg = bucket.lfg or {}
+    self._statusFollowupSeq = (self._statusFollowupSeq or 0) + 1
     bucket.lfg[myParsed.lookupKey] = {
         lookupKey = myParsed.lookupKey,
         displayName = myParsed.displayName,
@@ -5503,9 +5650,12 @@ function Clan:PostSmartGroupFormation(optionalActivity)
 
     local noteStr = ""
     if inGroup and not inRaid and (counts.total or 0) >= 1 and (counts.total or 0) < 5 then
-        local needT = math.max(0, 1 - (counts.TANK or 0))
-        local needH = math.max(0, 1 - (counts.HEALER or 0))
-        local needD = math.max(0, 3 - (counts.DAMAGER or 0))
+        local openSlots = math.max(0, 5 - (counts.total or 0))
+        local needT = math.min(openSlots, math.max(0, 1 - (counts.TANK or 0)))
+        openSlots = openSlots - needT
+        local needH = math.min(openSlots, math.max(0, 1 - (counts.HEALER or 0)))
+        openSlots = openSlots - needH
+        local needD = math.min(openSlots, math.max(0, 3 - (counts.DAMAGER or 0)))
         local needParts = {}
         if needT > 0 then needParts[#needParts + 1] = needT .. "T" end
         if needH > 0 then needParts[#needParts + 1] = needH .. "H" end
@@ -5591,7 +5741,7 @@ function Clan:GetActiveLfgForPlayer(rawNameOrKey)
     end
     if bucket and type(bucket.events) == "table" then
         for _, evt in pairs(bucket.events) do
-            if type(evt) == "table" and evt.isOpen ~= false and evt.creatorKey == key then
+            if type(evt) == "table" and evt.isOpen ~= false and IsVisibleClanEvent(self, evt) and evt.creatorKey == key then
                 return {
                     mode = "LFM",
                     role = "ANY",
@@ -5645,6 +5795,7 @@ function Clan:ClearMyLFG(isHardwareEvent)
     local myName = (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player"))
     local myParsed = myName and Compat.ParseCharacterName(myName)
     if not myParsed then return false end
+    self._statusFollowupSeq = (self._statusFollowupSeq or 0) + 1
     local bucket = Store:GetClanScopeData()
     if bucket.lfg then
         bucket.lfg[myParsed.lookupKey] = nil
@@ -6414,6 +6565,52 @@ local function PushUniqueText(list, seenSet, text)
     end
 end
 
+local function CleanOfficialLeaderCandidate(cand)
+    if cand == nil then return nil, nil end
+    if Safe.IsSecret and Safe.IsSecret(cand) then
+        return nil, cand
+    end
+    local rawStr = Safe.String(cand)
+    if not rawStr or rawStr == "" then
+        return nil, nil
+    end
+    local cleaned = Compat.CleanInput and Compat.CleanInput(rawStr) or rawStr
+    if not cleaned or cleaned == "" then
+        return nil, nil
+    end
+    if Compat.ParseCharacterFields then
+        local lk, _, disp = Compat.ParseCharacterFields(cleaned)
+        if lk and disp and disp ~= "" and disp ~= L["Official LFG"] then
+            return cleaned, nil
+        end
+        return nil, nil
+    end
+    if cleaned == L["Official LFG"] then
+        return nil, nil
+    end
+    return cleaned, nil
+end
+
+local function PickOfficialNameFromTable(tbl, curSecret)
+    if type(tbl) ~= "table" or (Safe.IsSecret and Safe.IsSecret(tbl)) then
+        return nil, curSecret
+    end
+    local clean, sec
+    clean, sec = CleanOfficialLeaderCandidate(tbl.name)
+    if clean then return clean, nil end
+    if sec and not curSecret then curSecret = sec end
+    clean, sec = CleanOfficialLeaderCandidate(tbl.leaderName)
+    if clean then return clean, nil end
+    if sec and not curSecret then curSecret = sec end
+    clean, sec = CleanOfficialLeaderCandidate(tbl.fullName)
+    if clean then return clean, nil end
+    if sec and not curSecret then curSecret = sec end
+    clean, sec = CleanOfficialLeaderCandidate(tbl.characterName)
+    if clean then return clean, nil end
+    if sec and not curSecret then curSecret = sec end
+    return nil, curSecret
+end
+
 local inspectMSeenScratch = {}
 local inspectSearchPartsScratch = {}
 local inspectTagsScratch = {}
@@ -6474,7 +6671,9 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
 
     local function RecordMember(mName, mLvl, mClass, mRole, mIsLeader, lfgRoles, slotIdx)
         if (type(mName) ~= "string" or mName == "") and (mIsLeader or (totalMembers == 1 and slotIdx == 1)) then
-            mName = leaderDisp
+            if leaderDisp and leaderDisp ~= L["Official LFG"] then
+                mName = leaderDisp
+            end
         end
         if mIsLeader or slotIdx == 1 then
             if (mLvl or 0) > 0 and out.leaderLvl == 0 then
@@ -6492,7 +6691,13 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
             }
         end
         if type(mName) == "string" and mName ~= "" then
-            local mLk, _, mDisp = Compat.ParseCharacterFields and Compat.ParseCharacterFields(mName)
+            local mLk, mDisp
+            if Compat.ParseCharacterFields then
+                mLk, _, mDisp = Compat.ParseCharacterFields(mName)
+            elseif Compat.ParseCharacterName then
+                local p = Compat.ParseCharacterName(mName)
+                mLk, mDisp = p and p.lookupKey, p and p.displayName
+            end
             local uniq = mLk or mName
             if mSeen[uniq] then return end
             mSeen[uniq] = true
@@ -6596,8 +6801,9 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
         for mIdx = 1, totalMembers do
             local mi = Safe.Call(C_LFGList.GetSearchResultPlayerInfo, resId, mIdx)
             if type(mi) == "table" then
+                local mClean = PickOfficialNameFromTable(mi, nil)
                 RecordMember(
-                    Safe.String(mi.name),
+                    mClean or Safe.String(mi.name),
                     Safe.Number(mi.level) or 0,
                     Safe.String(mi.classFilename),
                     Safe.String(mi.assignedRole),
@@ -6609,8 +6815,12 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
         end
     end
     if not leaderAdded and type(leaderInfo) == "table" then
+        local liClean = PickOfficialNameFromTable(leaderInfo, nil)
+        if not liClean and leaderDisp and leaderDisp ~= L["Official LFG"] then
+            liClean = leaderDisp
+        end
         RecordMember(
-            Safe.String(leaderInfo.name) or leaderDisp,
+            liClean,
             Safe.Number(leaderInfo.level) or 0,
             Safe.String(leaderInfo.classFilename),
             Safe.String(leaderInfo.assignedRole),
@@ -6619,7 +6829,7 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
             1
         )
     end
-    if not leaderAdded and leaderDisp then
+    if not leaderAdded and leaderDisp and leaderDisp ~= L["Official LFG"] then
         RecordMember(leaderDisp, out.leaderLvl, out.leaderClass, nil, true, nil, 1)
     end
 
@@ -6662,37 +6872,59 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         return false
     end
 
-    local rawSecretLeader = (info.leaderName ~= nil and Safe.IsSecret and Safe.IsSecret(info.leaderName)) and info.leaderName or nil
-    local leaderRaw = Safe.String(info.leaderName)
+    local leaderRaw, rawSecretLeader = CleanOfficialLeaderCandidate(info.leaderName)
     if (not leaderRaw or leaderRaw == "") and C_LFGList.GetSearchResultLeaderInfo then
         local okLi, li = pcall(C_LFGList.GetSearchResultLeaderInfo, resId)
         if okLi and li ~= nil then
             if type(li) == "table" and (not Safe.IsSecret or not Safe.IsSecret(li)) then
-                local cand = li.name or li.leaderName or li.fullName or li.characterName
-                if not rawSecretLeader and cand ~= nil and Safe.IsSecret and Safe.IsSecret(cand) then
-                    rawSecretLeader = cand
-                end
-                leaderRaw = Safe.String(cand)
+                leaderRaw, rawSecretLeader = PickOfficialNameFromTable(li, rawSecretLeader)
             else
-                if not rawSecretLeader and Safe.IsSecret and Safe.IsSecret(li) then
-                    rawSecretLeader = li
+                local liClean, liSec = CleanOfficialLeaderCandidate(li)
+                if liClean then
+                    leaderRaw = liClean
+                    rawSecretLeader = nil
+                elseif liSec and not rawSecretLeader then
+                    rawSecretLeader = liSec
                 end
-                leaderRaw = Safe.String(li)
             end
         end
     end
+    local numRawMembers = math.min(math.max(1, Safe.Number(info.numMembers) or 1), 15)
     if (not leaderRaw or leaderRaw == "") and C_LFGList.GetSearchResultPlayerInfo then
-        local mi = Safe.Call(C_LFGList.GetSearchResultPlayerInfo, resId, 1)
-        if type(mi) == "table" then
-            local cand = mi.name or mi.fullName or mi.characterName
-            if not rawSecretLeader and cand ~= nil and Safe.IsSecret and Safe.IsSecret(cand) then
-                rawSecretLeader = cand
+        local fallbackCand = nil
+        for slotIdx = 1, numRawMembers do
+            local mi = Safe.Call(C_LFGList.GetSearchResultPlayerInfo, resId, slotIdx)
+            if type(mi) == "table" then
+                local slotClean, slotSec = PickOfficialNameFromTable(mi, rawSecretLeader)
+                if slotSec and not rawSecretLeader then
+                    rawSecretLeader = slotSec
+                end
+                if slotClean then
+                    if Safe.Value(mi.isLeader) == true then
+                        leaderRaw = slotClean
+                        rawSecretLeader = nil
+                        break
+                    elseif not fallbackCand then
+                        fallbackCand = slotClean
+                    end
+                end
             end
-            leaderRaw = Safe.String(cand)
+        end
+        if (not leaderRaw or leaderRaw == "") and fallbackCand then
+            leaderRaw = fallbackCand
+            rawSecretLeader = nil
         end
     end
 
-    local leaderLk, _, leaderDisp = leaderRaw and Compat.ParseCharacterFields and Compat.ParseCharacterFields(leaderRaw)
+    local leaderLk, leaderDisp
+    if leaderRaw then
+        if Compat.ParseCharacterFields then
+            leaderLk, _, leaderDisp = Compat.ParseCharacterFields(leaderRaw)
+        elseif Compat.ParseCharacterName then
+            local p = Compat.ParseCharacterName(leaderRaw)
+            leaderLk, leaderDisp = p and p.lookupKey, p and p.displayName
+        end
+    end
     local isSelfLeader = (Safe.Value(info.hasSelf) == true) or (leaderDisp and Compat.IsMe and Compat.IsMe(leaderDisp)) == true
     if isSelfLeader then
         if not hasActiveSelf then
@@ -6771,20 +7003,21 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         filledD = Safe.Number(mc.DAMAGER) or 0
         filledNoRole = Safe.Number(mc.NOROLE) or 0
         if maxMembers <= 5 then
-            if (filledT + filledH + filledD) > 0 or filledNoRole == 0 then
-                needT = math.max(0, 1 - filledT)
-                needH = math.max(0, 1 - filledH)
-                needD = math.max(0, 3 - filledD)
-                if maxMembers > 0 and numMembers >= maxMembers then
-                    needT, needH, needD = 0, 0, 0
-                end
+            local openSlots = (maxMembers > 0) and math.max(0, maxMembers - numMembers) or 5
+            if openSlots <= 0 then
+                needT, needH, needD = 0, 0, 0
+            elseif (filledT + filledH + filledD) > 0 or filledNoRole == 0 then
+                needT = math.min(openSlots, math.max(0, 1 - filledT))
+                openSlots = openSlots - needT
+                needH = math.min(openSlots, math.max(0, 1 - filledH))
+                openSlots = openSlots - needH
+                needD = math.min(openSlots, math.max(0, 3 - filledD))
             elseif filledNoRole > 0 then
-                needT = 1
-                needH = 1
-                needD = math.max(0, 3 - filledNoRole)
-                if maxMembers > 0 and numMembers >= maxMembers then
-                    needT, needH, needD = 0, 0, 0
-                end
+                needT = math.min(openSlots, 1)
+                openSlots = openSlots - needT
+                needH = math.min(openSlots, 1)
+                openSlots = openSlots - needH
+                needD = math.min(openSlots, math.max(0, 3 - filledNoRole))
             end
         end
     end
@@ -6802,14 +7035,19 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         comment
     )
     local prevRec = self.officialLfgCache[leaderLk]
-    if type(prevRec) == "table" and prevRec._scanSig == scanSig and (now - (prevRec.updatedAt or 0)) < 12 then
+    if type(prevRec) == "table" and prevRec._scanSig == scanSig and (now - (prevRec.updatedAt or 0)) < 12
+        and prevRec.isUnknownLeader ~= true and prevRec.displayName ~= L["Official LFG"]
+    then
         prevRec.updatedAt = now
         if freshKeys then freshKeys[leaderLk] = true end
         return false
     end
 
+    local fallbackKey = "official_" .. tostring(resId)
     local mbrMeta = InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDisp)
-    if (not leaderRaw or leaderRaw == "") and not isSelfLeader and type(mbrMeta.members) == "table" then
+    if (not leaderRaw or leaderRaw == "" or not leaderDisp or leaderDisp == "" or leaderDisp == L["Official LFG"] or leaderLk == fallbackKey)
+        and not isSelfLeader and type(mbrMeta.members) == "table"
+    then
         local promotedName = nil
         for mi = 1, #mbrMeta.members do
             local m = mbrMeta.members[mi]
@@ -6824,11 +7062,23 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         end
         if promotedName and Compat.ParseCharacterFields then
             local pLk, _, pDisp = Compat.ParseCharacterFields(promotedName)
-            if pLk and pDisp then
+            if pLk and pDisp and pDisp ~= "" and pDisp ~= L["Official LFG"] then
                 leaderRaw = promotedName
                 leaderLk = pLk
                 leaderDisp = pDisp
                 rawSecretLeader = nil
+                scanSig = ("%s|%s|%d|%d|%d|%d|%d|%d|%s|%s"):format(
+                    tostring(resId),
+                    leaderDisp,
+                    numMembers,
+                    filledT,
+                    filledH,
+                    filledD,
+                    filledNoRole,
+                    Safe.Number(searchOrder) or 0,
+                    actDisplay,
+                    comment
+                )
             end
         end
     end
@@ -6899,7 +7149,7 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         ilvl = Safe.Number(info.requiredItemLevel) or 0,
         isDungeon = (catKind == "DUNGEONS"),
         isOfficial = true,
-        searchOrder = searchOrder,
+        searchOrder = searchOrder or (prevRec and prevRec.searchOrder) or nil,
         numGuildMates = mbrMeta.numGuildMates,
         numBNetFriends = mbrMeta.numBNetFriends,
         numCharFriends = mbrMeta.numCharFriends,
@@ -6922,6 +7172,9 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         memberSearchText = mbrMeta.memberSearchText,
         updatedAt = now,
     }
+    if leaderLk ~= fallbackKey and self.officialLfgCache[fallbackKey] ~= nil then
+        self.officialLfgCache[fallbackKey] = nil
+    end
     self.officialLfgCache[leaderLk] = rec
     if freshKeys then freshKeys[leaderLk] = true end
     local notifiedClan = false
@@ -7425,13 +7678,22 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
             or (ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(item.lookupKey or item.displayName, item.bnetAccountID))
         item.hasAddon = hasAddon == true
 
+        local leaderSMeta = Store and ((Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or item.displayName))
+            or (Store.GetSocialMeta and Store:GetSocialMeta(item.lookupKey or item.displayName))) or nil
+        if leaderSMeta and leaderSMeta.flag == "AVOID" then
+            item._isAvoidFlag = true
+        elseif leaderSMeta and leaderSMeta.flag == "GOOD" then
+            item._isGoodFlag = true
+        end
+
         local compRec = (item.lookupKey and Store and Store.GetRecentCompanion) and Store:GetRecentCompanion(item.lookupKey) or nil
         if compRec then
             item.isCompanion = true
             item.companionRuns = tonumber(compRec.runs) or 1
         end
 
-        local isTrusted = item.isClan or item.isAllied or item.isFriend or item.isWatchlist or item.hasFriendOrWatchlistSignup or item.hasGoodPartnerSignup or item.isCompanion
+        local isTrusted = (item.isClan or item.isAllied or item.isFriend or item.isWatchlist or item.hasFriendOrWatchlistSignup or item.hasGoodPartnerSignup or item.isCompanion or item._isGoodFlag) == true
+        item.isTrusted = isTrusted
         local gStr = item.guild or resolvedGuild
         local isEnemyGuild = (not isClan and not isAllied and gStr and gStr ~= "" and ns.Spotter and ns.Spotter.ClassifyGuild and ns.Spotter:ClassifyGuild(gStr) == "ENEMY") == true
         item.isEnemyGuild = isEnemyGuild or (item.hasEnemyGuildMember == true)
@@ -7562,7 +7824,7 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
     end
 
     for _, evt in pairs(bucket.events or {}) do
-        if evt.isOpen ~= false then
+        if type(evt) == "table" and evt.isOpen ~= false and IsVisibleClanEvent(self, evt) then
             local sum = self:GetSignupSummary(evt)
             local remT = math.max(0, (tonumber(evt.needT) or 0) - sum.TANK)
             local remH = math.max(0, (tonumber(evt.needH) or 0) - sum.HEALER)
@@ -7834,24 +8096,28 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
         end
     end
 
+    local inGrp = (Compat.IsInGroup and Compat.IsInGroup()) == true
     table.sort(out, function(a, b)
-        if a.isSelf ~= b.isSelf then return a.isSelf end
-        if a.online ~= b.online then return a.online end
-        local aWarn = (not a.isSelf) and ((a.hasAvoidSignup == true) or (a.isEnemyGuild == true))
-        local bWarn = (not b.isSelf) and ((b.hasAvoidSignup == true) or (b.isEnemyGuild == true))
+        local aSelf, bSelf = (a.isSelf == true), (b.isSelf == true)
+        if aSelf ~= bSelf then return aSelf end
+        local aOn, bOn = (a.online == true), (b.online == true)
+        if aOn ~= bOn then return aOn end
+        local aWarn = (not aSelf) and ((a.hasAvoidSignup == true) or (a.isEnemyGuild == true) or (a._isAvoidFlag == true))
+        local bWarn = (not bSelf) and ((b.hasAvoidSignup == true) or (b.isEnemyGuild == true) or (b._isAvoidFlag == true))
         if aWarn ~= bWarn then return not aWarn end
-        local aTrusted = (a.isClan or a.isAllied or a.isFriend or a.isWatchlist or a.hasFriendOrWatchlistSignup or a.hasGoodPartnerSignup or a.isCompanion) and 1 or 0
-        local bTrusted = (b.isClan or b.isAllied or b.isFriend or b.isWatchlist or b.hasFriendOrWatchlistSignup or b.hasGoodPartnerSignup or b.isCompanion) and 1 or 0
+        local aTrusted = (a.isClan or a.isAllied or a.isFriend or a.isWatchlist or a.hasFriendOrWatchlistSignup or a.hasGoodPartnerSignup or a.isCompanion or a._isGoodFlag) and 1 or 0
+        local bTrusted = (b.isClan or b.isAllied or b.isFriend or b.isWatchlist or b.hasFriendOrWatchlistSignup or b.hasGoodPartnerSignup or b.isCompanion or b._isGoodFlag) and 1 or 0
         if aTrusted ~= bTrusted then return aTrusted > bTrusted end
         local aRel = (a.isFriend or a.isWatchlist or a.hasFriendOrWatchlistSignup) and 1 or 0
         local bRel = (b.isFriend or b.isWatchlist or b.hasFriendOrWatchlistSignup) and 1 or 0
         if aRel ~= bRel then return aRel > bRel end
-        if a.isClan ~= b.isClan then return a.isClan end
-        if a.isAllied ~= b.isAllied then return a.isAllied end
-        local aBonus = (a.hasGoodPartnerSignup and 3 or 0) + (a.isCompanion and 2 or 0) + (a.hasAddon and 1 or 0)
-        local bBonus = (b.hasGoodPartnerSignup and 3 or 0) + (b.isCompanion and 2 or 0) + (b.hasAddon and 1 or 0)
+        local aClan, bClan = (a.isClan == true), (b.isClan == true)
+        if aClan ~= bClan then return aClan end
+        local aAllied, bAllied = (a.isAllied == true), (b.isAllied == true)
+        if aAllied ~= bAllied then return aAllied end
+        local aBonus = ((a.hasGoodPartnerSignup or a._isGoodFlag) and 3 or 0) + (a.isCompanion and 2 or 0) + (a.hasAddon and 1 or 0)
+        local bBonus = ((b.hasGoodPartnerSignup or b._isGoodFlag) and 3 or 0) + (b.isCompanion and 2 or 0) + (b.hasAddon and 1 or 0)
         if aBonus ~= bBonus then return aBonus > bBonus end
-        local inGrp = (Compat.IsInGroup and Compat.IsInGroup()) == true
         local aSolo = (a.mode == "LFG")
         local bSolo = (b.mode == "LFG")
         if aSolo ~= bSolo then
@@ -7866,7 +8132,12 @@ function Clan:GetClanLFGList(query, dungeonsOnly, sourceFilter, roleFilter)
             local bM = b.numMembers or 0
             if aM ~= bM then return aM > bM end
         end
-        if a.searchOrder and b.searchOrder and a.searchOrder ~= b.searchOrder then
+        local aHasOrder = (a.searchOrder ~= nil)
+        local bHasOrder = (b.searchOrder ~= nil)
+        if aHasOrder ~= bHasOrder then
+            return aHasOrder
+        end
+        if aHasOrder and a.searchOrder ~= b.searchOrder then
             return a.searchOrder < b.searchOrder
         end
         return (a.updatedAt or 0) > (b.updatedAt or 0)
@@ -7886,7 +8157,7 @@ function Clan:GetTrustedLFGBreakdown()
     trustedBdAt = nowClock
     self._trustedBdDirty = false
     wipe(trustedBdSeen)
-    local total, clanCnt, allyCnt, friendsCnt, scCnt = 0, 0, 0, 0, 0
+    local total, clanCnt, allyCnt, friendsCnt, compCnt, scCnt = 0, 0, 0, 0, 0, 0
     local bucket = Store and Store.GetClanScopeData and Store:GetClanScopeData() or nil
     local now = time()
 
@@ -7899,6 +8170,9 @@ function Clan:GetTrustedLFGBreakdown()
         if isClan then clanCnt = clanCnt + 1 end
         if isAllied then allyCnt = allyCnt + 1 end
         if isFriend or isWatchlist then friendsCnt = friendsCnt + 1 end
+        if isCompanion and not isClan and not isAllied and not isFriend and not isWatchlist then
+            compCnt = compCnt + 1
+        end
         if hasAddon then scCnt = scCnt + 1 end
         if lk then trustedBdSeen["lk:" .. tostring(lk)] = true end
     end
@@ -7914,7 +8188,7 @@ function Clan:GetTrustedLFGBreakdown()
     end
 
     for _, evt in pairs((bucket and bucket.events) or {}) do
-        if type(evt) == "table" and evt.isOpen ~= false then
+        if type(evt) == "table" and evt.isOpen ~= false and IsVisibleClanEvent(self, evt) then
             local hasFW = false
             for sKey, sRec in pairs(evt.signups or {}) do
                 if type(sRec) == "table" and sRec.role ~= "DECLINE" then
@@ -7974,6 +8248,7 @@ function Clan:GetTrustedLFGBreakdown()
     trustedBdResult.clan = clanCnt
     trustedBdResult.ally = allyCnt
     trustedBdResult.friends = friendsCnt
+    trustedBdResult.companions = compCnt
     trustedBdResult.sc = scCnt
     return trustedBdResult
 end
@@ -8273,7 +8548,7 @@ function Clan:GetClanBadgeLFGCount()
         count = count + 1
     end
     for _, evt in pairs(bucket.events or {}) do
-        if type(evt) == "table" and evt.isOpen ~= false then
+        if type(evt) == "table" and evt.isOpen ~= false and IsVisibleClanEvent(self, evt) then
             count = count + 1
         end
     end
@@ -8378,8 +8653,12 @@ local function ProcessGuildPeerDigest(digestStr, senderLookupKey)
     local now = time()
     local gossipStamp = now - 600
     local processed = 0
-    local myFull = (Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()) or Compat.GetPlayerName()
-    local myKey = (Compat.ParseCharacterFields and myFull) and select(1, Compat.ParseCharacterFields(myFull)) or nil
+    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local myFull = (type(resolvedSelf) == "table" and (resolvedSelf.fullName or resolvedSelf.displayName))
+        or (type(resolvedSelf) == "string" and resolvedSelf ~= "" and resolvedSelf)
+        or (Safe and Safe.String and UnitName and Safe.String(Safe.Call(UnitName, "player")))
+        or ""
+    local myKey = (myFull ~= "" and Compat.ParseCharacterFields) and select(1, Compat.ParseCharacterFields(myFull)) or nil
 
     for token in digestStr:gmatch("([^,]+)") do
         processed = processed + 1
@@ -8391,21 +8670,31 @@ local function ProcessGuildPeerDigest(digestStr, senderLookupKey)
             if inGuild then
                 local existing = bucket.peers[lk]
                 local sr = Store and Store.socialByLookup and Store.socialByLookup[lk]
+                local parsedDisp = (Compat.ParseCharacterFields and lk ~= "") and select(3, Compat.ParseCharacterFields(lk)) or nil
                 local dispName = (rosterRec and type(rosterRec.displayName) == "string" and rosterRec.displayName ~= "" and rosterRec.displayName)
+                    or (existing and type(existing.displayName) == "string" and existing.displayName ~= "" and existing.displayName)
                     or (existing and type(existing.name) == "string" and existing.name ~= "" and existing.name)
-                    or (sr and sr.name)
+                    or (sr and type(sr.displayName) == "string" and sr.displayName ~= "" and sr.displayName)
+                    or (sr and type(sr.name) == "string" and sr.name ~= "" and sr.name)
+                    or (type(parsedDisp) == "string" and parsedDisp ~= "" and parsedDisp)
                     or lk
                 if not Compat.IsMe(dispName) then
                     if type(existing) ~= "table" then
                         bucket.peers[lk] = {
+                            displayName = dispName,
                             name = dispName,
+                            lookupKey = lk,
                             version = ver,
                             updatedAt = gossipStamp,
                         }
                     elseif (tonumber(existing.updatedAt) or 0) < gossipStamp then
                         existing.version = ver
                         existing.updatedAt = gossipStamp
-                        if dispName ~= lk then existing.name = dispName end
+                        existing.lookupKey = lk
+                        if dispName ~= lk or type(existing.displayName) ~= "string" or existing.displayName == "" then
+                            existing.displayName = dispName
+                            existing.name = dispName
+                        end
                     end
                     if ns.Chat and ns.Chat.RecordPassiveSavedPeer then
                         ns.Chat:RecordPassiveSavedPeer(lk, dispName, ver, gossipStamp)
@@ -8414,6 +8703,65 @@ local function ProcessGuildPeerDigest(digestStr, senderLookupKey)
             end
         end
     end
+end
+
+local HEARD_EVT_RELAY_TTL = 15
+
+local function RecordHeardGuildEvtRelay(relayKey)
+    if type(relayKey) ~= "string" or relayKey == "" then return end
+    local nowMono = (GetTime and GetTime()) or time()
+    Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
+    Clan._heardGuildEvtSig[relayKey] = nowMono
+    local count = 0
+    for k, ts in pairs(Clan._heardGuildEvtSig) do
+        if type(ts) ~= "number" or (nowMono - ts) > HEARD_EVT_RELAY_TTL then
+            Clan._heardGuildEvtSig[k] = nil
+        else
+            count = count + 1
+        end
+    end
+    if count > 120 then
+        wipe(Clan._heardGuildEvtSig)
+        Clan._heardGuildEvtSig[relayKey] = nowMono
+    end
+end
+
+local function HasRecentGuildEvtRelay(relayKey)
+    local cache = Clan._heardGuildEvtSig
+    if not cache or type(relayKey) ~= "string" or relayKey == "" then return false end
+    local ts = cache[relayKey]
+    if type(ts) ~= "number" then return false end
+    local nowMono = (GetTime and GetTime()) or time()
+    if (nowMono - ts) <= HEARD_EVT_RELAY_TTL then
+        return true
+    end
+    cache[relayKey] = nil
+    return false
+end
+
+local function RecordHeardIntelRev(bucketKey, rev)
+    if type(bucketKey) ~= "string" or bucketKey == "" then return end
+    local numRev = tonumber(rev) or 0
+    if numRev <= 0 then return end
+    local nowMono = (GetTime and GetTime()) or time()
+    Clan._heardIntelRev = Clan._heardIntelRev or {}
+    local cur = Clan._heardIntelRev[bucketKey]
+    if type(cur) == "table" and (nowMono - (cur.at or 0)) <= 15 then
+        cur.rev = math.max(cur.rev or 0, numRev)
+        cur.at = nowMono
+    else
+        Clan._heardIntelRev[bucketKey] = { rev = numRev, at = nowMono }
+    end
+end
+
+local function GetRecentHeardIntelRev(bucketKey, sinceMono)
+    local rec = Clan._heardIntelRev and Clan._heardIntelRev[bucketKey]
+    if type(rec) ~= "table" or not rec.at then return 0 end
+    local nowMono = (GetTime and GetTime()) or time()
+    if rec.at >= (sinceMono or 0) and (nowMono - rec.at) <= 15 then
+        return tonumber(rec.rev) or 0
+    end
+    return 0
 end
 
 local function OnAddonMessage(_, _, prefix, text, chatType, sender)
@@ -8865,7 +9213,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         if myTok ~= "" then
             EnqueueIntelPacket(("AEOK~%s~%s~%s~%s"):format(
                 myTok,
-                senderGKey:sub(1, 32),
+                senderGKey:sub(1, 40),
                 flag and "1" or "0",
                 authorName
             ))
@@ -9022,8 +9370,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 end
             end
             if eventId ~= "" then
-                Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
-                Clan._heardGuildEvtSig["EVT:" .. eventId] = GetTime and GetTime() or now
+                RecordHeardGuildEvtRelay("EVT:" .. eventId)
             end
         end
 
@@ -9063,7 +9410,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     Compat.CleanPayloadField(effCreator or "", 32)
                 ):sub(1, Clan.MAX_PAYLOAD_BYTES or 240)
                 C_Timer.After(0.9 + math.random() * 1.4, function()
-                    if Clan._heardGuildEvtSig and Clan._heardGuildEvtSig[relayKey] then
+                    if HasRecentGuildEvtRelay(relayKey) then
                         return
                     end
                     if not Clan:IsMessagingLocked() then
@@ -9107,8 +9454,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             if evt.isAlliedEvent and evt.originGuild and evt.originGuild ~= "" and Clan:IsAlliedEventSharingMutual(evt.originGuild) then
                 if chatType == "GUILD" then
                     if IsSenderConfirmedInGuild(parsed.lookupKey) then
-                        Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
-                        Clan._heardGuildEvtSig["EVS:" .. eventId .. ":" .. (parts[3] ~= "0" and "1" or "0")] = GetTime and GetTime() or now
+                        RecordHeardGuildEvtRelay("EVS:" .. eventId .. ":" .. (parts[3] ~= "0" and "1" or "0"))
                         canEvtMod = true
                     end
                 elseif chatType == "WHISPER" then
@@ -9129,7 +9475,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     local rKey = "EVS:" .. eventId .. ":" .. (newState and "1" or "0")
                     local rPay = ("EVS~%s~%s"):format(eventId, newState and "1" or "0")
                     C_Timer.After(0.8 + math.random() * 1.2, function()
-                        if Clan._heardGuildEvtSig and Clan._heardGuildEvtSig[rKey] then return end
+                        if HasRecentGuildEvtRelay(rKey) then return end
                         if not Clan:IsMessagingLocked() then
                             EnqueueIntelPacket(rPay)
                         end
@@ -9221,8 +9567,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         end
 
         if chatType == "GUILD" and eventId ~= "" and signerKey ~= "" and IsValidRole(role) then
-            Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
-            Clan._heardGuildEvtSig["SIG:" .. eventId .. ":" .. signerKey .. ":" .. role] = GetTime and GetTime() or now
+            RecordHeardGuildEvtRelay("SIG:" .. eventId .. ":" .. signerKey .. ":" .. role)
         end
 
         if evt and IsValidRole(role) then
@@ -9295,8 +9640,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             if evt.isAlliedEvent and evt.originGuild and evt.originGuild ~= "" and Clan:IsAlliedEventSharingMutual(evt.originGuild) then
                 if chatType == "GUILD" then
                     if IsSenderConfirmedInGuild(parsed.lookupKey) then
-                        Clan._heardGuildEvtSig = Clan._heardGuildEvtSig or {}
-                        Clan._heardGuildEvtSig["DEL:" .. eventId] = GetTime and GetTime() or now
+                        RecordHeardGuildEvtRelay("DEL:" .. eventId)
                         canEvtDel = true
                     end
                 elseif chatType == "WHISPER" then
@@ -9316,7 +9660,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     local rKey = "DEL:" .. eventId
                     local rPay = "DEL~" .. eventId
                     C_Timer.After(0.8 + math.random() * 1.2, function()
-                        if Clan._heardGuildEvtSig and Clan._heardGuildEvtSig[rKey] then return end
+                        if HasRecentGuildEvtRelay(rKey) then return end
                         if not Clan:IsMessagingLocked() then
                             EnqueueIntelPacket(rPay)
                         end
@@ -9357,8 +9701,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 return
             end
             local rev = tonumber(parts[3]) or 0
-            Clan._heardIntelRev = Clan._heardIntelRev or {}
-            Clan._heardIntelRev.allc = math.max(Clan._heardIntelRev.allc or 0, rev)
+            RecordHeardIntelRev("allc", rev)
             bucket.alliance = bucket.alliance or {}
             if rev >= (bucket.alliance.rev or 0) then
                 bucket.alliance.enabled = (parts[4] == "1")
@@ -9376,8 +9719,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 return
             end
             local rev = tonumber(parts[3]) or 0
-            Clan._heardIntelRev = Clan._heardIntelRev or {}
-            Clan._heardIntelRev.hir = math.max(Clan._heardIntelRev.hir or 0, rev)
+            RecordHeardIntelRev("hir", rev)
             local h = bucket.hierarchy or {}
             if rev >= (h.rev or 0) then
                 local dMode = (parts[4] == "OFFICERS" or parts[4] == "RANK") and parts[4] or "LEADER"
@@ -9413,8 +9755,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             end
             local ver = parts[3]
             local rev = tonumber(parts[4]) or 0
-            Clan._heardIntelRev = Clan._heardIntelRev or {}
-            Clan._heardIntelRev.info = math.max(Clan._heardIntelRev.info or 0, rev)
+            RecordHeardIntelRev("info", rev)
             local editMode = (parts[5] == "ALL") and "ALL" or "OFFICERS"
             local summary = Compat.CleanPayloadField(parts[6] or "", 60)
             local schedule = Compat.CleanPayloadField(parts[7] or "", 55)
@@ -9459,8 +9800,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             end
             local ver = parts[3]
             local rev = tonumber(parts[4]) or 0
-            Clan._heardIntelRev = Clan._heardIntelRev or {}
-            Clan._heardIntelRev.dip = math.max(Clan._heardIntelRev.dip or 0, rev)
+            RecordHeardIntelRev("dip", rev)
             local stance = (parts[5] == "ALLY" or parts[5] == "ENEMY") and parts[5] or "NEUTRAL"
             local gName = Compat.CleanPayloadField(parts[7] or "", 40)
             local gKey = NormalizeGuildKey(gName)
@@ -9512,8 +9852,7 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 return
             end
             local rev = tonumber(parts[4]) or 0
-            Clan._heardIntelRev = Clan._heardIntelRev or {}
-            Clan._heardIntelRev.dip = math.max(Clan._heardIntelRev.dip or 0, rev)
+            RecordHeardIntelRev("dip", rev)
             local gKey = NormalizeGuildKey(parts[5] or "")
             if gKey ~= "" and bucket.diplomacy and bucket.diplomacy.guilds and bucket.diplomacy.guilds[gKey] then
                 if not bucket.diplomacy.guilds[gKey].localOnly and rev >= (bucket.diplomacy.guilds[gKey].rev or 0) then
@@ -9533,17 +9872,17 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
             local myInfoRev = (bucket.clanInfo and bucket.clanInfo.rev) or 0
             local myDipRev = (bucket.diplomacy and bucket.diplomacy.rev) or 0
             local myHirRev = (bucket.hierarchy and bucket.hierarchy.rev) or 0
-            local myAllcRev = (bucket.alliance and bucket.alliance.enabled and bucket.alliance.rev) or 0
+            local myAllcRev = (bucket.alliance and bucket.alliance.rev) or 0
             if (myInfoRev > peerInfoRev or myDipRev > peerDipRev or myHirRev > peerHirRev or myAllcRev > peerAllcRev) and (GetTime() - (Clan.lastIntelReplyAt or 0)) >= 25 then
-                Clan.lastIntelReplyAt = GetTime()
+                local reqStartedAt = (GetTime and GetTime()) or time()
+                Clan.lastIntelReplyAt = reqStartedAt
                 local d = Clan:IsGuildLeader() and (0.6 + math.random() * 0.6) or (1.4 + math.random() * 1.8)
                 C_Timer.After(d, function()
                     if ComputeGuildScopeToken() == myTok then
-                        local heard = Clan._heardIntelRev or {}
-                        local effInfo = math.max(peerInfoRev, heard.info or 0)
-                        local effDip = math.max(peerDipRev, heard.dip or 0)
-                        local effHir = math.max(peerHirRev, heard.hir or 0)
-                        local effAllc = math.max(peerAllcRev, heard.allc or 0)
+                        local effInfo = math.max(peerInfoRev, GetRecentHeardIntelRev("info", reqStartedAt))
+                        local effDip = math.max(peerDipRev, GetRecentHeardIntelRev("dip", reqStartedAt))
+                        local effHir = math.max(peerHirRev, GetRecentHeardIntelRev("hir", reqStartedAt))
+                        local effAllc = math.max(peerAllcRev, GetRecentHeardIntelRev("allc", reqStartedAt))
                         if Clan.BroadcastDeltaIntel then
                             Clan:BroadcastDeltaIntel(effInfo, effDip, effHir, effAllc)
                         else
@@ -9583,66 +9922,6 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                     ts = now,
                     priority = 3,
                 })
-            end
-        end
-
-    elseif cmd == "WB" then
-        local syncId = parts[2]
-        local ts = tonumber(parts[3])
-        local shardName = Compat.CleanPayloadField and Compat.CleanPayloadField(parts[4] or "", 40) or nil
-        if VALID_WB_SYNC_IDS[syncId] and ts and ts > 0 and ns.WorldBuffs and ns.WorldBuffs.ReceiveSyncedDrop then
-            ns.WorldBuffs:ReceiveSyncedDrop(syncId, ts, parsed.displayName, shardName)
-        end
-
-    elseif cmd == "WBR" then
-        if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("buffs") then return end
-        if not ns.WorldBuffs or not ns.WorldBuffs.GetCatchupSyncEntries then return end
-        local entries = ns.WorldBuffs:GetCatchupSyncEntries()
-        if not entries or #entries == 0 then return end
-        local monoNow = GetTime and GetTime() or 0
-        if Clan.lastWbCatchupReplyAt and (monoNow - Clan.lastWbCatchupReplyAt) < 30 then
-            return
-        end
-        Clan.lastWbCatchupReplyAt = monoNow
-        local baseDelay = (#entries >= 3) and 0.6 or ((#entries == 2) and 1.2 or 1.8)
-        local delay = baseDelay + math.random() * 0.9
-        if C_Timer and C_Timer.After then
-            C_Timer.After(delay, function()
-                if Clan:IsMessagingLocked() or not (IsInGuild and IsInGuild()) or not (ns.db and ns.db.settings and ns.db.settings.clanSync) then
-                    return
-                end
-                local heardWbAt = Clan._lastHeardWbCatchupAt or 0
-                if heardWbAt > 0 and ((GetTime and GetTime() or 0) - heardWbAt) < 6.0 then
-                    return
-                end
-                local curEntries = ns.WorldBuffs and ns.WorldBuffs.GetCatchupSyncEntries and ns.WorldBuffs:GetCatchupSyncEntries() or {}
-                if #curEntries == 0 then return end
-                local chunks = {}
-                for idx = 1, math.min(3, #curEntries) do
-                    local it = curEntries[idx]
-                    if VALID_WB_SYNC_IDS[it.id] and it.ts and it.ts > 0 then
-                        chunks[#chunks + 1] = it.id .. ":" .. tostring(math.floor(it.ts))
-                    end
-                end
-                if #chunks > 0 then
-                    local shard = Compat.CleanPayloadField and Compat.CleanPayloadField((Compat.Realm and Compat.Realm()) or "", 40) or ""
-                    local wbPayload = "WBC~" .. table.concat(chunks, ",") .. (shard ~= "" and ("~" .. shard) or "")
-                    TransmitAddonMessage(Clan, wbPayload, "GUILD", false)
-                end
-            end)
-        end
-
-    elseif cmd == "WBC" then
-        if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("buffs") then return end
-        Clan._lastHeardWbCatchupAt = GetTime and GetTime() or 0
-        local listStr = parts[2]
-        local shardName = Compat.CleanPayloadField and Compat.CleanPayloadField(parts[3] or "", 40) or nil
-        if type(listStr) ~= "string" or listStr == "" or not (ns.WorldBuffs and ns.WorldBuffs.ReceiveSyncedDrop) then return end
-        for token in listStr:gmatch("[^,]+") do
-            local sId, sTs = token:match("^([%w_]+):(%d+)$")
-            local tsNum = tonumber(sTs)
-            if sId and VALID_WB_SYNC_IDS[sId] and tsNum and tsNum > 0 then
-                ns.WorldBuffs:ReceiveSyncedDrop(sId, tsNum, parsed.displayName, shardName)
             end
         end
 
@@ -10173,7 +10452,7 @@ local function ParseEventCountdownMinutes(whenText, createdAt)
     if type(whenText) ~= "string" or whenText == "" then return nil end
     local low = whenText:lower()
 
-    -- Relative offsets written by players: "in 20m", "em 30 min", "1h", etc.
+    -- Relative offsets written by players: "in 20m", "em 30 min", "in 1h", etc.
     if createdAt and createdAt > 0 then
         local relMins = tonumber(low:match("^%s*[ie][nm]%s+(%d+)%s*m")) or tonumber(low:match("^(%d+)%s*min"))
         if relMins and relMins > 0 and relMins <= 720 then
@@ -10185,33 +10464,62 @@ local function ParseEventCountdownMinutes(whenText, createdAt)
         end
     end
 
-    -- Clock timestamps like "21:00", "21h30", "21h", "9:30 pm" (only for events created within the past 20 hours).
-    if createdAt and (time() - createdAt) > 72000 then
-        return nil
-    end
-    local hStr, mStr = low:match("(%d%d?):(%d%d)")
-    if not hStr then
-        hStr, mStr = low:match("(%d%d?)h(%d%d)")
-    end
-    if not hStr then
-        hStr = low:match("(%d%d?)h")
-        mStr = "0"
-    end
-    local hour = tonumber(hStr)
-    local minute = tonumber(mStr) or 0
+    local hour, minute = ExtractEventClockTime(whenText)
     if not hour or hour > 24 or minute > 59 then
         return nil
     end
-    if low:find("pm", 1, true) and hour < 12 then
-        hour = hour + 12
-    elseif low:find("am", 1, true) and hour == 12 then
-        hour = 0
-    end
     if hour == 24 then hour = 0 end
 
-    local nowTbl = date("*t")
+    local nowTs = time()
+    local nowTbl = date("*t", nowTs)
+    local todayDays = CivilDays(nowTbl.year, nowTbl.month, nowTbl.day)
+    local targetDays = nil
+
+    local dayStr, monStr, yrStr = low:match("(%d%d?)/(%d%d?)/(%d%d%d?%d?)")
+    if not dayStr then
+        dayStr, monStr = low:match("(%d%d?)/(%d%d?)")
+    end
+    if dayStr and monStr then
+        local dNum = tonumber(dayStr)
+        local mNum = tonumber(monStr)
+        if not mNum or mNum < 1 or mNum > 12 or not dNum or dNum < 1 or dNum > 31 then
+            return nil
+        end
+        local refTbl = (createdAt and createdAt > 0) and date("*t", createdAt) or nowTbl
+        local yNum = tonumber(yrStr)
+        if yNum and yNum < 100 then
+            yNum = 2000 + yNum
+        elseif not yNum then
+            yNum = refTbl.year or nowTbl.year or 2026
+            if mNum < (refTbl.month or 1) and ((refTbl.month or 1) >= 11 or mNum <= 2) then
+                yNum = yNum + 1
+            end
+        end
+        if dNum > DaysInCalendarMonth(yNum, mNum) then
+            return nil
+        end
+        targetDays = CivilDays(yNum, mNum, dNum)
+    elseif low:find("tomorrow", 1, true) or low:find("amanh", 1, true) or low:find("mañan", 1, true) or low:find("manan", 1, true) then
+        local refTbl = (createdAt and createdAt > 0) and date("*t", createdAt) or nowTbl
+        targetDays = CivilDays(refTbl.year, refTbl.month, refTbl.day) + 1
+    elseif low:find("today", 1, true) or low:find("hoje", 1, true) or low:find("hoy", 1, true) then
+        if createdAt and (nowTs - createdAt) > 72000 then
+            return nil
+        end
+        local refTbl = (createdAt and createdAt > 0) and date("*t", createdAt) or nowTbl
+        targetDays = CivilDays(refTbl.year, refTbl.month, refTbl.day)
+    end
+
     local nowMins = (nowTbl.hour or 0) * 60 + (nowTbl.min or 0)
     local evtMins = hour * 60 + minute
+    if targetDays ~= nil then
+        return ((targetDays - todayDays) * 1440) + (evtMins - nowMins)
+    end
+
+    -- Dateless clock timestamps like "21:00" only stay eligible within 20 hours of creation.
+    if createdAt and (nowTs - createdAt) > 72000 then
+        return nil
+    end
     local diff = evtMins - nowMins
     if diff < -60 then
         diff = diff + 1440
@@ -10220,14 +10528,21 @@ local function ParseEventCountdownMinutes(whenText, createdAt)
 end
 
 local function ComputeCalendarCountdownMinutes(calEvt)
-    if type(calEvt) ~= "table" or (calEvt.dayDelta or 99) > 1 then
+    if type(calEvt) ~= "table" then
         return nil
     end
-    local today = (C_DateAndTime and C_DateAndTime.GetCurrentCalendarTime and Safe.Call(C_DateAndTime.GetCurrentCalendarTime)) or date("*t")
-    local curHour = tonumber(today and today.hour) or 0
-    local curMin = tonumber(today and today.minute) or 0
-    local nowMins = curHour * 60 + curMin
-    local targetMins = ((calEvt.dayDelta or 0) * 1440) + ((calEvt.hour or 0) * 60) + (calEvt.minute or 0)
+    local curYear, curMonth, curDay, curHour, curMin = GetCurrentCalendarParts()
+    local deltaDays
+    if calEvt.year and calEvt.month and calEvt.monthDay then
+        deltaDays = CivilDays(calEvt.year, calEvt.month, calEvt.monthDay) - CivilDays(curYear, curMonth, curDay)
+    else
+        deltaDays = tonumber(calEvt.dayDelta) or 99
+    end
+    if deltaDays < -1 or deltaDays > 1 then
+        return nil
+    end
+    local nowMins = (curHour * 60) + curMin
+    local targetMins = (deltaDays * 1440) + ((calEvt.hour or 0) * 60) + (calEvt.minute or 0)
     return targetMins - nowMins
 end
 
@@ -10278,7 +10593,7 @@ function Clan:CheckUpcomingEventReminders()
     local _, myKey = ResolveSelfIdentity()
     if hasGuildEvents and myKey then
         for _, evt in pairs(bucket.events) do
-            if type(evt) == "table" and evt.isOpen ~= false and evt.signups and evt.signups[myKey] then
+            if IsVisibleClanEvent(self, evt) and evt.isOpen ~= false and evt.signups and evt.signups[myKey] then
                 local mins = ParseEventCountdownMinutes(evt.whenText, evt.createdAt)
                 if mins then
                     if mins > -1 and (not minUpcomingMins or mins < minUpcomingMins) then
@@ -10309,7 +10624,14 @@ function Clan:CheckUpcomingEventReminders()
                         if mins > -1 and (not minUpcomingMins or mins < minUpcomingMins) then
                             minUpcomingMins = mins
                         end
-                        local calKey = "cal:" .. tostring(cal.eventID or cal.title) .. ":" .. tostring(cal.hour) .. ":" .. tostring(cal.minute)
+                        local calKey = ("cal:%s:%d-%d-%d:%d:%d"):format(
+                            tostring(cal.eventID or cal.title),
+                            tonumber(cal.year) or 0,
+                            tonumber(cal.month) or 0,
+                            tonumber(cal.monthDay) or 0,
+                            tonumber(cal.hour) or 0,
+                            tonumber(cal.minute) or 0
+                        )
                         FireReminder(calKey, cal.title or L["Calendar Event"], mins, nil, "events")
                     end
                 end
@@ -10345,6 +10667,39 @@ function Clan:ScheduleNextEventReminderCheck()
     end)
 end
 
+function Clan:GetRosterHistoryLimit()
+    local raw = ns.db and ns.db.settings and tonumber(ns.db.settings.clanRosterHistoryLimit)
+    local lim = raw and math.floor(raw) or (Clan.MAX_ROSTER_HISTORY or 50)
+    if lim < 25 then lim = 25 elseif lim > 500 then lim = 500 end
+    return lim
+end
+
+function Clan:SetRosterHistoryLimit(limit)
+    local lim = math.floor(tonumber(limit) or 50)
+    if lim < 25 then lim = 25 elseif lim > 500 then lim = 500 end
+    if ns.db and ns.db.settings then
+        ns.db.settings.clanRosterHistoryLimit = lim
+    end
+    local bucket = Store:GetClanScopeData()
+    if type(bucket.rosterHistory) == "table" then
+        while #bucket.rosterHistory > lim do
+            table.remove(bucket.rosterHistory)
+        end
+    end
+    ns:Emit("CLAN_UPDATED")
+    return lim
+end
+
+function Clan:ClearRosterHistory()
+    local bucket = Store:GetClanScopeData()
+    if type(bucket.rosterHistory) == "table" then
+        wipe(bucket.rosterHistory)
+    else
+        bucket.rosterHistory = {}
+    end
+    ns:Emit("CLAN_UPDATED")
+end
+
 function Clan:GetRosterHistory()
     local bucket = Store:GetClanScopeData()
     return bucket.rosterHistory or {}
@@ -10354,14 +10709,38 @@ local histSeenScratch = {}
 local histSnapScratch = {}
 local histPackBuf = {}
 
+local function PackSnapshotMember(name, rank, rankIdx, level, classFile)
+    return table.concat({
+        tostring(name or ""):gsub("[\t\r\n]", " "),
+        tostring(rank or ""):gsub("[\t\r\n]", " "),
+        tostring(tonumber(rankIdx) or -1),
+        tostring(tonumber(level) or 0),
+        tostring(classFile or ""):gsub("[\t\r\n]", ""),
+    }, "\t")
+end
+
+local function UnpackSnapshotMember(val)
+    if type(val) == "string" then
+        local n, r, ri, lvl, cls = val:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+        if n ~= nil then
+            return n, r or "", tonumber(ri) or -1, tonumber(lvl) or 0, (cls ~= "" and cls or nil)
+        end
+        local n2, r2 = val:match("^([^\t]*)\t(.*)$")
+        return n2 or val, r2 or "", -1, 0, nil
+    elseif type(val) == "table" then
+        return val.name or "", val.rank or "", tonumber(val.rankIdx) or -1, tonumber(val.level) or 0, val.classFile
+    end
+    return "", "", -1, 0, nil
+end
+
 local function UnpackPackedRosterSnapshot(prevSnap, dest)
     wipe(dest)
     if type(prevSnap) ~= "table" then return end
     if type(prevSnap.packed) == "string" and prevSnap.packed ~= "" then
         for line in prevSnap.packed:gmatch("[^\n]+") do
-            local lk, cleanName, cleanRank = line:match("^([^\t]+)\t([^\t]*)\t(.*)$")
-            if lk and lk ~= "" then
-                dest[lk] = cleanName .. "\t" .. cleanRank
+            local lk, rest = line:match("^([^\t]+)\t(.*)$")
+            if lk and lk ~= "" and rest then
+                dest[lk] = rest
             end
         end
     elseif type(prevSnap.members) == "table" then
@@ -10369,7 +10748,7 @@ local function UnpackPackedRosterSnapshot(prevSnap, dest)
             if type(val) == "string" then
                 dest[lk] = val
             elseif type(val) == "table" then
-                dest[lk] = (val.name or "") .. "\t" .. (val.rank or "")
+                dest[lk] = PackSnapshotMember(val.name, val.rank, val.rankIdx, val.level, val.classFile)
             end
         end
     end
@@ -10385,16 +10764,6 @@ local function UpdateGuildRosterHistory()
     local total = GetNumGuildMembers and Safe.Number(GetNumGuildMembers()) or 0
     if not gName or gName == "" or not total or total <= 0 then return end
     Clan._lastRosterHistoryAt = nowClock
-
-    local function UnpackSnapshotMember(val)
-        if type(val) == "string" then
-            local n, r = val:match("^([^\t]*)\t(.*)$")
-            return n or val, r or ""
-        elseif type(val) == "table" then
-            return val.name or "", val.rank or ""
-        end
-        return "", ""
-    end
 
     local bucket = Store:GetClanScopeData()
     local prevSnap = bucket.rosterSnapshot
@@ -10419,18 +10788,22 @@ local function UpdateGuildRosterHistory()
     local currentCount = 0
     local histChanged = false
 
-    local function PushHist(kind, name, detail)
+    local function PushHist(kind, name, detail, classFile, level, zone)
         histChanged = true
-        table.insert(bucket.rosterHistory, 1, {
+        local entry = {
             kind = kind,
             name = name,
             detail = detail or "",
             ts = now,
-        })
+        }
+        if classFile and classFile ~= "" then entry.classFile = classFile end
+        if level and level > 0 then entry.level = level end
+        if zone and zone ~= "" then entry.zone = zone:sub(1, 36) end
+        table.insert(bucket.rosterHistory, 1, entry)
     end
 
     for i = 1, total do
-        local ok, fullName, rankName = pcall(GetGuildRosterInfo, i)
+        local ok, fullName, rankName, rankIndex, level, _, zone, _, _, _, _, classFile = pcall(GetGuildRosterInfo, i)
         if ok and fullName then
             local lk, _, dispName = Compat.ParseCharacterFields(Safe.String(fullName))
             if lk and dispName then
@@ -10438,18 +10811,27 @@ local function UpdateGuildRosterHistory()
                 currentCount = currentCount + 1
                 local cleanName = dispName:gsub("[\t\r\n]", " ")
                 local cleanRank = (Safe.String(rankName) or ""):gsub("[\t\r\n]", " ")
+                local cleanRankIdx = Safe.Number(rankIndex) or -1
+                local cleanLvl = Safe.Number(level) or 0
+                local cleanCls = Safe.String(classFile) or ""
+                local cleanZone = (Safe.String(zone) or ""):gsub("[\t\r\n]", " ")
+                local packedNow = PackSnapshotMember(cleanName, cleanRank, cleanRankIdx, cleanLvl, cleanCls)
                 local prevRaw = snapMembers[lk]
                 if not prevRaw then
-                    snapMembers[lk] = cleanName .. "\t" .. cleanRank
+                    snapMembers[lk] = packedNow
                     if canDiff then
-                        PushHist("JOINED", cleanName, cleanRank)
+                        PushHist("JOINED", cleanName, cleanRank, cleanCls, cleanLvl, cleanZone)
                     end
                 else
-                    local _, prevRank = UnpackSnapshotMember(prevRaw)
+                    local _, prevRank, prevRankIdx = UnpackSnapshotMember(prevRaw)
+                    snapMembers[lk] = packedNow
                     if prevRank ~= cleanRank and cleanRank ~= "" then
-                        snapMembers[lk] = cleanName .. "\t" .. cleanRank
                         if canDiff then
-                            PushHist("RANK", cleanName, (prevRank ~= "" and (prevRank .. " -> " .. cleanRank)) or cleanRank)
+                            local rKind = "RANK"
+                            if prevRankIdx >= 0 and cleanRankIdx >= 0 and prevRankIdx ~= cleanRankIdx then
+                                rKind = (cleanRankIdx < prevRankIdx) and "PROMOTED" or "DEMOTED"
+                            end
+                            PushHist(rKind, cleanName, (prevRank ~= "" and (prevRank .. " -> " .. cleanRank)) or cleanRank, cleanCls, cleanLvl, cleanZone)
                         end
                     end
                 end
@@ -10464,8 +10846,8 @@ local function UpdateGuildRosterHistory()
     for k, prevRaw in pairs(snapMembers) do
         if not histSeenScratch[k] then
             if canDiff then
-                local prevName, prevRank = UnpackSnapshotMember(prevRaw)
-                PushHist("LEFT", prevName, prevRank)
+                local prevName, prevRank, _, prevLvl, prevCls = UnpackSnapshotMember(prevRaw)
+                PushHist("LEFT", prevName, prevRank, prevCls, prevLvl, nil)
             end
             snapMembers[k] = nil
         end
@@ -10488,13 +10870,14 @@ local function UpdateGuildRosterHistory()
     wipe(snapMembers)
 
     if histChanged and #bucket.rosterHistory > 0 then
+        local maxKeep = Clan:GetRosterHistoryLimit()
         for i = #bucket.rosterHistory, 1, -1 do
             local h = bucket.rosterHistory[i]
-            if type(h) ~= "table" or (now - (h.ts or 0)) > (14 * 86400) then
+            if type(h) ~= "table" or (now - (h.ts or 0)) > (60 * 86400) then
                 table.remove(bucket.rosterHistory, i)
             end
         end
-        while #bucket.rosterHistory > (Clan.MAX_ROSTER_HISTORY or 40) do
+        while #bucket.rosterHistory > maxKeep do
             table.remove(bucket.rosterHistory)
         end
     end
@@ -10548,29 +10931,93 @@ function Clan:Init()
     ns.RegisterEvent(self, "GUILD_RANKS_UPDATE", function()
         QueueClanEmit(0.5)
     end)
+    ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
+        if Clan._intelDrainPendingCombat and type(Clan.intelQueue) == "table" and #Clan.intelQueue > 0 then
+            Clan._intelDrainPendingCombat = false
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.5, DrainIntelQueue)
+            else
+                DrainIntelQueue()
+            end
+        else
+            Clan._intelDrainPendingCombat = false
+        end
+    end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
-        C_Timer.After(6, function()
-            Clan.activeScopeToken = ComputeGuildScopeToken()
-            if not Compat.IsModuleEnabled or Compat.IsModuleEnabled("clan") then
-                Clan:AutoDetectMyProfessions(false)
-                Clan:SendVersionHello()
-                Clan:ApplyAutoInstanceStatus()
-                Clan:CheckAutoCloseFullDungeonLFG()
+        Clan._pewSeq = (Clan._pewSeq or 0) + 1
+        local seq = Clan._pewSeq
+        local pewAt = (GetTime and GetTime()) or 0
+
+        local syncSteps = {
+            function() Clan:ApplyAutoInstanceStatus() end,
+            function() Clan:CheckAutoCloseFullDungeonLFG() end,
+            function()
                 if Clan.SyncOfficialActiveLfg then
                     Clan:SyncOfficialActiveLfg()
                 end
-                Clan:RefreshGameCalendar(false)
+            end,
+            function()
                 if ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
                     Clan:RequestIntelSync()
                 end
+            end,
+            function()
+                if (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("buffs"))
+                    and ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
+                    Clan:RequestWorldBuffCatchup()
+                end
+            end,
+        }
+
+        local function RunPewSyncSteps(idx)
+            if Clan._pewSeq ~= seq or idx > #syncSteps then return end
+            if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("clan") then return end
+            if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+                if ns.RunAfterCombat then
+                    ns:RunAfterCombat("clan_pew_sync_steps", function()
+                        RunPewSyncSteps(idx)
+                    end)
+                end
+                return
             end
-        end)
-        C_Timer.After(12.5, function()
-            if (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("clan"))
-                and (not Compat.IsModuleEnabled or Compat.IsModuleEnabled("buffs"))
-                and ns.db and ns.db.settings and ns.db.settings.clanSync and IsInGuild and IsInGuild() then
-                Clan:RequestWorldBuffCatchup()
+            local nowMono = (GetTime and GetTime()) or 0
+            local minInt = (Clan.MIN_SEND_INTERVAL or 5) + 0.35
+            local waitRem = ((Clan.lastSyncSentAt or 0) + minInt) - nowMono
+            if idx == #syncSteps then
+                local wbRem = (pewAt + 12.5) - nowMono
+                if wbRem > waitRem then
+                    waitRem = wbRem
+                end
             end
+            if waitRem > 0 and C_Timer and C_Timer.After then
+                C_Timer.After(waitRem, function()
+                    RunPewSyncSteps(idx)
+                end)
+                return
+            end
+            syncSteps[idx]()
+            RunPewSyncSteps(idx + 1)
+        end
+
+        C_Timer.After(6, function()
+            if Clan._pewSeq ~= seq then return end
+            local function ExecutePewInitSync()
+                if Clan._pewSeq ~= seq then return end
+                Clan.activeScopeToken = ComputeGuildScopeToken()
+                if not Compat.IsModuleEnabled or Compat.IsModuleEnabled("clan") then
+                    Clan:AutoDetectMyProfessions(false)
+                    Clan:SendVersionHello()
+                    Clan:RefreshGameCalendar(false)
+                    RunPewSyncSteps(1)
+                end
+            end
+            if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+                if ns.RunAfterCombat then
+                    ns:RunAfterCombat("clan_pew_init_sync", ExecutePewInitSync)
+                end
+                return
+            end
+            ExecutePewInitSync()
         end)
     end)
     ns.RegisterEvent(self, "SKILL_LINES_CHANGED", function()

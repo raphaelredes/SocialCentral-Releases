@@ -10,6 +10,7 @@ local Store = ns.Store
 local Group = {
     members = {},
     readyStates = {},
+    readyStatesByGuid = {},
     readyCheckActive = false,
     memberInstanceCaps = {},
 }
@@ -58,6 +59,7 @@ function Group:Scan()
         self.members = {}
         self.readyCheckActive = false
         self.readyStates = {}
+        self.readyStatesByGuid = {}
         self._avoidNotified = {}
         if self.OnActiveRunRosterUpdated then
             self:OnActiveRunRosterUpdated(false)
@@ -91,24 +93,27 @@ function Group:Scan()
         end
     end
 
+    local raidMetaByIndex = {}
     local raidMetaByLookup = {}
     if inRaid and GetRaidRosterInfo then
         for rIdx = 1, numMembers do
             local okR, rName, _, rSub, _, _, _, _, _, rDead, rCombatRole, rIsML = pcall(GetRaidRosterInfo, rIdx)
-            if okR and rName then
-                local cleanRName = Safe.String(rName)
+            if okR and (rName or rSub) then
+                local cleanRole = Safe.String(rCombatRole)
+                if cleanRole ~= "MAINTANK" and cleanRole ~= "MAINASSIST" then
+                    cleanRole = nil
+                end
+                local metaEntry = {
+                    subgroup = Safe.Number(rSub) or 1,
+                    isDead = (Safe.Value(rDead) == true),
+                    combatRole = cleanRole,
+                    isML = (Safe.Value(rIsML) == true),
+                }
+                raidMetaByIndex[rIdx] = metaEntry
+                local cleanRName = rName and Safe.String(rName)
                 local rParsed = cleanRName and Compat.ParseCharacterName(cleanRName)
                 if rParsed and rParsed.lookupKey then
-                    local cleanRole = Safe.String(rCombatRole)
-                    if cleanRole ~= "MAINTANK" and cleanRole ~= "MAINASSIST" then
-                        cleanRole = nil
-                    end
-                    raidMetaByLookup[rParsed.lookupKey] = {
-                        subgroup = Safe.Number(rSub) or 1,
-                        isDead = (rDead == true),
-                        combatRole = cleanRole,
-                        isML = (rIsML == true),
-                    }
+                    raidMetaByLookup[rParsed.lookupKey] = metaEntry
                 end
             end
         end
@@ -137,7 +142,7 @@ function Group:Scan()
                 local role = NormalizeRole(Safe.String(Safe.Call(UnitGroupRolesAssigned, unit)))
                 local online = not UnitIsConnected or Safe.Value(UnitIsConnected(unit)) ~= false
                 local unitDead = (UnitIsDeadOrGhost and Safe.Value(Safe.Call(UnitIsDeadOrGhost, unit)) == true) or false
-                local rMeta = raidMetaByLookup[parsed.lookupKey]
+                local rMeta = (inRaid and raidMetaByIndex[idx]) or raidMetaByLookup[parsed.lookupKey]
                 local subgroup = (rMeta and rMeta.subgroup) or 1
                 local isDead = (rMeta and rMeta.isDead) or unitDead
                 local raidRole = rMeta and rMeta.combatRole or nil
@@ -149,6 +154,10 @@ function Group:Scan()
                 local instUsed = isMe and (myInst and myInst.used or 0)
                     or ((capRec and (nowCaps - (capRec.updatedAt or 0)) <= 3600) and capRec.used or nil)
                 local instMax = (capRec and capRec.max) or (myInst and myInst.max) or 5
+                local readyVal = (guid and self.readyStatesByGuid) and self.readyStatesByGuid[guid]
+                if readyVal == nil then
+                    readyVal = self.readyStates[parsed.lookupKey]
+                end
 
                 local item = {
                     unit = unit,
@@ -166,7 +175,7 @@ function Group:Scan()
                     isLeader = isLeader,
                     isAssistant = isAssistant,
                     isMe = isMe,
-                    ready = self.readyStates[parsed.lookupKey],
+                    ready = readyVal,
                     zone = currentZone,
                     instanceUsed = instUsed,
                     instanceMax = instMax,
@@ -248,7 +257,9 @@ function Group:Scan()
 
     local roleRank = { TANK = 1, HEALER = 2, DAMAGER = 3, NONE = 4 }
     table.sort(nextList, function(a, b)
-        if a.isLeader ~= b.isLeader then return a.isLeader end
+        local aLead = (a.isLeader == true)
+        local bLead = (b.isLeader == true)
+        if aLead ~= bLead then return aLead end
         if (a.subgroup or 1) ~= (b.subgroup or 1) then return (a.subgroup or 1) < (b.subgroup or 1) end
         local ra, rb = roleRank[a.role] or 4, roleRank[b.role] or 4
         if ra ~= rb then return ra < rb end
@@ -394,9 +405,15 @@ function Group:GetCompositionAnalysis()
 
     local missingRolesText = ""
     if counts.total > 0 and counts.total < 5 and not (Compat.IsInRaid and Compat.IsInRaid()) then
-        local needT = math.max(0, 1 - (counts.TANK or 0))
-        local needH = math.max(0, 1 - (counts.HEALER or 0))
-        local needD = math.max(0, 3 - (counts.DAMAGER or 0))
+        local openSlots = math.max(0, 5 - counts.total)
+        local rawNeedT = math.max(0, 1 - (counts.TANK or 0))
+        local rawNeedH = math.max(0, 1 - (counts.HEALER or 0))
+        local rawNeedD = math.max(0, 3 - (counts.DAMAGER or 0))
+        local needT = math.min(rawNeedT, openSlots)
+        openSlots = openSlots - needT
+        local needH = math.min(rawNeedH, openSlots)
+        openSlots = openSlots - needH
+        local needD = math.min(rawNeedD, openSlots)
         local parts = {}
         if needT > 0 then parts[#parts + 1] = needT .. "T" end
         if needH > 0 then parts[#parts + 1] = needH .. "H" end
@@ -728,17 +745,25 @@ local EXIT_GRACE_SECONDS = 45
 local LEAVE_GRACE_SECONDS = 12
 local MIN_VALID_RUN_SECONDS = 15
 
+local DUNGEON_ACCENT_MAP = {
+    ["á"] = "a", ["à"] = "a", ["â"] = "a", ["ã"] = "a", ["ä"] = "a",
+    ["Á"] = "a", ["À"] = "a", ["Â"] = "a", ["Ã"] = "a", ["Ä"] = "a",
+    ["é"] = "e", ["è"] = "e", ["ê"] = "e", ["ë"] = "e",
+    ["É"] = "e", ["È"] = "e", ["Ê"] = "e", ["Ë"] = "e",
+    ["í"] = "i", ["ì"] = "i", ["î"] = "i", ["ï"] = "i",
+    ["Í"] = "i", ["Ì"] = "i", ["Î"] = "i", ["Ï"] = "i",
+    ["ó"] = "o", ["ò"] = "o", ["ô"] = "o", ["õ"] = "o", ["ö"] = "o",
+    ["Ó"] = "o", ["Ò"] = "o", ["Ô"] = "o", ["Õ"] = "o", ["Ö"] = "o",
+    ["ú"] = "u", ["ù"] = "u", ["û"] = "u", ["ü"] = "u",
+    ["Ú"] = "u", ["Ù"] = "u", ["Û"] = "u", ["Ü"] = "u",
+    ["ç"] = "c", ["Ç"] = "c",
+    ["ñ"] = "n", ["Ñ"] = "n",
+}
+
 local function FoldDungeonSearchText(s)
     if type(s) ~= "string" or s == "" then return "" end
-    local out = s:lower()
-    out = out:gsub("[áàâãä]", "a")
-        :gsub("[éèêë]", "e")
-        :gsub("[íìîï]", "i")
-        :gsub("[óòôõö]", "o")
-        :gsub("[úùûü]", "u")
-        :gsub("ç", "c")
-        :gsub("ñ", "n")
-    return out
+    local out = s:gsub("[\194-\244][\128-\191]+", DUNGEON_ACCENT_MAP)
+    return out:lower()
 end
 
 local function IsInPartyOrRaidInstanceNow()
@@ -771,8 +796,9 @@ local function LookupMemberGuildShort(unit, lookupKey)
     end
     if lookupKey and ns.Store and ns.Store.socialByLookup then
         local row = ns.Store.socialByLookup[lookupKey]
-        if row and row.guildName and row.guildName ~= "" then
-            return row.guildName
+        local g = row and ((row.guild and row.guild ~= "" and row.guild) or (row.guildName and row.guildName ~= "" and row.guildName))
+        if g then
+            return g
         end
     end
     return nil
@@ -1272,7 +1298,7 @@ function Group:GetActiveDungeonRunSummary()
         bossKills = run.bossKills or 0,
         pulls = run.pulls or 0,
         dmg = totalDmg,
-        memberCount = math.max(1, count),
+        memberCount = math.max(1, count + 1, run.peakSize or (count + 1)),
     }
 end
 
@@ -1460,7 +1486,13 @@ function Group:CaptureActiveRunMembers(isInitial)
                 self:FinalizeActiveDungeonRun("member_left", false)
                 return
             elseif not inCombat then
-                local isSmallLeft = (run.instType ~= "raid" and liveCount <= 2) or ((run.leftSinceCombat or 0) >= 2)
+                local isSmallLeft
+                if run.instType == "raid" then
+                    local raidDisbandThreshold = math.max(3, math.floor((run.peakSize or liveCount) / 2))
+                    isSmallLeft = (liveCount <= 2) or ((run.leftSinceCombat or 0) >= raidDisbandThreshold)
+                else
+                    isSmallLeft = (liveCount <= 2) or ((run.leftSinceCombat or 0) >= 2)
+                end
                 if isSmallLeft then
                     run._leaveSeq = (run._leaveSeq or 0) + 1
                     local lSeq = run._leaveSeq
@@ -2262,6 +2294,7 @@ function Group:Init()
     ns.RegisterEvent(self, "READY_CHECK", function()
         Group.readyCheckActive = true
         Group.readyStates = {}
+        Group.readyStatesByGuid = {}
         QueueScan()
         local s = ns.db and ns.db.settings
         local modOn = (not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("group")
@@ -2277,10 +2310,32 @@ function Group:Init()
     end)
 
     ns.RegisterEvent(self, "READY_CHECK_CONFIRM", function(_, _, unit, confirm)
-        local rawName = unit and Safe.String(Safe.Call(UnitName, unit))
+        if not unit then return end
+        local guid = Safe.String(Safe.Call(UnitGUID, unit))
+        local existingName = nil
+        if Group.members then
+            for i = 1, #Group.members do
+                local m = Group.members[i]
+                if m and ((guid and m.guid == guid) or m.unit == unit) and m.displayName then
+                    existingName = m.displayName
+                    break
+                end
+            end
+        end
+        local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, guid, existingName, true)
+        local rawName = (resolved and resolved.fullName)
+            or Safe.String(Safe.Call(GetUnitName, unit, true))
+            or Safe.String(Safe.Call(UnitName, unit))
         local parsed = rawName and Compat.ParseCharacterName(rawName)
-        if parsed then
-            Group.readyStates[parsed.lookupKey] = Safe.Value(confirm) == true
+        local isReady = Safe.Value(confirm) == true
+        Group.readyStatesByGuid = Group.readyStatesByGuid or {}
+        if guid then
+            Group.readyStatesByGuid[guid] = isReady
+        end
+        if parsed and parsed.lookupKey then
+            Group.readyStates[parsed.lookupKey] = isReady
+        end
+        if guid or (parsed and parsed.lookupKey) then
             QueueScan()
         end
     end)

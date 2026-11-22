@@ -523,11 +523,11 @@ end
 local function ApplyNavBarTheme(navBar, p)
     if not navBar or not p then return end
     if navBar.bg then
-        local bg = p.bgPanel or p.bg or { 0.08, 0.09, 0.12 }
+        local bg = p.surfaceBg or p.windowBg or { 0.08, 0.09, 0.12 }
         navBar.bg:SetColorTexture(bg[1], bg[2], bg[3], 0.72)
     end
     if navBar.div then
-        local bd = p.border or { 0.35, 0.30, 0.22 }
+        local bd = p.surfaceBorder or p.windowBorder or { 0.35, 0.30, 0.22 }
         navBar.div:SetColorTexture(bd[1], bd[2], bd[3], 0.45)
     end
     if navBar.countFs then
@@ -1313,8 +1313,8 @@ local function ApplyHUDSelectionHighlight(f, isTargeted, stanceRgb, p)
         if f.selWash then
             f.selWash:Hide()
         end
-        if f.SetBackdropBorderColor and pal and pal.border then
-            local br = pal.border
+        local br = pal and (pal.windowBorder or pal.surfaceBorder)
+        if f.SetBackdropBorderColor and br then
             f:SetBackdropBorderColor(br[1], br[2], br[3], 1.0)
         end
     end
@@ -1459,7 +1459,7 @@ local function ApplyCompassBarVisuals(bar, entry, kin)
         distStr = "|cff888888" .. L["Dead"] .. "|r"
     else
         local distNum = kin.distYards
-        if distNum and type(distNum) == "number" and distNum > 0 then
+        if distNum and type(distNum) == "number" and distNum >= 0 then
             if distNum <= 10 then
                 distStr = string.format("|cff4ade80~%dm|r", distNum)
             elseif distNum <= 25 then
@@ -1469,7 +1469,8 @@ local function ApplyCompassBarVisuals(bar, entry, kin)
             elseif distNum <= 60 then
                 distStr = string.format("|cfffb923c%dm|r", distNum)
             else
-                distStr = string.format("|cff94a3b8>%dm|r", distNum)
+                local prefix = (not kin.exact) and ">" or ""
+                distStr = string.format("|cff94a3b8%s%dm|r", prefix, distNum)
             end
         else
             local rawText = kin.distText or L["Nearby"]
@@ -1567,9 +1568,54 @@ function SpotterHUD:UpdateCompassVisuals(snap, dt)
     self:SyncTickerState(kin)
 end
 
+local function ApplyHUDEntryIdentity(f, entry)
+    if not (f and f.compassBar and entry) then return end
+    local stanceVal = entry.stance or "SAME"
+    local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
+    if f.stanceBar and f._lastStanceBar ~= stanceVal then
+        f._lastStanceBar = stanceVal
+        f.stanceBar:SetColorTexture(rgb[1], rgb[2], rgb[3], 1)
+    end
+
+    f.compassBar.entry = entry
+
+    local dispName = entry.displayName or "?"
+    local classVal = entry.classFile or false
+    local lvlVal = (entry.level and entry.level > 0) and entry.level or 0
+    if f._lastNameStance ~= stanceVal or f._lastNameText ~= dispName or f._lastNameClass ~= classVal or f._lastNameLvl ~= lvlVal then
+        f._lastNameStance = stanceVal
+        f._lastNameText = dispName
+        f._lastNameClass = classVal
+        f._lastNameLvl = lvlVal
+        local stanceTag = stanceVal == "ENEMY" and L["ENEMY"]
+            or (stanceVal == "BLOCKED" and L["BLOCKED"])
+            or (stanceVal == "WATCHLIST" and L["WATCHLIST"])
+            or (stanceVal == "FRIEND" and L["FRIEND"])
+            or (stanceVal == "ALLY" and L["ALLY"] or L["CLAN"])
+        local colHex = (ns.Spotter and ns.Spotter.GetStanceColor and ns.Spotter:GetStanceColor(stanceVal).hex) or "|cffffffff"
+        local classHex = Compat.ClassHex and Compat.ClassHex(entry.classFile) or "|cffffffff"
+        local lvlPart = (lvlVal > 0) and (" |cff8b949e" .. lvlVal .. "|r") or ""
+        f.compassBar.nameFs:SetText(string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, dispName, lvlPart))
+    end
+
+    if f.compassBar.subFs then
+        local guildAndLoc = entry.guild and ("<" .. entry.guild .. ">") or ""
+        if entry.locationText and entry.locationText ~= "" then
+            guildAndLoc = (guildAndLoc ~= "") and (guildAndLoc .. " · " .. entry.locationText) or entry.locationText
+        end
+        if f.compassBar._lastSubText ~= guildAndLoc then
+            f.compassBar._lastSubText = guildAndLoc
+            f.compassBar.subFs:SetText(guildAndLoc)
+        end
+    end
+end
+
 function SpotterHUD:UpdateTargetVisuals()
     local f = self.frame
-    if not (f and f:IsShown() and f.compassBar) then return end
+    local cf = self.combatArrowFrame
+    local mainShown = (f and f:IsShown() and f.compassBar) == true
+    local combatShown = (cf and cf:IsShown()) == true
+    if not mainShown and not combatShown then return end
 
     local spotter = ns.Spotter
     local entriesMap = spotter and spotter.entries
@@ -1599,14 +1645,40 @@ function SpotterHUD:UpdateTargetVisuals()
     if not entry then return end
 
     local isTargeted = IsEntryCurrentlyTargeted(entry, currentTargetGuid, tLookupKey, tFirstName, tSurname)
-    local stanceRgb = STANCE_RGB[entry.stance or "SAME"] or STANCE_RGB.SAME
-    ApplyHUDSelectionHighlight(f, isTargeted, stanceRgb)
-
+    local stanceVal = entry.stance or "SAME"
+    local stanceRgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
     local entryChanged = (prevKey ~= entry.key)
-    if entryChanged and not (InCombatLockdown and InCombatLockdown()) then
-        self:Refresh()
-        return
+    local inCombat = (InCombatLockdown and InCombatLockdown()) == true
+
+    if mainShown then
+        ApplyHUDSelectionHighlight(f, isTargeted, stanceRgb)
+        ApplyHUDEntryIdentity(f, entry)
+        if entryChanged then
+            if not inCombat then
+                self:Refresh()
+                return
+            end
+            self.pendingRefresh = true
+        end
     end
+
+    if combatShown then
+        if cf.stanceBar then
+            cf.stanceBar:SetColorTexture(stanceRgb[1], stanceRgb[2], stanceRgb[3], 1)
+        end
+        local stanceTag = stanceVal == "ENEMY" and L["ENEMY"]
+            or (stanceVal == "BLOCKED" and L["BLOCKED"])
+            or (stanceVal == "WATCHLIST" and L["WATCHLIST"])
+            or (stanceVal == "FRIEND" and L["FRIEND"])
+            or (stanceVal == "ALLY" and L["ALLY"] or L["CLAN"])
+        local colHex = (ns.Spotter and ns.Spotter.GetStanceColor and ns.Spotter:GetStanceColor(stanceVal).hex) or "|cffffffff"
+        local classHex = Compat.ClassHex and Compat.ClassHex(entry.classFile) or "|cffffffff"
+        if cf.nameFs then
+            cf.nameFs:SetText(string.format("%s[%s]|r %s%s|r", colHex, stanceTag, classHex, entry.displayName or "?"))
+        end
+        ApplyHUDSelectionHighlight(cf, isTargeted, stanceRgb)
+    end
+
     self:UpdateCompassVisuals(entryChanged, 0.04)
     if ns.Spotter and ns.Spotter.UpdateFocusedPlateMarker then
         ns.Spotter:UpdateFocusedPlateMarker()
@@ -1731,6 +1803,7 @@ function SpotterHUD:Refresh()
         f._lastNameText = nil
         f._lastNameClass = nil
         f._lastNameLvl = nil
+        f.compassBar._lastSubText = nil
         f.compassBar.distFs:SetText("|cff8b949e" .. L["No targets currently detected."] .. "|r")
         ApplySpotterFrameLayout(f, false, false)
         self:SyncTickerState(nil)
@@ -1742,31 +1815,8 @@ function SpotterHUD:Refresh()
 
     local stanceVal = compassEntry.stance or "SAME"
     local rgb = STANCE_RGB[stanceVal] or STANCE_RGB.SAME
-    if f.stanceBar and f._lastStanceBar ~= stanceVal then
-        f._lastStanceBar = stanceVal
-        f.stanceBar:SetColorTexture(rgb[1], rgb[2], rgb[3], 1)
-    end
-
-    f.compassBar.entry = compassEntry
-
     local dispName = compassEntry.displayName or "?"
-    local classVal = compassEntry.classFile or false
-    local lvlVal = (compassEntry.level and compassEntry.level > 0) and compassEntry.level or 0
-    if f._lastNameStance ~= stanceVal or f._lastNameText ~= dispName or f._lastNameClass ~= classVal or f._lastNameLvl ~= lvlVal then
-        f._lastNameStance = stanceVal
-        f._lastNameText = dispName
-        f._lastNameClass = classVal
-        f._lastNameLvl = lvlVal
-        local stanceTag = stanceVal == "ENEMY" and L["ENEMY"]
-            or (stanceVal == "BLOCKED" and L["BLOCKED"])
-            or (stanceVal == "WATCHLIST" and L["WATCHLIST"])
-            or (stanceVal == "FRIEND" and L["FRIEND"])
-            or (stanceVal == "ALLY" and L["ALLY"] or L["CLAN"])
-        local colHex = ns.Spotter:GetStanceColor(stanceVal).hex
-        local classHex = Compat.ClassHex and Compat.ClassHex(compassEntry.classFile) or "|cffffffff"
-        local lvlPart = (lvlVal > 0) and (" |cff8b949e" .. lvlVal .. "|r") or ""
-        f.compassBar.nameFs:SetText(string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, dispName, lvlPart))
-    end
+    ApplyHUDEntryIdentity(f, compassEntry)
 
     local isActuallyTargeted = IsEntryCurrentlyTargeted(compassEntry, currentTargetGuid, tLookupKey, tFirstName, tSurname)
     ApplyHUDSelectionHighlight(f, isActuallyTargeted, rgb, p)

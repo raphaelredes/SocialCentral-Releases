@@ -282,10 +282,10 @@ local function GetActivityLockout(item, cachedLocks)
     if not (item and type(cachedLocks) == "table" and #cachedLocks > 0) then
         return nil
     end
-    local hay = ((item.activity or "") .. " " .. (item.note or "")):lower()
+    local hay = ((item.activity or "") .. " " .. (item.activityAllNames or "") .. " " .. (item.note or "")):lower()
     if #hay < 3 then return nil end
     for _, lk in ipairs(cachedLocks) do
-        if type(lk) == "table" and lk.locked and not lk.extended then
+        if type(lk) == "table" and (lk.locked or lk.extended) then
             local inst = lk.name and tostring(lk.name):lower()
             if inst and #inst >= 4 then
                 if hay:find(inst, 1, true) then
@@ -318,22 +318,29 @@ local function MatchesCategoryFilter(item, catId)
         (item and item.sourceType or "")
     ):lower()
     if catId == "RAIDS" then
+        local hasZulRaid = ((hay:find("%f[%w]zul%f[%W]") ~= nil) and not hay:find("farrak", 1, true))
+            or (hay:find("zul'gurub", 1, true) ~= nil)
+            or (hay:find("zulgurub", 1, true) ~= nil)
         return hay:find("raid") ~= nil or hay:find("raide") ~= nil or hay:find("banda") ~= nil
             or hay:find("molten") ~= nil or hay:find("nucleo") ~= nil or hay:find("núcleo") ~= nil
             or hay:find("onyx") ~= nil or hay:find("bwl") ~= nil or hay:find("covil") ~= nil
-            or hay:find("guarida") ~= nil or hay:find("naxx") ~= nil or hay:find("zg") ~= nil
-            or hay:find("zul") ~= nil or hay:find("aq20") ~= nil or hay:find("aq40") ~= nil
+            or hay:find("guarida") ~= nil or hay:find("naxx") ~= nil or hay:find("%f[%w]zg%f[%W]") ~= nil
+            or hasZulRaid or hay:find("aq20") ~= nil or hay:find("aq40") ~= nil
             or hay:find("ahn'qiraj") ~= nil or hay:find("boss") ~= nil or hay:find("chefe") ~= nil
             or hay:find("jefe") ~= nil
     elseif catId == "QUESTS" then
-        return hay:find("quest") ~= nil or hay:find("miss") ~= nil or hay:find("mision") ~= nil
+        local hasMissQuest = hay:find("%f[%w]miss%f[%W]") ~= nil
+            or hay:find("missao", 1, true) ~= nil or hay:find("missão", 1, true) ~= nil
+            or hay:find("missoes", 1, true) ~= nil or hay:find("missões", 1, true) ~= nil
+            or hay:find("mision", 1, true) ~= nil or hay:find("misión", 1, true) ~= nil
+        return hay:find("quest") ~= nil or hasMissQuest
             or hay:find("zona") ~= nil or hay:find("zone") ~= nil or hay:find("area") ~= nil
             or hay:find("área") ~= nil or hay:find("level") ~= nil or hay:find("farm") ~= nil
             or hay:find("grind") ~= nil or hay:find("elite") ~= nil
     elseif catId == "PVP" then
         return hay:find("pvp") ~= nil or hay:find("jcj") ~= nil or hay:find("arena") ~= nil
-            or hay:find("bg") ~= nil or hay:find("wsg") ~= nil or hay:find("ab") ~= nil
-            or hay:find("av") ~= nil or hay:find("batalha") ~= nil or hay:find("batalla") ~= nil
+            or hay:find("%f[%w]bgs?%f[%W]") ~= nil or hay:find("%f[%w]wsg%f[%W]") ~= nil or hay:find("%f[%w]ab%f[%W]") ~= nil
+            or hay:find("%f[%w]av%f[%W]") ~= nil or hay:find("batalha") ~= nil or hay:find("batalla") ~= nil
             or hay:find("battle") ~= nil or hay:find("warsong") ~= nil or hay:find("arathi") ~= nil
             or hay:find("alterac") ~= nil or hay:find("patrulha") ~= nil or hay:find("scout") ~= nil
     elseif catId == "CUSTOM" then
@@ -3408,7 +3415,12 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     local leaderName = (not canManage or not canInviteGroup) and Compat.GetGroupLeaderName and Compat.GetGroupLeaderName() or nil
     local sel = self.selectedItem
     local selfSelected = (self.viewMode == "browse") and (sel ~= nil) and (sel.isSelf == true)
-    local hasListing = (hasSelfListingOverride ~= nil) and hasSelfListingOverride or self:HasSelfActiveListing()
+    local hasListing
+    if hasSelfListingOverride ~= nil then
+        hasListing = hasSelfListingOverride
+    else
+        hasListing = self:HasSelfActiveListing()
+    end
 
     if c.sendMsgBtn then
         if selfSelected then
@@ -3598,8 +3610,11 @@ local function EnsureStandaloneLfgHost()
     hTitle:SetWordWrap(false)
     hTitle:SetText(L["Clans & Allies LFG (Standalone Window)"])
     host.titleText = hTitle
+    if Theme.AttachDragHandle then
+        Theme:AttachDragHandle(headerBar, host)
+    end
 
-    host:SetScript("OnHide", function()
+    host:HookScript("OnHide", function()
         if LFGFrameTab.subPanel and LFGFrameTab.subPanel:GetParent() == host then
             LFGFrameTab.subPanel:Hide()
             LFGFrameTab.active = false
@@ -4604,6 +4619,15 @@ local function IsItemFullForBrowse(item, roleFilter)
         return true
     elseif rf == "DPS" and nD == 0 then
         return true
+    elseif rf == "MINE" then
+        local rec = (ns.Clan and ns.Clan.GetRecommendedRolesForCharacter) and ns.Clan:GetRecommendedRolesForCharacter() or nil
+        local r = rec and rec.recommended
+        if r then
+            local canFit = (r.TANK == true and nT > 0) or (r.HEALER == true and nH > 0) or (r.DPS == true and nD > 0)
+            if not canFit then
+                return true
+            end
+        end
     end
     return false
 end
@@ -4627,6 +4651,11 @@ local function BuildBulletinBoardRows(filteredRows, collapsedBuckets, pendingIte
                 catOrder = bCatOrd or 6,
                 items = {},
                 trustedCount = 0,
+                watchCount = 0,
+                clanCount = 0,
+                allyCount = 0,
+                enemyCount = 0,
+                avoidCount = 0,
                 needT = 0,
                 needH = 0,
                 needD = 0,
@@ -4646,6 +4675,24 @@ local function BuildBulletinBoardRows(filteredRows, collapsedBuckets, pendingIte
         end
         if item.isTrusted or item.sourceType == "CLAN" or item.sourceType == "ALLY" or item.sourceType == "FRIEND" or item.sourceType == "EVENT" or item._isGoodFlag then
             b.trustedCount = b.trustedCount + 1
+        end
+        if item.isWatchlist or item.hasFriendOrWatchlistSignup then
+            b.watchCount = b.watchCount + 1
+        end
+        if item.isClan then
+            b.clanCount = b.clanCount + 1
+        end
+        if item.isAllied then
+            b.allyCount = b.allyCount + 1
+        end
+        if item.isEnemyGuild then
+            b.enemyCount = b.enemyCount + 1
+        end
+        local itemAvoidMeta = (not item.hasAvoidSignup and not item._isAvoidFlag and Store)
+            and ((Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or item.displayName))
+                or (Store.GetSocialMeta and Store:GetSocialMeta(item.lookupKey or item.displayName))) or nil
+        if item._isAvoidFlag or item.hasAvoidSignup or (itemAvoidMeta and itemAvoidMeta.flag == "AVOID") then
+            b.avoidCount = b.avoidCount + 1
         end
         if item.mode == "LFM" and item.sourceType ~= "EVENT" then
             b.needT = b.needT + math.max(0, item.needT or 0)
@@ -4675,6 +4722,11 @@ local function BuildBulletinBoardRows(filteredRows, collapsedBuckets, pendingIte
             catOrder = b.catOrder,
             groupCount = #b.items,
             trustedCount = b.trustedCount,
+            watchCount = b.watchCount,
+            clanCount = b.clanCount,
+            allyCount = b.allyCount,
+            enemyCount = b.enemyCount,
+            avoidCount = b.avoidCount,
             needT = b.needT,
             needH = b.needH,
             needD = b.needD,
@@ -4805,6 +4857,12 @@ local function CreateLfgRow(parent)
     row.headerAccentTex:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -3, 1)
     row.headerAccentTex:SetColorTexture(0.20, 0.15, 0.08, 0.90)
     row.headerAccentTex:Hide()
+
+    row.relStripe = row:CreateTexture(nil, "OVERLAY", nil, 3)
+    row.relStripe:SetWidth(3)
+    row.relStripe:SetPoint("TOPLEFT", row, "TOPLEFT", 1, -2)
+    row.relStripe:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 1, 2)
+    row.relStripe:Hide()
 
     row.SelectedTex = row:CreateTexture(nil, "OVERLAY", nil, 2)
     row.SelectedTex:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -3)
@@ -4998,8 +5056,13 @@ local function CreateLfgRow(parent)
             GameTooltip:AddLine("<" .. it.guild .. ">", 0.55, 0.85, 1.0)
         end
         local tags = {}
+        local tipMeta = Store and ((Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(it.lookupKey or it.displayName))
+            or (Store.GetSocialMeta and Store:GetSocialMeta(it.lookupKey or it.displayName))) or nil
+        if (tipMeta and tipMeta.flag == "AVOID") or it._isAvoidFlag or it.hasAvoidSignup then
+            tags[#tags + 1] = L["AVOID"]
+        end
         if it.isEnemyGuild then tags[#tags + 1] = L["Enemy Guild"] end
-        if it.isWatchlist then tags[#tags + 1] = L["WATCHLIST"] end
+        if it.isWatchlist or it.hasFriendOrWatchlistSignup then tags[#tags + 1] = L["WATCHLIST"] end
         if it.isFriend then tags[#tags + 1] = L["FRIEND"] end
         if it.isAllied then tags[#tags + 1] = L["Allied Guild"] elseif it.isClan then tags[#tags + 1] = L["Guild Member"] end
         if it.sourceType == "PUBLIC_CHAT" then tags[#tags + 1] = L["Global Chat"] end
@@ -5098,6 +5161,20 @@ end
 local function BuildLfgRowBadgeSpecs(item, sMeta)
     local cnt = 0
     local gGuildDesc = (item.guild and item.guild ~= "") and ("<" .. item.guild .. ">") or ""
+    if (sMeta and sMeta.flag == "AVOID") or item._isAvoidFlag or item.hasAvoidSignup then
+        local avDesc = (item.avoidSignupNames and item.avoidSignupNames ~= "") and item.avoidSignupNames
+            or (item.displayName or "")
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\TARGETINGFRAME\\UI-TargetingFrame-Skull", TC_FULL, TINT_AVOID, L["Avoid Warning"], avDesc, TINT_AVOID_TIP)
+    end
+    if item.isEnemyGuild then
+        local egDesc = (item.enemyGuildNames and item.enemyGuildNames ~= "") and item.enemyGuildNames or gGuildDesc
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\GossipFrame\\BattleMasterGossipIcon", TC_FULL, TINT_AVOID, L["Enemy Guild"], egDesc, TINT_AVOID_TIP)
+    end
+    if item.isWatchlist or item.hasFriendOrWatchlistSignup then
+        local rawW = (item.watchlistMemberNames and item.watchlistMemberNames ~= "") and item.watchlistMemberNames or item.friendOrWatchlistNames
+        local wDesc = (rawW and rawW ~= "") and (L["In group"] .. ": " .. rawW) or ""
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\AddOns\\SocialCentral\\Media\\bell-on", TC_FULL, TINT_WATCH, L["WATCHLIST"], wDesc, TINT_WATCH)
+    end
     if item.isClan then
         local gDesc = (item.guildMemberNames and item.guildMemberNames ~= "") and item.guildMemberNames
             or ((item.numGuildMates or 0) > 0 and (L["Guild in group"] .. ": " .. tostring(item.numGuildMates)) or gGuildDesc)
@@ -5113,21 +5190,10 @@ local function BuildLfgRowBadgeSpecs(item, sMeta)
             or (totalFriends > 0 and (L["Friends in group"] .. ": " .. tostring(totalFriends)) or "")
         cnt = PushBadgeSpec(cnt, nil, "Interface\\FriendsFrame\\UI-Toast-FriendOnlineIcon", TC_FRIEND, TINT_FRIEND, L["FRIEND"], fDesc, TINT_FRIEND)
     end
-    if item.isWatchlist or item.hasFriendOrWatchlistSignup then
-        local rawW = (item.watchlistMemberNames and item.watchlistMemberNames ~= "") and item.watchlistMemberNames or item.friendOrWatchlistNames
-        local wDesc = (rawW and rawW ~= "") and (L["In group"] .. ": " .. rawW) or ""
-        cnt = PushBadgeSpec(cnt, nil, "Interface\\AddOns\\SocialCentral\\Media\\bell-on", TC_FULL, TINT_WATCH, L["WATCHLIST"], wDesc, TINT_WATCH)
-    end
     if (sMeta and sMeta.flag == "GOOD") or item.hasGoodPartnerSignup or item.isCompanion then
         local gpDesc = (item.goodPartnerNames and item.goodPartnerNames ~= "") and item.goodPartnerNames
             or (item.isCompanion and L["Recent companion (%d runs)"]:format(item.companionRuns or 1) or "")
         cnt = PushBadgeSpec(cnt, nil, "Interface\\Buttons\\UI-CheckBox-Check", TC_FULL, TINT_GOOD, L["Good Partner (+)"], gpDesc, TINT_GOOD)
-    end
-    if (sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup or item.isEnemyGuild then
-        local warnTitle = ((sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup) and L["Avoid Warning"] or L["Enemy Guild"]
-        local warnDesc = (item.avoidSignupNames and item.avoidSignupNames ~= "") and item.avoidSignupNames
-            or ((item.enemyGuildNames and item.enemyGuildNames ~= "") and item.enemyGuildNames or gGuildDesc)
-        cnt = PushBadgeSpec(cnt, nil, "Interface\\TARGETINGFRAME\\UI-TargetingFrame-Skull", TC_FULL, TINT_AVOID, warnTitle, warnDesc, TINT_AVOID_TIP)
     end
     if item.newPlayerFriendly and cnt < 6 then
         local npAtlas = HasAtlas("groupfinder-icon-role-large-newplayer") and "groupfinder-icon-role-large-newplayer"
@@ -5152,6 +5218,23 @@ local function UpdateLfgRow(row, item, _, palette)
     if item and item._isBulletinHeader then
         if row.headerAccentTex then
             row.headerAccentTex:Show()
+        end
+        if row.relStripe then
+            if (item.avoidCount or 0) > 0 or (item.enemyCount or 0) > 0 then
+                row.relStripe:SetColorTexture(0.95, 0.25, 0.25, 0.95)
+                row.relStripe:Show()
+            elseif (item.watchCount or 0) > 0 then
+                row.relStripe:SetColorTexture(1.0, 0.70, 0.24, 0.95)
+                row.relStripe:Show()
+            elseif (item.clanCount or 0) > 0 then
+                row.relStripe:SetColorTexture(1.0, 0.82, 0.25, 0.92)
+                row.relStripe:Show()
+            elseif (item.allyCount or 0) > 0 then
+                row.relStripe:SetColorTexture(0.28, 0.90, 0.50, 0.92)
+                row.relStripe:Show()
+            else
+                row.relStripe:Hide()
+            end
         end
         if row.SelfTex then
             row.SelfTex:Hide()
@@ -5201,7 +5284,22 @@ local function UpdateLfgRow(row, item, _, palette)
         row.activityFs:SetPoint("RIGHT", row, "RIGHT", -10, 0)
         row.activityFs:SetJustifyH("LEFT")
         local metaParts = {}
-        if (item.trustedCount or 0) > 0 then
+        if (item.avoidCount or 0) > 0 then
+            metaParts[#metaParts + 1] = "|cffff4d4d" .. L["AVOID"] .. ": " .. tostring(item.avoidCount) .. "|r"
+        end
+        if (item.enemyCount or 0) > 0 then
+            metaParts[#metaParts + 1] = "|cffff5555" .. L["Enemy"] .. ": " .. tostring(item.enemyCount) .. "|r"
+        end
+        if (item.watchCount or 0) > 0 then
+            metaParts[#metaParts + 1] = "|cffffb347" .. L["Watchlist"] .. ": " .. tostring(item.watchCount) .. "|r"
+        end
+        if (item.clanCount or 0) > 0 then
+            metaParts[#metaParts + 1] = "|cffffd24d" .. L["Guild"] .. ": " .. tostring(item.clanCount) .. "|r"
+        end
+        if (item.allyCount or 0) > 0 then
+            metaParts[#metaParts + 1] = "|cff4de680" .. L["Ally"] .. ": " .. tostring(item.allyCount) .. "|r"
+        end
+        if (item.trustedCount or 0) > 0 and (item.watchCount or 0) == 0 and (item.clanCount or 0) == 0 and (item.allyCount or 0) == 0 then
             metaParts[#metaParts + 1] = "|cff72c6ff" .. L["Trusted: %d"]:format(item.trustedCount) .. "|r"
         end
         if (item.needT or 0) > 0 or (item.needH or 0) > 0 or (item.needD or 0) > 0 then
@@ -5301,14 +5399,16 @@ local function UpdateLfgRow(row, item, _, palette)
         elseif item.filledT ~= nil or item.filledH ~= nil or item.filledD ~= nil or item.filledNoRole ~= nil then
             local curT = item.filledT or 0
             local curH = item.filledH or 0
-            local curD = math.min(3, item.filledD or 0)
+            local rawD = item.filledD or 0
+            local curD = math.min(3, rawD)
             local curNo = item.filledNoRole or 0
             if curT >= 1 then slotFilled[1] = true end
             if curH >= 1 then slotFilled[2] = true end
             for d = 1, curD do
                 slotFilled[2 + d] = true
             end
-            local remNo = curNo
+            local overflow = math.max(0, curT - 1) + math.max(0, curH - 1) + math.max(0, rawD - 3)
+            local remNo = curNo + overflow
             for oi = 1, #lfgFillPriorityOrder do
                 if remNo <= 0 then break end
                 local orderIdx = lfgFillPriorityOrder[oi]
@@ -5363,9 +5463,14 @@ local function UpdateLfgRow(row, item, _, palette)
     else
         row.nameFs:SetTextColor(1, 1, 1, 1)
         local classHex = Compat.ClassHex and Compat.ClassHex(item.classFile) or "|cffffd200"
+        local dispLeader = item.displayName or "?"
+        if dispLeader == L["Official LFG"] or (item.isUnknownLeader and dispLeader == "?") then
+            local locClass = item.classFile and _G.LOCALIZED_CLASS_NAMES_MALE and _G.LOCALIZED_CLASS_NAMES_MALE[item.classFile]
+            dispLeader = (locClass and locClass ~= "") and (locClass .. " (" .. L["Leader"] .. ")") or L["Leader"]
+        end
         local keyTag = (item.keyLvl and item.keyLvl > 0) and (" |cffd2a8ff+" .. item.keyLvl .. "|r") or ""
         local selfTag = item.isSelf and (" |cff3fb950(" .. L["You"] .. ")|r") or ""
-        row.nameFs:SetText(string.format("%s%s%s|r%s%s", flagPrefix, classHex, item.displayName or "?", keyTag, selfTag))
+        row.nameFs:SetText(string.format("%s%s%s|r%s%s", flagPrefix, classHex, dispLeader, keyTag, selfTag))
     end
 
     local lvlPart = (item.level and item.level > 0) and L["Lv %d"]:format(item.level) or ""
@@ -5385,9 +5490,13 @@ local function UpdateLfgRow(row, item, _, palette)
     local lvlW = (lvlPart ~= "") and ((row.levelFs:GetStringWidth() or 32) + 6) or 0
     local clsW = hasClassIcon and 20 or 0
     local badgesW = (numBadges > 0) and (numBadges * 17 + 6) or 0
-    local extraTagW = ((sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup or item._lockoutInfo) and 48 or 0
+    local extraTagW = ((sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup or item.isEnemyGuild or item._lockoutInfo) and 48 or 0
     local maxNameW = math.max(48, math.min(164, rowW - leftStart - roleBlockW - lvlW - clsW - badgesW - extraTagW - 8))
-    row.nameFs:SetWidth(math.min(maxNameW, math.max(42, row.nameFs:GetStringWidth() or 96)))
+    row.nameFs:SetWidth(0)
+    local nameStrW = (row.nameFs.GetUnboundedStringWidth and row.nameFs:GetUnboundedStringWidth())
+        or row.nameFs:GetStringWidth()
+        or 96
+    row.nameFs:SetWidth(math.min(maxNameW, math.max(42, nameStrW)))
 
     local lastAnchor = (lvlPart ~= "") and row.levelFs or row.nameFs
     local rowAnchorSig = ((lvlPart ~= "") and "L:" or "N:") .. (hasClassIcon and "C:" or "0:") .. tostring(numBadges) .. ":" .. tostring(anchorRoleIcon)
@@ -5448,12 +5557,37 @@ local function UpdateLfgRow(row, item, _, palette)
         row.activityFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
     end
 
+    local isAvoidRow = (sMeta and sMeta.flag == "AVOID") or item._isAvoidFlag or item.hasAvoidSignup
+    local isWatchRow = item.isWatchlist or item.hasFriendOrWatchlistSignup
+    if row.relStripe then
+        if isAvoidRow then
+            row.relStripe:SetColorTexture(0.98, 0.24, 0.24, 0.96)
+            row.relStripe:Show()
+        elseif item.isEnemyGuild then
+            row.relStripe:SetColorTexture(0.92, 0.30, 0.22, 0.94)
+            row.relStripe:Show()
+        elseif isWatchRow then
+            row.relStripe:SetColorTexture(1.0, 0.70, 0.24, 0.95)
+            row.relStripe:Show()
+        elseif item.isClan then
+            row.relStripe:SetColorTexture(1.0, 0.82, 0.25, 0.92)
+            row.relStripe:Show()
+        elseif item.isAllied then
+            row.relStripe:SetColorTexture(0.28, 0.90, 0.50, 0.92)
+            row.relStripe:Show()
+        else
+            row.relStripe:Hide()
+        end
+    end
+
     local badges = ""
     if sMeta and sMeta.flag == "AVOID" then
         badges = badges .. "|cffff4d4d[" .. L["AVOID"] .. "]|r "
-    end
-    if item.hasAvoidSignup then
+    elseif item.hasAvoidSignup then
         badges = badges .. "|cffff4d4d[!" .. L["AVOID"] .. "]|r "
+    end
+    if item.isEnemyGuild then
+        badges = badges .. "|cffff5555[" .. L["Enemy"] .. "]|r "
     end
     if item.hasGoodPartnerSignup then
         badges = badges .. "|cff3fb950[+" .. L["PARTNER"] .. "]|r "
@@ -5495,10 +5629,25 @@ local function UpdateLfgRow(row, item, _, palette)
     else
         modeTag = "|cff3fb950[" .. L["LFM"] .. "]|r "
     end
+    local relPills = ""
+    if isWatchRow then
+        relPills = relPills .. "|cffffb347[" .. L["Watchlist"] .. "]|r "
+    end
+    if item.isClan then
+        relPills = relPills .. "|cffffd24d[" .. L["Guild"] .. "]|r "
+    elseif item.isAllied then
+        relPills = relPills .. "|cff4de680[" .. L["Ally"] .. "]|r "
+    end
+    if item.isEnemyGuild then
+        relPills = relPills .. "|cffff5555[" .. L["Enemy"] .. "]|r "
+    end
+    if isAvoidRow then
+        relPills = relPills .. "|cffff4d4d[" .. L["AVOID"] .. "]|r "
+    end
     local notePart = (item.note and item.note ~= "") and (" — " .. item.note) or ""
     local friendNote = (item.hasFriendOrWatchlistSignup and item.friendOrWatchlistNames and item.friendOrWatchlistNames ~= "")
         and (" |cffffa633(" .. L["In group"] .. ": " .. item.friendOrWatchlistNames .. ")|r") or ""
-    row.activityFs:SetText(modeTag .. "|cffe0d4b0" .. actTxt .. "|r|cffb8c0cc" .. notePart .. "|r" .. friendNote)
+    row.activityFs:SetText(relPills .. modeTag .. "|cffe0d4b0" .. actTxt .. "|r|cffb8c0cc" .. notePart .. "|r" .. friendNote)
 
     local selKey = LFGFrameTab.selectedKey
     local isSel = (selKey ~= nil) and (GetItemIdentityKey(item) == selKey)
@@ -6239,7 +6388,7 @@ function LFGFrameTab:RefreshData()
 
     self:UpdateViewLayout()
     if foundPendingIdx and self.list then
-        self.list.offset = math.max(0, foundPendingIdx - 1)
+        self.list.offset = math.max(0, foundPendingIdx - 1) * (self.list.rowHeight or 52)
     end
     self.list:SetData(rows, emptyMsg, false)
     SyncRowSelectionVisuals()
@@ -8170,6 +8319,7 @@ function LFGFrameTab:EnsureSideTab()
             GameTooltip:AddDoubleLine(L["Guild"], tostring(bd.clan or 0), 0.78, 0.84, 0.92, 1.0, 0.82, 0.25)
             GameTooltip:AddDoubleLine(L["Allied Clans"], tostring(bd.ally or 0), 0.78, 0.84, 0.92, 0.25, 0.88, 0.48)
             GameTooltip:AddDoubleLine(L["Friends / Watchlist"], tostring(bd.friends or 0), 0.78, 0.84, 0.92, 0.35, 0.78, 1.0)
+            GameTooltip:AddDoubleLine(L["Recent Companions"], tostring(bd.companions or 0), 0.78, 0.84, 0.92, 0.62, 0.84, 1.0)
             GameTooltip:AddDoubleLine(L["SocialCentral [SC]"], tostring(bd.sc or 0), 0.78, 0.84, 0.92, 0.25, 0.88, 0.48)
             if ns.Group and ns.Group.AppendInstanceHistoryTooltip then
                 ns.Group:AppendInstanceHistoryTooltip(GameTooltip)
@@ -8923,7 +9073,7 @@ function LFGFrameTab:AttachChatButton()
                 end, function() ToggleChatOpt("chatAntiSpamEnabled", false) end)
                 root:CreateCheckbox(L["Mirror Alliance Chat in Official Chat (/ali)"], function()
                     return not s or s.clanOfficialGreenWall ~= false
-                end, function() ToggleChatOpt("clanOfficialGreenWall", false) end)
+                end, function() ToggleChatOpt("clanOfficialGreenWall", true) end)
 
                 root:CreateDivider()
                 root:CreateButton(L["Copy Official Chat"], function()
@@ -9130,888 +9280,6 @@ function LFGFrameTab:AttachProfessionButton()
 end
 
 -- ============================================================================
--- Official Game Window Integration #6: WorldMapFrame ('M') -> World Buffs Pins & Mouseover Pill
--- ============================================================================
-local WORLD_BUFF_ICON_FALLBACK = 134153 -- Inv_Misc_Head_Dragon_01
-
--- Classic / Forever World Buff locations mapped to verified uiMapIDs.
--- Dire Maul North's three tribute buffs share one grouped Feralas pin to avoid overlapping icons.
-local WORLD_BUFF_MAP_PINS = {
-    {
-        key = "dragonslayer_sw",
-        mapID = 1453, -- Stormwind City
-        x = 0.635,
-        y = 0.718,
-        faction = "Alliance",
-        label = L["Stormwind — Valley of Heroes"],
-        buffIds = { "dragonslayer" },
-        continent = { [1415] = { 0.435, 0.742 }, [947] = { 0.652, 0.674 } },
-    },
-    {
-        key = "stormwind_keep",
-        mapID = 1453, -- Stormwind City
-        x = 0.755,
-        y = 0.312,
-        faction = "Alliance",
-        label = L["Stormwind — Keep"],
-        buffIds = { "stormwind" },
-        continent = { [1415] = { 0.449, 0.728 }, [947] = { 0.660, 0.668 } },
-    },
-    {
-        key = "dragonslayer_org",
-        mapID = 1454, -- Orgrimmar
-        x = 0.518,
-        y = 0.822,
-        faction = "Horde",
-        label = L["Orgrimmar — Valley of Strength"],
-        buffIds = { "dragonslayer" },
-        continent = { [1414] = { 0.578, 0.465 }, [947] = { 0.316, 0.478 } },
-    },
-    {
-        key = "warchief_org",
-        mapID = 1454, -- Orgrimmar
-        x = 0.342,
-        y = 0.382,
-        faction = "Horde",
-        label = L["Orgrimmar — Grommash Hold"],
-        buffIds = { "warchief" },
-        continent = { [1414] = { 0.562, 0.434 }, [947] = { 0.308, 0.456 } },
-    },
-    {
-        key = "warchief_barrens",
-        mapID = 1413, -- The Barrens
-        x = 0.519,
-        y = 0.304,
-        faction = "Horde",
-        label = L["The Barrens — The Crossroads"],
-        buffIds = { "warchief" },
-        continent = { [1414] = { 0.525, 0.518 }, [947] = { 0.289, 0.510 } },
-    },
-    {
-        key = "zandalar_stv",
-        mapID = 1434, -- Stranglethorn Vale
-        x = 0.154,
-        y = 0.160,
-        faction = "Both",
-        label = L["Stranglethorn Vale — Yojamba Isle"],
-        buffIds = { "zandalar" },
-        continent = { [1415] = { 0.405, 0.858 }, [947] = { 0.635, 0.752 } },
-    },
-    {
-        key = "songflower_felwood",
-        mapID = 1448, -- Felwood
-        x = 0.506,
-        y = 0.568,
-        faction = "Both",
-        label = L["Felwood — Songflower Glade"],
-        buffIds = { "songflower" },
-        continent = { [1414] = { 0.472, 0.295 }, [947] = { 0.258, 0.362 } },
-    },
-    {
-        key = "dm_feralas",
-        mapID = 1444, -- Feralas
-        x = 0.625,
-        y = 0.249,
-        faction = "Both",
-        label = L["Feralas — Dire Maul North"],
-        buffIds = { "dm_moldar", "dm_fengus", "dm_slipkik" },
-        continent = { [1414] = { 0.408, 0.658 }, [947] = { 0.219, 0.602 } },
-    },
-    {
-        key = "dmf_elwynn",
-        mapID = 1429, -- Elwynn Forest
-        x = 0.418,
-        y = 0.692,
-        faction = "Both",
-        label = L["Elwynn Forest — Goldshire"],
-        buffIds = { "dmf" },
-        continent = { [1415] = { 0.456, 0.774 }, [947] = { 0.665, 0.695 } },
-    },
-    {
-        key = "dmf_mulgore",
-        mapID = 1412, -- Mulgore
-        x = 0.370,
-        y = 0.375,
-        faction = "Both",
-        label = L["Mulgore — Thunder Bluff"],
-        buffIds = { "dmf" },
-        continent = { [1414] = { 0.440, 0.558 }, [947] = { 0.240, 0.535 } },
-    },
-    {
-        key = "silithyst_silithus",
-        mapID = 1451, -- Silithus
-        x = 0.525,
-        y = 0.655,
-        faction = "Both",
-        label = L["Silithus — Silithyst Field"],
-        buffIds = { "silithyst" },
-        continent = { [1414] = { 0.422, 0.858 }, [947] = { 0.226, 0.735 } },
-    },
-}
-
-local WORLD_BUFF_SONGFLOWER_NODES = {
-    { key = "sf_1", mapID = 1448, x = 0.343, y = 0.847, faction = "Both", label = L["Felwood Songflower Node (#1 South)"], buffIds = { "songflower" } },
-    { key = "sf_2", mapID = 1448, x = 0.399, y = 0.220, faction = "Both", label = L["Felwood Songflower Node (#2 Felpaw)"], buffIds = { "songflower" } },
-    { key = "sf_3", mapID = 1448, x = 0.399, y = 0.443, faction = "Both", label = L["Felwood Songflower Node (#3 Shatter Scar)"], buffIds = { "songflower" } },
-    { key = "sf_4", mapID = 1448, x = 0.399, y = 0.594, faction = "Both", label = L["Felwood Songflower Node (#4 Bloodvenom)"], buffIds = { "songflower" } },
-    { key = "sf_5", mapID = 1448, x = 0.409, y = 0.854, faction = "Both", label = L["Felwood Songflower Node (#5 Deadwood)"], buffIds = { "songflower" } },
-    { key = "sf_6", mapID = 1448, x = 0.506, y = 0.139, faction = "Both", label = L["Felwood Songflower Node (#6 Irontree N)"], buffIds = { "songflower" } },
-    { key = "sf_7", mapID = 1448, x = 0.528, y = 0.241, faction = "Both", label = L["Felwood Songflower Node (#7 Irontree S)"], buffIds = { "songflower" } },
-    { key = "sf_8", mapID = 1448, x = 0.543, y = 0.753, faction = "Both", label = L["Felwood Songflower Node (#8 Jadefire)"], buffIds = { "songflower" } },
-    { key = "sf_9", mapID = 1448, x = 0.556, y = 0.075, faction = "Both", label = L["Felwood Songflower Node (#9 Timbermaw)"], buffIds = { "songflower" } },
-}
-
-local function GetPlayerFactionSafe()
-    local f = ns.Compat and ns.Compat.PlayerFaction and ns.Compat.PlayerFaction()
-    if f == "Alliance" or f == "Horde" then
-        return f
-    end
-    return "Both"
-end
-
-local function AreWorldMapPinsEnabled()
-    return not (ns.db and ns.db.settings and ns.db.settings.worldBuffsMapPins == false)
-end
-
-local function GetWorldBuffLookup()
-    local defById = {}
-    local activeById = {}
-    local activeList = {}
-    if ns.WorldBuffs and ns.WorldBuffs.GetDefinitions then
-        for _, def in ipairs(ns.WorldBuffs:GetDefinitions()) do
-            defById[def.id] = def
-        end
-    end
-    if ns.WorldBuffs and ns.WorldBuffs.GetActiveBuffs then
-        local active = ns.WorldBuffs:GetActiveBuffs()
-        if type(active) == "table" then
-            activeList = active
-            for _, entry in ipairs(active) do
-                if entry.def and entry.def.id then
-                    activeById[entry.def.id] = entry
-                end
-            end
-        end
-    end
-    return defById, activeById, activeList
-end
-
-local function ProjectWorldMapCoord(pinDef, targetMapID)
-    if not targetMapID then return nil, nil end
-    if pinDef.mapID == targetMapID then
-        return pinDef.x, pinDef.y
-    end
-    local cache = pinDef._projCache
-    if cache then
-        local hit = cache[targetMapID]
-        if hit ~= nil then
-            if hit == false then return nil, nil end
-            return hit[1], hit[2]
-        end
-    else
-        cache = {}
-        pinDef._projCache = cache
-    end
-    local px, py
-    if C_Map and C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D then
-        local ok1, inst, worldPos = pcall(C_Map.GetWorldPosFromMapPos, pinDef.mapID, CreateVector2D(pinDef.x, pinDef.y))
-        if ok1 and inst and worldPos then
-            local ok2, outMapID, outPos = pcall(C_Map.GetMapPosFromWorldPos, inst, worldPos, targetMapID)
-            if ok2 and outMapID == targetMapID and outPos then
-                if outPos.GetXY then
-                    px, py = outPos:GetXY()
-                else
-                    px, py = outPos.x, outPos.y
-                end
-                if not (type(px) == "number" and type(py) == "number" and px >= 0.01 and px <= 0.99 and py >= 0.01 and py <= 0.99) then
-                    px, py = nil, nil
-                end
-            end
-        end
-    end
-    if not px then
-        local fallback = pinDef.continent and pinDef.continent[targetMapID]
-        if fallback then
-            px, py = fallback[1], fallback[2]
-        end
-    end
-    if px and py then
-        cache[targetMapID] = { px, py }
-        return px, py
-    end
-    cache[targetMapID] = false
-    return nil, nil
-end
-
-local function GetPinAggregateStatus(pinDef, defById, activeById)
-    local primaryDef = nil
-    local hasActive = false
-    local hasReady = false
-    local hasCooldown = false
-    local activeIcon = nil
-
-    for _, buffId in ipairs(pinDef.buffIds) do
-        local def = defById[buffId]
-        if def then
-            if not primaryDef then primaryDef = def end
-            local active = activeById[buffId]
-            if active then
-                hasActive = true
-                if not activeIcon and active.icon then
-                    activeIcon = active.icon
-                end
-            elseif ns.WorldBuffs and ns.WorldBuffs.GetDropCooldownStatus then
-                local cd = ns.WorldBuffs:GetDropCooldownStatus(def)
-                if cd then
-                    if cd.status == "READY" then
-                        hasReady = true
-                    elseif cd.status == "COOLDOWN" then
-                        hasCooldown = true
-                    end
-                end
-            end
-        end
-    end
-
-    local icon = activeIcon or (primaryDef and primaryDef.icon) or WORLD_BUFF_ICON_FALLBACK
-    local state = "IDLE"
-    if hasActive then
-        state = "ACTIVE"
-    elseif hasReady then
-        state = "READY"
-    elseif hasCooldown then
-        state = "COOLDOWN"
-    end
-    return state, icon, primaryDef
-end
-
-local function ShowWorldBuffPinTooltip(pinBtn)
-    local pinDef = pinBtn.pinDef
-    if not pinDef or not GameTooltip then return end
-    local defById, activeById = GetWorldBuffLookup()
-
-    GameTooltip:SetOwner(pinBtn, "ANCHOR_RIGHT")
-    GameTooltip:ClearLines()
-    GameTooltip:AddLine(pinDef.label or "", 1.0, 0.84, 0.25)
-
-    for _, buffId in ipairs(pinDef.buffIds) do
-        local def = defById[buffId]
-        if def then
-            local active = activeById[buffId]
-            local cd = ns.WorldBuffs and ns.WorldBuffs.GetDropCooldownStatus and ns.WorldBuffs:GetDropCooldownStatus(def)
-            local rightText, rr, rg, rb
-            if active then
-                local rem = active.remaining and active.remaining > 0 and ns.WorldBuffs:FormatDuration(active.remaining) or L["Active"]
-                rightText = L["Active: %s"]:format(rem)
-                rr, rg, rb = 0.25, 0.95, 0.45
-            else
-                if cd and cd.status == "READY" then
-                    rightText = L["Ready"]
-                    rr, rg, rb = 1.0, 0.82, 0.18
-                elseif cd and cd.status == "COOLDOWN" then
-                    rightText = cd.text or "?"
-                    rr, rg, rb = 0.95, 0.62, 0.22
-                elseif cd and cd.status == "NO_COOLDOWN" then
-                    rightText = L["No server cooldown"]
-                    rr, rg, rb = 0.45, 0.85, 0.95
-                elseif cd and cd.status == "SCHEDULED" then
-                    rightText = cd.text or L["Scheduled"]
-                    rr, rg, rb = 0.72, 0.82, 0.96
-                elseif def.yellDelay and def.yellDelay > 0 then
-                    rightText = L["Awaiting drop yell"]
-                    rr, rg, rb = 0.65, 0.68, 0.74
-                else
-                    rightText = L["Open-world pickup"]
-                    rr, rg, rb = 0.58, 0.78, 0.95
-                end
-            end
-            GameTooltip:AddDoubleLine(def.name or buffId, rightText, 0.95, 0.95, 0.98, rr, rg, rb)
-            if cd and cd.onyStatus and cd.nefStatus then
-                GameTooltip:AddDoubleLine("  Onyxia (6h)", cd.onyStatus.text or "?", 0.72, 0.78, 0.86, 0.88, 0.90, 0.96)
-                GameTooltip:AddDoubleLine("  Nefarian (8h)", cd.nefStatus.text or "?", 0.72, 0.78, 0.86, 0.88, 0.90, 0.96)
-            elseif cd and cd.status == "NO_COOLDOWN" and cd.text then
-                GameTooltip:AddLine("  " .. cd.text, 0.68, 0.84, 0.94, true)
-            elseif active and cd and cd.text and (cd.status == "COOLDOWN" or cd.status == "READY") then
-                GameTooltip:AddLine("  " .. cd.text, 0.82, 0.80, 0.64, true)
-            end
-            if cd and cd.peakText and cd.peakText ~= "" then
-                GameTooltip:AddLine("  " .. cd.peakText, 0.55, 0.88, 0.72, true)
-            end
-            if def.effect and def.effect ~= "" then
-                GameTooltip:AddLine("  " .. def.effect, 0.78, 0.84, 0.90, true)
-            end
-            if def.source and def.source ~= "" then
-                GameTooltip:AddLine("  " .. def.source, 0.62, 0.66, 0.72, true)
-            end
-        end
-    end
-
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(L["Left-click: Open Buffs tracker"], 0.45, 0.85, 1.0)
-    if pinBtn.canZoomZone then
-        GameTooltip:AddLine(L["Right-click: Zoom to zone"], 0.45, 0.85, 1.0)
-    end
-    GameTooltip:Show()
-end
-
-local function ShowWorldBuffsPillTooltip(anchor)
-    if not GameTooltip then return end
-    local defById, activeById, activeList = GetWorldBuffLookup()
-    local playerFaction = GetPlayerFactionSafe()
-
-    GameTooltip:SetOwner(anchor, "ANCHOR_BOTTOMLEFT")
-    GameTooltip:ClearLines()
-    GameTooltip:AddLine(L["SocialCentral: World Buffs"], 0.35, 0.78, 1.0)
-
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(L["Active World Buffs"], 1.0, 0.84, 0.28)
-    if #activeList > 0 then
-        for _, entry in ipairs(activeList) do
-            local def = entry.def
-            local rem = entry.remaining and entry.remaining > 0 and ns.WorldBuffs:FormatDuration(entry.remaining) or L["Active"]
-            GameTooltip:AddDoubleLine(entry.name or (def and def.name) or "Buff", rem, 0.25, 0.95, 0.45, 0.75, 1.0, 0.82)
-        end
-    else
-        GameTooltip:AddLine(L["No active world buffs on this character."], 0.65, 0.68, 0.74)
-    end
-
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(L["Capital Drop Cooldowns"], 1.0, 0.84, 0.28)
-    local openWorld = {}
-    if ns.WorldBuffs and ns.WorldBuffs.GetDefinitions then
-        for _, def in ipairs(ns.WorldBuffs:GetDefinitions()) do
-            if def.faction == "Both" or def.faction == playerFaction or playerFaction == "Both" then
-                if (def.cooldown and def.cooldown > 0) or def.id == "zandalar" then
-                    local cd = ns.WorldBuffs:GetDropCooldownStatus(def)
-                    local st, r, g, b
-                    if activeById[def.id] then
-                        local aRem = activeById[def.id].remaining
-                        st = L["Active: %s"]:format(aRem and aRem > 0 and ns.WorldBuffs:FormatDuration(aRem) or L["Active"])
-                        r, g, b = 0.25, 0.95, 0.45
-                    elseif cd and cd.status == "READY" then
-                        st = L["Ready"]
-                        r, g, b = 1.0, 0.82, 0.18
-                    elseif cd and cd.status == "COOLDOWN" then
-                        st = cd.text or "?"
-                        r, g, b = 0.95, 0.62, 0.22
-                    elseif cd and cd.status == "NO_COOLDOWN" then
-                        st = L["No server cooldown"]
-                        r, g, b = 0.45, 0.85, 0.95
-                    elseif cd and cd.status == "SCHEDULED" then
-                        st = cd.text or L["Scheduled"]
-                        r, g, b = 0.72, 0.82, 0.96
-                    elseif def.yellDelay and def.yellDelay > 0 then
-                        st = L["Awaiting drop yell"]
-                        r, g, b = 0.65, 0.68, 0.74
-                    else
-                        st = L["Open-world pickup"]
-                        r, g, b = 0.62, 0.76, 0.90
-                    end
-                    GameTooltip:AddDoubleLine(def.name or def.id, st, 0.92, 0.94, 0.98, r, g, b)
-                    if cd and cd.peakText and cd.peakText ~= "" then
-                        GameTooltip:AddLine("  " .. cd.peakText, 0.55, 0.88, 0.72, true)
-                    end
-                else
-                    openWorld[#openWorld + 1] = def
-                end
-            end
-        end
-    end
-
-    if #openWorld > 0 then
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine(L["Open-World & Tribute Buffs"], 1.0, 0.84, 0.28)
-        for _, def in ipairs(openWorld) do
-            local active = activeById[def.id]
-            local st, r, g, b
-            if active then
-                local aRem = active.remaining
-                st = aRem and aRem > 0 and ns.WorldBuffs:FormatDuration(aRem) or L["Active"]
-                r, g, b = 0.25, 0.95, 0.45
-            else
-                st = L["Open-world pickup"]
-                r, g, b = 0.62, 0.76, 0.90
-            end
-            GameTooltip:AddDoubleLine(def.name or def.id, st, 0.92, 0.94, 0.98, r, g, b)
-        end
-    end
-
-    GameTooltip:AddLine(" ")
-    local syncEnabled = ns.db and ns.db.settings and ns.db.settings.clanSync == true
-    local syncState = syncEnabled and L["Enabled (Guild)"] or L["Local only"]
-    GameTooltip:AddDoubleLine(L["Guild Buff Sync"], syncState, 0.72, 0.76, 0.82, syncEnabled and 0.30 or 0.75, syncEnabled and 0.92 or 0.68, syncEnabled and 0.50 or 0.50)
-    local pinState = AreWorldMapPinsEnabled() and L["Shown"] or L["Hidden"]
-    GameTooltip:AddDoubleLine(L["Map pins"], pinState, 0.72, 0.76, 0.82, AreWorldMapPinsEnabled() and 0.30 or 0.75, AreWorldMapPinsEnabled() and 0.92 or 0.45, AreWorldMapPinsEnabled() and 0.50 or 0.45)
-    GameTooltip:AddLine(L["Left-click: Open Buffs tracker"], 0.45, 0.85, 1.0)
-    GameTooltip:AddLine(L["Right-click: Toggle map pins"], 0.45, 0.85, 1.0)
-    GameTooltip:Show()
-end
-
-local function AcquireWorldBuffPin(canvas, idx)
-    LFGFrameTab.mapPins = LFGFrameTab.mapPins or {}
-    local pin = LFGFrameTab.mapPins[idx]
-    if pin then return pin end
-
-    pin = CreateFrame("Button", "SocialCentralWorldMapBuffPin" .. idx, canvas, "BackdropTemplate")
-    pin:SetSize(22, 22)
-    pin:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    pin:SetFrameLevel(2050)
-
-    local solidBg = pin:CreateTexture(nil, "BACKGROUND", nil, -8)
-    solidBg:SetAllPoints()
-    solidBg:SetTexture("Interface\\Buttons\\WHITE8X8")
-    solidBg:SetVertexColor(0.06, 0.05, 0.04, 1.0)
-    pin._solidOpaqueBg = solidBg
-
-    if pin.SetBackdrop then
-        pin:SetBackdrop({
-            bgFile = "Interface\\Buttons\\WHITE8X8",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile = true, tileSize = 8, edgeSize = 8,
-            insets = { left = 2, right = 2, top = 2, bottom = 2 },
-        })
-        pin:SetBackdropColor(0.06, 0.05, 0.04, 1.0)
-        pin:SetBackdropBorderColor(0.76, 0.62, 0.28, 1.0)
-    end
-
-    pin.icon = pin:CreateTexture(nil, "ARTWORK")
-    pin.icon:SetPoint("TOPLEFT", pin, "TOPLEFT", 2, -2)
-    pin.icon:SetPoint("BOTTOMRIGHT", pin, "BOTTOMRIGHT", -2, 2)
-    pin.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-
-    pin.activeDot = pin:CreateTexture(nil, "OVERLAY")
-    pin.activeDot:SetSize(8, 8)
-    pin.activeDot:SetPoint("BOTTOMRIGHT", pin, "BOTTOMRIGHT", 1, -1)
-    pin.activeDot:SetTexture("Interface\\RAIDFRAME\\ReadyCheck-Ready")
-    pin.activeDot:Hide()
-
-    pin:SetScript("OnEnter", function(selfPin)
-        ShowWorldBuffPinTooltip(selfPin)
-    end)
-    pin:SetScript("OnLeave", function()
-        if GameTooltip then GameTooltip:Hide() end
-    end)
-    pin:SetScript("OnClick", function(selfPin, button)
-        if not selfPin.pinDef then return end
-        if button == "RightButton" then
-            if selfPin.canZoomZone and _G.WorldMapFrame and _G.WorldMapFrame.SetMapID and not (InCombatLockdown and InCombatLockdown()) then
-                pcall(_G.WorldMapFrame.SetMapID, _G.WorldMapFrame, selfPin.pinDef.mapID)
-            end
-            return
-        end
-        if ns.UI and ns.UI.ShowHub then
-            ns.UI:ShowHub("buffs")
-        end
-    end)
-
-    LFGFrameTab.mapPins[idx] = pin
-    return pin
-end
-
-function LFGFrameTab:RefreshWorldMapBuffs()
-    local mapFrame = _G.WorldMapFrame
-    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("M") then
-        if self.mapPill then self.mapPill:Hide() end
-        if self.mapQuickBtn then self.mapQuickBtn:Hide() end
-        if self.mapPins then
-            for _, p in ipairs(self.mapPins) do
-                p:Hide()
-            end
-        end
-        return
-    end
-    if self.mapPill then self.mapPill:Show() end
-    if self.mapQuickBtn then
-        self.mapQuickBtn:Show()
-        if self.mapQuickBtn.RefreshTheme then self.mapQuickBtn:RefreshTheme() end
-    end
-    if not (mapFrame and mapFrame.IsShown and mapFrame:IsShown()) then return end
-
-    local defById, activeById, activeList = GetWorldBuffLookup()
-    local playerFaction = GetPlayerFactionSafe()
-    local pinsEnabled = AreWorldMapPinsEnabled()
-
-    -- 1. Refresh compact corner badge/pill inside ScrollContainer
-    local pill = self.mapPill
-    if pill then
-        local activeCount = #activeList
-        if activeCount > 0 then
-            pill.label:SetText(("%s (%d)"):format(L["World Buffs"], activeCount))
-            pill.label:SetTextColor(0.38, 0.95, 0.52, 1)
-        else
-            pill.label:SetText(L["World Buffs"])
-            pill.label:SetTextColor(1.0, 0.84, 0.30, 1)
-        end
-
-        local shownIcons = 0
-        for i = 1, 5 do
-            local slot = pill.miniIcons[i]
-            local entry = activeList[i]
-            if slot and entry then
-                slot.tex:SetTexture(entry.icon or WORLD_BUFF_ICON_FALLBACK)
-                slot:Show()
-                shownIcons = shownIcons + 1
-            elseif slot then
-                slot:Hide()
-            end
-        end
-
-        local lblWidth = pill.label:GetStringWidth() or 78
-        local iconsWidth = shownIcons > 0 and (shownIcons * 17 + 4) or 0
-        local totalWidth = math.max(128, math.min(268, math.ceil(26 + lblWidth + iconsWidth + 24)))
-        pill:SetWidth(totalWidth)
-        pill.emblem:SetTexture((activeList[1] and activeList[1].icon) or WORLD_BUFF_ICON_FALLBACK)
-        if pill.SetBackdropBorderColor then
-            if activeCount > 0 then
-                pill:SetBackdropBorderColor(0.28, 0.82, 0.42, 1.0)
-            else
-                pill:SetBackdropBorderColor(0.72, 0.58, 0.25, 1.0)
-            end
-        end
-    end
-
-    -- 2. Refresh World Map Canvas Pins
-    if self.mapPins then
-        for _, p in ipairs(self.mapPins) do
-            p:Hide()
-        end
-    end
-    if not pinsEnabled or not mapFrame:IsShown() then return end
-
-    local canvas = mapFrame.GetCanvas and mapFrame:GetCanvas()
-    local currentMapID = mapFrame.GetMapID and mapFrame:GetMapID()
-    if not canvas or not currentMapID then return end
-
-    local cw, ch = canvas:GetWidth() or 0, canvas:GetHeight() or 0
-    if cw < 40 or ch < 40 then return end
-
-    local isZoneMap = (currentMapID ~= 947 and currentMapID ~= 1414 and currentMapID ~= 1415)
-    local pinSize = isZoneMap and 22 or 18
-    local pinLevel = math.max(2050, (canvas:GetFrameLevel() or 2000) + 45)
-    local idx = 0
-
-    local dmfStatus = ns.WorldBuffs and ns.WorldBuffs.GetDarkmoonFaireStatus and ns.WorldBuffs:GetDarkmoonFaireStatus() or nil
-    local activeDmfKey = nil
-    local targetDmfKey = nil
-    if dmfStatus then
-        local isMulgore = (dmfStatus.location == L["Mulgore"])
-        targetDmfKey = isMulgore and "dmf_mulgore" or "dmf_elwynn"
-        if dmfStatus.isActive then
-            activeDmfKey = targetDmfKey
-        end
-    end
-
-    for _, pinDef in ipairs(WORLD_BUFF_MAP_PINS) do
-        local isDmfPin = (pinDef.key == "dmf_elwynn" or pinDef.key == "dmf_mulgore")
-        local dmfVisible = (not isDmfPin) or (targetDmfKey == pinDef.key)
-        if dmfVisible and (pinDef.faction == "Both" or pinDef.faction == playerFaction or playerFaction == "Both") then
-            local px, py = ProjectWorldMapCoord(pinDef, currentMapID)
-            if px and py then
-                idx = idx + 1
-                local pin = AcquireWorldBuffPin(canvas, idx)
-                local state, icon = GetPinAggregateStatus(pinDef, defById, activeById)
-                pin:SetParent(canvas)
-                pin:SetSize(pinSize, pinSize)
-                pin:SetFrameLevel(pinLevel)
-                pin:ClearAllPoints()
-                pin:SetPoint("CENTER", canvas, "TOPLEFT", px * cw, -py * ch)
-                pin.pinDef = pinDef
-                pin.canZoomZone = (pinDef.mapID ~= currentMapID)
-                pin.icon:SetTexture(icon)
-
-                if state == "ACTIVE" then
-                    if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(0.22, 0.92, 0.40, 1.0) end
-                    pin.activeDot:Show()
-                elseif isDmfPin and activeDmfKey ~= pinDef.key then
-                    if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(0.45, 0.65, 0.90, 0.92) end
-                    pin.activeDot:Hide()
-                elseif state == "READY" then
-                    if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(1.0, 0.84, 0.16, 1.0) end
-                    pin.activeDot:Hide()
-                elseif state == "COOLDOWN" then
-                    if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(0.92, 0.56, 0.18, 1.0) end
-                    pin.activeDot:Hide()
-                else
-                    if pin.SetBackdropBorderColor then pin:SetBackdropBorderColor(0.72, 0.58, 0.26, 1.0) end
-                    pin.activeDot:Hide()
-                end
-                pin:Show()
-            end
-        end
-    end
-
-    if currentMapID == 1448 and (not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSongflowerPins ~= false) then
-        local sfDef = defById["songflower"]
-        local sfIcon = (sfDef and sfDef.icon) or WORLD_BUFF_ICON_FALLBACK
-        for _, nodeDef in ipairs(WORLD_BUFF_SONGFLOWER_NODES) do
-            idx = idx + 1
-            local pin = AcquireWorldBuffPin(canvas, idx)
-            pin:SetParent(canvas)
-            pin:SetSize(16, 16)
-            pin:SetFrameLevel(pinLevel)
-            pin:ClearAllPoints()
-            pin:SetPoint("CENTER", canvas, "TOPLEFT", nodeDef.x * cw, -nodeDef.y * ch)
-            pin.pinDef = nodeDef
-            pin.canZoomZone = false
-            pin.icon:SetTexture(sfIcon)
-            pin.activeDot:Hide()
-            if pin.SetBackdropBorderColor then
-                pin:SetBackdropBorderColor(0.32, 0.84, 0.48, 0.95)
-            end
-            pin:Show()
-        end
-    end
-end
-
-local function BuildWorldMapQuickMenu(root)
-    if not root then return end
-    root:CreateTitle("SocialCentral — " .. L["World Buffs"])
-    if root.CreateCheckbox then
-        root:CreateCheckbox(L["Show World Buff pins on World Map (M)"], function()
-            return AreWorldMapPinsEnabled()
-        end, function()
-            if ns.db and ns.db.settings then
-                ns.db.settings.worldBuffsMapPins = not AreWorldMapPinsEnabled()
-            end
-            LFGFrameTab:RefreshWorldMapBuffs()
-            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
-        end)
-        root:CreateCheckbox(L["Show Felwood Songflower node pins"], function()
-            return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSongflowerPins ~= false
-        end, function()
-            if ns.db and ns.db.settings then
-                ns.db.settings.worldBuffsSongflowerPins = not (ns.db.settings.worldBuffsSongflowerPins ~= false)
-            end
-            LFGFrameTab:RefreshWorldMapBuffs()
-            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
-        end)
-        root:CreateCheckbox(L["Alert when capital World Buff cooldown finishes"], function()
-            return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsReadyAlert ~= false
-        end, function()
-            if ns.db and ns.db.settings then
-                ns.db.settings.worldBuffsReadyAlert = not (ns.db.settings.worldBuffsReadyAlert ~= false)
-            end
-            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
-        end)
-    end
-    if root.CreateDivider then root:CreateDivider() end
-    root:CreateButton(L["Disable World Buffs Module (M)"], function()
-        if ns.db and ns.db.settings then
-            ns.db.settings.embedWorldMap = false
-        end
-        LFGFrameTab:RefreshWorldMapBuffs()
-        ns:Emit("SETTINGS_UPDATED")
-        ns:Emit("WORLD_BUFFS_UPDATED")
-        if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
-        if ns.UI and ns.UI.QueueRefresh then ns.UI:QueueRefresh(false) end
-        ns:Print("%s", L["World Buffs (M) module disabled. Re-enable anytime in Settings (/sc)."])
-    end)
-    root:CreateButton(L["Settings"], function()
-        if ns.Settings and ns.Settings.Open then ns.Settings:Open("radar") end
-    end)
-end
-
-function LFGFrameTab:AttachWorldMapButton()
-    local mapFrame = _G.WorldMapFrame
-    if self.mapHooked or not mapFrame then return end
-    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("M") then
-        return
-    end
-    self.mapHooked = true
-
-    local container = (mapFrame.ScrollContainer) or mapFrame
-    local pill = CreateFrame("Button", "SocialCentralWorldMapBuffsPill", container, "BackdropTemplate")
-    pill:SetSize(148, 26)
-    pill:SetPoint("TOPRIGHT", container, "TOPRIGHT", -10, -10)
-    pill:SetFrameLevel(math.min(9500, math.max(MaxHierarchyLevel(container, 2) + 30, 2550)))
-    pill:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-
-    local solidBg = pill:CreateTexture(nil, "BACKGROUND", nil, -8)
-    solidBg:SetAllPoints()
-    solidBg:SetTexture("Interface\\Buttons\\WHITE8X8")
-    solidBg:SetVertexColor(0.06, 0.05, 0.04, 1.0)
-    pill._solidOpaqueBg = solidBg
-
-    if pill.SetBackdrop then
-        pill:SetBackdrop({
-            bgFile = "Interface\\Buttons\\WHITE8X8",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile = true, tileSize = 12, edgeSize = 12,
-            insets = { left = 3, right = 3, top = 3, bottom = 3 },
-        })
-        pill:SetBackdropColor(0.06, 0.05, 0.04, 1.0)
-        pill:SetBackdropBorderColor(0.72, 0.58, 0.25, 1.0)
-    end
-
-    local pillBevel = pill:CreateTexture(nil, "BORDER", nil, 1)
-    pillBevel:SetHeight(1)
-    pillBevel:SetPoint("TOPLEFT", pill, "TOPLEFT", 6, -3)
-    pillBevel:SetPoint("TOPRIGHT", pill, "TOPRIGHT", -6, -3)
-    pillBevel:SetColorTexture(1.0, 0.86, 0.42, 0.28)
-    pill._topBevel = pillBevel
-
-    pill.emblem = pill:CreateTexture(nil, "ARTWORK")
-    pill.emblem:SetSize(16, 16)
-    pill.emblem:SetPoint("LEFT", pill, "LEFT", 6, 0)
-    pill.emblem:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    pill.emblem:SetTexture(WORLD_BUFF_ICON_FALLBACK)
-
-    pill.label = pill:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    pill.label:SetPoint("LEFT", pill.emblem, "RIGHT", 5, 0)
-    pill.label:SetText(L["World Buffs"])
-
-    local wbHelp = Theme:CreateHelpButton(
-        pill,
-        L["Help: World Buffs on World Map"],
-        L["Displays an official-style summary badge and interactive zone pins for Classic/Forever World Buffs directly on the World Map."],
-        L["Hover pins or the badge for live timers and cooldowns. Left-click to open the full Buffs tracker, or Right-click the badge to toggle map pins."]
-    )
-    wbHelp:SetPoint("RIGHT", pill, "RIGHT", -4, 0)
-
-    pill.miniIcons = {}
-    for i = 1, 5 do
-        local slot = CreateFrame("Frame", nil, pill)
-        slot:SetSize(15, 15)
-        if i == 1 then
-            slot:SetPoint("RIGHT", wbHelp, "LEFT", -4, 0)
-        else
-            slot:SetPoint("RIGHT", pill.miniIcons[i - 1], "LEFT", -2, 0)
-        end
-        slot.border = slot:CreateTexture(nil, "BACKGROUND")
-        slot.border:SetAllPoints()
-        slot.border:SetTexture("Interface\\Buttons\\WHITE8X8")
-        slot.border:SetVertexColor(0.24, 0.85, 0.42, 1.0)
-
-        slot.tex = slot:CreateTexture(nil, "ARTWORK")
-        slot.tex:SetPoint("TOPLEFT", slot, "TOPLEFT", 1, -1)
-        slot.tex:SetPoint("BOTTOMRIGHT", slot, "BOTTOMRIGHT", -1, 1)
-        slot.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-        slot:Hide()
-        pill.miniIcons[i] = slot
-    end
-
-    pill:SetScript("OnEnter", function(selfPill)
-        ShowWorldBuffsPillTooltip(selfPill)
-    end)
-    pill:SetScript("OnLeave", function()
-        if GameTooltip then GameTooltip:Hide() end
-    end)
-    pill:SetScript("OnClick", function(selfPill, button)
-        if button == "RightButton" then
-            if MenuUtil and MenuUtil.CreateContextMenu then
-                MenuUtil.CreateContextMenu(selfPill, function(_, root)
-                    BuildWorldMapQuickMenu(root)
-                end)
-                return
-            end
-            if ns.db and ns.db.settings then
-                ns.db.settings.worldBuffsMapPins = not AreWorldMapPinsEnabled()
-            end
-            LFGFrameTab:RefreshWorldMapBuffs()
-            ShowWorldBuffsPillTooltip(selfPill)
-            if ns.Settings and ns.Settings.Refresh then
-                ns.Settings:Refresh()
-            end
-            return
-        end
-        if ns.UI and ns.UI.ShowHub then
-            ns.UI:ShowHub("buffs")
-        end
-    end)
-
-    if Theme.CreateOfficialQuickButton then
-        local mapQuickBtn = Theme:CreateOfficialQuickButton(container, {
-            name = "SocialCentralWorldMapQuickBtn",
-            size = 22,
-            title = L["World Buffs (M)"],
-            tooltipAnchor = "ANCHOR_LEFT",
-            getStatusState = function()
-                local s = ns.db and ns.db.settings
-                if s and s.embedWorldMap == false then return "off" end
-                if not AreWorldMapPinsEnabled() then return "partial" end
-                return "active"
-            end,
-            getTooltipLines = function()
-                return {
-                    { left = L["Map pins"], right = AreWorldMapPinsEnabled() and ("|cff3fb950" .. L["On"] .. "|r") or ("|cff8b949e" .. L["Off"] .. "|r") },
-                    L["Toggle World Buffs, Songflower node pins, or disable World Map (M) integration."],
-                }
-            end,
-            buildMenu = BuildWorldMapQuickMenu,
-        })
-        if mapQuickBtn then
-            mapQuickBtn:SetPoint("RIGHT", pill, "LEFT", -4, 0)
-            mapQuickBtn:SetFrameLevel(pill:GetFrameLevel())
-            self.mapQuickBtn = mapQuickBtn
-        end
-    end
-
-    local mapBuffRefreshPending = false
-    local function ScheduleMapBuffRefresh()
-        if not (_G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()) then
-            return
-        end
-        if mapBuffRefreshPending then
-            return
-        end
-        mapBuffRefreshPending = true
-        if C_Timer and C_Timer.After then
-            C_Timer.After(0, function()
-                mapBuffRefreshPending = false
-                if _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
-                    LFGFrameTab:RefreshWorldMapBuffs()
-                end
-            end)
-        else
-            mapBuffRefreshPending = false
-            LFGFrameTab:RefreshWorldMapBuffs()
-        end
-    end
-
-    if mapFrame.HookScript then
-        mapFrame:HookScript("OnShow", function()
-            if not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(mapFrame)) then
-                if ns.UI and ns.UI.CloseEmbeddedIfHost then
-                    ns.UI:CloseEmbeddedIfHost(mapFrame)
-                end
-            end
-            ScheduleMapBuffRefresh()
-        end)
-        mapFrame:HookScript("OnHide", function()
-            if LFGFrameTab.mapPins then
-                for _, p in ipairs(LFGFrameTab.mapPins) do
-                    p:Hide()
-                end
-            end
-        end)
-        mapFrame:HookScript("OnSizeChanged", ScheduleMapBuffRefresh)
-    end
-    local canvas = mapFrame.GetCanvas and mapFrame:GetCanvas()
-    if canvas and canvas.HookScript then
-        canvas:HookScript("OnSizeChanged", ScheduleMapBuffRefresh)
-    end
-    if hooksecurefunc then
-        if type(mapFrame.OnMapChanged) == "function" then
-            hooksecurefunc(mapFrame, "OnMapChanged", ScheduleMapBuffRefresh)
-        end
-        if type(mapFrame.SetMapID) == "function" then
-            hooksecurefunc(mapFrame, "SetMapID", ScheduleMapBuffRefresh)
-        end
-        if mapFrame.BorderFrame and mapFrame.BorderFrame.MaximizeMinimizeFrame then
-            local mm = mapFrame.BorderFrame.MaximizeMinimizeFrame
-            if type(mm.Maximize) == "function" then
-                hooksecurefunc(mm, "Maximize", ScheduleMapBuffRefresh)
-            end
-            if type(mm.Minimize) == "function" then
-                hooksecurefunc(mm, "Minimize", ScheduleMapBuffRefresh)
-            end
-        end
-    end
-
-    self.mapPill = pill
-    self:RefreshWorldMapBuffs()
-end
-
 local function OpenSocialUIModule(targetTab, fallbackToChatFrame, forceKeepOpen)
     local sf = _G.SocialUIFrame or _G.FriendsFrame
     if sf and sf.IsShown and sf:IsShown() then
@@ -10035,9 +9303,7 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local groupEmbedActive = (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(lfgHost)) == true
         local anyLfgEmbed = active or groupEmbedActive
         if shown or active then
-            local bd = (ns.Clan and ns.Clan.GetTrustedLFGBreakdown and ns.Clan:GetTrustedLFGBreakdown()) or nil
-            local lfgCount = (bd and bd.total) or 0
-            UpdateSideTabBadge(self.sideTab, active and 0 or lfgCount, "group")
+            UpdateSideTabBadge(self.sideTab, 0, "group")
             if shown then
                 self:UpdateNativeBridgeBar()
             end
@@ -10093,9 +9359,6 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         if shown and self.charTab:IsShown() then
             SyncRightSideTabHitboxAndLayer(charHost, self.charTab, DiscoverRightSideTabs(charHost, self.charTab, CHARACTER_NATIVE_TABS), 600)
         end
-    end
-    if self.mapPill and _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
-        self:RefreshWorldMapBuffs()
     end
 end
 
@@ -10583,21 +9846,6 @@ function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
         return
     end
 
-    if mod == "buffs" then
-        if _G.WorldMapFrame and _G.WorldMapFrame:IsShown() then
-            LFGFrameTab:AttachWorldMapButton()
-            LFGFrameTab:RefreshWorldMapBuffs()
-            if ns.UI and ns.UI.OpenEmbedded then
-                ns.UI:OpenEmbedded(_G.WorldMapFrame, { "buffs" }, "buffs", forceKeepOpen)
-                return
-            end
-        end
-        if ns.UI and ns.UI.ShowHub then
-            ns.UI:ShowHub("buffs")
-        end
-        return
-    end
-
     if ns.UI and ns.UI.ShowHub then
         ns.UI:ShowHub(moduleId)
     end
@@ -10610,6 +9858,16 @@ function LFGFrameTab:Init()
 
     local refreshQueued = false
     local syncEmbeddedQueued = false
+    local function IsAnyEmbeddedHostShown()
+        local lfgHost = _G.LFGParentFrame
+        local socialHost = _G.SocialUIFrame or _G.FriendsFrame
+        local guildHost = _G.CommunitiesFrame or _G.GuildFrame
+        local charHost = _G.CharacterFrame
+        return (lfgHost and lfgHost.IsShown and lfgHost:IsShown())
+            or (socialHost and socialHost.IsShown and socialHost:IsShown())
+            or (guildHost and guildHost.IsShown and guildHost:IsShown())
+            or (charHost and charHost.IsShown and charHost:IsShown())
+    end
     local function RunCoalescedRefresh()
         refreshQueued = false
         if _G.LFGParentFrame and _G.LFGParentFrame:IsShown() then
@@ -10617,6 +9875,8 @@ function LFGFrameTab:Init()
         end
         if LFGFrameTab.active and LFGFrameTab.subPanel and LFGFrameTab.subPanel:IsShown() then
             LFGFrameTab:RefreshData()
+        elseif IsAnyEmbeddedHostShown() then
+            LFGFrameTab:SyncAllEmbeddedTabStates()
         end
     end
     local function RefreshIfOpen()
@@ -10638,23 +9898,13 @@ function LFGFrameTab:Init()
     ns.RegisterEvent(self, "PARTY_LEADER_CHANGED", RefreshIfOpen)
     ns.RegisterEvent(self, "LFG_LIST_ACTIVE_ENTRY_UPDATE", RefreshIfOpen)
     local function SyncEmbeddedIfAnyHostShown()
-        local lfgHost = _G.LFGParentFrame
-        local socialHost = _G.SocialUIFrame or _G.FriendsFrame
-        local guildHost = _G.CommunitiesFrame or _G.GuildFrame
-        local charHost = _G.CharacterFrame
-        local mapHost = _G.WorldMapFrame
-        if (lfgHost and lfgHost.IsShown and lfgHost:IsShown())
-            or (socialHost and socialHost.IsShown and socialHost:IsShown())
-            or (guildHost and guildHost.IsShown and guildHost:IsShown())
-            or (charHost and charHost.IsShown and charHost:IsShown())
-            or (mapHost and mapHost.IsShown and mapHost:IsShown())
-        then
+        if IsAnyEmbeddedHostShown() then
             if C_Timer and C_Timer.After then
-                if syncEmbeddedQueued or refreshQueued then return end
+                if syncEmbeddedQueued then return end
                 syncEmbeddedQueued = true
                 C_Timer.After(0.14, function()
                     syncEmbeddedQueued = false
-                    if not refreshQueued then
+                    if IsAnyEmbeddedHostShown() then
                         LFGFrameTab:SyncAllEmbeddedTabStates()
                     end
                 end)
@@ -10670,20 +9920,20 @@ function LFGFrameTab:Init()
     ns:On("SOCIAL_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("WATCHLIST_UPDATED", SyncEmbeddedIfAnyHostShown)
     ns:On("ADDON_MESSAGE_NOTIFY", SyncEmbeddedIfAnyHostShown)
-    ns:On("WORLD_BUFFS_UPDATED", function()
-        if _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
-            LFGFrameTab:RefreshWorldMapBuffs()
-        end
-    end)
 
     local tryAttachPending = false
     local function TryAttachAll()
         tryAttachPending = false
+        if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+            if ns.RunAfterCombat then
+                ns:RunAfterCombat("lfg_try_attach_all", TryAttachAll)
+            end
+            return
+        end
         LFGFrameTab:AttachHooks()
         LFGFrameTab:AttachSocialUI()
         LFGFrameTab:AttachCommunitiesUI()
         LFGFrameTab:AttachCharacterUI()
-        LFGFrameTab:AttachWorldMapButton()
         LFGFrameTab:AttachChatButton()
         LFGFrameTab:AttachProfessionButton()
         if _G.LFGParentFrame and _G.LFGParentFrame.IsShown and _G.LFGParentFrame:IsShown() then
@@ -10697,9 +9947,6 @@ function LFGFrameTab:Init()
         end
         if _G.CharacterFrame and _G.CharacterFrame:IsShown() then
             LFGFrameTab:EnsureCharacterSideTab()
-        end
-        if _G.WorldMapFrame and _G.WorldMapFrame:IsShown() then
-            LFGFrameTab:RefreshWorldMapBuffs()
         end
     end
     local function QueueTryAttachAll()

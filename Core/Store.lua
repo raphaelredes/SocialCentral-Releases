@@ -1,6 +1,7 @@
 local _, ns = ...
 
 local Compat = ns.Compat
+local Safe = ns.Safe
 
 -- Unified social store bridging live Social rosters, Nearby passive sightings,
 -- Account Alts, and Watchlist entries.
@@ -52,6 +53,9 @@ function Store:InvalidateScopeCaches()
     self._clanScopeGuild = nil
     self._clanScopeCached = nil
     self._wlIndexDirty = true
+    if ns.Watchlist then
+        ns.Watchlist._wlIndexDirty = true
+    end
     self._socialFoldersCache = nil
     self._linkedAltsDirty = true
 end
@@ -558,7 +562,7 @@ end
 function Store:NotifyWatchlistOnline(entry, opts)
     if not entry then return false end
     if opts and opts.suppressAlert then return false end
-    if (ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false) or (Compat.IsFocusSilenced and Compat.IsFocusSilenced()) then
+    if (ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false) or (Compat.IsFocusSilenced and Compat.IsFocusSilenced(entry.id or entry.displayName)) then
         return false
     end
     local alerts = ns.db and ns.db.settings and ns.db.settings.alerts
@@ -617,6 +621,9 @@ end
 
 function Store:InvalidateWatchlistIndex()
     self._wlIndexDirty = true
+    if ns.Watchlist then
+        ns.Watchlist._wlIndexDirty = true
+    end
 end
 
 -- Cross-pollinate Watchlist rows whenever live Social or Nearby detects a watched player.
@@ -661,19 +668,32 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
     local directEntry = list[parsed.lookupKey]
     local idMatches = self._wlIdMatches and self._wlIdMatches[parsed.lookupKey]
     local firstMatches = firstLower and self._wlNoSurnameByFirst and self._wlNoSurnameByFirst[firstLower]
-    if not (directEntry and directEntry.id == parsed.lookupKey) and not idMatches and not firstMatches then
+    if not directEntry and not idMatches and not firstMatches then
         return
     end
 
     local now = time()
     local changed = false
     local keysToReindex
+    local reindexedTargets
+    local processedKeys = {}
+    local hasExactTarget = (directEntry ~= nil) or (type(idMatches) == "table" and #idMatches > 0)
 
     local function ApplyObservation(idKey, entry)
-        if type(entry) ~= "table" then return end
-        local exactMatch = entry.id == parsed.lookupKey
-        local firstMatch = firstLower and (not entry.surname) and entry.firstName and entry.firstName:lower() == firstLower
+        if type(entry) ~= "table" or processedKeys[idKey] then return end
+        processedKeys[idKey] = true
+        local exactMatch = (idKey == parsed.lookupKey) or (entry.id == parsed.lookupKey)
+        local firstMatch = firstLower and (not entry.surname or entry.surname == "") and entry.firstName and entry.firstName:lower() == firstLower
         if not (exactMatch or firstMatch) then return end
+        if not exactMatch then
+            -- Do not let a full-name sighting overwrite or duplicate a separate first-name-only entry when the full-name key already exists.
+            if parsed.surname and parsed.surname ~= "" and (hasExactTarget or list[parsed.lookupKey] ~= nil or (reindexedTargets and reindexedTargets[parsed.lookupKey])) then
+                return
+            end
+            if data.guid and data.guid ~= "" and entry.guid and entry.guid ~= "" and data.guid ~= entry.guid then
+                return
+            end
+        end
 
         local prevStatus = entry.status
         local obsOnline = data.online
@@ -711,18 +731,22 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
             entry.guid = data.guid
         end
         if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
-            if trustedSurnameSource then
+            local targetOccupied = (parsed.lookupKey ~= idKey)
+                and (list[parsed.lookupKey] ~= nil or (reindexedTargets and reindexedTargets[parsed.lookupKey]))
+            if trustedSurnameSource and not targetOccupied then
                 entry.firstName = parsed.firstName or entry.firstName
                 entry.surname = parsed.surname
                 entry.displayName = parsed.displayName
                 entry.observedCandidate = nil
                 entry.truncatedWarning = nil
-                self._wlIndexDirty = true
-                if parsed.lookupKey ~= idKey and not list[parsed.lookupKey] then
+                self:InvalidateWatchlistIndex()
+                if parsed.lookupKey ~= idKey then
+                    reindexedTargets = reindexedTargets or {}
+                    reindexedTargets[parsed.lookupKey] = true
                     keysToReindex = keysToReindex or {}
                     keysToReindex[#keysToReindex + 1] = { oldId = idKey, newId = parsed.lookupKey, entry = entry }
                 end
-            else
+            elseif not targetOccupied then
                 -- Passive nearby/chat sighting: suggest candidate without permanently hijacking FirstName-only entry.
                 entry.observedCandidate = parsed.displayName
             end
@@ -732,7 +756,7 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
             entry.firstName = parsed.firstName or entry.firstName
             entry.surname = parsed.surname or entry.surname
             entry.displayName = parsed.displayName
-            self._wlIndexDirty = true
+            self:InvalidateWatchlistIndex()
         end
         if obsOnline then
             local wasExpired = (entry._expiredOnline == true)
@@ -769,11 +793,15 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
 
     if keysToReindex then
         for _, item in ipairs(keysToReindex) do
-            item.entry.id = item.newId
-            list[item.newId] = item.entry
-            list[item.oldId] = nil
+            if not list[item.newId] or list[item.newId] == item.entry then
+                item.entry.id = item.newId
+                list[item.newId] = item.entry
+                if item.oldId ~= item.newId then
+                    list[item.oldId] = nil
+                end
+            end
         end
-        self._wlIndexDirty = true
+        self:InvalidateWatchlistIndex()
     end
 
     if changed then
@@ -860,6 +888,10 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
     end
     if patch.favorite ~= nil then
         rec.favorite = (patch.favorite == true) and true or nil
+        local wl = self:GetWatchlistTable()
+        if wl and type(wl[key]) == "table" then
+            wl[key].favorite = (patch.favorite == true) and true or false
+        end
     end
     if patch.notifyMuted ~= nil then
         rec.notifyMuted = (patch.notifyMuted == true) and true or nil
@@ -992,7 +1024,12 @@ function Store:SetAccountIgnore(rawNameOrKey, opts)
         local dur = tonumber(opts.durationSec) or 0
         expiresAt = (dur > 0) and (now + dur) or 0
     end
-    local hideChat = (opts.hideChat ~= nil) and (opts.hideChat == true) or (prev.hideChat ~= false)
+    local hideChat
+    if opts.hideChat ~= nil then
+        hideChat = (opts.hideChat == true)
+    else
+        hideChat = (prev.hideChat ~= false)
+    end
 
     tbl[key] = {
         name = cleanName,
@@ -1334,13 +1371,18 @@ function Store:IsSocialFavorite(rawNameOrKey)
         return true
     end
     local pres = self:GetFriendPresence(key)
-    return type(pres) == "table" and pres.favorite == true
+    if type(pres) == "table" and pres.favorite == true then
+        return true
+    end
+    local wl = self:GetWatchlistTable()
+    local w = wl and wl[key]
+    return type(w) == "table" and w.favorite == true
 end
 
-function Store:ToggleSocialFavorite(rawNameOrKey)
+function Store:SetSocialFavorite(rawNameOrKey, state)
     local key = NormalizeMetaKey(rawNameOrKey)
     if not key then return false end
-    local nextFav = not self:IsSocialFavorite(key)
+    local nextFav = (state == true)
     self:SetSocialMeta(key, { favorite = nextFav })
     local tbl = self:GetFriendPresenceTable()
     local rec = tbl[key]
@@ -1353,8 +1395,125 @@ function Store:ToggleSocialFavorite(rawNameOrKey)
             tbl[key] = rec
         end
     end
+    local wl = self:GetWatchlistTable()
+    if wl and type(wl[key]) == "table" then
+        wl[key].favorite = nextFav
+    end
     ns:Emit("SOCIAL_UPDATED")
+    ns:Emit("WATCHLIST_UPDATED")
+    ns:Emit("CHAT_UPDATED")
+    ns:Emit("NEARBY_UPDATED")
     return nextFav
+end
+
+function Store:ToggleSocialFavorite(rawNameOrKey)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return false end
+    return self:SetSocialFavorite(key, not self:IsSocialFavorite(key))
+end
+
+--- Reconcile and recover all legacy/cross-table favorites idempotently without losing user data across updates.
+function Store:MigrateLegacyFavorites()
+    if not ns.db then return 0 end
+    local curMeta = self:GetSocialMetaTable()
+    local curPres = self:GetFriendPresenceTable()
+    local curWl = self:GetWatchlistTable()
+    local recoveredKeys = {}
+    local recoveredMetaByNorm = {}
+
+    local function HarvestScopedTable(scopedTbl, captureMetaFields)
+        if type(scopedTbl) ~= "table" then return end
+        for rawKey, rec in pairs(scopedTbl) do
+            if type(rec) == "table" and rec.favorite == true then
+                local candidate = rec.fullName or rec.displayName or rec.id or rawKey
+                local normKey = (type(candidate) == "string" and not candidate:find("#", 1, true) and not candidate:find("|K", 1, true)) and NormalizeMetaKey(candidate) or nil
+                if normKey and normKey ~= "" then
+                    recoveredKeys[normKey] = true
+                    if captureMetaFields then
+                        local stash = recoveredMetaByNorm[normKey] or {}
+                        for _, fld in ipairs({ "folder", "flag", "nickname", "note", "mainName" }) do
+                            if (not stash[fld] or stash[fld] == "") and type(rec[fld]) == "string" and rec[fld] ~= "" then
+                                stash[fld] = rec[fld]
+                            end
+                        end
+                        if rec.notifyMuted == true then stash.notifyMuted = true end
+                        recoveredMetaByNorm[normKey] = stash
+                    end
+                end
+            end
+        end
+    end
+
+    HarvestScopedTable(curMeta, true)
+    HarvestScopedTable(curPres)
+    HarvestScopedTable(curWl)
+
+    for _, rootTbl in ipairs({ ns.db.socialMeta, ns.db.friendPresence, ns.db.watchlist }) do
+        if type(rootTbl) == "table" then
+            for rawKey, flatRec in pairs(rootTbl) do
+                if type(flatRec) == "table" and flatRec.favorite == true then
+                    local candidate = flatRec.fullName or flatRec.displayName or flatRec.id or rawKey
+                    local normKey = (type(candidate) == "string" and not candidate:find("#", 1, true) and not candidate:find("|K", 1, true)) and NormalizeMetaKey(candidate) or nil
+                    if normKey and normKey ~= "" then
+                        recoveredKeys[normKey] = true
+                    end
+                end
+            end
+        end
+    end
+
+    if type(ns.db.socialFavorites) == "table" then
+        local scope = Compat and Compat.ScopeKey and Compat.ScopeKey() or nil
+        local function HarvestBoolMap(tbl)
+            if type(tbl) ~= "table" then return end
+            for rawKey, val in pairs(tbl) do
+                if val == true and type(rawKey) == "string" and not rawKey:find("#", 1, true) and not rawKey:find("|K", 1, true) then
+                    local normKey = NormalizeMetaKey(rawKey)
+                    if normKey and normKey ~= "" then
+                        recoveredKeys[normKey] = true
+                    end
+                end
+            end
+        end
+        HarvestBoolMap(ns.db.socialFavorites)
+        if scope and type(ns.db.socialFavorites[scope]) == "table" then
+            HarvestBoolMap(ns.db.socialFavorites[scope])
+        end
+    end
+
+    local synced = 0
+    for normKey in pairs(recoveredKeys) do
+        local m = curMeta[normKey]
+        if type(m) ~= "table" then
+            m = { favorite = true }
+            curMeta[normKey] = m
+            synced = synced + 1
+        elseif m.favorite ~= true then
+            m.favorite = true
+            synced = synced + 1
+        end
+        local stash = recoveredMetaByNorm[normKey]
+        if type(stash) == "table" then
+            for _, fld in ipairs({ "folder", "flag", "nickname", "note", "mainName" }) do
+                if (not m[fld] or m[fld] == "") and stash[fld] then
+                    m[fld] = stash[fld]
+                end
+            end
+            if stash.notifyMuted == true and m.notifyMuted == nil then
+                m.notifyMuted = true
+            end
+        end
+        local p = curPres[normKey]
+        if type(p) ~= "table" then
+            curPres[normKey] = { favorite = true }
+        elseif p.favorite ~= true then
+            p.favorite = true
+        end
+        if type(curWl[normKey]) == "table" and curWl[normKey].favorite ~= true then
+            curWl[normKey].favorite = true
+        end
+    end
+    return synced
 end
 
 -- Session-only mute map for Battle.net accounts without a character name (never persisted to SavedVariables).
@@ -1537,10 +1696,15 @@ function Store:GetPlayerAffinityScore(rawNameOrKey, nowTs)
     end
     if ns.Chat and type(ns.Chat.threads) == "table" then
         local th = ns.Chat.threads["w:" .. key]
-        if type(th) == "table" and th.updatedAt and th.updatedAt > 0 then
-            local chatAgeHours = math.max(0, (now - th.updatedAt) / 3600)
-            local chatDecay = 1 / (1 + chatAgeHours * 0.08)
-            score = score + math.floor((60 * chatDecay) + 0.5)
+        if type(th) == "table" then
+            local rawLast = tonumber(th.lastAt)
+            local rawUpdated = tonumber(th.updatedAt)
+            local chatTs = (rawLast and rawLast > 0) and rawLast or ((rawUpdated and rawUpdated > 0) and rawUpdated or 0)
+            if chatTs > 0 then
+                local chatAgeHours = math.max(0, (now - chatTs) / 3600)
+                local chatDecay = 1 / (1 + chatAgeHours * 0.08)
+                score = score + math.floor((60 * chatDecay) + 0.5)
+            end
         end
     end
     return score

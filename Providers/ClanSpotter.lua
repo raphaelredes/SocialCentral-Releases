@@ -1731,6 +1731,17 @@ local function MigrateEntryStateKey(self, oldKey, newKey, entry)
             self.visibleUnits[uTok] = newKey
         end
     end
+    if self.lastAlert and self.lastAlert.key == oldKey then
+        self.lastAlert.key = newKey
+    end
+    if ns.SpotterHUD then
+        if ns.SpotterHUD.focusedKey == oldKey then
+            ns.SpotterHUD.focusedKey = newKey
+        end
+        if ns.SpotterHUD.interactionKey == oldKey then
+            ns.SpotterHUD.interactionKey = newKey
+        end
+    end
 end
 
 function Spotter:GetStanceLabel(stance)
@@ -2078,7 +2089,9 @@ local function TrimExcessTargets()
     end
 
     table.sort(list, function(a, b)
-        if a.onScreen ~= b.onScreen then return a.onScreen end
+        local aOn = (a.onScreen == true)
+        local bOn = (b.onScreen == true)
+        if aOn ~= bOn then return aOn end
         local pa = STANCE_PRIORITY[a.stance] or 9
         local pb = STANCE_PRIORITY[b.stance] or 9
         if pa ~= pb then return pa < pb end
@@ -2347,6 +2360,15 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
     local key = (pKey and pKey ~= "" and pKey) or NormalizeKeyPart(rawName)
     if not key or key == "" then return nil end
 
+    if trackedByGuid and trackedByGuid.key and trackedByGuid.key ~= key then
+        local trackedHasSurname = type(trackedByGuid.displayName) == "string" and trackedByGuid.displayName:find("%s") ~= nil
+        if pSurname or not trackedHasSurname then
+            MigrateEntryStateKey(self, trackedByGuid.key, key, self.entries[key] or trackedByGuid)
+        else
+            key = trackedByGuid.key
+        end
+    end
+
     local existingEntry = self.entries[key] or trackedByGuid
     local now = time()
     if skipCooldown then
@@ -2427,11 +2449,6 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
 
     if guid then
         bystanderCooldown[guid] = nil
-    end
-
-    -- Upgrade any earlier first-name-only sighting matching the same GUID cleanly in O(1).
-    if trackedByGuid and trackedByGuid.key and trackedByGuid.key ~= key then
-        MigrateEntryStateKey(self, trackedByGuid.key, key, existingEntry or trackedByGuid)
     end
 
     local displayName = pDisplayName or rawName
@@ -2544,7 +2561,7 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
 
     if (stance == "ENEMY" or stance == "BLOCKED" or stance == "WATCHLIST" or stance == "ALLY")
         and entry.surname and entry.surname ~= "" and entry.guid and not entry.dead
-        and (not IsInInstanceCached()) and (not IsCrowdMode())
+        and (not IsInInstanceFast()) and (not IsCrowdMode())
         and ns.Clan and ns.Clan.QueueCooperativeSighting then
         ns.Clan:QueueCooperativeSighting(entry.displayName, entry.guid, entry.level, entry.classFile, entry.guild, entry.zone)
     end
@@ -2610,11 +2627,44 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         return nil
     end
 
-    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanSender, true)
-    local bestFullName = (resolved and resolved.fullName) or cleanSender
+    local existingByGuid = cleanGuid and self.entryByGuid[cleanGuid] or nil
+    if existingByGuid and self.entries[existingByGuid.key] ~= existingByGuid then
+        existingByGuid = nil
+    end
+    local bestFullName = cleanSender
+    if not cleanSender:find("%s") then
+        if existingByGuid and type(existingByGuid.displayName) == "string" and existingByGuid.displayName:find("%s") then
+            bestFullName = existingByGuid.displayName
+        elseif cleanGuid and Compat.LookupForeverFullName then
+            local resolved = Compat.LookupForeverFullName(cleanGuid, fastFirst or cleanSender, false)
+            if resolved and resolved.fullName then
+                bestFullName = resolved.fullName
+            end
+        end
+    end
     local parsed = Compat.ParseCharacterName(bestFullName)
     local key = (parsed and parsed.lookupKey) or NormalizeKeyPart(bestFullName)
     if not key or key == "" then return nil end
+
+    local prevEntry = self.entries[key] or existingByGuid
+    local prevOldKey = prevEntry and prevEntry.key
+    if not prevEntry and cleanGuid then
+        for oldKey, oldEntry in pairs(self.entries) do
+            if oldEntry.guid == cleanGuid then
+                prevEntry = oldEntry
+                prevOldKey = oldEntry.key or oldKey
+                break
+            end
+        end
+    end
+    if prevEntry and prevOldKey and prevOldKey ~= key then
+        local prevHasSurname = type(prevEntry.displayName) == "string" and prevEntry.displayName:find("%s") ~= nil
+        if (parsed and parsed.surname) or not prevHasSurname then
+            MigrateEntryStateKey(self, prevOldKey, key, self.entries[key] or prevEntry)
+        else
+            key = prevOldKey
+        end
+    end
 
     local now = time()
     if (not self.manualTracked[key]) and (
@@ -2646,6 +2696,9 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     if (not gName or gName == "") and knownGuild and knownGuild ~= "" then
         gName = knownGuild
     end
+    if (not gName or gName == "") and prevEntry and prevEntry.guild and prevEntry.guild ~= "" then
+        gName = prevEntry.guild
+    end
     local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
     if gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) ~= myNormGuild then
         isMyGuildMember = false
@@ -2669,7 +2722,7 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
             if oldEntry.guid == cleanGuid then
                 entry = oldEntry
                 if oldKey ~= key then
-                    self.entries[oldKey] = nil
+                    MigrateEntryStateKey(self, oldKey, key, entry)
                 end
                 break
             end
@@ -2698,6 +2751,7 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     end
     entry.displayName = displayName
     entry.firstName = firstName
+    entry.surname = (parsed and parsed.surname) or entry.surname
     entry.unitName = entry.unitName or firstName
     entry.targetName = targetMacroName
     entry.guild = gName
@@ -2947,6 +3001,7 @@ function Spotter:ReclassifyActiveEntries()
                     if parsed and parsed.lookupKey ~= "" then
                         entry.displayName = parsed.displayName
                         entry.firstName = parsed.firstName
+                        entry.surname = parsed.surname or entry.surname
                         entry.targetName = SanitizeMacroTargetName(parsed.displayName, nil) or parsed.displayName
                         if parsed.lookupKey ~= key then
                             entry.key = parsed.lookupKey
@@ -3378,6 +3433,9 @@ local function ResolveManualTrackKey(rawName, guid)
         return nil, cleanName, cleanGuid
     end
     local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanName)
+    if (not resolved or not resolved.surname) and cleanGuid and Compat.LookupForeverFullName then
+        resolved = Compat.LookupForeverFullName(cleanGuid, cleanName, false) or resolved
+    end
     local bestFullName = (resolved and resolved.fullName) or cleanName
     local parsed = bestFullName and Compat.ParseCharacterName and Compat.ParseCharacterName(bestFullName)
     local key = (parsed and parsed.lookupKey) or (bestFullName and NormalizeKeyPart(bestFullName))
@@ -3431,6 +3489,9 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     end
 
     local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(nil, cleanGuid, cleanName)
+    if (not resolved or not resolved.surname) and cleanGuid and Compat.LookupForeverFullName then
+        resolved = Compat.LookupForeverFullName(cleanGuid, cleanName, false) or resolved
+    end
     local bestFullName = (resolved and resolved.fullName) or cleanName
     local parsed = bestFullName and Compat.ParseCharacterName and Compat.ParseCharacterName(bestFullName)
     local key = (parsed and parsed.lookupKey) or NormalizeKeyPart(bestFullName)
@@ -3502,6 +3563,7 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     end
     entry.displayName = displayName
     entry.firstName = firstName
+    entry.surname = (parsed and parsed.surname) or entry.surname
     entry.unitName = entry.unitName or firstName
     entry.targetName = targetMacroName
     entry.guild = gName or entry.guild
@@ -3541,7 +3603,9 @@ function Spotter:GetActiveTargets(filterStance)
         local aAlive = (a.dead ~= true)
         local bAlive = (b.dead ~= true)
         if aAlive ~= bAlive then return aAlive end
-        if a.onScreen ~= b.onScreen then return a.onScreen end
+        local aOn = (a.onScreen == true)
+        local bOn = (b.onScreen == true)
+        if aOn ~= bOn then return aOn end
         local pa = STANCE_PRIORITY[a.stance] or 9
         local pb = STANCE_PRIORITY[b.stance] or 9
         if pa ~= pb then return pa < pb end

@@ -22,3 +22,4 @@ ignore:
   - "*.cmd"
   - "*.sh"
   - "*.exe"
+  - "*.html"

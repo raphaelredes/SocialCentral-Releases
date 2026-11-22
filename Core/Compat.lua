@@ -332,16 +332,16 @@ function Compat.DetectWorldType(realmName, rawRealmName)
         combined = (Compat.Realm() .. " " .. rn):lower()
     end
     -- Check compound RP modes before generic PvP / PvE so "RP-PvE" never degrades into plain "PvE".
-    if combined:find("rppvp", 1, true) or combined:find("rp%-pvp", 1, true) or combined:find("rp pvp", 1, true) then
+    if combined:find("rppvp", 1, true) or combined:find("rp-pvp", 1, true) or combined:find("rp pvp", 1, true) then
         return "RP-PvP"
-    elseif combined:find("rppve", 1, true) or combined:find("rp%-pve", 1, true) or combined:find("rp pve", 1, true)
-        or combined:find("rpnormal", 1, true) or combined:find("rp%-normal", 1, true) or combined:find("rp normal", 1, true) then
+    elseif combined:find("rppve", 1, true) or combined:find("rp-pve", 1, true) or combined:find("rp pve", 1, true)
+        or combined:find("rpnormal", 1, true) or combined:find("rp-normal", 1, true) or combined:find("rp normal", 1, true) then
         return "RP-PvE"
     elseif combined:find("pve", 1, true) or combined:find("normal", 1, true) then
         return "PvE"
     elseif combined:find("pvp", 1, true) then
         return "PvP"
-    elseif combined:find("%f[%a]rp%f[%A]") then
+    elseif combined:find("%f[%a]rp%f[%A]") or combined:find("realmrp%f[%A]") then
         return "RP"
     end
     return nil
@@ -384,6 +384,7 @@ end
 function Compat.IsForeverShardLabel(label)
     if type(label) ~= "string" or label == "" then return false end
     local p = Plain(label)
+    if p == "" then return false end
     if p:match("^camwow%a*%d*realm%d*%a+$") then return true end
     if not LooksLikeServerRealm(label) then return false end
     local own = Compat.Realm()
@@ -438,6 +439,16 @@ function Compat.CleanInput(text)
     if type(text) ~= "string" then return nil end
     local cleaned = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h", ""):gsub("|h", "")
     cleaned = cleaned:gsub("[%c|]", " "):gsub("^%s*(.-)%s*$", "%1"):gsub("%s+", " ")
+    if cleaned == "" then return nil end
+    return cleaned
+end
+
+-- Sanitize user-entered official chat text while preserving native WoW item/spell/quest hyperlinks.
+function Compat.CleanChatMessage(text)
+    if type(text) ~= "string" then return nil end
+    if Safe and Safe.IsSecret and Safe.IsSecret(text) then return nil end
+    local cleaned = text:gsub("|Haddon:[^|]*|h(.-)|h", "%1")
+    cleaned = cleaned:gsub("[%c]+", " "):gsub("^%s*(.-)%s*$", "%1")
     if cleaned == "" then return nil end
     return cleaned
 end
@@ -557,11 +568,11 @@ end
 
 Compat.CapitalizeNameWord = CapitalizeNameWord
 
--- Strip trailing Forever shard suffixes and accidental duplicated "-Surname" tags
+-- Strip trailing Forever shard suffixes (hyphen- or space-separated) and accidental duplicated "-Surname" tags
 -- (e.g. "Francisco Camundongo-Camundongo" -> "Francisco Camundongo").
 local function StripForeverSuffixes(cleaned)
-    local head, tail = cleaned:match("^(.-)%-([^%-]+)$")
-    if head and tail and Compat.IsForeverShardLabel(tail) then
+    local head, tail = cleaned:match("^(.-)[%s%-]+([^%s%-]+)$")
+    if head and head ~= "" and tail and Compat.IsForeverShardLabel(tail) then
         cleaned = head
     end
     local f3, s3, t3 = cleaned:match("^([^%s%-]+)[%s%-]+([^%s%-]+)%-([^%s%-]+)$")
@@ -594,12 +605,10 @@ local function ParseCharInternal(raw)
     cleaned = StripForeverSuffixes(cleaned)
 
     local result
-    -- Forever characters use space-separated "FirstName Surname"; hyphenated "Name-Realm" tails strip shards only.
-    local first, sep, second = cleaned:match("^([^%s%-]+)([%s%-]+)([^%s%-]+)$")
+    -- Forever characters use space-separated "FirstName Surname"; strip trailing shard suffixes whether hyphen- or space-separated.
+    local first, _, second = cleaned:match("^([^%s%-]+)([%s%-]+)([^%s%-]+)$")
     if first and second then
-        local isHyphenShard = sep:find("-", 1, true) ~= nil and Compat.IsForeverShardLabel(second)
-        local isExplicitSpaceShard = Plain(second):match("^camwow%a*%d*realm%d*%a+$") ~= nil
-        if isHyphenShard or isExplicitSpaceShard then
+        if Compat.IsForeverShardLabel(second) then
             local capFirst = CapitalizeNameWord(first)
             result = {
                 firstName = capFirst,
@@ -674,17 +683,24 @@ local function ParseForeverInternal(raw)
     cleaned = StripForeverSuffixes(cleaned)
 
     local result
-    local first, sep, second = cleaned:match("^([^%s%-]+)([%s%-]+)([^%s%-]+)$")
-    local isHyphenShard = first and second and sep:find("-", 1, true) ~= nil and Compat.IsForeverShardLabel(second)
-    local isExplicitSpaceShard = first and second and Plain(second):match("^camwow%a*%d*realm%d*%a+$") ~= nil
-    if first and second and not isHyphenShard and not isExplicitSpaceShard then
-        local capFirst = CapitalizeNameWord(first)
-        local capSecond = CapitalizeNameWord(second)
-        result = {
-            firstName = capFirst,
-            surname = capSecond,
-            fullName = capFirst .. " " .. capSecond,
-        }
+    local first, _, second = cleaned:match("^([^%s%-]+)([%s%-]+)([^%s%-]+)$")
+    if first and second then
+        if Compat.IsForeverShardLabel(second) then
+            local capFirst = CapitalizeNameWord(first)
+            result = {
+                firstName = capFirst,
+                surname = nil,
+                fullName = capFirst,
+            }
+        else
+            local capFirst = CapitalizeNameWord(first)
+            local capSecond = CapitalizeNameWord(second)
+            result = {
+                firstName = capFirst,
+                surname = capSecond,
+                fullName = capFirst .. " " .. capSecond,
+            }
+        end
     else
         local single = cleaned:match("^([^%s%-]+)$") or cleaned
         local capSingle = CapitalizeNameWord(single)
@@ -804,7 +820,8 @@ local tooltipTitleMissAt = {}
 local foreverLookupMissAt = {}
 local foreverLookupMissCount = 0
 local GUID_CACHE_LIMIT = 400
-local lastRosterSyncAt = 0
+local ROSTER_SYNC_THROTTLE = 15
+local lastRosterSyncAt = nil
 local lastSyncedGuildTotal = -1
 local scanTooltip
 
@@ -860,7 +877,8 @@ local function ExtractForeverNameFromLine(lineText, firstName)
         local cur = tokens[i]
         local nxt = tokens[i + 1]
         if cur:lower() == firstLower and nxt and not nxt:match("^[<%[%(]") then
-            local cleanNext = nxt:match("^([^%-]+)$") or nxt
+            local cleanNext = nxt:gsub("[,;:%.!?]+$", "")
+            cleanNext = cleanNext:match("^([^%-]+)") or ""
             if cleanNext ~= "" and not Compat.IsForeverShardLabel(cleanNext) and not TITLE_PARTICLES[cleanNext:lower()] then
                 return {
                     firstName = cur,
@@ -905,13 +923,18 @@ local function IsLikelyTooltipMetaLine(lineText)
     local clean = Compat.CleanInput(lineText)
     if not clean then return true end
     local lower = clean:lower()
-    if lower:find("^level%s") or lower:find("^n[ií]vel%s") or lower:find("%slevel%s%d") or lower:find("%sn[ií]vel%s%d") then
+    if lower:find("^level%s") or lower:find("%slevel%s%d")
+        or lower:find("^nivel%s") or lower:find("%snivel%s%d")
+        or lower:find("^nível%s") or lower:find("%snível%s%d")
+        or lower:find("^nÍvel%s") or lower:find("%snÍvel%s%d") then
         return true
     end
     if LEVEL and type(LEVEL) == "string" and clean:find(LEVEL, 1, true) then
         return true
     end
-    if lower == "pvp" or lower == "jcj" or lower == "alliance" or lower == "horde" or lower == "aliança" or lower == "alianca" or lower == "horda" or lower == "alianza" then
+    if lower == "pvp" or lower == "jcj" or lower == "alliance" or lower == "horde"
+        or lower == "aliança" or lower == "alian\195\135a" or lower == "alianca"
+        or lower == "horda" or lower == "alianza" then
         return true
     end
     return false
@@ -1128,7 +1151,7 @@ function Compat.LookupForeverFullName(guid, firstName, allowRosterSync)
     if cleanGuid then
         local nowClock = (GetTime and GetTime()) or 0
         if allowRosterSync ~= false and (not foreverLookupMissAt[cleanGuid] or (nowClock - foreverLookupMissAt[cleanGuid]) >= 20) then
-            if (nowClock - lastRosterSyncAt) >= 15 and Compat.SyncRosterForeverNames then
+            if (not lastRosterSyncAt or (nowClock - lastRosterSyncAt) >= ROSTER_SYNC_THROTTLE) and Compat.SyncRosterForeverNames then
                 Compat.SyncRosterForeverNames()
             end
             if foreverNameByGuid[cleanGuid] then
@@ -1155,13 +1178,15 @@ end
 function Compat.SyncRosterForeverNames(force, friendsOnly)
     local nowClock = (GetTime and GetTime()) or 0
     local numGuild = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
-    if not force and not friendsOnly and lastRosterSyncAt > 0 and (nowClock - lastRosterSyncAt) < 30 and lastSyncedGuildTotal == numGuild then
+    if not force and not friendsOnly and lastRosterSyncAt and (nowClock - lastRosterSyncAt) < ROSTER_SYNC_THROTTLE and lastSyncedGuildTotal == numGuild then
         return
     end
-    lastRosterSyncAt = nowClock
-    lastSyncedGuildTotal = numGuild
-    wipe(foreverLookupMissAt)
-    foreverLookupMissCount = 0
+    if not friendsOnly then
+        lastRosterSyncAt = nowClock
+        lastSyncedGuildTotal = numGuild
+        wipe(foreverLookupMissAt)
+        foreverLookupMissCount = 0
+    end
 
     if not friendsOnly and numGuild > 0 and GetGuildRosterInfo then
         for i = 1, numGuild do
@@ -1198,6 +1223,7 @@ function Compat.SyncRosterForeverNames(force, friendsOnly)
                     local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
                     if cleanGuid then
                         foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
+                        foreverLookupMissAt[cleanGuid] = nil
                     end
                     if rec.firstName then
                         StoreFirstNameSurnameCandidate(rec.firstName:lower(), rec, cleanGuid)
@@ -1331,8 +1357,9 @@ function Compat.IsMe(rawName, guid)
     if not cachedMyGuid then
         cachedMyGuid = Safe.String(Safe.Call(UnitGUID, "player"))
     end
-    if cachedMyGuid and guid then
-        return guid == cachedMyGuid
+    local cleanGuid = Safe.String(guid)
+    if cachedMyGuid and cleanGuid then
+        return cleanGuid == cachedMyGuid
     end
     local parsed = ParseCharInternal(rawName)
     if not cachedMyName or cachedMyName == "Unknown" or not (cachedMyParsed and cachedMyParsed.surname) then
@@ -1530,7 +1557,7 @@ local function GetActiveEditableChatBox()
 end
 
 local function InsertDraftIntoActiveChatBox(draftText)
-    local draft = Compat.CleanInput(draftText)
+    local draft = (Compat.CleanChatMessage and Compat.CleanChatMessage(draftText)) or Compat.CleanInput(draftText)
     if not draft or draft == "" then return true end
     local eb = GetActiveEditableChatBox()
     if eb and eb.IsShown and eb:IsShown() and eb.Insert and eb.GetText then
@@ -1555,7 +1582,7 @@ function Compat.Whisper(target, draftText)
     local clean = Compat.FormatForeverTarget(target)
     if not clean then return false end
     local slashName = clean:gsub("%s+", "-")
-    local draft = Compat.CleanInput(draftText)
+    local draft = (Compat.CleanChatMessage and Compat.CleanChatMessage(draftText)) or Compat.CleanInput(draftText)
     local hasDraft = (draft and draft ~= "") and true or false
 
     if ChatFrameUtil and ChatFrameUtil.SendTell then
@@ -1879,15 +1906,18 @@ end
 
 function Compat.FormatMoney(copper)
     copper = tonumber(copper) or 0
-    local g = math.floor(copper / 10000)
-    local s = math.floor(copper / 100) % 100
-    local c = copper % 100
+    local neg = copper < 0
+    local abs = math.floor(math.abs(copper) + 0.5)
+    local g = math.floor(abs / 10000)
+    local s = math.floor(abs / 100) % 100
+    local c = abs % 100
+    local prefix = (neg and abs > 0) and "-" or ""
     if g > 0 then
-        return ("%dg %ds"):format(g, s)
+        return prefix .. ("%dg %ds"):format(g, s)
     elseif s > 0 then
-        return ("%ds %dc"):format(s, c)
+        return prefix .. ("%ds %dc"):format(s, c)
     end
-    return ("%dc"):format(c)
+    return prefix .. ("%dc"):format(c)
 end
 
 function Compat.FormatRelativeTime(timestamp, L)
@@ -2142,6 +2172,55 @@ function Compat.FactionIconMarkup(faction, size)
     return string.format("|TInterface\\TargetingFrame\\UI-PVP-Horde:%d:%d:0:0:64:64:5:37:3:37|t ", sz, sz)
 end
 
+function Compat.FavoriteStarMarkup(size)
+    local sz = tonumber(size) or 13
+    if sz < 8 then sz = 8 elseif sz > 32 then sz = 32 end
+    return string.format("|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_1:%d:%d:0:0|t ", sz, sz)
+end
+
+function Compat.BNetIconMarkup(size)
+    local sz = tonumber(size) or 14
+    if sz < 8 then sz = 8 elseif sz > 32 then sz = 32 end
+    return string.format("|TInterface\\ChatFrame\\UI-ChatIcon-BattleNet:%d:%d:0:0|t", sz, sz)
+end
+
+function Compat.AddonIconMarkup(verified, size)
+    local sz = tonumber(size) or 13
+    if sz < 8 then sz = 8 elseif sz > 32 then sz = 32 end
+    if verified == false then
+        return string.format("|TInterface\\AddOns\\SocialCentral\\Media\\icon:%d:%d:0:0:64:64:0:64:0:64:145:195:240|t", sz, sz)
+    end
+    return string.format("|TInterface\\AddOns\\SocialCentral\\Media\\icon:%d:%d:0:0|t", sz, sz)
+end
+
+function Compat.StatusIconMarkup(kind, size)
+    local sz = tonumber(size) or 13
+    if sz < 8 then sz = 8 elseif sz > 32 then sz = 32 end
+    local k = type(kind) == "string" and kind:upper() or ""
+    if k == "AFK" then
+        local tex = (type(FRIENDS_TEXTURE_AFK) == "string" and FRIENDS_TEXTURE_AFK ~= "") and FRIENDS_TEXTURE_AFK or "Interface\\FriendsFrame\\StatusIcon-Away"
+        return string.format("|T%s:%d:%d:0:0|t", tex, sz, sz)
+    elseif k == "DND" then
+        local tex = (type(FRIENDS_TEXTURE_DND) == "string" and FRIENDS_TEXTURE_DND ~= "") and FRIENDS_TEXTURE_DND or "Interface\\FriendsFrame\\StatusIcon-DnD"
+        return string.format("|T%s:%d:%d:0:0|t", tex, sz, sz)
+    elseif k == "GOOD" or k == "READY" then
+        return string.format("|TInterface\\RAIDFRAME\\ReadyCheck-Ready:%d:%d:0:0|t", sz, sz)
+    elseif k == "AVOID" or k == "NOTREADY" then
+        return string.format("|TInterface\\RAIDFRAME\\ReadyCheck-NotReady:%d:%d:0:0|t", sz, sz)
+    elseif k == "BLOCK" or k == "DEAD" then
+        return string.format("|TInterface\\TARGETINGFRAME\\UI-TargetingFrame-Skull:%d:%d:0:0|t", sz, sz)
+    elseif k == "LEADER" or k == "GROUP" then
+        return string.format("|TInterface\\GroupFrame\\UI-Group-LeaderIcon:%d:%d:0:0|t", sz, sz)
+    elseif k == "FRIEND" then
+        return string.format("|TInterface\\FriendsFrame\\UI-Toast-FriendOnlineIcon:%d:%d:0:0|t", sz, sz)
+    elseif k == "CHAT" then
+        return string.format("|TInterface\\ChatFrame\\UI-ChatIcon-Chat-Up:%d:%d:0:0|t", sz, sz)
+    elseif k == "WATCH" then
+        return string.format("|TInterface\\Icons\\INV_Misc_Spyglass_03:%d:%d:0:0:64:64:5:59:5:59|t", sz, sz)
+    end
+    return ""
+end
+
 function Compat.FactionFromRace(raceStrOrId)
     if type(raceStrOrId) == "number" then
         if C_CreatureInfo and C_CreatureInfo.GetFactionInfo then
@@ -2179,9 +2258,9 @@ function Compat.ResolveCharacterFaction(nameOrKey, guidHint, bnetAccountID)
         end
     end
 
-    local lookupKey, firstName
+    local lookupKey, firstName, _, surname
     if cleanName and cleanName ~= "" then
-        lookupKey, firstName = Compat.ParseCharacterFields(cleanName)
+        lookupKey, firstName, _, surname = Compat.ParseCharacterFields(cleanName)
     end
 
     local Store = ns.Store
@@ -2190,16 +2269,24 @@ function Compat.ResolveCharacterFaction(nameOrKey, guidHint, bnetAccountID)
         if type(altsTbl) == "table" then
             local curPool = Compat.RealmPool(Compat.Realm())
             local firstLow = firstName and firstName:lower() or nil
+            local surnameLow = (surname and surname ~= "") and surname:lower() or nil
             local altFacMatch, altFirstCount, altFirstFac = nil, 0, nil
             for _, alt in pairs(altsTbl) do
                 if type(alt) == "table" and alt.faction then
-                    local altPool = alt.realmPool and Compat.RealmPool(alt.realmPool) or curPool
+                    local altPool = (alt.realmName and Compat.RealmPool(alt.realmName))
+                        or (alt.realmPool and Compat.RealmPool(alt.realmPool))
+                        or curPool
                     if altPool == curPool then
-                        local altParsedKey, altFirst = Compat.ParseCharacterFields(alt.fullName or alt.name or "")
+                        local altParsedKey, altFirst, _, altSurname = Compat.ParseCharacterFields(alt.fullName or alt.name or "")
+                        if (not altSurname or altSurname == "") and type(alt.surname) == "string" and alt.surname ~= "" then
+                            altSurname = alt.surname
+                        end
+                        local altSurnameLow = (altSurname and altSurname ~= "") and altSurname:lower() or nil
+                        local surnameMismatch = surnameLow and altSurnameLow and (surnameLow ~= altSurnameLow)
                         if altParsedKey == lookupKey then
                             altFacMatch = alt.faction
                             break
-                        elseif firstLow and altFirst and altFirst:lower() == firstLow then
+                        elseif firstLow and altFirst and altFirst:lower() == firstLow and not surnameMismatch then
                             altFirstCount = altFirstCount + 1
                             altFirstFac = alt.faction
                         end
@@ -2300,7 +2387,7 @@ function Compat.IsWindowIntegrationEnabled(winKey)
     elseif winKey == "C" or winKey == "alts" or winKey == "character" then
         return not s or s.embedCharacterWindow ~= false
     elseif winKey == "M" or winKey == "buffs" or winKey == "map" then
-        return not s or s.embedWorldMap ~= false
+        return false
     elseif winKey == "chatframe" or winKey == "officialchat" then
         return not s or s.embedOfficialChat ~= false
     elseif winKey == "mail" or winKey == "sendmail" then
@@ -2327,7 +2414,7 @@ function Compat.IsModuleEnabled(modKey)
     elseif m == "alts" or m == "c" then
         return not s or s.embedCharacterWindow ~= false
     elseif m == "buffs" or m == "m" then
-        return not s or s.embedWorldMap ~= false
+        return false
     elseif m == "lfg" or m == "i" then
         return not s or s.embedLfgWindow ~= false
     elseif m == "clan" or m == "guild" or m == "diplomacy" or m == "j" then
@@ -2341,24 +2428,293 @@ function Compat.IsModuleEnabled(modKey)
     return true
 end
 
-function Compat.GetFocusSilenceReason()
+local focusWatcherHost = nil
+
+local function IsCurrentlyInInstance()
+    if not IsInInstance then return false, "none" end
+    local ok, inInst, instType = pcall(IsInInstance)
+    if ok and Safe and Safe.Value(inInst) == true then
+        local t = Safe.String(instType)
+        if t and t ~= "none" then
+            return true, t
+        end
+    end
+    return false, "none"
+end
+
+local function IsGamePlayerDnd()
+    if not UnitIsDND then return false end
+    local ok, isDnd = pcall(UnitIsDND, "player")
+    local v = ok and Safe and Safe.Value(isDnd)
+    return (v == true or v == 1) or false
+end
+
+local function EmitFocusEndedSummary()
+    local L = ns.L or {}
+    local unread = (ns.Chat and ns.Chat.GetTotalUnread) and ns.Chat:GetTotalUnread(false) or 0
+    if unread <= 0 then
+        return
+    end
+    local msgFmt = L["Focus Mode ended — you have %d unread messages."] or "Focus Mode ended — you have %d unread messages."
+    if ns.Print then
+        ns:Print("%s", msgFmt:format(unread))
+    end
+    if ns.Emit then
+        ns:Emit("ADDON_MESSAGE_NOTIFY", {
+            id = "focus_summary:" .. tostring(time()),
+            kind = "FOCUS_SUMMARY",
+            sourceTag = L["Focus Mode"] or "Focus Mode",
+            sender = L["Focus Mode Ended"] or "Focus Mode Ended",
+            text = (L["You have %d unread messages."] or "You have %d unread messages."):format(unread),
+            ts = time(),
+            priority = 2,
+        })
+    end
+end
+
+local function ScheduleTimedDndCheck(delaySec)
+    if not (C_Timer and C_Timer.After) then return end
+    Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
+    local gen = Compat._dndTimerGen
+    local waitSec = math.max(0.5, math.min(86400, tonumber(delaySec) or 1))
+    C_Timer.After(waitSec, function()
+        if Compat._dndTimerGen ~= gen then return end
+        if Compat.CheckExpiredDnd then
+            Compat.CheckExpiredDnd(true, false)
+        end
+    end)
+end
+
+function Compat.IsSenderFavorite(senderKeyOrName, bnetAccountID)
+    local Store = ns.Store
+    if not (Store and Store.IsSocialFavorite) then return false end
+    local bnId = bnetAccountID
+    local cleanSender = senderKeyOrName
+    if type(cleanSender) == "string" then
+        if cleanSender:sub(1, 2) == "w:" then
+            cleanSender = cleanSender:sub(3)
+        elseif cleanSender:sub(1, 3) == "bn:" then
+            bnId = bnId or tonumber(cleanSender:sub(4))
+            cleanSender = nil
+        elseif cleanSender:sub(1, 5) == "room:" or cleanSender:sub(1, 3) == "ch:" or cleanSender:sub(1, 9) == "mentions:" or cleanSender:sub(1, 6) == "notes:" then
+            cleanSender = nil
+        end
+    end
+    if cleanSender and cleanSender ~= "" then
+        if Store:IsSocialFavorite(cleanSender) then
+            return true
+        end
+        local lk = Compat.ParseCharacterFields and Compat.ParseCharacterFields(cleanSender) or nil
+        if lk and lk ~= "" and Store:IsSocialFavorite(lk) then
+            return true
+        end
+    end
+    if bnId and Store.socialDirectoryByKey then
+        local bRow = Store.socialDirectoryByKey["bnet:" .. tostring(bnId)]
+        if type(bRow) == "table" then
+            if bRow.favorite == true then
+                return true
+            end
+            local activeLk = bRow.lookupKey
+            if activeLk and activeLk ~= "" and Store:IsSocialFavorite(activeLk) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function Compat.OnFocusModeEnded()
+    EmitFocusEndedSummary()
+end
+
+function Compat.CheckExpiredDnd(scheduleTimerIfPending, deferEmit)
+    if Compat._checkingDnd then return false end
+    local s = ns.db and ns.db.settings
+    if not s or s.doNotDisturb ~= true then
+        return false
+    end
+    Compat._checkingDnd = true
+    local cleared = false
+    local now = time()
+    if type(s.dndUntil) == "number" and s.dndUntil > 0 then
+        if now >= s.dndUntil then
+            s.doNotDisturb = false
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
+            cleared = true
+        elseif scheduleTimerIfPending then
+            ScheduleTimedDndCheck((s.dndUntil - now) + 0.5)
+        end
+    end
+    if (not cleared) and s.dndUntilLeaveInstance == true then
+        local inInst = IsCurrentlyInInstance()
+        if inInst then
+            s.dndInstanceEntered = true
+        elseif s.dndInstanceEntered == true then
+            s.doNotDisturb = false
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
+            cleared = true
+        end
+    end
+    Compat._checkingDnd = nil
+    if cleared then
+        local stillSilenced = (s.syncGameDnd ~= false and IsGamePlayerDnd())
+            or (s.autoSilenceInInstances == true and IsCurrentlyInInstance())
+        if not stillSilenced then
+            Compat._lastGlobalFocusReason = nil
+        end
+        local function notifyCleared()
+            Compat._focusEndPending = nil
+            if not stillSilenced then
+                Compat.OnFocusModeEnded()
+            end
+            if IsInCombatNow() then
+                if ns.RunAfterCombat then
+                    ns:RunAfterCombat("focus_dnd_expired_sync", function()
+                        if ns.Emit then
+                            ns:Emit("SETTINGS_UPDATED")
+                        end
+                        if ns.Settings and ns.Settings.Refresh then
+                            ns.Settings:Refresh()
+                        end
+                    end)
+                end
+                return
+            end
+            if ns.Emit then
+                ns:Emit("SETTINGS_UPDATED")
+            end
+            if ns.Settings and ns.Settings.Refresh then
+                ns.Settings:Refresh()
+            end
+        end
+        if deferEmit and C_Timer and C_Timer.After then
+            if not Compat._focusEndPending then
+                Compat._focusEndPending = true
+                C_Timer.After(0, notifyCleared)
+            end
+        else
+            notifyCleared()
+        end
+    end
+    return cleared
+end
+
+function Compat.SetDoNotDisturb(state, durationSec, untilLeaveInstance)
+    local s = ns.db and ns.db.settings
+    if not s then return end
+    local prevReason = Compat.GetFocusSilenceReason()
+    local enable = (state == true)
+    s.doNotDisturb = enable
+    if enable then
+        if type(durationSec) == "number" and durationSec > 0 then
+            s.dndUntil = time() + math.floor(durationSec + 0.5)
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
+            ScheduleTimedDndCheck(durationSec + 0.5)
+        elseif untilLeaveInstance == true then
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = true
+            s.dndInstanceEntered = IsCurrentlyInInstance() and true or false
+            Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
+        else
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
+            Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
+        end
+    else
+        s.dndUntil = 0
+        s.dndUntilLeaveInstance = false
+        s.dndInstanceEntered = nil
+        Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
+    end
+    local curReason = Compat.GetFocusSilenceReason()
+    Compat._lastGlobalFocusReason = curReason
+    if prevReason ~= nil and curReason == nil then
+        Compat.OnFocusModeEnded()
+    end
+    if ns.Emit then
+        ns:Emit("SETTINGS_UPDATED")
+    end
+    if ns.Settings and ns.Settings.Refresh then
+        ns.Settings:Refresh()
+    end
+end
+
+function Compat.InitFocusWatcher()
+    Compat.CheckExpiredDnd(true, false)
+    Compat._lastGlobalFocusReason = Compat.GetFocusSilenceReason()
+    if not focusWatcherHost then
+        focusWatcherHost = {}
+        local function HandleFocusEnvChange(_, ev, unit)
+            if ev == "PLAYER_FLAGS_CHANGED" then
+                if Safe and Safe.IsSecret and Safe.IsSecret(unit) then return end
+                local u = (Safe and Safe.String) and Safe.String(unit) or nil
+                if u ~= "player" then return end
+            end
+            Compat.CheckExpiredDnd(true, false)
+            local curReason = Compat.GetFocusSilenceReason()
+            if curReason ~= Compat._lastGlobalFocusReason then
+                local prevReason = Compat._lastGlobalFocusReason
+                Compat._lastGlobalFocusReason = curReason
+                if prevReason ~= nil and curReason == nil then
+                    Compat.OnFocusModeEnded()
+                end
+                if IsInCombatNow() then
+                    if ns.RunAfterCombat then
+                        ns:RunAfterCombat("focus_env_settings_sync", function()
+                            if ns.Emit then
+                                ns:Emit("SETTINGS_UPDATED")
+                            end
+                            if ns.Settings and ns.Settings.Refresh then
+                                ns.Settings:Refresh()
+                            end
+                        end)
+                    end
+                    return
+                end
+                if ns.Emit then
+                    ns:Emit("SETTINGS_UPDATED")
+                end
+                if ns.Settings and ns.Settings.Refresh then
+                    ns.Settings:Refresh()
+                end
+            end
+        end
+        if ns.RegisterEvent then
+            ns.RegisterEvent(focusWatcherHost, "PLAYER_FLAGS_CHANGED", HandleFocusEnvChange)
+            ns.RegisterEvent(focusWatcherHost, "PLAYER_ENTERING_WORLD", HandleFocusEnvChange)
+            ns.RegisterEvent(focusWatcherHost, "ZONE_CHANGED_NEW_AREA", HandleFocusEnvChange)
+        end
+    end
+end
+
+function Compat.GetFocusSilenceReason(senderKeyOrName, bnetAccountID)
     local s = ns.db and ns.db.settings
     if not s then return nil end
+    Compat.CheckExpiredDnd(false, true)
+    if s.focusAllowFavorites ~= false and (senderKeyOrName or bnetAccountID) then
+        if Compat.IsSenderFavorite(senderKeyOrName, bnetAccountID) then
+            return nil
+        end
+    end
     if s.doNotDisturb == true then
         return "dnd"
     end
-    if s.autoSilenceInInstances == true and IsInInstance then
-        local ok, inInst, instType = pcall(IsInInstance)
-        if ok and Safe and Safe.Value(inInst) == true then
-            local t = Safe.String(instType)
-            if t and t ~= "none" then
-                return "instance"
-            end
-        end
+    if s.syncGameDnd ~= false and IsGamePlayerDnd() then
+        return "game_dnd"
+    end
+    if s.autoSilenceInInstances == true and IsCurrentlyInInstance() then
+        return "instance"
     end
     return nil
 end
 
-function Compat.IsFocusSilenced()
-    return Compat.GetFocusSilenceReason() ~= nil
+function Compat.IsFocusSilenced(senderKeyOrName, bnetAccountID)
+    return Compat.GetFocusSilenceReason(senderKeyOrName, bnetAccountID) ~= nil
 end

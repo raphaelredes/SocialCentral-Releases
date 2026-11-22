@@ -49,17 +49,14 @@ local HORDE_ZONE_TOKENS = {
     "silvermoon", "luaprata", "durotar", "mulgore", "tirisfal", "eversong", "canto eterno", "ghostlands", "terras fantasmas",
 }
 
-local function ResolveBNetFaction(g, areaName, lookupKey)
-    if lookupKey and bnetFactionByLookup[lookupKey] then
-        return bnetFactionByLookup[lookupKey]
-    end
+local function ResolveBNetFaction(g, areaName, lookupKey, allowCache)
     local rawFac = type(g) == "table" and Safe.String(g.factionName) or nil
     if rawFac and rawFac ~= "" then
         local low = rawFac:lower()
         if low == "alliance" or low:find("alian", 1, true) then
-            return "Alliance"
+            return "Alliance", true
         elseif low == "horde" or low:find("hord", 1, true) then
-            return "Horde"
+            return "Horde", true
         end
     end
     local raceId = type(g) == "table" and Safe.Number(g.raceID) or nil
@@ -67,29 +64,32 @@ local function ResolveBNetFaction(g, areaName, lookupKey)
         local fInfo = Safe.Call(C_CreatureInfo.GetFactionInfo, raceId)
         local fGroup = type(fInfo) == "table" and Safe.String(fInfo.groupTag) or nil
         if fGroup == "Alliance" or fGroup == "Horde" then
-            return fGroup
+            return fGroup, true
         end
+    end
+    if allowCache and lookupKey and bnetFactionByLookup[lookupKey] then
+        return bnetFactionByLookup[lookupKey], false
     end
     local raceName = type(g) == "table" and Safe.String(g.raceName) or nil
     if raceName and raceName ~= "" then
         local lowR = raceName:lower()
         for _, tok in ipairs(ALLIANCE_RACE_TOKENS) do
-            if lowR:find(tok, 1, true) then return "Alliance" end
+            if lowR:find(tok, 1, true) then return "Alliance", false end
         end
         for _, tok in ipairs(HORDE_RACE_TOKENS) do
-            if lowR:find(tok, 1, true) then return "Horde" end
+            if lowR:find(tok, 1, true) then return "Horde", false end
         end
     end
     if areaName and areaName ~= "" then
         local lowA = areaName:lower()
         for _, tok in ipairs(ALLIANCE_ZONE_TOKENS) do
-            if lowA:find(tok, 1, true) then return "Alliance" end
+            if lowA:find(tok, 1, true) then return "Alliance", false end
         end
         for _, tok in ipairs(HORDE_ZONE_TOKENS) do
-            if lowA:find(tok, 1, true) then return "Horde" end
+            if lowA:find(tok, 1, true) then return "Horde", false end
         end
     end
-    return nil
+    return nil, false
 end
 
 local presenceScratch = {}
@@ -152,6 +152,13 @@ local function FindMergeKey(ctx, preferredKey, guid, bnetAccountID, lookupKey, a
     return preferredKey
 end
 
+local BNET_STATE_RANK = {
+    wow_forever = 4,
+    wow_other = 3,
+    bnet_app = 2,
+    offline = 1,
+}
+
 local function MergeEntry(ctx, key, patch)
     local map = ctx.map
     local row = map[key]
@@ -162,9 +169,57 @@ local function MergeEntry(ctx, key, patch)
         }
         map[key] = row
     end
+    local incomingOnline = patch.online == true
     for k, v in pairs(patch) do
         if k == "sources" then
             for s in pairs(v) do row.sources[s] = true end
+        elseif k == "online" or k == "friendOnline" or k == "guildOnline" or k == "bnetOnline"
+            or k == "afk" or k == "dnd" or k == "samePool"
+        then
+            if v ~= nil then
+                row[k] = (row[k] == true) or (v == true)
+            end
+        elseif k == "sameFaction" then
+            if v ~= nil and row.sameFaction ~= true then
+                row.sameFaction = (v == true)
+            end
+        elseif k == "bnetState" then
+            if v ~= nil and v ~= "" then
+                local curRank = BNET_STATE_RANK[row.bnetState] or 0
+                local newRank = BNET_STATE_RANK[v] or 0
+                if newRank >= curRank then
+                    row.bnetState = v
+                end
+            end
+        elseif k == "lastSeen" then
+            local numV = tonumber(v)
+            if numV and numV > (tonumber(row.lastSeen) or 0) then
+                row.lastSeen = numV
+            end
+        elseif k == "level" then
+            local numV = tonumber(v)
+            if numV and (numV > 0 or (tonumber(row.level) or 0) <= 0) then
+                row.level = numV
+            end
+        elseif k == "area" then
+            if v ~= nil and v ~= "" then
+                if not (row.online == true and not incomingOnline and type(row.area) == "string" and row.area ~= "") then
+                    row.area = v
+                end
+            end
+        elseif k == "displayName" then
+            if v ~= nil and v ~= "" then
+                local existing = row.displayName
+                local keepExisting = type(existing) == "string" and existing ~= ""
+                    and ((patch.hasCharacterName == false) or (existing:find(" ", 1, true) and not tostring(v):find(" ", 1, true)))
+                if not keepExisting then
+                    row.displayName = v
+                end
+            end
+        elseif k == "hasCharacterName" then
+            if row.hasCharacterName ~= true and not (row.sources and (row.sources.friend or row.sources.guild)) then
+                row.hasCharacterName = (v == true)
+            end
         elseif v ~= nil and v ~= "" then
             row[k] = v
         end
@@ -604,8 +659,8 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                 local samePool = sameProject and ((not realmName) or Compat.IsForeverShardLabel(realmName))
                 local myEngFaction, myLocFaction = Compat.PlayerFaction()
                 local rawAreaForFac = type(g) == "table" and Safe.String(g.areaName) or ""
-                local cleanFaction = ResolveBNetFaction(g, rawAreaForFac, parsed and parsed.lookupKey)
-                if cleanFaction and parsed and parsed.lookupKey then
+                local cleanFaction, isAuthFaction = ResolveBNetFaction(g, rawAreaForFac, parsed and parsed.lookupKey, samePool)
+                if cleanFaction and isAuthFaction and samePool and parsed and parsed.lookupKey then
                     bnetFactionByLookup[parsed.lookupKey] = cleanFaction
                 end
                 local sameFaction = (not cleanFaction) or cleanFaction == myEngFaction or (myLocFaction ~= nil and cleanFaction == myLocFaction)
@@ -682,6 +737,9 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                     local prevActive = bRec.activeLookupKey
                     bRec.bnetName = accountName or bRec.bnetName
                     bRec.online = gOnline == true
+                    if bnetState == "wow_forever" or bnetState == "wow_other" then
+                        bRec.seenWoW = true
+                    end
                     if bnetState == "wow_forever" and parsed and parsed.lookupKey then
                         bRec.activeLookupKey = parsed.lookupKey
                         bRec.activeDisplayName = parsed.displayName
@@ -741,14 +799,11 @@ end
 
 local function IsRowWoWOnline(row)
     if not row then return false end
+    if row.friendOnline == true or row.guildOnline == true then
+        return true
+    end
     if row.bnetAccountID then
-        return row.bnetState == "wow_forever"
-    end
-    if row.friendOnline == true then
-        return true
-    end
-    if row.guildOnline == true then
-        return true
+        return row.online == true and row.bnetState == "wow_forever"
     end
     return row.online == true and (row.bnetState == "wow_forever" or (row.sources and (row.sources.friend or row.sources.guild)))
 end
@@ -757,12 +812,12 @@ local function CheckFriendOnlineTransitions(dirMap)
     local nextWow = {}
     local isGuildWatchFn = Store and Store.IsGuildLoginNotifyEnabled
     for _, row in pairs(dirMap) do
-        local isFriend = row.sources and (row.sources.friend or row.sources.bnet)
-        local isOptedGuild = row.sources and row.sources.guild and row.lookupKey and isGuildWatchFn and isGuildWatchFn(Store, row.lookupKey)
+        local isFriend = (row.sources and (row.sources.friend or row.sources.bnet)) == true
+        local isOptedGuild = (row.sources and row.sources.guild and row.lookupKey and isGuildWatchFn and isGuildWatchFn(Store, row.lookupKey)) == true
         if (isFriend or isOptedGuild) and IsRowWoWOnline(row) then
             local aKey = GetAlertTargetKey(row)
             if aKey then
-                local isFav = row.bnetFavorite == true or (row.lookupKey and Store.IsSocialFavorite and Store:IsSocialFavorite(row.lookupKey))
+                local isFav = (row.lookupKey and Store.IsSocialFavorite and Store:IsSocialFavorite(row.lookupKey)) == true
                 nextWow[aKey] = {
                     shownName = row.displayName or row.bnetName or "?",
                     classFile = row.classFile,
@@ -818,7 +873,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                     local didToast = false
                     local didChat = false
                     local didSound = false
-                    local focusSilenced = Compat.IsFocusSilenced and Compat.IsFocusSilenced()
+                    local focusSilenced = Compat.IsFocusSilenced and Compat.IsFocusSilenced(nextInfo.lookupKey or nextInfo.shownName, nextInfo.bnetAccountID)
                     if (not focusSilenced) and settings.friendOnlineAlertToast ~= false then
                         ns:Emit("ADDON_MESSAGE_NOTIFY", {
                             id = "friend:" .. aKey .. ":" .. tostring(now),
@@ -873,8 +928,8 @@ local function CheckFriendOnlineTransitions(dirMap)
             local classFile = type(oldInfo) == "table" and oldInfo.classFile or nil
             local lookupKey = type(oldInfo) == "table" and oldInfo.lookupKey or nil
             local bnetAccId = type(oldInfo) == "table" and oldInfo.bnetAccountID or nil
-            local isOptedGuild = type(oldInfo) == "table" and oldInfo.isOptedGuild or false
-            local isFriend = type(oldInfo) == "table" and oldInfo.isFriend or true
+            local isOptedGuild = type(oldInfo) == "table" and (oldInfo.isOptedGuild == true)
+            local isFriend = (type(oldInfo) ~= "table") or (oldInfo.isFriend == true)
             local isFav = type(oldInfo) == "table" and oldInfo.isFav or false
             local sources = type(oldInfo) == "table" and oldInfo.sources or nil
 
@@ -889,7 +944,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                         or (sources and sources.bnet and not (sources and sources.friend) and L["Battle.net"])
                         or L["Friend Offline"]
 
-                    local focusSilenced = Compat.IsFocusSilenced and Compat.IsFocusSilenced()
+                    local focusSilenced = Compat.IsFocusSilenced and Compat.IsFocusSilenced(lookupKey or shownName, bnetAccId)
                     if (not focusSilenced) and settings.friendOfflineAlertToast ~= false then
                         ns:Emit("ADDON_MESSAGE_NOTIFY", {
                             id = "friend:off:" .. oldKey .. ":" .. tostring(now),
@@ -905,7 +960,7 @@ local function CheckFriendOnlineTransitions(dirMap)
                             priority = 1,
                         })
                     end
-                    if settings.friendOfflineAlertChat == true then
+                    if (not focusSilenced) and settings.friendOfflineAlertChat == true then
                         local hex = Compat.ClassHex(classFile)
                         local link = "|Haddon:SCentral:social:" .. shownName .. "|h|cff59c7ff[" .. L["Social"] .. "]|r|h"
                         local lineText = L["%s disconnected %s"]:format(hex .. shownName .. "|r", link)
@@ -951,14 +1006,16 @@ local function BuildDirectoryStats(onlineMap, dirMap, inviteCount)
         if row.sources then
             if row.sources.friend then
                 stats.friendTotal = stats.friendTotal + 1
-                if row.online then stats.friendOnline = stats.friendOnline + 1 end
+                if row.friendOnline == true then stats.friendOnline = stats.friendOnline + 1 end
             end
             if row.sources.bnet then
                 stats.bnetTotal = stats.bnetTotal + 1
-                if row.bnetState == "wow_forever" then
-                    stats.bnetOnlineWoW = stats.bnetOnlineWoW + 1
-                elseif row.online then
-                    stats.bnetOnlineApp = stats.bnetOnlineApp + 1
+                if row.bnetOnline == true then
+                    if row.bnetState == "wow_forever" then
+                        stats.bnetOnlineWoW = stats.bnetOnlineWoW + 1
+                    else
+                        stats.bnetOnlineApp = stats.bnetOnlineApp + 1
+                    end
                 end
             end
         end
@@ -1063,7 +1120,12 @@ function Social:Scan()
         dirByKey[k] = row
         if row.lookupKey and row.lookupKey ~= "" then
             local prev = dirByLookup[row.lookupKey]
-            if not prev or (row.online and not prev.online) then
+            local rowForever = (row.samePool ~= false)
+            local prevForever = prev and (prev.samePool ~= false)
+            if not prev
+                or (rowForever and not prevForever)
+                or (rowForever == prevForever and row.online and not prev.online)
+            then
                 dirByLookup[row.lookupKey] = row
             end
         end
@@ -1156,6 +1218,51 @@ function Social:GetDirectoryStats()
         offlineTotal = 0,
         pendingBNetInvites = 0,
     }
+end
+
+local function CollectSavedFavoriteKeys(seenKeys)
+    if not Store or not Store.IsSocialFavorite then return end
+    local function ScanBucket(tbl)
+        if type(tbl) ~= "table" then return end
+        for rawKey, rec in pairs(tbl) do
+            if type(rawKey) == "string" and rawKey ~= "" and type(rec) == "table" and rec.favorite == true then
+                local cand = rec.fullName or rec.displayName or rec.id or rawKey
+                local parsed = (Compat and Compat.ParseCharacterName) and Compat.ParseCharacterName(cand) or nil
+                local normKey = (parsed and parsed.lookupKey) or (type(rawKey) == "string" and rawKey:lower()) or nil
+                if normKey and normKey ~= "" and not seenKeys[normKey] and Store:IsSocialFavorite(normKey) then
+                    seenKeys[normKey] = true
+                end
+            end
+        end
+    end
+    if Store.GetSocialMetaTable then ScanBucket(Store:GetSocialMetaTable()) end
+    if Store.GetFriendPresenceTable then ScanBucket(Store:GetFriendPresenceTable()) end
+    if Store.GetWatchlistTable then ScanBucket(Store:GetWatchlistTable()) end
+end
+
+function Social:GetFavoriteCount()
+    local seen = {}
+    local count = 0
+    for _, item in pairs(Store.socialDirectory or {}) do
+        local key = item and item.lookupKey
+        if key and not seen[key] and Store.IsSocialFavorite and Store:IsSocialFavorite(key) == true then
+            seen[key] = true
+            count = count + 1
+        end
+    end
+    local savedKeys = {}
+    CollectSavedFavoriteKeys(savedKeys)
+    for normKey in pairs(savedKeys) do
+        if not seen[normKey] then
+            local parsed = Compat and Compat.ParseCharacterName and Compat.ParseCharacterName(normKey) or nil
+            local disp = (parsed and parsed.displayName) or normKey
+            if not (Compat and Compat.IsMe and Compat.IsMe(disp)) then
+                seen[normKey] = true
+                count = count + 1
+            end
+        end
+    end
+    return count
 end
 
 --- Mark a Battle.net character as opposing faction when an in-game whisper fails while they are online on Battle.net.
@@ -1260,13 +1367,9 @@ local function ComputeSmartScore(item, meta, isFav, isSC, hasCompanion)
     local tier = 1
     if item.online then
         if item.bnetState == "wow_forever" or (item.sources and RowHasFriendOrGuild(item)) then
-            if isFav then
-                tier = 7
-            else
-                tier = 6
-            end
+            tier = isFav and 9 or 8
         elseif item.bnetState == "wow_other" then
-            tier = isFav and 5 or 4
+            tier = isFav and 7 or 6
         else
             tier = isFav and 5 or 4
         end
@@ -1323,18 +1426,55 @@ function Social:GetDirectoryList(opts)
         return out
     end
 
+    local function MatchesFolderFilter(meta)
+        if folderFilter == "__none" then
+            return not (meta and meta.folder and meta.folder ~= "")
+        elseif folderFilter ~= "all" then
+            return (meta and meta.folder == folderFilter) == true
+        end
+        return true
+    end
+
+    local function IsBNetFriendKnownWoWPlayer(item, isFav)
+        if not (item and item.sources and item.sources.bnet == true) then
+            return true
+        end
+        if item.sources.friend == true or item.sources.guild == true or isFav then
+            return true
+        end
+        if item.bnetState == "wow_forever" or item.bnetState == "wow_other" then
+            return true
+        end
+        local accId = item.bnetAccountID
+        local bRec = accId and bnetInfoByAccId[accId] or nil
+        if bRec and (bRec.seenWoW == true or (type(bRec.chars) == "table" and next(bRec.chars) ~= nil)) then
+            return true
+        end
+        local lk = item.lookupKey
+        if lk and lk ~= "" and Store then
+            if Store.GetFriendPresence and Store:GetFriendPresence(lk) then return true end
+            if Store.GetSocialMeta and Store:GetSocialMeta(lk) then return true end
+            local wl = Store.GetWatchlistTable and Store:GetWatchlistTable()
+            if wl and wl[lk] then return true end
+        end
+        return false
+    end
+
+    local emittedFavKeys = (srcFilter == "fav" or srcFilter == "all") and {} or nil
     for _, item in pairs(Store.socialDirectory or {}) do
         local key = item.lookupKey
         local meta = key and Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(key)
             or (key and Store.GetSocialMeta and Store:GetSocialMeta(key))
             or nil
-        local isFav = item.bnetFavorite == true or (key ~= nil and Store.IsSocialFavorite and Store:IsSocialFavorite(key))
+        local isFav = (key ~= nil and Store.IsSocialFavorite and Store:IsSocialFavorite(key)) == true
         local isSC = key ~= nil and hasChat and ns.Chat:IsLookupKeyVerified(key) == true
         local comp = key and Store.GetRecentCompanion and Store:GetRecentCompanion(key) or nil
 
         local srcMatch = false
-        if srcFilter == "all" then
-            srcMatch = item.online or showOffline
+        if not IsBNetFriendKnownWoWPlayer(item, isFav) then
+            srcMatch = false
+        elseif srcFilter == "all" then
+            srcMatch = isFav or item.online or showOffline
         elseif srcFilter == "online" then
             srcMatch = item.online == true
         elseif srcFilter == "offline" then
@@ -1346,7 +1486,7 @@ function Social:GetDirectoryList(opts)
         elseif srcFilter == "bnet" then
             srcMatch = item.sources and item.sources.bnet == true and (item.online or showOffline)
         elseif srcFilter == "fav" then
-            srcMatch = isFav and (item.online or showOffline)
+            srcMatch = isFav
         elseif srcFilter == "sc" then
             srcMatch = isSC and (item.online or showOffline)
         elseif srcFilter == "good" then
@@ -1355,16 +1495,55 @@ function Social:GetDirectoryList(opts)
             srcMatch = comp ~= nil
         end
 
-        local folderMatch = true
-        if folderFilter == "__none" then
-            folderMatch = not (meta and meta.folder and meta.folder ~= "")
-        elseif folderFilter ~= "all" then
-            folderMatch = (meta and meta.folder == folderFilter) == true
-        end
+        local folderMatch = MatchesFolderFilter(meta)
 
         if srcMatch and folderMatch then
             out[#out + 1] = item
             scoreMap[item] = ComputeSmartScore(item, meta, isFav, isSC, comp ~= nil)
+            if emittedFavKeys and key then
+                emittedFavKeys[key] = true
+            end
+        end
+    end
+
+    if (srcFilter == "fav" or srcFilter == "all") and Store then
+        local savedFavKeys = {}
+        CollectSavedFavoriteKeys(savedFavKeys)
+        local wlTbl = Store.GetWatchlistTable and Store:GetWatchlistTable() or {}
+        local presTbl = Store.GetFriendPresenceTable and Store:GetFriendPresenceTable() or {}
+        for normKey in pairs(savedFavKeys) do
+            if not emittedFavKeys[normKey] then
+                emittedFavKeys[normKey] = true
+                local wl = wlTbl[normKey]
+                local pres = presTbl[normKey]
+                local parsed = (Compat and Compat.ParseCharacterName) and Compat.ParseCharacterName(normKey) or nil
+                local disp = (wl and wl.displayName) or (parsed and parsed.displayName) or normKey
+                if not (Compat and Compat.IsMe and Compat.IsMe(disp, wl and wl.guid)) then
+                    local meta = (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(normKey))
+                        or (Store.GetSocialMeta and Store:GetSocialMeta(normKey))
+                        or nil
+                    if MatchesFolderFilter(meta) then
+                        local isSC = hasChat and ns.Chat:IsLookupKeyVerified(normKey) == true
+                        local comp = Store.GetRecentCompanion and Store:GetRecentCompanion(normKey) or nil
+                        local synth = {
+                            lookupKey = normKey,
+                            displayName = disp,
+                            classFile = (wl and wl.classFile) or (pres and pres.lastClass) or nil,
+                            level = (wl and wl.level) or (pres and pres.lastLevel) or 0,
+                            area = (wl and wl.area) or (pres and pres.lastArea) or "",
+                            guild = (wl and wl.guild) or nil,
+                            online = (wl and wl.status == "online") == true,
+                            lastSeen = (wl and wl.lastSeen) or (pres and pres.lastSeen) or (meta and meta.updatedAt) or 0,
+                            guid = wl and wl.guid or nil,
+                            hasCharacterName = true,
+                            samePool = true,
+                            sources = { watchlist = (wl ~= nil) or nil, saved = true },
+                        }
+                        out[#out + 1] = synth
+                        scoreMap[synth] = ComputeSmartScore(synth, meta, true, isSC, comp ~= nil)
+                    end
+                end
+            end
         end
     end
 

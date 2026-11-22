@@ -451,7 +451,8 @@ end
 
 local function EnsureWatchlistFastIndex(list)
     local idx = Watchlist._wlFastIndex
-    if Watchlist._wlIndexDirty or Watchlist._wlIndexedTbl ~= list or type(idx) ~= "table" then
+    local storeDirty = (Store and Store._wlIndexDirty) == true
+    if Watchlist._wlIndexDirty or storeDirty or Watchlist._wlIndexedTbl ~= list or type(idx) ~= "table" then
         idx = {}
         for _, e in pairs(list) do
             if type(e) == "table" then
@@ -461,7 +462,7 @@ local function EnsureWatchlistFastIndex(list)
                     local dl = e.displayName:lower()
                     if not idx[dl] then idx[dl] = e end
                 end
-                if e.firstName then
+                if e.firstName and (not e.surname or e.surname == "") then
                     local fl = e.firstName:lower()
                     if not idx[fl] then idx[fl] = e end
                 end
@@ -470,6 +471,11 @@ local function EnsureWatchlistFastIndex(list)
         Watchlist._wlFastIndex = idx
         Watchlist._wlIndexedTbl = list
         Watchlist._wlIndexDirty = false
+        if storeDirty and Store then
+            Store._wlIndexDirty = false
+            -- Clear Store's auxiliary table so SyncWatchlistObservation still rebuilds its own caches next pass.
+            Store._wlNoSurnameByFirst = nil
+        end
     end
     return idx
 end
@@ -485,13 +491,13 @@ function Watchlist:GetEntry(nameOrKey)
     local low = tostring(nameOrKey):lower()
     if list[low] then return list[low] end
     local idx = EnsureWatchlistFastIndex(list)
-    local hit = idx[low]
+    local hit = (parsed and parsed.lookupKey and idx[parsed.lookupKey]) or idx[low]
     if hit and hit.id and list[hit.id] == hit then
         return hit
     elseif hit then
         Watchlist._wlIndexDirty = true
         idx = EnsureWatchlistFastIndex(list)
-        local retry = idx[low]
+        local retry = (parsed and parsed.lookupKey and idx[parsed.lookupKey]) or idx[low]
         if retry and retry.id and list[retry.id] == retry then
             return retry
         end
@@ -531,8 +537,14 @@ function Watchlist:ToggleFavorite(id)
     local list = Store:GetWatchlistTable()
     local entry = list[id]
     if not entry then return false end
-    entry.favorite = not entry.favorite
-    ns:Emit("WATCHLIST_UPDATED")
+    local curFav = (entry.favorite == true) or (Store.IsSocialFavorite and Store:IsSocialFavorite(id) == true)
+    local nextFav = not curFav
+    entry.favorite = nextFav
+    if Store and Store.SetSocialFavorite then
+        Store:SetSocialFavorite(id, nextFav)
+    else
+        ns:Emit("WATCHLIST_UPDATED")
+    end
     return true
 end
 
@@ -627,7 +639,7 @@ function Watchlist:GetEntries(groupFilter, sortBy)
     for _, entry in pairs(list) do
         local include = true
         if groupFilter == "__fav" then
-            include = entry.favorite == true
+            include = (entry.favorite == true) or (Store.IsSocialFavorite and Store:IsSocialFavorite(entry.id) == true)
         elseif groupFilter and groupFilter ~= "all" then
             include = entry.group == groupFilter
         end
@@ -638,8 +650,8 @@ function Watchlist:GetEntries(groupFilter, sortBy)
 
     local mode = sortBy or (ns.db and ns.db.settings and ns.db.settings.sortBy) or "status"
     table.sort(out, function(a, b)
-        local favA = a.favorite and 1 or 0
-        local favB = b.favorite and 1 or 0
+        local favA = ((a.favorite == true) or (Store.IsSocialFavorite and Store:IsSocialFavorite(a.id) == true)) and 1 or 0
+        local favB = ((b.favorite == true) or (Store.IsSocialFavorite and Store:IsSocialFavorite(b.id) == true)) and 1 or 0
         if favA ~= favB then return favA > favB end
 
         if mode == "recent" then
@@ -673,7 +685,9 @@ end
 
 local function MatchEntry(entry, candidateParsed)
     if entry.id == candidateParsed.lookupKey then return true end
-    if not entry.surname and entry.firstName:lower() == candidateParsed.firstName:lower() then
+    if (not entry.surname or entry.surname == "") and entry.firstName and candidateParsed.firstName
+        and entry.firstName:lower() == candidateParsed.firstName:lower()
+    then
         return true
     end
     return false
@@ -1155,7 +1169,8 @@ local function ComputeWatchlistCheckPriority(entry, now)
         return -1
     end
     local dirRow = Store and Store.socialDirectoryByLookup and entry.id and Store.socialDirectoryByLookup[entry.id]
-    local isPassiveKnown = (socRow ~= nil) or (dirRow ~= nil and dirRow.online == true)
+    local isPassiveKnown = (socRow ~= nil)
+        or (dirRow ~= nil and dirRow.sources ~= nil and (dirRow.sources.friend == true or dirRow.sources.bnet == true or dirRow.sources.guild == true))
     local age = entry.lastChecked and math.max(0, now - entry.lastChecked) or 999999
     local isUnknown = (entry.status == "unknown")
     local isUnverifiedOnline = (entry.status == "online")
@@ -1170,7 +1185,7 @@ local function ComputeWatchlistCheckPriority(entry, now)
     local activePrior = 1.0 + (0.5 / (1 + (seenAge / 86400)))
     local passivePenalty = isPassiveKnown and 0.15 or 1.0
     local base = isUnknown and (1000000 + (entry._expiredOnline and 50000 or 0) + math.min(age, 86400))
-        or (isUnverifiedOnline and (50000 + math.min(age, 86400)) or age)
+        or (isUnverifiedOnline and (50000 + math.min(age, 86400)) or (math.min(age, 86400) * 0.2))
     return base * favMult * activePrior * passivePenalty
 end
 
@@ -1554,8 +1569,14 @@ local function RegisterUnitContextMenus()
 
         local curMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(parsed.lookupKey or parsed.displayName) or (Store.GetSocialMeta and Store:GetSocialMeta(parsed.displayName)))
         local existingEntry = Watchlist:GetEntry(parsed.displayName)
-        if existingEntry and parsed.surname and existingEntry.surname and existingEntry.surname:lower() ~= parsed.surname:lower() then
-            existingEntry = nil
+        if existingEntry then
+            local entryHasSur = existingEntry.surname and existingEntry.surname ~= ""
+            local targetHasSur = parsed.surname and parsed.surname ~= ""
+            if entryHasSur and targetHasSur and existingEntry.surname:lower() ~= parsed.surname:lower() then
+                existingEntry = nil
+            elseif (entryHasSur ~= targetHasSur) and not (existingEntry.guid and rawGuid and existingEntry.guid == rawGuid) then
+                existingEntry = nil
+            end
         end
         local isWatched = existingEntry ~= nil
 

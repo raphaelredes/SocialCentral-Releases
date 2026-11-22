@@ -15,6 +15,7 @@ local Toast = {
     framePool = {},
     activeItems = {},
     queue = {},
+    recentHistory = {},
     activeIndex = 1,
     tutorialDialog = nil,
     pendingTutorial = false,
@@ -29,6 +30,7 @@ local MAX_NAV_NUMS = 5
 local PAGE_SIZE = 5
 local MAX_VISIBLE_TOASTS = 1
 local MAX_QUEUE = 15
+local MAX_RECENT_HISTORY = 25
 local DEFAULT_TOAST_DURATION_SEC = 6.0
 
 local function GetConfiguredToastDuration()
@@ -86,6 +88,7 @@ local KIND_RGB = {
     WATCHLIST_ONLINE = { 0.40, 0.94, 0.48 },
     AVOID_ALERT      = { 1.00, 0.30, 0.30 },
     MENTION          = { 1.00, 0.80, 0.24 },
+    FOCUS_SUMMARY    = { 0.35, 0.78, 1.00 },
     VERSION_UPDATE   = { 1.00, 0.78, 0.20 },
 }
 
@@ -142,6 +145,39 @@ local function FormatCooldownKey(item)
         return item.threadKey
     end
     return tostring(item.kind or "MSG") .. ":" .. tostring(item.sender or "?")
+end
+
+local function RecordRecentNotification(item)
+    if type(item) ~= "table" or item.isTest then return end
+    if item.kind == "FOCUS_SUMMARY" then return end
+    local cKey = FormatCooldownKey(item)
+    local nowTs = item.ts or time()
+    for i, rec in ipairs(Toast.recentHistory) do
+        if rec.cKey == cKey then
+            rec.text = item.text or rec.text
+            rec.sender = item.sender or rec.sender
+            rec.senderClass = item.senderClass or rec.senderClass
+            rec.sourceTag = item.sourceTag or rec.sourceTag
+            rec.ts = nowTs
+            rec.coalescedCount = (rec.coalescedCount or 1) + 1
+            if i > 1 then
+                table.remove(Toast.recentHistory, i)
+                table.insert(Toast.recentHistory, 1, rec)
+            end
+            return
+        end
+    end
+    local copy = {}
+    for k, v in pairs(item) do
+        copy[k] = v
+    end
+    copy.cKey = cKey
+    copy.ts = nowTs
+    copy.coalescedCount = 1
+    table.insert(Toast.recentHistory, 1, copy)
+    while #Toast.recentHistory > MAX_RECENT_HISTORY do
+        table.remove(Toast.recentHistory, #Toast.recentHistory)
+    end
 end
 
 local function ApplyToastNavBarTheme(navBar, p)
@@ -261,10 +297,40 @@ local function NavigateForItem(item)
         if ns.NavigateToModule then
             ns:NavigateToModule("chat", { threadKey = item.threadKey or "mentions:radar" })
         end
+    elseif k == "FOCUS_SUMMARY" then
+        if ns.QuickReply and ns.QuickReply.OpenLatest and ns.QuickReply:OpenLatest() then
+            return
+        end
+        if ns.NavigateToModule then
+            ns:NavigateToModule("chat")
+        end
     else
+        local s = ns.db and ns.db.settings
+        local qrEnabled = (not s) or s.quickReplyEnabled ~= false
+        if qrEnabled and item.threadKey and ns.QuickReply and ns.QuickReply.OpenThread and ns.QuickReply:OpenThread(item.threadKey, true) then
+            return
+        end
         if ns.NavigateToModule then
             ns:NavigateToModule("chat", { threadKey = item.threadKey })
         end
+    end
+end
+
+function Toast:RecordRecentItem(item)
+    RecordRecentNotification(item)
+end
+
+function Toast:GetRecentHistory()
+    return self.recentHistory
+end
+
+function Toast:ClearRecentHistory()
+    wipe(self.recentHistory)
+end
+
+function Toast:ActivateHistoryItem(item)
+    if item then
+        NavigateForItem(item)
     end
 end
 
@@ -319,6 +385,11 @@ local function EnsureAnchorFrame()
             key = "notification_toast",
             anchor = "TOP",
             combatLock = false,
+            onStop = function()
+                if Toast.LayoutStack then
+                    Toast:LayoutStack()
+                end
+            end,
             onReset = function(win)
                 PositionToastAnchorBelowChat(win)
                 if Toast.LayoutStack then
@@ -333,6 +404,68 @@ local function EnsureAnchorFrame()
 
     Toast.anchorFrame = anchor
     return anchor
+end
+
+local function RemoveActiveToastAt(i)
+    local curIdx = Toast.activeIndex or 1
+    local removedActive = (i == curIdx)
+    table.remove(Toast.activeItems, i)
+    if i < curIdx then
+        Toast.activeIndex = math.max(1, curIdx - 1)
+    elseif curIdx > #Toast.activeItems then
+        Toast.activeIndex = math.max(1, #Toast.activeItems)
+    end
+    return removedActive
+end
+
+local function PruneActiveToasts(predicateFn)
+    local removedAny = false
+    local removedActive = false
+    for i = #Toast.activeItems, 1, -1 do
+        local cur = Toast.activeItems[i]
+        if predicateFn(cur) then
+            if Toast.confirmPopup and Toast.confirmPopup:IsShown() and Toast.confirmPopup._targetItem == cur then
+                Toast.confirmPopup:Hide()
+            end
+            if RemoveActiveToastAt(i) then
+                removedActive = true
+            end
+            removedAny = true
+        end
+    end
+    return removedAny, removedActive
+end
+
+local function DrainToastQueueAndResetElapsed(removedActive)
+    while #Toast.queue > 0 and #Toast.activeItems < MAX_QUEUE do
+        local nextItem = table.remove(Toast.queue, 1)
+        table.insert(Toast.activeItems, nextItem)
+    end
+    if removedActive then
+        local nextActive = Toast.activeItems[Toast.activeIndex or 1]
+        if nextActive then
+            nextActive.elapsed = 0
+        end
+    end
+end
+
+local function PrepareToastDragStart(f)
+    if GameTooltip and GameTooltip.GetOwner and GameTooltip:GetOwner() == f then
+        GameTooltip:Hide()
+    end
+    local anchor = Toast.anchorFrame
+    if not (f and anchor) then return end
+    local _, relTo = f:GetPoint(1)
+    if relTo ~= anchor then
+        local fx = f.GetCenter and f:GetCenter() or nil
+        local fTop = f.GetTop and f:GetTop() or nil
+        if fx and fTop and UIParent then
+            anchor:ClearAllPoints()
+            anchor:SetPoint("TOP", UIParent, "BOTTOMLEFT", fx, fTop)
+        end
+        f:ClearAllPoints()
+        f:SetPoint("TOP", anchor, "TOP", 0, 0)
+    end
 end
 
 local function SelectToastIndex(idx)
@@ -478,6 +611,10 @@ local function BuildToastNavBar(f)
     countFs:SetPoint("RIGHT", navBar, "RIGHT", -4, 0)
     countFs:SetJustifyH("RIGHT")
     navBar.countFs = countFs
+
+    navBar:HookScript("OnDragStart", function()
+        PrepareToastDragStart(f)
+    end)
 
     if Theme and Theme.AttachDragHandle and Toast.anchorFrame then
         Theme:AttachDragHandle(navBar, Toast.anchorFrame)
@@ -941,9 +1078,7 @@ function Toast:EnsureFrame(index)
     end)
 
     f:HookScript("OnDragStart", function(self)
-        if GameTooltip and GameTooltip.GetOwner and GameTooltip:GetOwner() == self then
-            GameTooltip:Hide()
-        end
+        PrepareToastDragStart(self)
     end)
 
     -- Attach drag handle so dragging ANY toast moves the whole stack together
@@ -1035,7 +1170,9 @@ local function RenderItemOnFrame(f, item, showNav)
         f.closeBtn:ClearAllPoints()
         f.closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -4)
     end
+    local canMuteItem = (item.kind ~= "FOCUS_SUMMARY")
     if f.muteNotifBtn then
+        f.muteNotifBtn:SetShown(canMuteItem)
         f.muteNotifBtn:ClearAllPoints()
         if showNav then
             f.muteNotifBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -(6 + navOffset))
@@ -1045,7 +1182,13 @@ local function RenderItemOnFrame(f, item, showNav)
     end
     if f.markReadBtn then
         f.markReadBtn:ClearAllPoints()
-        f.markReadBtn:SetPoint("RIGHT", f.muteNotifBtn, "LEFT", -3, 0)
+        if canMuteItem and f.muteNotifBtn then
+            f.markReadBtn:SetPoint("RIGHT", f.muteNotifBtn, "LEFT", -3, 0)
+        elseif showNav then
+            f.markReadBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -(6 + navOffset))
+        else
+            f.markReadBtn:SetPoint("RIGHT", f.closeBtn, "LEFT", -3, 0)
+        end
     end
 
     local showQuickRead = (not hasActionRow) and item.threadKey and item.threadKey ~= "" and ns.Chat and ns.Chat.MarkThreadRead
@@ -1060,7 +1203,7 @@ local function RenderItemOnFrame(f, item, showNav)
         f.queueLbl:Hide()
     end
 
-    local rightPad = showNav and -29 or -51
+    local rightPad = showNav and (canMuteItem and -29 or -8) or (canMuteItem and -51 or -29)
     if showQuickRead then rightPad = rightPad - 27 end
     f.titleLbl:ClearAllPoints()
     f.titleLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -(8 + navOffset))
@@ -1352,8 +1495,10 @@ function Toast:LayoutStack()
     local hudRef = (_G.SocialCentralSpotterFrame and _G.SocialCentralSpotterFrame.IsShown and _G.SocialCentralSpotterFrame:IsShown() and _G.SocialCentralSpotterFrame)
         or (_G.SocialCentralSpotterCombatArrow and _G.SocialCentralSpotterCombatArrow.IsShown and _G.SocialCentralSpotterCombatArrow:IsShown() and _G.SocialCentralSpotterCombatArrow)
         or nil
+    local isDragging = self.anchorFrame and self.anchorFrame._scDragging == true
+    local hasCustomPos = HasSavedCustomToastPosition()
     local shouldAnchorToHud = false
-    if hudRef and self.anchorFrame and self.anchorFrame.GetCenter and hudRef.GetCenter then
+    if not isDragging and not hasCustomPos and hudRef and self.anchorFrame and self.anchorFrame.GetCenter and hudRef.GetCenter then
         local ax, ay = self.anchorFrame:GetCenter()
         local hx, hy = hudRef:GetCenter()
         if ax and hx and ay and hy and math.abs(ax - hx) < (TOAST_WIDTH * 0.85) and math.abs(ay - hy) < 96 then
@@ -1372,6 +1517,32 @@ function Toast:LayoutStack()
 
     local activeIdx = self.activeIndex or 1
     local item = self.activeItems[activeIdx]
+    local inCombat = ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) == true
+    local sCfg = ns.db and ns.db.settings
+    local silenceCombat = (not sCfg) or sCfg.msgPreviewSilenceCombat ~= false
+    if inCombat and silenceCombat then
+        if item and item.kind ~= "AVOID_ALERT" then
+            local avoidIdx = nil
+            for i = 1, totalCount do
+                local it = self.activeItems[i]
+                if it and it.kind == "AVOID_ALERT" then
+                    avoidIdx = i
+                    break
+                end
+            end
+            if avoidIdx then
+                activeIdx = avoidIdx
+                self.activeIndex = avoidIdx
+                item = self.activeItems[avoidIdx]
+            else
+                f:Hide()
+                if self.anchorFrame then
+                    self.anchorFrame:SetScript("OnUpdate", nil)
+                end
+                return
+            end
+        end
+    end
     local showNav = totalCount > 1
 
     f:ClearAllPoints()
@@ -1436,18 +1607,16 @@ function Toast:LayoutStack()
             local remainingFrac = math.max(0, 1 - (it.elapsed / totalDur))
 
             if card:IsShown() and card.progressFill then
-                card.progressFill:SetWidth(math.max(1, (TOAST_WIDTH - 8) * remainingFrac))
+                local newW = math.max(1, (TOAST_WIDTH - 8) * remainingFrac)
+                if card._lastProgressW ~= newW then
+                    card._lastProgressW = newW
+                    card.progressFill:SetWidth(newW)
+                end
             end
 
             if it.elapsed >= totalDur then
-                table.remove(Toast.activeItems, idx)
-                if idx > #Toast.activeItems then
-                    Toast.activeIndex = math.max(1, #Toast.activeItems)
-                end
-                local nextActive = Toast.activeItems[Toast.activeIndex]
-                if nextActive then
-                    nextActive.elapsed = 0
-                end
+                local removedActive = RemoveActiveToastAt(idx)
+                DrainToastQueueAndResetElapsed(removedActive)
                 Toast:LayoutStack()
             end
         end
@@ -1472,11 +1641,8 @@ local function DescribeDisableTarget(item)
                 table.remove(Toast.queue, i)
             end
         end
-        for i = #Toast.activeItems, 1, -1 do
-            if kindMatchesFn(Toast.activeItems[i]) then
-                table.remove(Toast.activeItems, i)
-            end
-        end
+        local _, removedActive = PruneActiveToasts(kindMatchesFn)
+        DrainToastQueueAndResetElapsed(removedActive)
         Toast:SortActiveItems()
         Toast:LayoutStack()
         ns:Print("|cff9da7b5%s|r %s", label, L["disabled. Re-enable anytime in Settings -> Notifications."])
@@ -1746,14 +1912,29 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         local dndBtn = Theme:CreateButton(pop, 264, 20, L["Pause All (Do Not Disturb)"], "default")
         dndBtn:SetPoint("BOTTOMLEFT", 12, 10)
         dndBtn:SetPoint("BOTTOMRIGHT", -12, 10)
-        dndBtn:SetScript("OnClick", function()
-            pop:Hide()
-            if ns.db and ns.db.settings then
-                ns.db.settings.doNotDisturb = true
+        dndBtn:SetScript("OnClick", function(selfBtn)
+            local function activateDnd(durSec, untilLeave)
+                pop:Hide()
+                if Compat and Compat.SetDoNotDisturb then
+                    Compat.SetDoNotDisturb(true, durSec, untilLeave)
+                elseif ns.db and ns.db.settings then
+                    ns.db.settings.doNotDisturb = true
+                    ns:Emit("SETTINGS_UPDATED")
+                    if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
+                end
+                ns:Print("%s", L["Do Not Disturb active — popups & chimes paused."])
             end
-            ns:Emit("SETTINGS_UPDATED")
-            if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
-            ns:Print("%s", L["Do Not Disturb active — popups & chimes paused."])
+            if MenuUtil and MenuUtil.CreateContextMenu then
+                MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+                    root:CreateTitle(L["Do Not Disturb"])
+                    root:CreateButton(L["For 30 minutes"], function() activateDnd(1800, false) end)
+                    root:CreateButton(L["For 1 hour"], function() activateDnd(3600, false) end)
+                    root:CreateButton(L["Until leaving instance"], function() activateDnd(nil, true) end)
+                    root:CreateButton(L["Until I turn it off"], function() activateDnd(nil, false) end)
+                end)
+            else
+                activateDnd(nil, false)
+            end
         end)
         pop.dndBtn = dndBtn
 
@@ -1795,10 +1976,6 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
     pop.cancelBtn:ClearAllPoints()
     pop.cancelBtn:SetPoint("BOTTOMRIGHT", -12, 10 + extraBottom)
 
-    pop.subLbl:SetText(("|cffffd24d%s|r\n|cffd2d9e4%s|r"):format(spec.label or "", spec.desc or ""))
-    local textH = (pop.subLbl.GetStringHeight and pop.subLbl:GetStringHeight()) or 32
-    pop:SetHeight(math.max(108 + extraBottom, math.ceil(36 + textH + 44 + extraBottom)))
-
     pop.confirmBtn:SetScript("OnClick", function()
         pop:Hide()
         if spec.disableFn then
@@ -1829,6 +2006,10 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         pop:SetWidth(288)
     end
 
+    pop.subLbl:SetText(("|cffffd24d%s|r\n|cffd2d9e4%s|r"):format(spec.label or "", spec.desc or ""))
+    local textH = (pop.subLbl.GetStringHeight and pop.subLbl:GetStringHeight()) or 32
+    pop:SetHeight(math.max(108 + extraBottom, math.ceil(36 + textH + 44 + extraBottom)))
+
     pop:ClearAllPoints()
     local ref = (anchorToast and anchorToast.IsShown and anchorToast:IsShown() and anchorToast) or self.anchorFrame
     if ref and ref.GetCenter and UIParent and UIParent.GetWidth then
@@ -1855,25 +2036,15 @@ function Toast:DismissItem(item)
     if self.confirmPopup and self.confirmPopup:IsShown() and self.confirmPopup._targetItem == item then
         self.confirmPopup:Hide()
     end
+    local removedActive = false
     for i, it in ipairs(self.activeItems) do
         if it == item or (it.id and it.id == item.id) then
-            table.remove(self.activeItems, i)
-            if (self.activeIndex or 1) > #self.activeItems then
-                self.activeIndex = math.max(1, #self.activeItems)
-            end
+            removedActive = RemoveActiveToastAt(i)
             break
         end
     end
 
-    while #self.queue > 0 and #self.activeItems < MAX_QUEUE do
-        local nextItem = table.remove(self.queue, 1)
-        table.insert(self.activeItems, nextItem)
-    end
-
-    local nextActive = self.activeItems[self.activeIndex or 1]
-    if nextActive then
-        nextActive.elapsed = 0
-    end
+    DrainToastQueueAndResetElapsed(removedActive)
 
     self:LayoutStack()
 end
@@ -1893,7 +2064,9 @@ function Toast:PushNotification(item)
     if type(item) ~= "table" then return end
     local s = ns.db and ns.db.settings
     local itemId = type(item.id) == "string" and item.id or ""
-    if item.kind ~= "AVOID_ALERT" and Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced() then
+    if item.kind ~= "AVOID_ALERT" and item.kind ~= "FOCUS_SUMMARY" and not item.isTest
+        and Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced(item.lookupKey or item.sender, item.bnetAccountID)
+    then
         return
     end
     if item.kind == "FRIEND_ONLINE" then
@@ -1945,6 +2118,19 @@ function Toast:PushNotification(item)
         if s and s.versionCheck == false then
             return
         end
+    elseif item.kind == "FOCUS_SUMMARY" then
+        -- Focus Mode end summary appears once when Focus Mode ends.
+    elseif item.kind == "MENTION" then
+        if s and (s.moduleChatEnabled == false or s.mentionAlertsEnabled == false) then
+            return
+        end
+    elseif item.kind == "RMI" then
+        if s and s.moduleChatEnabled == false then
+            return
+        end
+        if s and s.addonMsgTaskbarFlash ~= false and (item.priority or 1) >= 2 and FlashClientIcon then
+            pcall(FlashClientIcon)
+        end
     else
         if s and s.moduleChatEnabled == false then
             return
@@ -1952,10 +2138,12 @@ function Toast:PushNotification(item)
         if s and s.addonMsgTaskbarFlash ~= false and (item.priority or 1) >= 2 and FlashClientIcon then
             pcall(FlashClientIcon)
         end
-        if s and s.addonMsgToast == false then
+        if not item.isTest and not (s and s.addonMsgToast == true) then
             return
         end
     end
+
+    RecordRecentNotification(item)
 
     local cKey = FormatCooldownKey(item)
 
@@ -1996,9 +2184,19 @@ function Toast:PushNotification(item)
         table.insert(self.activeItems, entry)
         if #self.activeItems == 1 then
             self.activeIndex = 1
+        elseif entry.kind == "AVOID_ALERT" then
+            self.activeIndex = #self.activeItems
         end
     else
-        self.activeItems[#self.activeItems] = entry
+        if #self.queue < MAX_QUEUE then
+            table.insert(self.queue, entry)
+        else
+            self.queue[#self.queue] = entry
+        end
+        if entry.kind == "AVOID_ALERT" then
+            self.activeItems[#self.activeItems] = entry
+            self.activeIndex = #self.activeItems
+        end
     end
     self:LayoutStack()
 end
@@ -2031,6 +2229,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Dungeon & Raid Social"],
             priority = 2,
             totalDuration = cfgDur,
+            isTest = true,
         })
     elseif v == "friend" then
         self:PushNotification({
@@ -2042,6 +2241,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Online"],
             priority = 1,
             totalDuration = cfgDur,
+            isTest = true,
         })
     elseif v == "offline" then
         self:PushNotification({
@@ -2053,6 +2253,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Disconnected"],
             priority = 1,
             totalDuration = cfgDur,
+            isTest = true,
         })
     elseif v == "avoid" then
         self:PushNotification({
@@ -2064,6 +2265,7 @@ function Toast:ShowTestNotification(variant)
             text = L["In your group! Flagged as Avoid."],
             priority = 2,
             totalDuration = cfgDur,
+            isTest = true,
         })
     elseif v == "watchlist" then
         self:PushNotification({
@@ -2075,6 +2277,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Online"],
             priority = 2,
             totalDuration = cfgDur,
+            isTest = true,
         })
     elseif v == "buff" or v == "buffs" then
         self:PushNotification({
@@ -2086,6 +2289,7 @@ function Toast:ShowTestNotification(variant)
             text = "~15s",
             priority = 2,
             totalDuration = cfgDur,
+            isTest = true,
         })
     elseif v == "queue" or v == "multi" or v == "stack" or v == "page" then
         wipe(self.queue)
@@ -2100,6 +2304,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Sample addon notification toast — drag anywhere to reposition!"],
             priority = 2,
             totalDuration = cfgDur,
+            isTest = true,
         })
         self:PushNotification({
             id = "test:invite:" .. tostring(now),
@@ -2111,6 +2316,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Dungeon & Raid Social"],
             priority = 2,
             totalDuration = cfgDur,
+            isTest = true,
         })
         self:PushNotification({
             id = "test:friend:" .. tostring(now),
@@ -2121,6 +2327,7 @@ function Toast:ShowTestNotification(variant)
             text = L["Online"],
             priority = 1,
             totalDuration = cfgDur,
+            isTest = true,
         })
     else
         self:PushNotification({
@@ -2133,6 +2340,7 @@ function Toast:ShowTestNotification(variant)
             threadKey = ns.Chat and ns.Chat.activeThreadKey or nil,
             priority = 2,
             totalDuration = cfgDur,
+            isTest = true,
         })
     end
 
@@ -2161,18 +2369,11 @@ function Toast:Init()
                 table.remove(Toast.queue, i)
             end
         end
-        local changed = false
-        for i = #Toast.activeItems, 1, -1 do
-            local it = Toast.activeItems[i]
-            if it and type(it.id) == "string" and it.id:sub(1, pLen) == prefix then
-                table.remove(Toast.activeItems, i)
-                changed = true
-            end
-        end
+        local changed, removedActive = PruneActiveToasts(function(it)
+            return it and type(it.id) == "string" and it.id:sub(1, pLen) == prefix
+        end)
         if changed then
-            while #Toast.queue > 0 and #Toast.activeItems < MAX_QUEUE do
-                table.insert(Toast.activeItems, table.remove(Toast.queue, 1))
-            end
+            DrainToastQueueAndResetElapsed(removedActive)
             Toast:LayoutStack()
         end
     end)
@@ -2194,39 +2395,34 @@ function Toast:Init()
                 table.remove(Toast.queue, i)
             end
         end
-        local changed = false
-        for i = #Toast.activeItems, 1, -1 do
-            local cur = Toast.activeItems[i]
-            if Matches(cur) then
-                if Toast.confirmPopup and Toast.confirmPopup:IsShown() and Toast.confirmPopup._targetItem == cur then
-                    Toast.confirmPopup:Hide()
-                end
-                table.remove(Toast.activeItems, i)
-                changed = true
-            end
-        end
+        local changed, removedActive = PruneActiveToasts(Matches)
         if changed then
+            DrainToastQueueAndResetElapsed(removedActive)
             Toast:LayoutStack()
         end
     end)
 
     ns:On("CHAT_UPDATED", function()
         -- Automatically dismiss any active toast if the player opened and read that exact thread elsewhere.
-        for i = #Toast.activeItems, 1, -1 do
-            local cur = Toast.activeItems[i]
-            if cur and cur.threadKey and ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible(cur.threadKey) then
-                Toast:DismissItem(cur)
-            end
+        local changed, removedActive = PruneActiveToasts(function(cur)
+            return cur and cur.threadKey and ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible(cur.threadKey)
+        end)
+        if changed then
+            DrainToastQueueAndResetElapsed(removedActive)
+            Toast:LayoutStack()
         end
     end)
 
     local function PruneForSettingsOrInstance()
         local s = ns.db and ns.db.settings
         if not s then return end
-        local focusSil = Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced()
         local function ShouldPrune(it)
             if not it then return false end
-            if focusSil and it.kind ~= "AVOID_ALERT" then return true end
+            if it.kind ~= "AVOID_ALERT" and it.kind ~= "FOCUS_SUMMARY" and not it.isTest
+                and Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced(it.lookupKey or it.sender, it.bnetAccountID)
+            then
+                return true
+            end
             if it.kind == "WORLDBUFF" and s.embedWorldMap == false then return true end
             if it.kind == "WATCHLIST_ONLINE" and s.moduleWatchlistEnabled == false then return true end
             if (it.kind == "DIRECT" or it.kind == "ROOM" or it.kind == "RMI" or it.kind == "ALLIANCE") and s.moduleChatEnabled == false then return true end
@@ -2239,17 +2435,9 @@ function Toast:Init()
         for i = #Toast.queue, 1, -1 do
             if ShouldPrune(Toast.queue[i]) then table.remove(Toast.queue, i) end
         end
-        local changed = false
-        for i = #Toast.activeItems, 1, -1 do
-            if ShouldPrune(Toast.activeItems[i]) then
-                table.remove(Toast.activeItems, i)
-                changed = true
-            end
-        end
+        local changed, removedActive = PruneActiveToasts(ShouldPrune)
         if changed then
-            while #Toast.queue > 0 and #Toast.activeItems < MAX_QUEUE do
-                table.insert(Toast.activeItems, table.remove(Toast.queue, 1))
-            end
+            DrainToastQueueAndResetElapsed(removedActive)
             Toast:LayoutStack()
         end
     end
@@ -2271,9 +2459,21 @@ function Toast:Init()
         PruneForSettingsOrInstance()
         if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
     end)
+    ns.RegisterEvent(self, "PLAYER_REGEN_DISABLED", function()
+        if Toast.confirmPopup and Toast.confirmPopup:IsShown() then
+            Toast.confirmPopup:Hide()
+        end
+        local sCfg = ns.db and ns.db.settings
+        if (not sCfg or sCfg.msgPreviewSilenceCombat ~= false) and #Toast.activeItems > 0 then
+            Toast:LayoutStack()
+        end
+    end)
     ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
         if Toast.pendingTutorial then
             Toast:ShowTutorialIfNeeded()
+        end
+        if #Toast.activeItems > 0 then
+            Toast:LayoutStack()
         end
     end)
 

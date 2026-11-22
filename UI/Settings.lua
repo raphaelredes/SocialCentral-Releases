@@ -161,12 +161,23 @@ function Search.SetBuildContext(tabId, tabLabel, tabOrder)
     Search.pendingMeta = nil
 end
 
-function Search.SetPendingMeta(title, helpTitle, helpWhat, helpHow)
+function Search.SetPendingMeta(title, helpTitle, helpWhat, helpHow, extraKeywords)
+    if type(title) == "table" then
+        Search.pendingMeta = {
+            title = title.title,
+            helpTitle = title.helpTitle,
+            description = title.description or title.helpWhat,
+            howText = title.howText or title.helpHow,
+            extraKeywords = title.extraKeywords or title.keywords,
+        }
+        return
+    end
     Search.pendingMeta = {
         title = title,
         helpTitle = helpTitle,
         description = helpWhat,
         howText = helpHow,
+        extraKeywords = extraKeywords,
     }
 end
 
@@ -195,7 +206,7 @@ function Search.Register(spec)
         step = spec.step,
         actionLabel = spec.actionLabel,
         onTrigger = spec.onTrigger,
-        extraKeywords = spec.extraKeywords or "",
+        extraKeywords = spec.extraKeywords or spec.keywords or "",
     }
     local optLabels = {}
     if type(entry.options) == "table" then
@@ -231,6 +242,7 @@ function Search.IsEntryModuleEnabled(entry)
     elseif modKey == "nearby" then return s.moduleNearbyEnabled ~= false
     elseif modKey == "chat" then return s.moduleChatEnabled ~= false
     elseif modKey == "officialChat" then return s.embedOfficialChat ~= false
+    elseif modKey == "group" then return s.moduleGroupEnabled ~= false
     end
     return true
 end
@@ -878,6 +890,17 @@ local function SetWidgetEnabled(w, enabled)
         if w._clearBtn and w._clearBtn.SetEnabled then
             w._clearBtn:SetEnabled(on)
         end
+        if w._scClearBtn and w._scClearBtn.SetEnabled then
+            w._scClearBtn:SetEnabled(on)
+        end
+    end
+    if type(w._scButtons) == "table" then
+        for _, item in ipairs(w._scButtons) do
+            local btn = item and item.btn
+            if btn and btn.SetEnabled then
+                btn:SetEnabled(on)
+            end
+        end
     end
     if w._scMinus and w._scMinus.SetEnabled then
         w._scMinus:SetEnabled(on)
@@ -1118,6 +1141,10 @@ local function CreateCheckbox(parent, labelText, anchorTo, yOffset, getter, sett
         cb:SetChecked(getter() and true or false)
     end
 
+    local pendingKw = (Search.pendingMeta and (Search.pendingMeta.extraKeywords or Search.pendingMeta.keywords)) or ""
+    if Search.pendingMeta and Search.pendingMeta.title == nil then
+        Search.pendingMeta = nil
+    end
     Search.Register({
         kind = "checkbox",
         title = labelText,
@@ -1127,6 +1154,7 @@ local function CreateCheckbox(parent, labelText, anchorTo, yOffset, getter, sett
         helpTitle = helpTitle,
         description = helpWhat,
         howText = helpHow,
+        extraKeywords = pendingKw,
     })
     return cb
 end
@@ -1152,6 +1180,8 @@ local function CreateChoiceRow(parent, anchorTo, yOffset, options, getter, sette
         end)
         buttons[#buttons + 1] = { btn = btn, value = opt.value }
     end
+
+    row._scButtons = buttons
 
     local function ReflowChoiceRow()
         local maxW = math.max(320, (parent:GetWidth() or 590) - 34)
@@ -1193,6 +1223,7 @@ local function CreateChoiceRow(parent, anchorTo, yOffset, options, getter, sette
         helpTitle = meta and meta.helpTitle or choiceTitle,
         description = meta and meta.description or "",
         howText = meta and meta.howText or "",
+        extraKeywords = meta and meta.extraKeywords or "",
     })
     return row
 end
@@ -1260,6 +1291,7 @@ local function CreateStepperRow(parent, anchorTo, yOffset, minVal, maxVal, unit,
         helpTitle = meta and meta.helpTitle or stepTitle,
         description = meta and meta.description or "",
         howText = meta and meta.howText or "",
+        extraKeywords = meta and meta.extraKeywords or "",
     })
     return row
 end
@@ -1296,10 +1328,11 @@ local function CollectDisabledNotificationNames()
     local focusReason = Compat and Compat.GetFocusSilenceReason and Compat.GetFocusSilenceReason()
     if focusReason == "dnd" then
         out[#out + 1] = L["Do Not Disturb (Active)"]
+    elseif focusReason == "game_dnd" then
+        out[#out + 1] = L["WoW /dnd (Busy)"]
     elseif focusReason == "instance" then
         out[#out + 1] = L["Silenced in Instance"]
     end
-    local wbOn = s.embedWorldMap ~= false
     local guildOn = (not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled("J")
     local watchOn = s.moduleWatchlistEnabled ~= false
     local chatOn = s.moduleChatEnabled ~= false
@@ -1307,12 +1340,9 @@ local function CollectDisabledNotificationNames()
     if s.friendOnlineAlertToast == false then out[#out + 1] = L["Friend Online Alerts"] end
     if s.friendOfflineAlertToast == false then out[#out + 1] = L["Friend Offline Alerts"] end
     if watchOn and s.alerts and s.alerts.toast == false then out[#out + 1] = L["Watchlist Online Alerts"] end
-    if chatOn and s.addonMsgToast == false then out[#out + 1] = L["Floating Message Popups"] end
     if chatOn and s.msgPreviewEnabled == false then out[#out + 1] = L["Minimap Message Previews"] end
     if chatOn and s.mentionAlertsEnabled == false then out[#out + 1] = L["Mentions & Keywords Radar"] end
     if chatOn and s.chatSound == false then out[#out + 1] = L["Chat Sounds (Master)"] end
-    if wbOn and s.worldBuffsAlerts == false then out[#out + 1] = L["World Buff Drop Alerts"] end
-    if wbOn and s.worldBuffsExpiryAlert == false then out[#out + 1] = L["World Buff Expiry Warning"] end
     if guildOn and s.clanLfgAlertEnabled == false then out[#out + 1] = L["Clan Dungeon Alerts"] end
     if guildOn and s.clanSignupAlertEnabled == false then out[#out + 1] = L["Guild Signup Alerts"] end
     if guildOn and s.clanEventReminders == false then out[#out + 1] = L["Guild Event Reminders"] end
@@ -1328,7 +1358,6 @@ local function GetActivePresetMode()
         and s.embedLfgWindow ~= false
         and s.embedGuildWindow ~= false
         and s.embedCharacterWindow ~= false
-        and s.embedWorldMap ~= false
         and s.spotterEnabled ~= false
         and s.moduleWatchlistEnabled ~= false
         and s.moduleNearbyEnabled ~= false
@@ -1341,7 +1370,6 @@ local function GetActivePresetMode()
         and s.embedLfgWindow == false
         and s.embedGuildWindow == false
         and s.embedCharacterWindow ~= false
-        and s.embedWorldMap == false
         and s.spotterEnabled == false
         and s.moduleWatchlistEnabled ~= false
         and s.moduleNearbyEnabled ~= false
@@ -1354,7 +1382,6 @@ local function GetActivePresetMode()
         and s.embedLfgWindow == false
         and s.embedGuildWindow == false
         and s.embedCharacterWindow ~= false
-        and s.embedWorldMap == false
         and s.spotterEnabled == false
         and s.moduleWatchlistEnabled == false
         and s.moduleNearbyEnabled == false
@@ -1632,6 +1659,9 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.moduleChatEnabled = true
             s.moduleGroupEnabled = true
             s.doNotDisturb = false
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
         elseif mode == "social" then
             s.embedSocialWindow = true
             s.embedLfgWindow = false
@@ -1649,6 +1679,9 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.moduleChatEnabled = true
             s.moduleGroupEnabled = false
             s.doNotDisturb = false
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
         elseif mode == "ultralight" then
             s.embedSocialWindow = false
             s.embedLfgWindow = false
@@ -1667,6 +1700,9 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.moduleChatEnabled = true
             s.moduleGroupEnabled = false
             s.doNotDisturb = true
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
         end
         NotifySettingChanged("CLAN_UPDATED")
         ns:Emit("WORLD_BUFFS_UPDATED")
@@ -1778,16 +1814,8 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Attaches the My Alts side-tab (gold vault, equipped items, bags, and bank search) inside Blizzard's Character (C) window."],
         L["Uncheck to disable the My Alts module, bag/bank snapshots, and alt item tooltip counts completely."]
     )
-    local embMapCb = CreateGridCheckbox(
-        winLeft, embCharCb, -4, L["World Buffs on Map (M)"],
-        function() return not ns.db or not ns.db.settings or ns.db.settings.embedWorldMap ~= false end,
-        function(checked) ns.db.settings.embedWorldMap = checked; NotifySettingChanged("WORLD_BUFFS_UPDATED") end,
-        L["Help: Integrate World Map (M)"],
-        L["Enables the entire World Buffs module: World Map (M) badge & pins, drop alerts, timers, and guild buff sync."],
-        L["Uncheck to turn off the entire World Buffs module and disable all World Buff options in Radar & Map."]
-    )
     local embOffChatCb = CreateGridCheckbox(
-        winLeft, embMapCb, -4, L["Official Chat (ChatFrame)"],
+        winLeft, embCharCb, -4, L["Official Chat (ChatFrame)"],
         function() return not ns.db or not ns.db.settings or ns.db.settings.embedOfficialChat ~= false end,
         function(checked) ns.db.settings.embedOfficialChat = checked; NotifySettingChanged("CHAT_UPDATED") end,
         L["Help: Official Chat (ChatFrame)"],
@@ -1872,7 +1900,16 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         scAutoBottom,
         -4,
         function() return ns.db and ns.db.settings and ns.db.settings.doNotDisturb == true end,
-        function(checked) ns.db.settings.doNotDisturb = checked; NotifySettingChanged() end,
+        function(checked)
+            if Compat and Compat.SetDoNotDisturb then
+                Compat.SetDoNotDisturb(checked)
+            elseif ns.db and ns.db.settings then
+                ns.db.settings.doNotDisturb = checked
+                ns.db.settings.dndUntil = 0
+                ns.db.settings.dndUntilLeaveInstance = false
+                NotifySettingChanged()
+            end
+        end,
         L["Help: Do Not Disturb"],
         L["Temporarily pauses all non-critical floating popups and sound chimes without overwriting any of your saved notification checkboxes."],
         L["Great for raids, arenas, or quiet focus sessions; uncheck to resume your exact saved preferences."]
@@ -1890,10 +1927,34 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Resumes notifications automatically as soon as you step back into the open world."]
     )
 
+    local focusFavCb = CreateCheckbox(
+        ov,
+        L["Allow Favorites (★) through Focus Mode & Do Not Disturb"],
+        autoInstSilCb,
+        -4,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.focusAllowFavorites ~= false end,
+        function(checked) ns.db.settings.focusAllowFavorites = checked; NotifySettingChanged() end,
+        L["Help: Allow Favorites in Focus Mode"],
+        L["Allows incoming whispers, notifications, and chimes from friends marked as Favorite (★) in SocialCentral even while Focus Mode or Do Not Disturb is active."],
+        L["Uncheck to silence everyone without exception during Focus Mode."]
+    )
+
+    local syncDndCb = CreateCheckbox(
+        ov,
+        L["Sync Focus Mode automatically with WoW /dnd (Busy) status"],
+        focusFavCb,
+        -4,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.syncGameDnd ~= false end,
+        function(checked) ns.db.settings.syncGameDnd = checked; NotifySettingChanged() end,
+        L["Help: Sync with WoW /dnd"],
+        L["Automatically pauses SocialCentral popups and chimes whenever your character is marked Busy (/dnd) in World of Warcraft."],
+        L["Type /dnd in chat again to clear your Busy status and resume notifications."]
+    )
+
     local winHeader = AddSectionHeader(
         ov,
         L["Official Game Windows (Native Tabs)"],
-        autoInstSilCb,
+        syncDndCb,
         -12,
         L["Help: Official Game Windows"],
         L["SocialCentral features live directly inside Blizzard's native windows via side-tabs and toolbar buttons. Use this Settings window for configuration and quick shortcuts."],
@@ -1910,7 +1971,6 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         { mod = "clan", label = L["Clan Hub & Diplomacy (J)"], variant = "default", isGuild = true },
         { mod = "alts", label = L["My Alts (C)"], variant = "default" },
         { mod = "chat", label = L["Conversations (Chat)"], variant = "default" },
-        { mod = "buffs", label = L["World Buffs (M)"], variant = "default" },
         { mod = "runs", label = L["Dungeon & Raid Log"], variant = "default" },
         { mod = "hub", label = L["Unified Hub (/sc hub)"], variant = "default" },
     }
@@ -1981,9 +2041,7 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         L["Passively records started dungeon and raid groups, teammate names, roles, bosses defeated, and total run time from the first enemy pulled until the run ends."],
         L["View anytime in /sc -> Dungeon & Raid Log (or /sc runs). Uses zero combat-log scanning and keeps up to 80 compact runs so PC impact stays negligible."]
     )
-    Search.SetPendingMeta({
-        keywords = "dungeon raid masmorra historico log group tempo run duration",
-    })
+    Search.SetPendingMeta(nil, nil, nil, nil, "dungeon raid masmorra historico log group tempo run duration")
     local runLogCb = CreateCheckbox(
         ov,
         L["Record started dungeon & raid groups (teammates & total time)"],
@@ -2022,7 +2080,7 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         kind = "action",
         title = L["Open Dungeon & Raid Log"],
         actionLabel = L["Open Dungeon & Raid Log"],
-        keywords = "dungeon raid masmorra historico log group tempo run duration",
+        extraKeywords = "dungeon raid masmorra historico log group tempo run duration",
         widget = openRunsBtn,
         helpTitle = L["Help: Dungeon & Raid Log"],
         description = L["Opens your searchable progression history of started dungeon and raid groups with all teammates and run times."],
@@ -2098,6 +2156,9 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         function(checked)
             ns.db.settings.msgPreviewGroup = checked
             ns.db.settings.msgPreviewPromptAnswered = true
+            if checked and ns.Chat and ns.Chat.UnmuteChannelKeysForSetting then
+                ns.Chat:UnmuteChannelKeysForSetting("msgPreviewGroup")
+            end
             NotifySettingChanged()
         end,
         L["Help: Preview Group"],
@@ -2111,6 +2172,9 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         function(checked)
             ns.db.settings.msgPreviewGuild = checked
             ns.db.settings.msgPreviewPromptAnswered = true
+            if checked and ns.Chat and ns.Chat.UnmuteChannelKeysForSetting then
+                ns.Chat:UnmuteChannelKeysForSetting("msgPreviewGuild")
+            end
             NotifySettingChanged()
         end,
         L["Help: Preview Guild"],
@@ -2172,7 +2236,7 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
 
     local mpSilCombatCb = CreateCheckbox(
         nf, L["Hide message previews while in combat"], mpSilPvpCb, -6,
-        function() return ns.db and ns.db.settings and ns.db.settings.msgPreviewSilenceCombat == true end,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.msgPreviewSilenceCombat ~= false end,
         function(checked)
             ns.db.settings.msgPreviewSilenceCombat = checked
             ns.db.settings.msgPreviewPromptAnswered = true
@@ -2331,7 +2395,111 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
 
     AddDeps(deps.defaultBtns, testMpBtn, moveMpPosBtn, resetMpPosBtn)
     AddDeps(deps.chat, mpMasterCb, mpWhisperCb, mpBNetCb, mpGroupCb, mpGuildCb, mpRoomsCb, mpSilDngCb, mpSilRaidCb, mpSilPvpCb, mpSilCombatCb, durLbl, durStep, maxVisLbl, maxVisStep, testMpBtn, moveMpPosBtn, resetMpPosBtn)
-    return mpPosRow
+
+    -- Quick Reply Popup (Minimap Click on Pending Notifications)
+    local qrHdr = CreateSubHeader(nf, L["Quick Reply Popup (Minimap)"], mpPosRow, -14)
+
+    local qrMasterCb = CreateCheckbox(
+        nf, L["Open Quick Reply popup when clicking Minimap with pending messages"], qrHdr, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyEnabled ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyEnabled = checked
+            if ns.Chat and ns.Chat.InvalidateUnreadCache then ns.Chat:InvalidateUnreadCache() end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Quick Reply Popup"],
+        L["When enabled, clicking the Minimap icon while you have pending notifications or saved drafts opens a compact, movable Quick Reply window on the latest message instead of the full hub."],
+        L["When no notifications or drafts are pending, clicking the Minimap icon opens the main SocialCentral window normally. You can drag the Quick Reply window anywhere on screen and close it with ESC or X."]
+    )
+
+    local qrAutoCloseCb = CreateCheckbox(
+        nf, L["Auto-close Quick Reply after 10s of inactivity (saves draft)"], qrMasterCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyAutoClose ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyAutoClose = checked
+            NotifySettingChanged()
+        end,
+        L["Help: Quick Reply Auto-Close & Drafts"],
+        L["Automatically closes the Quick Reply popup 10 seconds after you stop typing or leave the window (e.g. to focus on combat), keeping your typed message saved as a draft."],
+        L["Click the Minimap icon anytime to jump right back to that conversation with your draft restored so you can finish sending it."]
+    )
+
+    local qrWhisperCb = CreateCheckbox(
+        nf, L["Quick Reply notifications: Whispers & SocialCentral Chat"], qrAutoCloseCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyNotifyWhisper ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyNotifyWhisper = checked
+            if ns.Chat and ns.Chat.InvalidateUnreadCache then ns.Chat:InvalidateUnreadCache() end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Quick Reply Whispers"],
+        L["Marks incoming personal Whispers and SocialCentral direct/room messages as pending notifications for the Minimap Quick Reply popup."],
+        L["Leave checked to reply to whispers in one click from the Minimap without opening the full Conversations tab."]
+    )
+
+    local qrBNetCb = CreateCheckbox(
+        nf, L["Quick Reply notifications: Battle.net Messages"], qrWhisperCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyNotifyBNet ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyNotifyBNet = checked
+            if ns.Chat and ns.Chat.InvalidateUnreadCache then ns.Chat:InvalidateUnreadCache() end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Quick Reply Battle.net"],
+        L["Marks incoming Battle.net friend messages as pending notifications for the Minimap Quick Reply popup."],
+        L["Uncheck if you prefer to answer Battle.net messages only from Blizzard chat or the full Conversations tab."]
+    )
+
+    local qrPartyCb = CreateCheckbox(
+        nf, L["Quick Reply notifications: Party / Instance Chat"], qrBNetCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyNotifyParty ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyNotifyParty = checked
+            if checked and ns.Chat and ns.Chat.UnmuteChannelKeysForSetting then
+                ns.Chat:UnmuteChannelKeysForSetting("quickReplyNotifyParty")
+            end
+            if ns.Chat and ns.Chat.InvalidateUnreadCache then ns.Chat:InvalidateUnreadCache() end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Quick Reply Party"],
+        L["Marks incoming Party and Instance chat messages as pending notifications so you can reply quickly via the Minimap icon."],
+        L["Uncheck if you prefer to read Party chat solely in Blizzard's chat window."]
+    )
+
+    local qrRaidCb = CreateCheckbox(
+        nf, L["Quick Reply notifications: Raid Chat"], qrPartyCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.quickReplyNotifyRaid == true end,
+        function(checked)
+            ns.db.settings.quickReplyNotifyRaid = checked
+            if checked and ns.Chat and ns.Chat.UnmuteChannelKeysForSetting then
+                ns.Chat:UnmuteChannelKeysForSetting("quickReplyNotifyRaid")
+            end
+            if ns.Chat and ns.Chat.InvalidateUnreadCache then ns.Chat:InvalidateUnreadCache() end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Quick Reply Raid"],
+        L["Marks incoming Raid chat messages as pending notifications for the Minimap Quick Reply popup."],
+        L["Off by default to keep large raids uncluttered; enable if you want 1-click raid replies from the Minimap."]
+    )
+
+    local qrGuildCb = CreateCheckbox(
+        nf, L["Quick Reply notifications: Guild & Officer Chat"], qrRaidCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.quickReplyNotifyGuild == true end,
+        function(checked)
+            ns.db.settings.quickReplyNotifyGuild = checked
+            if checked and ns.Chat and ns.Chat.UnmuteChannelKeysForSetting then
+                ns.Chat:UnmuteChannelKeysForSetting("quickReplyNotifyGuild")
+            end
+            if ns.Chat and ns.Chat.InvalidateUnreadCache then ns.Chat:InvalidateUnreadCache() end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Quick Reply Guild"],
+        L["Marks incoming Guild and Officer chat messages as pending notifications for the Minimap Quick Reply popup."],
+        L["Off by default for busy guilds; enable if you want Guild chat to trigger the Minimap Quick Reply popup."]
+    )
+
+    AddDeps(deps.chat, qrMasterCb, qrAutoCloseCb, qrWhisperCb, qrBNetCb, qrPartyCb, qrRaidCb, qrGuildCb)
+    return qrGuildCb
 end
 
 local function BuildMinimapBadgeStyleControls(nf, anchorTo, deps, NotifySettingChanged)
@@ -2612,9 +2780,11 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         local s = ns.db and ns.db.settings
         if s then
             s.doNotDisturb = false
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndInstanceEntered = nil
             s.friendOnlineAlertToast = true
             s.friendOfflineAlertToast = true
-            s.addonMsgToast = true
             s.msgPreviewEnabled = true
             s.msgPreviewPromptAnswered = true
             s.mentionAlertsEnabled = true
@@ -2771,7 +2941,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
     )
     local addonToastCb = CreateCheckbox(
         nf, L["Show floating popup Toast for incoming addon messages"], addonNotifyHeader, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.addonMsgToast ~= false end,
+        function() return ns.db and ns.db.settings and ns.db.settings.addonMsgToast == true end,
         function(checked) ns.db.settings.addonMsgToast = checked; NotifySettingChanged() end,
         L["Help: Floating Notification Toast"],
         L["Displays a compact, draggable 100%-opaque pill near the top of your screen when a peer messages you via the addon or sends a room invite."],
@@ -2884,7 +3054,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
                 local itemW = math.min(130, math.max(58, (tcb.text:GetStringWidth() or 40) + 30))
                 if xOff > 0 and (xOff + itemW) > 520 then
                     xOff = 0
-                    yOff = -42
+                    yOff = yOff - 22
                 end
                 tcb:ClearAllPoints()
                 tcb:SetPoint("TOPLEFT", officialChatTabsRow, "TOPLEFT", xOff, yOff)
@@ -2896,7 +3066,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
                 tcb:Hide()
             end
         end
-        officialChatTabsRow:SetHeight((yOff < -30) and 68 or 48)
+        officialChatTabsRow:SetHeight(math.max(48, math.abs(yOff) + 26))
     end
     AddDeps(deps.chat, tabsRowLbl)
     for cid = 1, 10 do
@@ -3134,32 +3304,8 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Shows clickable reminders 15 minutes and 5 minutes before scheduled Guild Events or Blizzard Calendar raids you confirmed or organized."],
         L["Click the reminder toast or chat link to jump straight to your Events tab in Guild (J)."]
     )
-    local buffAlertCb = CreateCheckbox(
-        nf, L["World Buff Drop Alerts"], clanEventRemindersCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsAlerts ~= false end,
-        function(checked) if ns.db and ns.db.settings then ns.db.settings.worldBuffsAlerts = checked end; NotifySettingChanged() end,
-        L["Help: World Buff Drop Alerts"],
-        L["Prints a local chat notification whenever an NPC announces the turn-in of Onyxia, Nefarian, Rend Blackhand, or Hakkar heads in town."],
-        L["Alerts you ~6 to 15 seconds before the buff lands so you have time to log in or reposition."]
-    )
-    local buffSoundCb = CreateCheckbox(
-        nf, L["Play chime on World Buff drop alert"], buffAlertCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSound ~= false end,
-        function(checked) if ns.db and ns.db.settings then ns.db.settings.worldBuffsSound = checked end end,
-        L["Help: World Buff Sound Chime"],
-        L["Plays an audio chime when an NPC announces an incoming world buff drop."],
-        L["Uncheck if you prefer silent chat notifications only."]
-    )
-    local buffExpiryCb = CreateCheckbox(
-        nf, L["Warn me out of combat when an active World Buff has under 5m left"], buffSoundCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsExpiryAlert ~= false end,
-        function(checked) if ns.db and ns.db.settings then ns.db.settings.worldBuffsExpiryAlert = checked end; NotifySettingChanged() end,
-        L["Help: World Buff Expiry Warning"],
-        L["Alerts you with a chat line and toast outside combat when one of your active Classic World Buffs drops below 5 minutes remaining."],
-        L["Helpful before starting a dungeon run or chronobooning / refreshing your buffs."]
-    )
     local scoutAlertCb = CreateCheckbox(
-        nf, L["Notify on shared Guild Scout sighting alerts"], buffExpiryCb, -6,
+        nf, L["Notify on shared Guild Scout sighting alerts"], clanEventRemindersCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.spotterScoutAlert ~= false end,
         function(checked) ns.db.settings.spotterScoutAlert = checked; NotifySettingChanged() end,
         L["Help: Guild Scout Alerts"],
@@ -3176,8 +3322,6 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
     )
 
     BuildMentionsSettingsSection(nf, avoidGrpCb, deps, NotifySettingChanged)
-
-    AddDeps(deps.wb, buffAlertCb, buffSoundCb, buffExpiryCb)
     AddDeps(deps.guild, clanLfgAlertCb, clanLfgDngOnlyCb, clanLfgNearLevelCb, clanLfgAlertSoundCb, clanFilterLbl, clanFilterInput, clanEventAlertCb, clanSignupAlertCb, clanEventRemindersCb, scoutAlertCb)
 end
 
@@ -3333,76 +3477,13 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         L["Uncheck if you only want notifications for Ally or Enemy guilds."]
     )
 
-    local buffsHeader = AddSectionHeader(
-        rd, L["World Buffs (Classic & Forever)"], spotterSameCb, -14,
-        L["Help: World Buffs"],
-        L["Tracks active Classic World Buffs, detects city drop announcements in real time, and lets you monitor drop timers and server rules."],
-        L["Browse the Buffs list to check active timers, buff sources, and WoW Forever raid-suppression rules."]
-    )
-    local buffMapPinsCb = CreateCheckbox(
-        rd, L["Show World Buff pins on World Map (M)"], buffsHeader, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsMapPins ~= false end,
-        function(checked)
-            if ns.db and ns.db.settings then ns.db.settings.worldBuffsMapPins = checked end
-            if ns.LFGFrameTab and ns.LFGFrameTab.RefreshWorldMapBuffs then ns.LFGFrameTab:RefreshWorldMapBuffs() end
-        end,
-        L["Help: World Buffs Map Integration"],
-        L["Shows interactive World Buff pins at Classic/Forever drop zones and open-world sources directly on the World Map (M)."],
-        L["Leave checked to see buff spots directly on the map with hover tooltips, or uncheck to keep only the compact corner summary badge."]
-    )
-    local songPinsCb = CreateCheckbox(
-        rd, L["Show Felwood Songflower node pins on World Map (M)"], buffMapPinsCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsSongflowerPins ~= false end,
-        function(checked)
-            if ns.db and ns.db.settings then ns.db.settings.worldBuffsSongflowerPins = checked end
-            if ns.LFGFrameTab and ns.LFGFrameTab.RefreshWorldMapBuffs then ns.LFGFrameTab:RefreshWorldMapBuffs() end
-        end,
-        L["Help: Felwood Songflower Map Pins"],
-        L["Shows all Cleansed Songflower spawn locations directly inside Blizzard's Felwood World Map alongside Darkmoon Faire location pins."],
-        L["Toggle anytime from here or via the [SC] button on the World Map (M)."]
-    )
-    local readyWbCb = CreateCheckbox(
-        rd, L["Alert outside combat when capital World Buff cooldown finishes"], songPinsCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.worldBuffsReadyAlert ~= false end,
-        function(checked)
-            if ns.db and ns.db.settings then ns.db.settings.worldBuffsReadyAlert = checked end
-        end,
-        L["Help: Capital World Buff Ready Alerts"],
-        L["Dispatches a chat line and notification toast outside combat right as a tracked Onyxia, Nefarian, Rend, or Might of Stormwind cooldown resets to Ready."],
-        L["Works passively using your locally observed or guild-synced World Buff drop timestamps."]
-    )
-
     local openRadarBtn = ns.Theme:CreateButton(rd, 178, 24, L["Open Target Radar"], "primary")
     ns.Theme:AutoFitButton(openRadarBtn, 150, 18, 240)
-    openRadarBtn:SetPoint("TOPLEFT", readyWbCb, "BOTTOMLEFT", 4, -10)
+    openRadarBtn:SetPoint("TOPLEFT", spotterSameCb, "BOTTOMLEFT", 4, -12)
     openRadarBtn:SetScript("OnClick", function()
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then ns.SpotterHUD:Toggle() end
     end)
     HelpBtn(rd, openRadarBtn, L["Help: Open Target Radar"], L["Manually opens the Target Radar HUD to test target tracking and range display."], L["Click this button or type '/sc radar' to show or hide the floating radar."])
-
-    local openBuffsBtn = ns.Theme:CreateButton(rd, 210, 24, L["Open World Buffs Tracker"], "default")
-    ns.Theme:AutoFitButton(openBuffsBtn, 180, 18, 280)
-    openBuffsBtn:SetPoint("LEFT", openRadarBtn, "RIGHT", 32, 0)
-    openBuffsBtn:SetScript("OnClick", function()
-        CloseSettingsBeforeJump()
-        if ns.UI and ns.UI.ShowHub then
-            ns.UI:ShowHub("buffs")
-        elseif ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
-            ns.LFGFrameTab:OpenOfficialModule("buffs")
-        end
-    end)
-    HelpBtn(rd, openBuffsBtn, L["Help: Open World Buffs Tracker"], L["Opens the World Buffs tab in SocialCentral to view active buffs, drop timers, and classic buff sources."], L["Click to review all classic world buffs and their status in WoW Forever."])
-
-    Search.Register({
-        kind = "action",
-        title = L["Open World Buffs Tracker"],
-        actionLabel = L["Open World Buffs Tracker"],
-        widget = openBuffsBtn,
-        helpTitle = L["Help: Open World Buffs Tracker"],
-        description = L["Opens the World Buffs tab in SocialCentral to view active buffs, drop timers, and classic buff sources."],
-        howText = L["Click to review all classic world buffs and their status in WoW Forever."],
-        onTrigger = function() openBuffsBtn:Click() end,
-    })
 
     local resetRadarTabBtn = ns.Theme:CreateButton(rd, 190, 22, L["Restore Defaults (This Tab)"], "default")
     ns.Theme:AutoFitButton(resetRadarTabBtn, 160, 16, 250)
@@ -3426,12 +3507,8 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
                 s.spotterIgnoreGroup = true
                 s.spotterSound = true
                 s.spotterLockHUD = false
-                s.embedWorldMap = true
-                s.worldBuffsMapPins = true
-                s.worldBuffsSongflowerPins = true
-                s.worldBuffsReadyAlert = true
             end
-            NotifySettingChanged("WORLD_BUFFS_UPDATED")
+            NotifySettingChanged()
             for _, sync in ipairs(syncFns) do sync() end
         end
         if ns.UI and ns.UI.OpenConfirmModal then
@@ -3447,9 +3524,8 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         end
     end)
 
-    AddDeps(deps.defaultBtns, openBuffsBtn, resetRadarTabBtn)
+    AddDeps(deps.defaultBtns, resetRadarTabBtn)
     AddDeps(deps.primaryBtns, openRadarBtn)
-    AddDeps(deps.wb, buffMapPinsCb, songPinsCb, readyWbCb, openBuffsBtn)
     AddDeps(deps.radar, spotterAutoHudCb, spotterDurLbl, spotterDurStep, spotterPlateArrowCb, spotterBadgesCb, spotterTargetHighlightCb, spotterEnemyCb, spotterAllyCb, spotterWatchlistCb, spotterFriendsCb, spotterBlockedCb, spotterSameCb, spotterIgnoreGroupCb, spotterSoundCb, spotterLockCb, openRadarBtn)
 end
 
@@ -3804,8 +3880,21 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
         L["Click any folder header inside Friends/Social (O) to collapse or expand it; searching automatically shows all matches."]
     )
 
+    local compactListCb = CreateCheckbox(
+        gn, L["Compact 1-line player lists (Watchlist, Social, Nearby & Guild)"], folderCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.compactListRows == true end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.compactListRows = checked end
+            if ns.UI and ns.UI.Refresh then ns.UI:Refresh(true) end
+            if NotifySettingChanged then NotifySettingChanged("SOCIAL_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("SOCIAL_UPDATED") end
+        end,
+        L["Row Density"],
+        L["Shows each player on a single compact line (class, name, level, zone and right-aligned badges) to fit nearly twice as many players on screen."],
+        L["Toggle anytime from Settings or directly using the 1L/2L button in Watchlist and Social."]
+    )
+
     local popupWarnCb = CreateCheckbox(
-        gn, L["Show warning banner on official Invite, Trade & Duel from Avoid/Ignored"], folderCb, -6,
+        gn, L["Show warning banner on official Invite, Trade & Duel from Avoid/Ignored"], compactListCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.socialOfficialPopupAlerts ~= false end,
         function(checked)
             if ns.db and ns.db.settings then ns.db.settings.socialOfficialPopupAlerts = checked end
@@ -3907,6 +3996,8 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
         onTrigger = function() expBtn:Click() end,
     })
 
+    AddDeps(deps.social, folderCb)
+    AddDeps(deps.group, rcAuditCb)
     AddDeps(deps.nearby, nearbyRow)
     AddDeps(deps.defaultBtns, expBtn)
     return expRow
@@ -4406,7 +4497,7 @@ local function BuildPanel()
 
     local pages = {}
     local pageHeights = {
-        overview = 1220,
+        overview = 1290,
         notifications = 2940,
         radar = 980,
         general = 2210,
@@ -4550,7 +4641,16 @@ local function BuildPanel()
         badgeParts[#badgeParts + 1] = isCharProf and ("|cff58a6ff" .. L["Profile: Character"] .. "|r") or ("|cff9da7b5" .. L["Profile: Account"] .. "|r")
         local focusReason = Compat and Compat.GetFocusSilenceReason and Compat.GetFocusSilenceReason()
         if focusReason == "dnd" then
-            badgeParts[#badgeParts + 1] = "|cffff9b3d[" .. L["Do Not Disturb"] .. "]|r"
+            local sCfg = ns.db and ns.db.settings
+            local extra = ""
+            if sCfg and type(sCfg.dndUntil) == "number" and sCfg.dndUntil > time() then
+                extra = " (" .. tostring(math.max(1, math.ceil((sCfg.dndUntil - time()) / 60))) .. "m)"
+            elseif sCfg and sCfg.dndUntilLeaveInstance == true then
+                extra = " (" .. L["Until leaving instance"] .. ")"
+            end
+            badgeParts[#badgeParts + 1] = "|cffff9b3d[" .. L["Do Not Disturb"] .. extra .. "]|r"
+        elseif focusReason == "game_dnd" then
+            badgeParts[#badgeParts + 1] = "|cffff9b3d[" .. L["WoW /dnd (Busy)"] .. "]|r"
         elseif focusReason == "instance" then
             badgeParts[#badgeParts + 1] = "|cffffd24d[" .. L["Silenced in Instance"] .. "]|r"
         end

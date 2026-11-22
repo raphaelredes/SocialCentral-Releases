@@ -183,14 +183,14 @@ local function CatalogUpsert(itemID, link, name, icon, quality)
         if okIc and Safe.Value(fID) then finalIcon = Safe.Value(fID) end
     end
 
-    local finalQual = quality or cQual
-    if not finalQual and C_Item and C_Item.GetItemQualityByID then
+    local finalQual = quality
+    if (not finalQual or finalQual == 1) and (cQual == nil or cQual == 1) and C_Item and C_Item.GetItemQualityByID then
         local okQ, qVal = pcall(C_Item.GetItemQualityByID, id)
         if okQ and Safe.Number(qVal) then finalQual = Safe.Number(qVal) end
     end
-    finalQual = finalQual or 1
+    finalQual = finalQual or cQual or 1
 
-    if catalog and (not existingRaw or (finalName ~= "" and not cName) or (cClass == nil and classID ~= nil)) then
+    if catalog and (not existingRaw or (finalName ~= "" and not cName) or (cClass == nil and classID ~= nil) or (finalIcon and not cIcon) or (finalQual ~= cQual)) then
         local packed = table.concat({
             finalName,
             tostring(finalIcon or ""),
@@ -309,7 +309,18 @@ local function PackContainerList(rawItems)
             end
         end
     end
-    return packed, table.concat(packed, "\n")
+    local sigParts = {}
+    for i = 1, #packed do
+        local v = packed[i]
+        if type(v) == "string" then
+            sigParts[i] = v
+        elseif type(v) == "table" then
+            sigParts[i] = string.format("raw:%s:%s:%s:%s", tostring(v.name or ""), tostring(v.icon or ""), tostring(v.count or 1), tostring(v.quality or 1))
+        else
+            sigParts[i] = tostring(v)
+        end
+    end
+    return packed, table.concat(sigParts, "\n")
 end
 
 local function BuildEquipDigest(equipTbl)
@@ -701,6 +712,9 @@ function Alts:Snapshot(includeBank, force)
     if not (ns.db and ns.db.alts) then return end
     local monoNow = GetTime and GetTime() or 0
     if not includeBank and not force and self._lastSnapshotAt and (monoNow - self._lastSnapshotAt) < 0.5 then
+        if C_Timer and C_Timer.After then
+            self:QueueSnapshot(false, 0.55)
+        end
         return
     end
     local name = Safe.String(Safe.Call(UnitName, "player"))
@@ -728,14 +742,23 @@ function Alts:Snapshot(includeBank, force)
     self._dirtyProfs = false
     local level = Safe.Number(Safe.Call(UnitLevel, "player")) or (type(prev) == "table" and prev.level) or 1
     local xp = Safe.Number(Safe.Call(UnitXP, "player")) or 0
-    local xpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
+    local liveXpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
+    local xpMax = liveXpMax
     if xpMax <= 1 and type(prev) == "table" and (prev.xpMax or 0) > 1 then
         xp = prev.xp or xp
         xpMax = prev.xpMax
     elseif xpMax <= 0 then
         xpMax = 1
     end
-    local rested = Safe.Number(Safe.Call(GetXPExhaustion)) or 0
+    local restedLive = Safe.Number(Safe.Call(GetXPExhaustion))
+    local rested
+    if restedLive ~= nil then
+        rested = math.max(0, restedLive)
+    elseif liveXpMax <= 1 and type(prev) == "table" and prev.rested ~= nil then
+        rested = tonumber(prev.rested) or 0
+    else
+        rested = 0
+    end
     local money = Safe.Number(Safe.Call(GetMoney)) or 0
     local guild = Safe.String(Safe.Call(GetGuildInfo, "player"))
     if (not guild or guild == "") and ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name then
@@ -877,6 +900,29 @@ function Alts:Snapshot(includeBank, force)
     local resolvedFull = (resolvedSurname and resolvedSurname ~= "") and (tostring(resolvedFirst or name) .. " " .. resolvedSurname)
         or (resolved and resolved.fullName)
         or name
+    local recipes = type(prev) == "table" and prev.recipes or nil
+    local profsChanged = false
+    if fullProfs and type(prev) == "table" then
+        if type(recipes) == "table" and self.PruneUnlearnedRecipes then
+            if self:PruneUnlearnedRecipes(recipes, prev.professions, professions) then
+                profsChanged = true
+            end
+        end
+        if type(prev.professions) == "table" and type(professions) == "table" then
+            if #prev.professions ~= #professions then
+                profsChanged = true
+            else
+                for idx, ap in ipairs(professions) do
+                    local oldAp = prev.professions[idx]
+                    if not oldAp or oldAp.name ~= ap.name or oldAp.rank ~= ap.rank or oldAp.maxRank ~= ap.maxRank then
+                        profsChanged = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+
     ns.db.alts[key] = {
         name = name,
         firstName = resolvedFirst,
@@ -905,6 +951,7 @@ function Alts:Snapshot(includeBank, force)
         bindLocation = bindLocation or "",
         hearthReadyAt = hearthReadyAt,
         professions = professions,
+        recipes = recipes,
         craftCooldowns = type(prev) == "table" and prev.craftCooldowns or nil,
         lockouts = lockouts,
         guild = guild,
@@ -937,6 +984,10 @@ function Alts:Snapshot(includeBank, force)
     if itemsChanged then
         self.itemIndex = nil
     end
+    if profsChanged then
+        self._recipeSeq = (self._recipeSeq or 0) + 1
+        self._recipeIndexCache = nil
+    end
     ns:Emit("ALTS_UPDATED")
 end
 
@@ -958,7 +1009,11 @@ function Alts:UpdateScalars()
     if xp then rec.xp = xp end
     if xpMax and xpMax > 0 then rec.xpMax = xpMax end
     local rested = Safe.Number(Safe.Call(GetXPExhaustion))
-    if rested ~= nil then rec.rested = rested end
+    if rested ~= nil then
+        rec.rested = math.max(0, rested)
+    elseif xpMax and xpMax > 1 then
+        rec.rested = 0
+    end
     if IsResting then
         rec.wasResting = (Safe.Value(Safe.Call(IsResting)) == true) or false
     end
@@ -1135,9 +1190,18 @@ function Alts:GetEstimatedRested(altData)
     local xpMax = math.max(1, tonumber(altData.xpMax) or 1)
     if altData.key == curKey then
         local liveRested = Safe.Number(Safe.Call(GetXPExhaustion))
-        local val = (liveRested ~= nil) and liveRested or (tonumber(altData.rested) or 0)
+        local liveMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
+        local val
+        if liveRested ~= nil then
+            val = math.max(0, liveRested)
+        elseif liveMax > 1 then
+            val = 0
+        else
+            val = math.max(0, tonumber(altData.rested) or 0)
+        end
         local pct = math.min(150, math.floor((val / xpMax) * 100 + 0.5))
-        local restingNow = (IsResting and Safe.Value(Safe.Call(IsResting)) == true) or (altData.wasResting == true)
+        local restingLive = IsResting and Safe.Bool(Safe.Call(IsResting))
+        local restingNow = (restingLive ~= nil) and restingLive or (altData.wasResting == true)
         return pct, false, 0, restingNow, pct
     end
     local baseRested = math.max(0, tonumber(altData.rested) or 0)
@@ -1258,6 +1322,26 @@ local RECIPE_SUBCLASS_TO_PROF = {
     [11] = "INSCRIPTION",
 }
 
+local function BuildRecipeKey(profCode, recipeName, outItemID, spId)
+    if spId and spId > 0 then
+        return "s:" .. tostring(spId)
+    end
+    local fold = NormalizeRecipeLookupName(FoldRecipeText(recipeName or ""))
+    if fold == "" then
+        fold = FoldRecipeText(recipeName or "")
+    end
+    fold = fold:gsub(",", "")
+    local cleanProf = (type(profCode) == "string" and profCode ~= "") and profCode:gsub(",", "") or ""
+    local pPrefix = (cleanProf ~= "") and (cleanProf .. ":") or ""
+    if outItemID and outItemID > 0 then
+        if fold ~= "" then
+            return "i:" .. tostring(outItemID) .. ":" .. pPrefix .. fold:sub(1, 32)
+        end
+        return "i:" .. tostring(outItemID) .. ((cleanProf ~= "") and (":" .. cleanProf) or "")
+    end
+    return "n:" .. pPrefix .. fold:sub(1, 38)
+end
+
 local recipeCatalogCache = {}
 local recipeCatalogCacheCount = 0
 
@@ -1300,20 +1384,29 @@ local function RecipeCatalogUpsert(rKey, name, profCode, profDisp, itemID, spell
     local fProf = ((type(profDisp) == "string" and profDisp ~= "") and profDisp or (prev and prev.profDisp) or ""):gsub("[\t\r\n]+", " ")
     local fItem = tonumber(itemID) or (prev and prev.itemID)
     local fSpell = tonumber(spellID) or (prev and prev.spellID)
-    local fQual = tonumber(quality) or (prev and prev.quality) or 1
+    local explicitQual = tonumber(quality)
+    local fQual = explicitQual
     local fIcon = icon or (prev and prev.icon)
     if not fIcon and fItem and C_Item and C_Item.GetItemIconByID then
         local okIc, idIc = pcall(C_Item.GetItemIconByID, fItem)
         if okIc and Safe.Value(idIc) then fIcon = Safe.Value(idIc) end
     end
-    if not fQual and fItem and C_Item and C_Item.GetItemQualityByID then
+    if (not fQual or fQual == 1) and fItem and C_Item and C_Item.GetItemQualityByID then
         local okQ, qVal = pcall(C_Item.GetItemQualityByID, fItem)
         if okQ and Safe.Number(qVal) then fQual = Safe.Number(qVal) end
     end
+    if not fQual then
+        fQual = (prev and prev.quality) or 1
+    elseif prev and prev.quality and prev.quality > 1 and fQual == 1 and not explicitQual then
+        fQual = prev.quality
+    end
     local fReag = (type(reagentsStr) == "string" and reagentsStr ~= "") and reagentsStr:gsub("[\t\r\n]+", "") or (prev and prev.reagentsStr) or ""
 
-    if existing and prev and prev.name == fName and prev.profCode == fCode and (prev.icon or "") == (fIcon or "")
+    if existing and prev and prev.name == fName and prev.profCode == fCode
+        and (prev.profDisp or "") == fProf
+        and (prev.icon or "") == (fIcon or "")
         and (prev.reagentsStr or "") == fReag and prev.itemID == fItem and prev.spellID == fSpell
+        and (prev.quality or 1) == (fQual or 1)
     then
         return rKey
     end
@@ -1330,6 +1423,10 @@ local function RecipeCatalogUpsert(rKey, name, profCode, profDisp, itemID, spell
     if packed ~= existing then
         ns.db.recipeCatalog[rKey] = packed
         recipeCatalogCache[rKey] = nil
+        if existing then
+            Alts._recipeSeq = (Alts._recipeSeq or 0) + 1
+            Alts._recipeIndexCache = nil
+        end
     end
     return rKey
 end
@@ -1717,12 +1814,19 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
     local profName, profRank, profMax = nil, 0, 0
     local capturedKeys = {}
     local seenNew = {}
+    local seenNewFolded = {}
     local isPartialScan = false
 
-    local function PushRecipe(rKey)
+    local function PushRecipe(rKey, rawRecipeName)
         if rKey and not seenNew[rKey] then
             seenNew[rKey] = true
             capturedKeys[#capturedKeys + 1] = rKey
+        end
+        if type(rawRecipeName) == "string" and rawRecipeName ~= "" then
+            local f = NormalizeRecipeLookupName(FoldRecipeText(rawRecipeName))
+            if f ~= "" then
+                seenNewFolded[f] = true
+            end
         end
     end
 
@@ -1750,7 +1854,8 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                 if okInfo and type(rInfo) == "table" and rInfo.learned == true then
                     local rName = Safe.String(rInfo.name)
                     if rName and rName ~= "" then
-                        local outItemID, icon, qual = nil, Safe.Value(rInfo.icon), 1
+                        local outItemID, icon, qual = nil, Safe.Value(rInfo.icon), nil
+                        local outLink = nil
                         local reagentsParts = {}
                         if C_TradeSkillUI.GetRecipeSchematic then
                             local okS, schem = pcall(C_TradeSkillUI.GetRecipeSchematic, rid, false)
@@ -1771,21 +1876,21 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                                 end
                             end
                         end
-                        if (not outItemID or outItemID <= 0) and C_TradeSkillUI.GetRecipeItemLink then
+                        if C_TradeSkillUI.GetRecipeItemLink then
                             local okL, rLink = pcall(C_TradeSkillUI.GetRecipeItemLink, rid)
-                            local cleanL = okL and Safe.String(rLink) or nil
-                            outItemID = cleanL and tonumber(cleanL:match("item:(%d+)")) or outItemID
+                            outLink = okL and Safe.String(rLink) or nil
+                            if (not outItemID or outItemID <= 0) and outLink then
+                                outItemID = tonumber(outLink:match("item:(%d+)")) or outItemID
+                            end
                         end
                         if outItemID and outItemID > 0 then
-                            local _, _, cIc, cQl = CatalogUpsert(outItemID, nil, rName, icon, nil)
+                            local _, _, cIc, cQl = CatalogUpsert(outItemID, outLink, nil, icon, nil)
                             icon = icon or cIc
-                            qual = cQl or 1
+                            qual = cQl
                         end
                         local spId = Safe.Number(rInfo.recipeID) or Safe.Number(rid)
-                        local rKey = (outItemID and outItemID > 0 and ("i:" .. outItemID))
-                            or (spId and spId > 0 and ("s:" .. spId))
-                            or ("n:" .. FoldRecipeText(rName):sub(1, 38))
-                        PushRecipe(RecipeCatalogUpsert(rKey, rName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")))
+                        local rKey = BuildRecipeKey(profCode, rName, outItemID, spId)
+                        PushRecipe(RecipeCatalogUpsert(rKey, rName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")), rName)
                     end
                 end
             end
@@ -1817,11 +1922,11 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                             local outItemID = outLink and tonumber(outLink:match("item:(%d+)")) or nil
                             local spId = recLink and (tonumber(recLink:match("enchant:(%d+)")) or tonumber(recLink:match("spell:(%d+)"))) or nil
                             local icon = GetTradeSkillIcon and Safe.Value(Safe.Call(GetTradeSkillIcon, i)) or nil
-                            local qual = 1
+                            local qual = nil
                             if outItemID and outItemID > 0 then
-                                local _, _, cIc, cQl = CatalogUpsert(outItemID, outLink, sName, icon, nil)
+                                local _, _, cIc, cQl = CatalogUpsert(outItemID, outLink, nil, icon, nil)
                                 icon = icon or cIc
-                                qual = cQl or 1
+                                qual = cQl
                             end
                             local reagentsParts = {}
                             if GetTradeSkillNumReagents and GetTradeSkillReagentItemLink then
@@ -1837,10 +1942,8 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                                     end
                                 end
                             end
-                            local rKey = (outItemID and outItemID > 0 and ("i:" .. outItemID))
-                                or (spId and spId > 0 and ("s:" .. spId))
-                                or ("n:" .. FoldRecipeText(sName):sub(1, 38))
-                            PushRecipe(RecipeCatalogUpsert(rKey, sName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")))
+                            local rKey = BuildRecipeKey(profCode, sName, outItemID, spId)
+                            PushRecipe(RecipeCatalogUpsert(rKey, sName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")), sName)
                         end
                     end
                 end
@@ -1866,11 +1969,11 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                         local outItemID = outLink and tonumber(outLink:match("item:(%d+)")) or nil
                         local spId = recLink and (tonumber(recLink:match("enchant:(%d+)")) or tonumber(recLink:match("spell:(%d+)"))) or nil
                         local icon = GetCraftIcon and Safe.Value(Safe.Call(GetCraftIcon, i)) or nil
-                        local qual = 1
+                        local qual = nil
                         if outItemID and outItemID > 0 then
-                            local _, _, cIc, cQl = CatalogUpsert(outItemID, outLink, cName, icon, nil)
+                            local _, _, cIc, cQl = CatalogUpsert(outItemID, outLink, nil, icon, nil)
                             icon = icon or cIc
-                            qual = cQl or 1
+                            qual = cQl
                         end
                         local reagentsParts = {}
                         if GetCraftNumReagents and GetCraftReagentItemLink then
@@ -1886,10 +1989,8 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                                 end
                             end
                         end
-                        local rKey = (outItemID and outItemID > 0 and ("i:" .. outItemID))
-                            or (spId and spId > 0 and ("s:" .. spId))
-                            or ("n:" .. FoldRecipeText(cName):sub(1, 38))
-                        PushRecipe(RecipeCatalogUpsert(rKey, cName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")))
+                        local rKey = BuildRecipeKey(profCode, cName, outItemID, spId)
+                        PushRecipe(RecipeCatalogUpsert(rKey, cName, profCode, profName, outItemID, spId, qual, icon, table.concat(reagentsParts, ",")), cName)
                     end
                 end
             end
@@ -1904,15 +2005,34 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
     rec.recipes = rec.recipes or {}
     local prevBucket = rec.recipes[profCode]
     local prevStr = type(prevBucket) == "table" and prevBucket.keys or ""
+    local prevRank = type(prevBucket) == "table" and (tonumber(prevBucket.rank) or 0) or 0
+    local prevMax = type(prevBucket) == "table" and (tonumber(prevBucket.maxRank) or 0) or 0
+    local prevPn = type(prevBucket) == "table" and prevBucket.pn or nil
     if isPartialScan and prevStr ~= "" then
         for oldKey in prevStr:gmatch("[^,]+") do
-            PushRecipe(oldKey)
+            local skipLegacy = false
+            if oldKey:match("^i:%d+$") then
+                local oldRaw = ns.db and ns.db.recipeCatalog and ns.db.recipeCatalog[oldKey]
+                local oldObj = oldRaw and ParseRecipeCatalogRaw(oldKey, oldRaw)
+                if oldObj and oldObj.name then
+                    local fOld = NormalizeRecipeLookupName(FoldRecipeText(oldObj.name))
+                    if fOld ~= "" and seenNewFolded[fOld] then
+                        skipLegacy = true
+                    end
+                end
+            end
+            if not skipLegacy then
+                PushRecipe(oldKey)
+            end
         end
     end
 
     table.sort(capturedKeys)
     local joined = table.concat(capturedKeys, ",")
     local changed = (prevStr ~= joined)
+        or (prevRank ~= (profRank or 0))
+        or (prevMax ~= (profMax or 0))
+        or (prevPn ~= profName)
     rec.recipes[profCode] = {
         pn = profName,
         rank = profRank or 0,
@@ -1927,6 +2047,33 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
         ns:Emit("ALTS_UPDATED")
     end
     return true
+end
+
+function Alts:PruneUnlearnedRecipes(recipes, prevProfs, curProfs)
+    if type(recipes) ~= "table" or type(prevProfs) ~= "table" or type(curProfs) ~= "table" then
+        return false
+    end
+    local skillLines = GetNumSkillLines and (Safe.Number(Safe.Call(GetNumSkillLines)) or 0) or 0
+    if skillLines <= 0 or #curProfs == 0 then
+        return false
+    end
+    local curCodes = {}
+    for _, ap in ipairs(curProfs) do
+        if type(ap) == "table" and ap.name and ap.name ~= "" then
+            curCodes[NormalizeTradeProfCode(ap.name)] = true
+        end
+    end
+    local pruned = false
+    for _, oldAp in ipairs(prevProfs) do
+        if type(oldAp) == "table" and oldAp.name and oldAp.name ~= "" then
+            local oldCode = NormalizeTradeProfCode(oldAp.name)
+            if not curCodes[oldCode] and recipes[oldCode] ~= nil then
+                recipes[oldCode] = nil
+                pruned = true
+            end
+        end
+    end
+    return pruned
 end
 
 function Alts:ScanTradeSkillCooldowns()
@@ -2352,11 +2499,16 @@ function Alts:GetLockouts(altData)
     if type(raw) ~= "table" then return out end
     for _, lk in ipairs(raw) do
         if type(lk) == "table" then
+            local expAt = tonumber(lk.expiresAt) or 0
             local rem
-            if altData.key == curKey then
+            if expAt > 0 then
+                if expAt > now then
+                    rem = expAt - now
+                elseif altData.key == curKey and self._instanceInfoReady then
+                    rem = tonumber(lk.reset) or 0
+                end
+            elseif altData.key == curKey then
                 rem = tonumber(lk.reset) or 0
-            elseif (lk.expiresAt or 0) > now then
-                rem = math.max(0, (lk.expiresAt or 0) - now)
             end
             if rem ~= nil and (rem > 0 or lk.locked or lk.extended) then
                 out[#out + 1] = {
@@ -2639,14 +2791,26 @@ local function AppendAltItemTooltip(tooltip, data, isLegacyHook)
 
     if crafters and #crafters > 0 then
         local cParts = {}
-        for i = 1, math.min(#crafters, 5) do
+        local seenCraftOwner = {}
+        local shownCraft = 0
+        local extraCraft = 0
+        for i = 1, #crafters do
             local cr = crafters[i]
-            local hex = Compat.ClassHex(cr.classFile)
-            local pSuffix = (cr.profName and cr.profName ~= "") and (" (" .. cr.profName .. ")") or ""
-            cParts[#cParts + 1] = hex .. (cr.displayName or "?") .. "|r|cff9da7b5" .. pSuffix .. "|r"
+            local ownerSig = tostring(cr.altKey or cr.displayName or i) .. "|" .. tostring(cr.profCode or cr.profName or "")
+            if not seenCraftOwner[ownerSig] then
+                seenCraftOwner[ownerSig] = true
+                if shownCraft < 5 then
+                    shownCraft = shownCraft + 1
+                    local hex = Compat.ClassHex(cr.classFile)
+                    local pSuffix = (cr.profName and cr.profName ~= "") and (" (" .. cr.profName .. ")") or ""
+                    cParts[#cParts + 1] = hex .. (cr.displayName or "?") .. "|r|cff9da7b5" .. pSuffix .. "|r"
+                else
+                    extraCraft = extraCraft + 1
+                end
+            end
         end
-        if #crafters > 5 then
-            cParts[#cParts + 1] = "|cff9da7b5+" .. tostring(#crafters - 5) .. "|r"
+        if extraCraft > 0 then
+            cParts[#cParts + 1] = "|cff9da7b5+" .. tostring(extraCraft) .. "|r"
         end
         tooltip:AddLine("|cff3fb950" .. L["Craftable by Alt"] .. ":|r " .. table.concat(cParts, ", "), 0.90, 0.96, 0.92, true)
     end
@@ -2862,6 +3026,8 @@ function Alts:RemoveAlt(altKey)
             self._altBuckets[altKey] = nil
         end
         self.itemIndex = nil
+        self._recipeSeq = (self._recipeSeq or 0) + 1
+        self._recipeIndexCache = nil
         ns:Emit("ALTS_UPDATED")
         return true
     end
@@ -2974,6 +3140,8 @@ function Alts:Init()
 
     ns.RegisterEvent(self, "SKILL_LINES_CHANGED", function()
         self._dirtyProfs = true
+        self._recipeSeq = (self._recipeSeq or 0) + 1
+        self._recipeIndexCache = nil
         self:QueueSnapshot(false, 1.5)
     end)
 
@@ -2982,16 +3150,36 @@ function Alts:Init()
         ns.RegisterEvent(self, tsEvent, function()
             self._dirtyProfs = true
             self:QueueSnapshot(false, 1.5)
-            if not self._cdScanQueued and C_Timer and C_Timer.After then
-                self._cdScanQueued = true
-                C_Timer.After(0.45, function()
-                    Alts._cdScanQueued = false
-                    Alts:ScanTradeSkillCooldowns()
-                    Alts:ScanLearnedRecipes(isCraft)
-                    if ns.LFGFrameTab and ns.LFGFrameTab.AttachProfessionButton then
-                        ns.LFGFrameTab:AttachProfessionButton()
-                    end
-                end)
+            if C_Timer and C_Timer.After then
+                self._pendingTradeIsCraft = isCraft
+                if isCraft then
+                    self._pendingScanCraft = true
+                else
+                    self._pendingScanTrade = true
+                end
+                if not self._cdScanQueued then
+                    self._cdScanQueued = true
+                    C_Timer.After(0.45, function()
+                        Alts._cdScanQueued = false
+                        local wantCraft = Alts._pendingTradeIsCraft == true
+                        local bothKinds = Alts._pendingScanCraft and Alts._pendingScanTrade
+                        Alts._pendingScanCraft = nil
+                        Alts._pendingScanTrade = nil
+                        Alts._pendingTradeIsCraft = nil
+                        if bothKinds then
+                            if _G.CraftFrame and _G.CraftFrame.IsShown and _G.CraftFrame:IsShown() then
+                                wantCraft = true
+                            elseif _G.TradeSkillFrame and _G.TradeSkillFrame.IsShown and _G.TradeSkillFrame:IsShown() then
+                                wantCraft = false
+                            end
+                        end
+                        Alts:ScanTradeSkillCooldowns()
+                        Alts:ScanLearnedRecipes(wantCraft)
+                        if ns.LFGFrameTab and ns.LFGFrameTab.AttachProfessionButton then
+                            ns.LFGFrameTab:AttachProfessionButton()
+                        end
+                    end)
+                end
             else
                 self:ScanTradeSkillCooldowns()
                 self:ScanLearnedRecipes(isCraft)

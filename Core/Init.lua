@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.23"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.23" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.24"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.24" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -79,6 +79,9 @@ local DEFAULTS = {
         sortBy = "status",          -- "status" | "name" | "recent"
         socialSortBy = "smart",     -- "smart" | "name" | "level" | "lastSeen"
         socialShowOffline = true,   -- show offline Character/BNet friends in Social directory
+        watchlistShowOffline = true, -- show offline players in Watchlist directory
+        chatShowOffline = true,      -- show offline direct threads in Conversations directory
+        compactListRows = false,     -- compact 1-line rows in Watchlist/Social/Nearby/Guild lists
         friendOnlineAlertMode = "all", -- "all" | "favorites" | "off"
         friendOnlineAlertToast = true,       -- show compact floating toast when friends come online
         friendOnlineAlertChat = false,       -- optional extra chat summary line on friend login
@@ -147,7 +150,7 @@ local DEFAULTS = {
         embedProfessionWindow = true, -- passively catalog learned recipes & show [SC] toggle on official Profession windows
         tooltipRecipeAlts = true,   -- show Craftable by Alt / Recipe known / Guild crafter inside item tooltips
         guildRecipeReply = true,    -- answer on-demand CRQ recipe queries from guildmates when Clan Sync is on
-        addonMsgToast = true,       -- show compact floating toast pill when addon messages arrive
+        addonMsgToast = false,      -- opt-in floating toast pill for text addon messages (Minimap Previews handle chats cleanly without duplicating)
         toastDuration = 6,          -- seconds each notification toast stays visible before disappearing (default 6s)
         toastTutorialShown = false, -- one-time account-wide tutorial shown when first notification toast appears
         toastBelowChatMigrated = false, -- one-time migration placing default toast position directly below ChatFrame1
@@ -159,7 +162,7 @@ local DEFAULTS = {
         minimapBadgeStyle = "fusion", -- "fusion" (multi-color circle under SC icon + hover split) | "separate" (orbital numbers around SC icon)
         addonMsgTabBadges = true,   -- display compact unread badges on Social (O) & Guild (J) side-tabs
         msgPreviewEnabled = true,       -- show compact animated message preview capsule beside Minimap
-        msgPreviewPromptAnswered = false, -- first-time opt-in & channel picker answered
+        msgPreviewPromptAnswered = true, -- never hijack first whisper with a blocking setup dialog (setup still available manually)
         msgPreviewWhispers = true,      -- show minimap previews for Character Whispers & Direct Addon chat
         msgPreviewBNet = true,          -- show minimap previews for Battle.net friends messages
         msgPreviewGroup = false,        -- show minimap previews for Party / Raid / Instance messages
@@ -168,8 +171,15 @@ local DEFAULTS = {
         msgPreviewSilenceDungeons = true, -- auto-hide minimap previews inside Dungeons / Scenarios
         msgPreviewSilenceRaids = true,  -- auto-hide minimap previews inside Raids
         msgPreviewSilencePvP = true,    -- auto-hide minimap previews inside Battlegrounds & Arenas
-        msgPreviewSilenceCombat = false, -- optionally pause minimap previews while in combat
+        msgPreviewSilenceCombat = true, -- retract & hold message previews and popups while actively in combat
         msgPreviewDuration = 6,         -- seconds to display preview before retracting back into SC icon (default 6s)
+        quickReplyEnabled = true,       -- clicking Minimap icon with pending message notifications opens compact Quick Reply popup
+        quickReplyAutoClose = true,     -- auto-close Quick Reply popup after 10s of inactivity while preserving typed draft
+        quickReplyNotifyWhisper = true, -- include Whispers & SocialCentral Direct Chat in Quick Reply notifications
+        quickReplyNotifyBNet = true,    -- include Battle.net messages in Quick Reply notifications
+        quickReplyNotifyParty = true,   -- include Party / Instance chat in Quick Reply notifications
+        quickReplyNotifyRaid = false,   -- include Raid chat in Quick Reply notifications
+        quickReplyNotifyGuild = false,  -- include Guild / Officer chat in Quick Reply notifications
         msgPreviewMaxVisible = 3,       -- max simultaneous minimap preview rows (1..3); extras wait in FIFO queue
         msgPreviewDefault6Migrated = false, -- one-time upgrade from initial 5s default to 6s default
         spotterEnabled = true,      -- lightweight event-driven radar (0ms idle CPU)
@@ -192,14 +202,10 @@ local DEFAULTS = {
         spotterPlateTutorialShown = false, -- show one-time nameplate tutorial (Shift+V / V) on first radar sighting
         spotterRadarTutorialShown = false, -- show one-time target radar proximity tutorial on first radar tracking
         spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
-        worldBuffsAlerts = true,    -- notify when a Classic World Buff is announced by an NPC
-        worldBuffsSound = true,     -- audio chime on incoming World Buff drop announcement
-        worldBuffsMapPins = true,   -- show minimalist World Buff pins & hover summary on World Map (M)
         embedSocialWindow = true,   -- integrate SocialCentral side-tab inside Social / Friends (O)
         embedLfgWindow = true,      -- integrate Clans & Allies LFG tab inside Group Finder (I)
         embedGuildWindow = true,    -- integrate Guild Hub & Diplomacy side-tab inside Communities / Guild (J)
         embedCharacterWindow = true, -- integrate My Alts side-tab inside Character window (C)
-        embedWorldMap = true,       -- integrate World Buffs badge & pins inside World Map (M)
         shortcutAutoOpenAddon = {
             O = false, -- Social / Friends (O)
             I = false, -- Group Finder (I)
@@ -219,6 +225,11 @@ local DEFAULTS = {
         moduleGroupEnabled = true,     -- master toggle for Group & Recent Companions module
         doNotDisturb = false,          -- non-destructive master pause for all popups & alert chimes
         autoSilenceInInstances = false, -- automatically pause social popups/chimes inside dungeons, raids & BGs
+        focusAllowFavorites = true,    -- allow Favorite (★) players through Focus Mode & Do Not Disturb
+        syncGameDnd = true,            -- automatically treat WoW /dnd (Busy) status as Focus Mode
+        dndUntil = 0,                  -- epoch timestamp when timed Do Not Disturb auto-clears (0 = no timer)
+        dndUntilLeaveInstance = false, -- auto-clear Do Not Disturb upon leaving the current instance
+        focusUpgradeV1Migrated = false, -- one-time upgrade to single-surface notifications & combat hold defaults
         spotterScoutAlert = true,   -- notify on shared Scout sighting alerts from guildmates
         tooltipItemAlts = true,     -- show alt bag/bank/equipped item counts inside item tooltips
         tooltipPlayerNotes = true,  -- show Social Card notes, red flags & companion context inside player tooltips
@@ -242,13 +253,11 @@ local DEFAULTS = {
         dungeonRunLogEnabled = true, -- passively record started dungeon/raid groups, teammates & run duration (zero CLEU)
         dungeonLogPromptShown = false, -- one-time account-wide reminder after finishing the first dungeon or raid
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
-        worldBuffsExpiryAlert = true, -- warn out of combat when an active World Buff has < 5 minutes left
+        clanRosterHistoryLimit = 50, -- max guild roster join/leave/rank entries retained (25..500)
         socialGroupByFolder = true,  -- organize O -> Social into collapsible colored folder sections
         socialOfficialPopupAlerts = true, -- show warning banner on official Invite, Trade & Duel popups from Ignored/Avoid players
         clanOfficialGreenWall = true, -- mirror Alliance Guild chat into Blizzard Official Chat (ChatFrame1)
         groupReadyCheckAudit = true,  -- show missing Raid/Dungeon buff audit alert on Blizzard Ready Check
-        worldBuffsSongflowerPins = true, -- show Felwood Songflower node pins on Blizzard World Map (M)
-        worldBuffsReadyAlert = true,  -- notify outside combat when tracked capital World Buff cooldowns finish
     },
     window = {
         point = nil,
@@ -290,11 +299,25 @@ local function DeepCopyValue(val)
     return copy
 end
 
-local function ApplyDefaults(target, defaults)
+local USER_MAP_SETTING_KEYS = {
+    chatMutedThreads = true,
+    lfgWatchedActivities = true,
+    lfgBrowseSelectedActivities = true,
+    chatQuickReplies = true,
+    addonChatFrames = true,
+}
+
+local function ApplyDefaults(target, defaults, shallowMapKeys)
     for k, v in pairs(defaults) do
         if type(v) == "table" then
-            if type(target[k]) ~= "table" then target[k] = {} end
-            ApplyDefaults(target[k], v)
+            if shallowMapKeys and shallowMapKeys[k] then
+                if target[k] == nil then
+                    target[k] = DeepCopyValue(v)
+                end
+            else
+                if type(target[k]) ~= "table" then target[k] = {} end
+                ApplyDefaults(target[k], v)
+            end
         elseif target[k] == nil then
             target[k] = v
         end
@@ -302,7 +325,7 @@ local function ApplyDefaults(target, defaults)
 end
 
 local function SyncRuntimeProfileVisuals()
-    for _, ev in ipairs({ "SETTINGS_UPDATED", "CLAN_UPDATED", "CHAT_UPDATED", "WATCHLIST_UPDATED", "NEARBY_UPDATED", "WORLD_BUFFS_UPDATED", "SOCIAL_UPDATED" }) do
+    for _, ev in ipairs({ "SETTINGS_UPDATED", "CLAN_UPDATED", "CHAT_UPDATED", "WATCHLIST_UPDATED", "NEARBY_UPDATED", "SOCIAL_UPDATED" }) do
         ns:Emit(ev)
     end
     if ns.Theme and ns.Theme.NotifyChanged then
@@ -383,25 +406,6 @@ local function HandleSlash(raw)
             altAllAlts = true,
             altSearch = rest or "",
         })
-    elseif cmd == "buffs" or cmd == "buff" or cmd == "wbuffs" then
-        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("buffs") then
-            ns:Print("%s", L["This module is disabled in Settings."])
-            return
-        end
-        if rest == "report" or rest == "share" or rest == "chat" then
-            if ns.WorldBuffs and ns.WorldBuffs.OpenChatAnnouncement then
-                ns.WorldBuffs:OpenChatAnnouncement()
-            end
-        else
-            if ns.WorldBuffs and ns.WorldBuffs.PrintActiveBuffs then
-                ns.WorldBuffs:PrintActiveBuffs()
-            end
-            if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
-                ns.LFGFrameTab:OpenOfficialModule("buffs")
-            elseif ns.UI and ns.UI.OpenTab then
-                ns.UI:OpenTab("buffs")
-            end
-        end
     elseif cmd == "al" or cmd == "alliance" then
         if ns.Compat and ns.Compat.IsModuleEnabled and (not ns.Compat.IsModuleEnabled("clan") or not ns.Compat.IsModuleEnabled("chat")) then
             ns:Print("%s", L["This module is disabled in Settings."])
@@ -508,6 +512,14 @@ local function HandleSlash(raw)
         elseif ns.UI and ns.UI.ShowHub then
             ns.UI:ShowHub("group")
         end
+    elseif cmd == "quickreply" or cmd == "qr" then
+        if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("chat") then
+            ns:Print("%s", L["This module is disabled in Settings."])
+            return
+        end
+        if ns.QuickReply and ns.QuickReply.OpenPreviewOrLatest then
+            ns.QuickReply:OpenPreviewOrLatest()
+        end
     elseif cmd == "resetpos" or cmd == "reset" then
         if ns.Theme and ns.Theme.ResetAllWindowPositions then
             ns.Theme:ResetAllWindowPositions()
@@ -531,7 +543,6 @@ local function HandleSlash(raw)
             ns:Print("  |cffffd200/sc group|r — %s", L["Open Group"])
             ns:Print("  |cffffd200/sc runs|r — %s", L["Dungeon & Raid Log"])
         end
-        if ModOn("buffs") then ns:Print("  |cffffd200/sc buffs|r — %s", L["World Buffs"]) end
         if ModOn("clan") then ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"]) end
         if ModOn("alts") then ns:Print("  |cffffd200/sc recipes [item]|r — %s", L["Search Alt & Guild Recipes"]) end
         ns:Print("  |cffffd200/sc hub|r — %s", L["Unified Hub (/sc hub)"])
@@ -697,12 +708,22 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.toastBelowChatMigrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.focusUpgradeV1Migrated ~= true then
+        if SocialCentralDB.settings.addonMsgToast == true then
+            SocialCentralDB.settings.addonMsgToast = false
+        end
+        if SocialCentralDB.settings.msgPreviewSilenceCombat == false then
+            SocialCentralDB.settings.msgPreviewSilenceCombat = true
+        end
+        SocialCentralDB.settings.msgPreviewPromptAnswered = true
+        SocialCentralDB.settings.focusUpgradeV1Migrated = true
+    end
     ns._accountSettings = SocialCentralDB.settings
     if SocialCentralCharDB.useCharProfile == true then
         if type(SocialCentralCharDB.settings) ~= "table" then
             SocialCentralCharDB.settings = DeepCopyValue(ns._accountSettings or DEFAULTS.settings)
         else
-            ApplyDefaults(SocialCentralCharDB.settings, ns._accountSettings or DEFAULTS.settings)
+            ApplyDefaults(SocialCentralCharDB.settings, ns._accountSettings or DEFAULTS.settings, USER_MAP_SETTING_KEYS)
             if SocialCentralCharDB.settings.msgPreviewDefault6Migrated ~= true then
                 if SocialCentralCharDB.settings.msgPreviewDuration == 5 then
                     SocialCentralCharDB.settings.msgPreviewDuration = 6
@@ -714,6 +735,16 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
                     SocialCentralCharDB.settings.chatSoundCooldown = 6
                 end
                 SocialCentralCharDB.settings.chatSoundCooldownDefault6Migrated = true
+            end
+            if SocialCentralCharDB.settings.focusUpgradeV1Migrated ~= true then
+                if SocialCentralCharDB.settings.addonMsgToast == true then
+                    SocialCentralCharDB.settings.addonMsgToast = false
+                end
+                if SocialCentralCharDB.settings.msgPreviewSilenceCombat == false then
+                    SocialCentralCharDB.settings.msgPreviewSilenceCombat = true
+                end
+                SocialCentralCharDB.settings.msgPreviewPromptAnswered = true
+                SocialCentralCharDB.settings.focusUpgradeV1Migrated = true
             end
         end
         SocialCentralDB.settings = SocialCentralCharDB.settings
@@ -736,7 +767,7 @@ function ns:SetCharProfileEnabled(enabled)
         if type(SocialCentralCharDB.settings) ~= "table" or next(SocialCentralCharDB.settings) == nil then
             SocialCentralCharDB.settings = DeepCopyValue(ns._accountSettings or DEFAULTS.settings)
         else
-            ApplyDefaults(SocialCentralCharDB.settings, ns._accountSettings or DEFAULTS.settings)
+            ApplyDefaults(SocialCentralCharDB.settings, ns._accountSettings or DEFAULTS.settings, USER_MAP_SETTING_KEYS)
         end
         if ns.db then
             ns.db.settings = SocialCentralCharDB.settings
@@ -756,7 +787,7 @@ function ns:CopyAccountSettingsToChar()
     SocialCentralCharDB = SocialCentralCharDB or {}
     local src = ns._accountSettings or DEFAULTS.settings
     SocialCentralCharDB.settings = DeepCopyValue(src)
-    ApplyDefaults(SocialCentralCharDB.settings, DEFAULTS.settings)
+    ApplyDefaults(SocialCentralCharDB.settings, DEFAULTS.settings, USER_MAP_SETTING_KEYS)
     if ns.db then
         ns.db.settings = SocialCentralCharDB.settings
     end
@@ -766,6 +797,13 @@ end
 
 function ns:ResetCurrentSettingsToDefaults()
     local fresh = DeepCopyValue(DEFAULTS.settings)
+    -- Keep one-time legacy migrations marked complete so user choices after a reset are never reverted on reload.
+    fresh.spotterV2Migrated = true
+    fresh.friendAlertAllMigrated = true
+    fresh.msgPreviewDefault6Migrated = true
+    fresh.chatSoundCooldownDefault6Migrated = true
+    fresh.toastBelowChatMigrated = true
+    fresh.focusUpgradeV1Migrated = true
     if ns:IsCharProfileEnabled() then
         SocialCentralCharDB = SocialCentralCharDB or {}
         SocialCentralCharDB.settings = fresh
@@ -796,6 +834,9 @@ ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
     if ns.Store and ns.Store.NormalizeLegacyRealmScopes then
         pcall(ns.Store.NormalizeLegacyRealmScopes, ns.Store)
     end
+    if ns.Store and ns.Store.MigrateLegacyFavorites then
+        pcall(ns.Store.MigrateLegacyFavorites, ns.Store)
+    end
     for _, mod in ipairs(ns.modules) do
         if type(mod.Init) == "function" then
             local ok, err = pcall(mod.Init, mod)
@@ -825,6 +866,9 @@ ns.RegisterEvent(boot, "PLAYER_LOGIN", function()
     if ns.SetupOfficialChatConfigToggle then
         ns:SetupOfficialChatConfigToggle()
     end
+    if ns.Compat and ns.Compat.InitFocusWatcher then
+        pcall(ns.Compat.InitFocusWatcher)
+    end
     ns._bootScopeKey = ns.Compat and ns.Compat.ScopeKey and ns.Compat.ScopeKey() or nil
 
     ns.UnregisterEvent(boot, "PLAYER_LOGIN")
@@ -848,7 +892,12 @@ local function RefreshOfficialChatToggleState()
         or (GetChatWindowInfo and select(1, GetChatWindowInfo(chatID)))
         or tostring(chatID)
     local framesTbl = ns.db and ns.db.settings and ns.db.settings.addonChatFrames
-    local checked = (type(framesTbl) ~= "table") and (chatID == 1) or (framesTbl[chatID] == true)
+    local checked
+    if type(framesTbl) ~= "table" then
+        checked = (chatID == 1)
+    else
+        checked = (framesTbl[chatID] == true)
+    end
     btn:SetChecked(checked and true or false)
     if btn.Text then
         btn.Text:SetText(string.format(L["[SC] Addon Chat (%s)"], tabLabel))
@@ -976,7 +1025,7 @@ ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
         if ns.Watchlist and ns.Watchlist.NormalizeStoredEntries then
             pcall(ns.Watchlist.NormalizeStoredEntries, ns.Watchlist)
         end
-        for _, ev in ipairs({ "WATCHLIST_UPDATED", "CHAT_UPDATED", "SOCIAL_UPDATED", "CLAN_UPDATED", "WORLD_BUFFS_UPDATED" }) do
+        for _, ev in ipairs({ "WATCHLIST_UPDATED", "CHAT_UPDATED", "SOCIAL_UPDATED", "CLAN_UPDATED" }) do
             ns:Emit(ev)
         end
     end
@@ -1045,6 +1094,7 @@ end
 local navRegenHost = {}
 local pendingNavigation = nil
 local pendingCombatTasks = {}
+local pendingCombatTaskSeq = 0
 
 --- Run a non-protected UI/UX callback right away outside combat, or defer once until combat ends.
 function ns:RunAfterCombat(actionId, fn, noticeText)
@@ -1055,7 +1105,13 @@ function ns:RunAfterCombat(actionId, fn, noticeText)
         if not ok and geterrorhandler then geterrorhandler()(err) end
         return ok
     end
-    local key = tostring(actionId or ("task_" .. tostring(#pendingCombatTasks + 1)))
+    local key
+    if actionId ~= nil and actionId ~= "" then
+        key = tostring(actionId)
+    else
+        pendingCombatTaskSeq = pendingCombatTaskSeq + 1
+        key = "task_" .. tostring(pendingCombatTaskSeq)
+    end
     pendingCombatTasks[key] = fn
     if noticeText ~= false then
         ns:Print("%s", (type(noticeText) == "string" and noticeText ~= "") and noticeText or L["Will finish right after combat ends."])
@@ -1067,7 +1123,7 @@ end
 function ns:NavigateToModule(modName, opts)
     opts = opts or {}
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-    if inCombat then
+    if inCombat and (modName == "settings" or modName == "lfg") then
         local alreadySame = (pendingNavigation and pendingNavigation.mod == modName)
         pendingNavigation = { mod = modName, opts = opts }
         if not alreadySame then
@@ -1076,7 +1132,9 @@ function ns:NavigateToModule(modName, opts)
         return false
     end
 
-    pendingNavigation = nil
+    if not inCombat then
+        pendingNavigation = nil
+    end
     if (opts.socialFilter or opts.socialSearch or opts.watchlistSearch ~= nil) and ns.UI and ns.UI.SetSocialNavigation then
         ns.UI:SetSocialNavigation(opts)
     end
@@ -1113,8 +1171,10 @@ function ns:NavigateToModule(modName, opts)
         ns.Clan:ClearNotificationCount()
     end
 
-    if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
+    if (not inCombat) and ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
         ns.LFGFrameTab:OpenOfficialModule(modName, true)
+    elseif ns.UI and ns.UI.ShowHub and inCombat then
+        ns.UI:ShowHub(modName)
     elseif ns.UI and ns.UI.OpenTab then
         ns.UI:OpenTab(modName)
     end
@@ -1133,10 +1193,17 @@ ns.RegisterEvent(navRegenHost, "PLAYER_REGEN_ENABLED", function()
             queued[k] = fn
             pendingCombatTasks[k] = nil
         end
-        for _, fn in pairs(queued) do
+        local doneKeys = {}
+        for k, fn in pairs(queued) do
             if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+                for rk, rfn in pairs(queued) do
+                    if not doneKeys[rk] and pendingCombatTasks[rk] == nil then
+                        pendingCombatTasks[rk] = rfn
+                    end
+                end
                 break
             end
+            doneKeys[k] = true
             local ok, err = pcall(fn)
             if not ok and geterrorhandler then geterrorhandler()(err) end
         end
@@ -1186,12 +1253,6 @@ if EventRegistry and EventRegistry.RegisterCallback then
                 return
             end
             ns:NavigateToModule("diplomacy", { clanRightView = "diplomacy" })
-        elseif link:find("addon:SCentral:buffs", 1, true) then
-            if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("buffs") then
-                ns:Print("%s", L["This module is disabled in Settings."])
-                return
-            end
-            ns:NavigateToModule("buffs")
         elseif link:find("addon:SCentral:spotter", 1, true) then
             if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("radar") then
                 ns:Print("%s", L["This module is disabled in Settings."])

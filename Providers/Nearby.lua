@@ -90,15 +90,25 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         Nearby:Prune(true)
     end
 
-    -- Upgrade any earlier first-name-only entry matching the same GUID in O(1).
+    -- Upgrade any earlier first-name-only entry matching the same GUID in O(1),
+    -- without downgrading an already resolved full name back to a bare first name.
     local upgraded
     if guid then
         local prevRow = nearbyByGuid[guid]
         if prevRow and prevRow.key and prevRow.key ~= parsed.lookupKey and Store.nearby[prevRow.key] == prevRow then
-            upgraded = prevRow
-            Store.nearby[prevRow.key] = nil
-            if nearbyCountSynced then
-                nearbyCount = math.max(0, nearbyCount - 1)
+            local prevHasSurname = type(prevRow.displayName) == "string" and prevRow.displayName:find("%s") ~= nil
+            local prevFirst = prevRow.displayName and prevRow.displayName:match("^([^%s%-]+)")
+            if (not parsed.surname) and prevHasSurname and prevFirst and parsed.firstName and prevFirst:lower() == parsed.firstName:lower() then
+                local prevParsed = Compat.ParseCharacterName(prevRow.displayName)
+                if prevParsed then
+                    parsed = prevParsed
+                end
+            else
+                upgraded = prevRow
+                Store.nearby[prevRow.key] = nil
+                if nearbyCountSynced then
+                    nearbyCount = math.max(0, nearbyCount - 1)
+                end
             end
         end
     end
@@ -362,7 +372,7 @@ local function InspectUnit(unit, source, fromTicker)
         if not isVis then
             local myMap = C_Map and C_Map.GetBestMapForUnit and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, "player"))
             local uMap = C_Map and C_Map.GetBestMapForUnit and Safe.Number(Safe.Call(C_Map.GetBestMapForUnit, unit))
-            if not uMap or (myMap and uMap ~= myMap) then
+            if not myMap or not uMap or uMap ~= myMap then
                 isPhysicalGroupNear = false
                 if uMap and C_Map and C_Map.GetMapInfo then
                     local info = Safe.Call(C_Map.GetMapInfo, uMap)
@@ -517,25 +527,72 @@ local RACE_TO_FACTION = {
 
 local function IsOpposingFactionChatSpeaker(cleanGuid, cleanSender)
     local myFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
-    if not myFac then return false end
+    if not myFac then return true end
     local detectedFac = nil
     if cleanGuid and GetPlayerInfoByGUID then
-        local ok, _, _, _, engRace = pcall(GetPlayerInfoByGUID, cleanGuid)
-        if ok and type(engRace) == "string" then
-            detectedFac = RACE_TO_FACTION[engRace]
+        local ok, _, _, locRace, engRace = pcall(GetPlayerInfoByGUID, cleanGuid)
+        if ok then
+            local cleanEng = Safe.String(engRace)
+            local cleanLoc = Safe.String(locRace)
+            if Compat.FactionFromRace then
+                detectedFac = Compat.FactionFromRace(cleanEng or cleanLoc)
+            end
+            if not detectedFac and cleanEng then
+                detectedFac = RACE_TO_FACTION[cleanEng]
+            end
         end
     end
+    local parsedSender = cleanSender and Compat.ParseCharacterName and Compat.ParseCharacterName(cleanSender) or nil
     if not detectedFac and Store then
         local sRow = cleanGuid and Store.socialByGuid and Store.socialByGuid[cleanGuid]
-        if not sRow and cleanSender and Compat.ParseCharacterName and Store.socialByLookup then
-            local p = Compat.ParseCharacterName(cleanSender)
-            sRow = p and p.lookupKey and Store.socialByLookup[p.lookupKey]
+        if not sRow and parsedSender and parsedSender.lookupKey and Store.socialByLookup then
+            local candidate = Store.socialByLookup[parsedSender.lookupKey]
+            if candidate and not (cleanGuid and candidate.guid and candidate.guid ~= cleanGuid) then
+                sRow = candidate
+            end
         end
-        if sRow and (sRow.faction == "Alliance" or sRow.faction == "Horde") then
-            detectedFac = sRow.faction
+        if sRow then
+            if sRow.faction == "Alliance" or sRow.faction == "Horde" then
+                detectedFac = sRow.faction
+            elseif sRow.sameFaction == true or (sRow.sources and (sRow.sources.guild == true or sRow.sources.friend == true)) then
+                detectedFac = myFac
+            elseif sRow.sameFaction == false then
+                return true
+            end
         end
     end
-    return (detectedFac ~= nil and detectedFac ~= myFac)
+    if not detectedFac and Store and Store.nearby then
+        if cleanGuid then
+            local nRow = nearbyByGuid[cleanGuid]
+            if not nRow and parsedSender and parsedSender.lookupKey then
+                local candidate = Store.nearby[parsedSender.lookupKey]
+                if candidate and candidate.guid == cleanGuid then
+                    nRow = candidate
+                end
+            end
+            if nRow then
+                detectedFac = myFac
+            end
+        elseif parsedSender and parsedSender.lookupKey and Store.nearby[parsedSender.lookupKey] then
+            detectedFac = myFac
+        end
+    end
+    if not detectedFac and Compat.IsGuildMember and Compat.IsGuildMember(parsedSender and parsedSender.firstName, cleanGuid, cleanSender) then
+        detectedFac = myFac
+    end
+    if not detectedFac and Compat.IsInMyGroup and Compat.IsInMyGroup(cleanSender, cleanGuid) then
+        detectedFac = myFac
+    end
+    if not detectedFac and cleanGuid and C_FriendList and C_FriendList.IsFriend then
+        local okF, isF = pcall(C_FriendList.IsFriend, cleanGuid)
+        if okF and Safe.Value(isF) == true then
+            detectedFac = myFac
+        end
+    end
+    if not detectedFac then
+        return true
+    end
+    return (detectedFac ~= myFac)
 end
 
 local function OnChat(_, eventName, text, sender, ...)
@@ -558,10 +615,18 @@ local function OnChat(_, eventName, text, sender, ...)
         Compat.CacheForeverFullName(cleanGuid, cleanSender)
     end
     local bestName = cleanSender
-    if not cleanSender:find("%s") and cleanGuid and Compat.LookupForeverFullName then
-        local resolved = Compat.LookupForeverFullName(cleanGuid, cleanSender, false)
-        if resolved and resolved.fullName then
-            bestName = resolved.fullName
+    if not cleanSender:find("%s") and cleanGuid then
+        if Compat.LookupForeverFullName then
+            local resolved = Compat.LookupForeverFullName(cleanGuid, cleanSender, false)
+            if resolved and resolved.fullName then
+                bestName = resolved.fullName
+            end
+        end
+        if not bestName:find("%s") and nearbyByGuid[cleanGuid] then
+            local cachedRow = nearbyByGuid[cleanGuid]
+            if cachedRow and type(cachedRow.displayName) == "string" and cachedRow.displayName:find("%s") then
+                bestName = cachedRow.displayName
+            end
         end
     end
     local guild = cleanGuid and Compat.ReadUnitTooltipGuild and Compat.ReadUnitTooltipGuild(nil, cleanGuid, true) or nil
@@ -591,16 +656,66 @@ local function OnChat(_, eventName, text, sender, ...)
     end
 
     -- Refresh already-recorded Nearby rows without overwriting their real map zone, and notify Watchlist cleanly without a fake zone.
-    local existing = Store.nearby and ((cleanGuid and nearbyByGuid[cleanGuid]) or Store.nearby[parsed.lookupKey])
+    local existing = nil
+    if Store.nearby then
+        existing = (cleanGuid and nearbyByGuid[cleanGuid]) or Store.nearby[parsed.lookupKey]
+        if not existing and parsed.surname and parsed.firstName then
+            local firstLowerKey = parsed.firstName:lower()
+            local oldRow = Store.nearby[firstLowerKey]
+            if oldRow and not (cleanGuid and oldRow.guid and oldRow.guid ~= cleanGuid) then
+                existing = oldRow
+            end
+        end
+    end
+    local notifyName = parsed.displayName
     if existing then
-        existing.displayName = parsed.displayName
-        existing.guid = cleanGuid or existing.guid
+        local existingHasSurname = type(existing.displayName) == "string" and existing.displayName:find("%s") ~= nil
+        local shouldKeepExistingKey = existingHasSurname and not parsed.surname
+        if not shouldKeepExistingKey then
+            if existing.key and existing.key ~= parsed.lookupKey then
+                if Store.nearby[existing.key] == existing then
+                    Store.nearby[existing.key] = nil
+                    if nearbyCountSynced then
+                        nearbyCount = math.max(0, nearbyCount - 1)
+                    end
+                end
+                local dupRow = Store.nearby[parsed.lookupKey]
+                if dupRow and dupRow ~= existing then
+                    if dupRow.guid and nearbyByGuid[dupRow.guid] == dupRow then
+                        nearbyByGuid[dupRow.guid] = nil
+                    end
+                    if not existing.classFile then existing.classFile = dupRow.classFile end
+                    if not existing.level then existing.level = dupRow.level end
+                    if not existing.area then existing.area = dupRow.area end
+                    if not existing.guild then existing.guild = dupRow.guild end
+                    if not existing.guid then existing.guid = dupRow.guid end
+                elseif nearbyCountSynced and Store.nearby[parsed.lookupKey] == nil then
+                    nearbyCount = nearbyCount + 1
+                end
+                existing.key = parsed.lookupKey
+                Store.nearby[parsed.lookupKey] = existing
+            elseif not existing.key then
+                existing.key = parsed.lookupKey
+                if nearbyCountSynced and Store.nearby[parsed.lookupKey] == nil then
+                    nearbyCount = nearbyCount + 1
+                end
+                Store.nearby[parsed.lookupKey] = existing
+            end
+            existing.displayName = parsed.displayName
+        end
+        if cleanGuid and cleanGuid ~= "" then
+            existing.guid = cleanGuid
+            nearbyByGuid[cleanGuid] = existing
+        elseif existing.guid and existing.guid ~= "" then
+            nearbyByGuid[existing.guid] = existing
+        end
         if guild and guild ~= "" then existing.guild = guild end
         existing.lastSeen = time()
+        notifyName = existing.displayName or notifyName
         QueueEmit()
     end
 
-    Store:SyncWatchlistObservation(parsed.displayName, {
+    Store:SyncWatchlistObservation(notifyName, {
         online = true,
         guid = cleanGuid,
         source = "chat",

@@ -354,7 +354,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
     -- Mandatory 100% Opacity enforcement for any window, modal, or popup dialog:
     -- Ensure an explicit solid opaque quad is present on the frame's BACKGROUND layer (-8)
     -- with alpha 1.0 so background elements (text, buttons, 3D world) NEVER bleed through.
-    if kind == "window" then
+    if resolvedKind == "window" then
         if not frame._solidOpaqueBg then
             frame._solidOpaqueBg = frame:CreateTexture(nil, "BACKGROUND", nil, -8)
             frame._solidOpaqueBg:SetAllPoints(frame)
@@ -368,7 +368,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
     if self:IsBlizzard(p) then
         local hasStoneAtlas = HasAtlas("groupfinder-Stat-StoneBG")
 
-        if kind == "row" or kind == "rowAlt" then
+        if resolvedKind == "row" or resolvedKind == "rowAlt" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
@@ -376,9 +376,9 @@ function Theme:ApplyBackdrop(frame, kind, palette)
                 frame._foreverRowBg:Hide()
             end
             SyncDepthPolish(frame, "none", p, true)
-            local bgRow = (kind == "row") and { 0.085, 0.078, 0.070 } or { 0.055, 0.050, 0.045 }
+            local bgRow = (resolvedKind == "row") and { 0.085, 0.078, 0.070 } or { 0.055, 0.050, 0.045 }
             ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, bgRow, nil, false)
-            frame:SetBackdropColor(bgRow[1], bgRow[2], bgRow[3], (kind == "row") and 0.42 or 0.25)
+            frame:SetBackdropColor(bgRow[1], bgRow[2], bgRow[3], (resolvedKind == "row") and 0.42 or 0.25)
             if frame.GetObjectType and frame:GetObjectType() == "Button" and not frame._foreverRowHl then
                 local hl = frame:CreateTexture(nil, "HIGHLIGHT")
                 hl:SetAllPoints(frame)
@@ -388,7 +388,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             return
         end
 
-        if kind == "surface" and frame._scIsListRow then
+        if resolvedKind == "surface" and frame._scIsListRow then
             ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, { 0.22, 0.17, 0.08 }, nil, false)
             frame:SetBackdropColor(0.22, 0.17, 0.08, 0.55)
             if frame._foreverRowBg then frame._foreverRowBg:Hide() end
@@ -400,14 +400,14 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             frame._foreverRowBg:Hide()
         end
 
-        if kind == "window" then
+        if resolvedKind == "window" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
             ApplyBackdropSpec(frame, BLIZZ_DIALOG_BACKDROP, { 0.08, 0.075, 0.07 }, { 0.86, 0.80, 0.68 }, true)
             SyncDepthPolish(frame, "none", p, true)
             return
-        elseif kind == "header" then
+        elseif resolvedKind == "header" then
             ApplyBackdropSpec(frame, hasStoneAtlas and BACKDROP_SPEC or BLIZZ_SURFACE_BACKDROP, { 0.085, 0.08, 0.07 }, { 0.46, 0.38, 0.22 }, true)
             if hasStoneAtlas then
                 if not frame._foreverSurfaceStone then
@@ -422,14 +422,14 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             end
             SyncDepthPolish(frame, "header", p, true)
             return
-        elseif kind == "inset" then
+        elseif resolvedKind == "inset" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
             ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.048, 0.045, 0.042 }, { 0.36, 0.30, 0.19 }, true)
             SyncDepthPolish(frame, "inset", p, true)
             return
-        elseif kind == "surface" then
+        elseif resolvedKind == "surface" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
@@ -448,27 +448,27 @@ function Theme:ApplyBackdrop(frame, kind, palette)
 
     local bg, border
 
-    if kind == "window" then
+    if resolvedKind == "window" then
         bg, border = p.windowBg, p.windowBorder
-    elseif kind == "header" then
+    elseif resolvedKind == "header" then
         bg, border = p.headerBg, p.surfaceBorder
-    elseif kind == "surface" then
+    elseif resolvedKind == "surface" then
         bg, border = p.surfaceBg, p.surfaceBorder
-    elseif kind == "inset" then
+    elseif resolvedKind == "inset" then
         bg, border = p.insetBg, p.surfaceBorder
-    elseif kind == "button" then
+    elseif resolvedKind == "button" then
         bg, border = p.btnBg, p.btnBorder
-    elseif kind == "primary" then
+    elseif resolvedKind == "primary" then
         bg, border = p.accentDim, p.accentBorder
-    elseif kind == "danger" then
+    elseif resolvedKind == "danger" then
         bg, border = p.dangerBg, p.dangerBorder
-    elseif kind == "row" then
+    elseif resolvedKind == "row" then
         bg, border = p.rowBg, nil
-    elseif kind == "rowAlt" then
+    elseif resolvedKind == "rowAlt" then
         bg, border = p.rowAltBg, nil
-    elseif kind == "activeTab" then
+    elseif resolvedKind == "activeTab" then
         bg, border = p.accentDim, p.accentBorder
-    elseif kind == "tab" then
+    elseif resolvedKind == "tab" then
         bg, border = p.surfaceBg, p.surfaceBorder
     else
         bg, border = p.surfaceBg, p.surfaceBorder
@@ -559,70 +559,34 @@ function Theme:MeasureTextWidth(btn)
 end
 
 local function EnsureBlizzButtonVisual(btn, isTab)
-    if isTab then
-        if btn._blizzBtn then
-            btn._blizzBtn:Hide()
+    if not isTab then
+        if btn._blizzTabFrame then
+            btn._blizzTabFrame:Hide()
         end
-        if not btn._blizzTabFrame then
-            local tab = CreateFrame("Frame", nil, btn, "BackdropTemplate")
-            tab:SetAllPoints(btn)
-            tab:EnableMouse(false)
-            if tab.SetClipsChildren then
-                tab:SetClipsChildren(true)
-            end
-            tab._topAccent = tab:CreateTexture(nil, "OVERLAY")
-            tab._topAccent:SetPoint("TOPLEFT", tab, "TOPLEFT", 2, -1)
-            tab._topAccent:SetPoint("TOPRIGHT", tab, "TOPRIGHT", -2, -1)
-            tab._topAccent:SetHeight(2)
-
-            tab._bottomBridge = tab:CreateTexture(nil, "OVERLAY")
-            tab._bottomBridge:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", 1, 0)
-            tab._bottomBridge:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -1, 0)
-            tab._bottomBridge:SetHeight(2)
-
-            tab._scIsInternalBtnLayer = true
-            btn._blizzTabFrame = tab
-        end
-        return btn._blizzTabFrame, "tab"
+        return nil, nil
     end
 
-    if btn._blizzTabFrame then
-        btn._blizzTabFrame:Hide()
-    end
-    if not btn._blizzBtn and not btn._blizzBtnFailed then
-        local ok, vis = pcall(CreateFrame, "Button", nil, btn, "UIPanelButtonTemplate")
-        if ok and vis then
-            vis:EnableMouse(false)
-            vis:SetText("")
-            if vis.Text then vis.Text:SetText("") end
-            vis._scIsInternalBtnLayer = true
-            btn._blizzBtn = vis
-        else
-            btn._blizzBtnFailed = true
+    if not btn._blizzTabFrame then
+        local tab = CreateFrame("Frame", nil, btn, "BackdropTemplate")
+        tab:SetAllPoints(btn)
+        tab:EnableMouse(false)
+        if tab.SetClipsChildren then
+            tab:SetClipsChildren(true)
         end
-    end
-    return btn._blizzBtn, "button"
-end
+        tab._topAccent = tab:CreateTexture(nil, "OVERLAY")
+        tab._topAccent:SetPoint("TOPLEFT", tab, "TOPLEFT", 2, -1)
+        tab._topAccent:SetPoint("TOPRIGHT", tab, "TOPRIGHT", -2, -1)
+        tab._topAccent:SetHeight(2)
 
-local function TintBlizzButtonTextures(vis, desat, r, g, b)
-    local regions = { vis.Left, vis.Middle, vis.Right }
-    for i = 1, 3 do
-        local tex = regions[i]
-        if tex and tex.SetDesaturated then
-            pcall(tex.SetDesaturated, tex, desat)
-            pcall(tex.SetVertexColor, tex, r, g, b)
-        end
+        tab._bottomBridge = tab:CreateTexture(nil, "OVERLAY")
+        tab._bottomBridge:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", 1, 0)
+        tab._bottomBridge:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -1, 0)
+        tab._bottomBridge:SetHeight(2)
+
+        tab._scIsInternalBtnLayer = true
+        btn._blizzTabFrame = tab
     end
-    local norm = vis.GetNormalTexture and vis:GetNormalTexture()
-    if norm and norm.SetDesaturated then
-        pcall(norm.SetDesaturated, norm, desat)
-        pcall(norm.SetVertexColor, norm, r, g, b)
-    end
-    local push = vis.GetPushedTexture and vis:GetPushedTexture()
-    if push and push.SetDesaturated then
-        pcall(push.SetDesaturated, push, desat)
-        pcall(push.SetVertexColor, push, r, g, b)
-    end
+    return btn._blizzTabFrame, "tab"
 end
 
 --- Keep internal button plate and text layers cleanly ordered above parent card backgrounds.
@@ -633,9 +597,6 @@ function Theme:SyncButtonLayers(btn)
     local bLvl = math.max(1, math.min(9990, btn:GetFrameLevel() or 1))
     if btn._blizzTabFrame and btn._blizzTabFrame.SetFrameLevel then
         btn._blizzTabFrame:SetFrameLevel(bLvl + 1)
-    end
-    if btn._blizzBtn and btn._blizzBtn.SetFrameLevel then
-        btn._blizzBtn:SetFrameLevel(bLvl + 1)
     end
     if btn._textLayer and btn._textLayer.SetFrameLevel then
         btn._textLayer:SetFrameLevel(bLvl + 4)
@@ -675,7 +636,7 @@ function Theme:SyncSubtreeLayers(root, depth)
         return
     end
     local baseLvl = math.max(1, math.min(9980, (root.GetFrameLevel and root:GetFrameLevel()) or 1))
-    if root._textLayer or root._blizzTabFrame or root._blizzBtn then
+    if root._textLayer or root._blizzTabFrame then
         self:SyncButtonLayers(root)
     end
     if root.clearBtn and root.clearBtn.SetFrameLevel then
@@ -694,6 +655,41 @@ function Theme:SyncSubtreeLayers(root, depth)
     end
 end
 
+local function EnsureToggleSquareRing(btn)
+    if btn._scToggleRing then
+        return btn._scToggleRing
+    end
+    local layer = btn._textLayer or btn
+    local ring = {
+        top = layer:CreateTexture(nil, "OVERLAY", nil, 5),
+        bottom = layer:CreateTexture(nil, "OVERLAY", nil, 5),
+        left = layer:CreateTexture(nil, "OVERLAY", nil, 5),
+        right = layer:CreateTexture(nil, "OVERLAY", nil, 5),
+    }
+    ring.top:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+    ring.top:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
+    ring.top:SetHeight(2)
+    ring.bottom:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 0)
+    ring.bottom:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    ring.bottom:SetHeight(2)
+    ring.left:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, -2)
+    ring.left:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 2)
+    ring.left:SetWidth(2)
+    ring.right:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, -2)
+    ring.right:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 2)
+    ring.right:SetWidth(2)
+    btn._scToggleRing = ring
+    return ring
+end
+
+local function SetToggleSquareRingColor(ring, r, g, b, a)
+    if not ring then return end
+    for _, edge in pairs(ring) do
+        edge:SetColorTexture(r, g, b, a or 1)
+        edge:Show()
+    end
+end
+
 local function ApplyButtonColors(btn, hovered)
     local p = Theme:GetPalette()
     if not btn.SetBackdrop then
@@ -705,15 +701,14 @@ local function ApplyButtonColors(btn, hovered)
     local variant = btn._scVariant or "default"
     local active = btn._scActive
     local isBlizz = Theme:IsBlizzard(p)
-    local w = btn:GetWidth() or 0
     btn._scThemeKey = p.key
 
     Theme:SyncButtonLayers(btn)
     SyncBlizzTextOffset(btn, 0, 0)
 
-    local useBlizzPlate = isBlizz and (variant == "tab" or ((variant == "primary" or variant == "danger") and w >= 26))
+    local useBlizzPlate = isBlizz and (variant == "tab")
     if useBlizzPlate then
-        local vis, kind = EnsureBlizzButtonVisual(btn, variant == "tab")
+        local vis = EnsureBlizzButtonVisual(btn, true)
         if vis then
             if btn._scNavIndicator then btn._scNavIndicator:Hide() end
             if btn._scAppliedBackdrop ~= nil then
@@ -722,88 +717,44 @@ local function ApplyButtonColors(btn, hovered)
             end
             Theme:SyncButtonLayers(btn)
             vis:ClearAllPoints()
-            if kind == "tab" then
-                vis:SetAllPoints(btn)
-                if vis._scAppliedBackdrop ~= BACKDROP_SPEC then
-                    vis:SetBackdrop(BACKDROP_SPEC)
-                    vis._scAppliedBackdrop = BACKDROP_SPEC
+            vis:SetAllPoints(btn)
+            if vis._scAppliedBackdrop ~= BACKDROP_SPEC then
+                vis:SetBackdrop(BACKDROP_SPEC)
+                vis._scAppliedBackdrop = BACKDROP_SPEC
+            end
+            if active then
+                vis:SetBackdropColor(0.14, 0.12, 0.09, 0.98)
+                vis:SetBackdropBorderColor(0.84, 0.66, 0.24, 1)
+                vis._topAccent:SetColorTexture(0.98, 0.80, 0.28, 0.95)
+                vis._topAccent:Show()
+                vis._bottomBridge:SetColorTexture(0.10, 0.09, 0.08, 1)
+                vis._bottomBridge:Show()
+                SyncBlizzTextOffset(btn, 0, 0)
+                if btn.label then
+                    btn.label:SetTextColor(1.0, 1.0, 1.0)
                 end
-                if active then
-                    vis:SetBackdropColor(0.14, 0.12, 0.09, 0.98)
-                    vis:SetBackdropBorderColor(0.84, 0.66, 0.24, 1)
-                    vis._topAccent:SetColorTexture(0.98, 0.80, 0.28, 0.95)
-                    vis._topAccent:Show()
-                    vis._bottomBridge:SetColorTexture(0.10, 0.09, 0.08, 1)
-                    vis._bottomBridge:Show()
-                    SyncBlizzTextOffset(btn, 0, 0)
-                    if btn.label then
-                        btn.label:SetTextColor(1.0, 1.0, 1.0)
-                    end
-                elseif hovered then
-                    vis:SetBackdropColor(0.11, 0.10, 0.09, 0.95)
-                    vis:SetBackdropBorderColor(0.66, 0.52, 0.22, 1)
-                    vis._topAccent:SetColorTexture(0.82, 0.64, 0.24, 0.65)
-                    vis._topAccent:Show()
-                    vis._bottomBridge:SetColorTexture(0.36, 0.29, 0.16, 0.9)
-                    vis._bottomBridge:Show()
-                    SyncBlizzTextOffset(btn, 0, -1)
-                    if btn.label then
-                        btn.label:SetTextColor(1.0, 0.93, 0.65)
-                    end
-                else
-                    vis:SetBackdropColor(0.07, 0.07, 0.08, 0.90)
-                    vis:SetBackdropBorderColor(0.38, 0.30, 0.16, 0.95)
-                    vis._topAccent:SetColorTexture(0.55, 0.44, 0.18, 0.28)
-                    vis._topAccent:Show()
-                    vis._bottomBridge:SetColorTexture(0.32, 0.25, 0.13, 0.85)
-                    vis._bottomBridge:Show()
-                    SyncBlizzTextOffset(btn, 0, -1)
-                    if btn.label then
-                        local g = p.textGold or p.text
-                        btn.label:SetTextColor(g[1], g[2], g[3])
-                    end
+            elseif hovered then
+                vis:SetBackdropColor(0.11, 0.10, 0.09, 0.95)
+                vis:SetBackdropBorderColor(0.66, 0.52, 0.22, 1)
+                vis._topAccent:SetColorTexture(0.82, 0.64, 0.24, 0.65)
+                vis._topAccent:Show()
+                vis._bottomBridge:SetColorTexture(0.36, 0.29, 0.16, 0.9)
+                vis._bottomBridge:Show()
+                SyncBlizzTextOffset(btn, 0, -1)
+                if btn.label then
+                    btn.label:SetTextColor(1.0, 0.93, 0.65)
                 end
             else
-                vis:SetAllPoints(btn)
-                if not btn:IsEnabled() then
-                    vis:Disable()
-                    vis:UnlockHighlight()
-                    vis:SetAlpha(0.60)
-                    TintBlizzButtonTextures(vis, true, 0.38, 0.38, 0.40)
-                else
-                    vis:Enable()
-                    vis:SetAlpha(1.0)
-                    if btn._scPushed then
-                        vis:SetButtonState("PUSHED")
-                    else
-                        vis:SetButtonState("NORMAL")
-                    end
-                    if hovered then
-                        vis:LockHighlight()
-                    else
-                        vis:UnlockHighlight()
-                    end
-                    if variant == "danger" then
-                        TintBlizzButtonTextures(vis, false, hovered and 0.96 or 0.84, 0.38, 0.36)
-                    else
-                        TintBlizzButtonTextures(vis, false, hovered and 1.12 or 1.02, hovered and 1.06 or 1.0, hovered and 1.02 or 0.96)
-                    end
-                end
-                if btn._scPushed and btn:IsEnabled() then
-                    SyncBlizzTextOffset(btn, 1, -1)
-                else
-                    SyncBlizzTextOffset(btn, 0, 0)
-                end
+                vis:SetBackdropColor(0.07, 0.07, 0.08, 0.90)
+                vis:SetBackdropBorderColor(0.38, 0.30, 0.16, 0.95)
+                vis._topAccent:SetColorTexture(0.55, 0.44, 0.18, 0.28)
+                vis._topAccent:Show()
+                vis._bottomBridge:SetColorTexture(0.32, 0.25, 0.13, 0.85)
+                vis._bottomBridge:Show()
+                SyncBlizzTextOffset(btn, 0, -1)
                 if btn.label then
-                    if not btn:IsEnabled() then
-                        btn.label:SetTextColor(p.textDim[1], p.textDim[2], p.textDim[3])
-                    elseif active or hovered then
-                        btn.label:SetTextColor(1, 1, 1)
-                    elseif variant == "danger" then
-                        btn.label:SetTextColor(1.0, 0.82, 0.78)
-                    else
-                        btn.label:SetTextColor(1.0, 0.92, 0.68)
-                    end
+                    local g = p.textGold or p.text
+                    btn.label:SetTextColor(g[1], g[2], g[3])
                 end
             end
             vis:Show()
@@ -812,7 +763,6 @@ local function ApplyButtonColors(btn, hovered)
         end
     end
 
-    if btn._blizzBtn then btn._blizzBtn:Hide() end
     if btn._blizzTabFrame then btn._blizzTabFrame:Hide() end
     if variant == "nav" then
         local parent = btn._textLayer or btn
@@ -868,45 +818,103 @@ local function ApplyButtonColors(btn, hovered)
     SyncBlizzTextOffset(btn, 0, 0)
 
     local bg, border, textColor
-    if not btn:IsEnabled() then
-        bg = isBlizz and { 0.07, 0.065, 0.06, 0.88 } or p.insetBg
-        border = isBlizz and { 0.24, 0.21, 0.16, 0.75 } or p.surfaceBorder
-        textColor = p.textDim
-    elseif variant == "primary" or (active and not isBlizz) then
-        bg = hovered and p.accent or p.accentDim
-        border = p.accentBorder
-        textColor = p.text
-    elseif active and isBlizz then
-        bg = hovered and { 0.28, 0.21, 0.09, 0.98 } or { 0.21, 0.16, 0.07, 0.96 }
-        border = { 0.90, 0.72, 0.26, 1.0 }
-        textColor = { 1.0, 0.95, 0.78 }
-    elseif variant == "danger" then
-        bg = hovered and p.dangerHoverBg or p.dangerBg
-        border = p.dangerBorder
-        textColor = p.text
-    elseif variant == "tab" then
-        bg = hovered and p.rowHoverBg or p.surfaceBg
-        border = p.surfaceBorder
-        textColor = hovered and p.text or p.textMuted
-    elseif variant == "ghost" then
-        if btn._scHelpRing then
-            bg = { 0, 0, 0, 0 }
-            border = { 0, 0, 0, 0 }
-            textColor = hovered and { 1.0, 0.95, 0.72 } or { 0.84, 0.72, 0.38 }
+    local isIconToggle = (btn._scIconToggle == true)
+    if isIconToggle then
+        local enabled = btn:IsEnabled()
+        local ac = btn._scToggleActiveCol or { 0.96, 0.76, 0.22 }
+        local ring = EnsureToggleSquareRing(btn)
+        if not enabled then
+            bg = { 0.06, 0.065, 0.075, 0.92 }
+            border = { 0.26, 0.28, 0.32, 0.75 }
+            textColor = p.textDim
+            SetToggleSquareRingColor(ring, 0.26, 0.28, 0.32, 0.70)
+        elseif active then
+            bg = hovered and { ac[1] * 0.34, ac[2] * 0.34, ac[3] * 0.34, 0.98 }
+                or { ac[1] * 0.24, ac[2] * 0.24, ac[3] * 0.24, 0.96 }
+            border = { ac[1], ac[2], ac[3], 1.0 }
+            textColor = { 1.0, 0.96, 0.84 }
+            SetToggleSquareRingColor(ring, ac[1], ac[2], ac[3], 1.0)
         else
-            bg = hovered and (isBlizz and { 0.22, 0.17, 0.09, 0.85 } or p.rowHoverBg) or { 0, 0, 0, 0 }
-            border = hovered and (isBlizz and { 0.68, 0.54, 0.22, 0.85 } or p.surfaceBorder) or { 0, 0, 0, 0 }
-            textColor = hovered and (isBlizz and { 1.0, 0.90, 0.55 } or p.text) or p.textMuted
+            bg = hovered and { 0.14, 0.15, 0.17, 0.96 } or { 0.08, 0.085, 0.095, 0.94 }
+            border = hovered and { 0.56, 0.60, 0.66, 0.96 } or { 0.36, 0.38, 0.42, 0.90 }
+            textColor = p.textMuted
+            if hovered then
+                SetToggleSquareRingColor(ring, 0.58, 0.62, 0.68, 0.95)
+            else
+                SetToggleSquareRingColor(ring, 0.38, 0.40, 0.44, 0.85)
+            end
         end
-    elseif isBlizz then
-        -- Sleek Modern Blizzard Charcoal-Bronze Matte Button (replaces archaic red boxes on default utility buttons)
-        bg = hovered and { 0.20, 0.17, 0.12, 0.98 } or { 0.12, 0.11, 0.095, 0.96 }
-        border = hovered and { 0.84, 0.66, 0.24, 1.0 } or { 0.40, 0.34, 0.21, 0.92 }
-        textColor = hovered and { 1.0, 0.96, 0.82 } or { 0.94, 0.86, 0.64 }
+        if btn.ico then
+            local inactiveDesat = not (btn._scIconOpts and btn._scIconOpts.keepColorWhenInactive == true)
+            local desat = (not enabled) or (not active and inactiveDesat)
+            if btn.ico.SetDesaturated then
+                btn.ico:SetDesaturated(desat)
+            end
+            local col = btn._scIconOpts and btn._scIconOpts.color
+            if not enabled then
+                btn.ico:SetVertexColor(0.55, 0.55, 0.58, 0.45)
+            elseif active then
+                if col then
+                    btn.ico:SetVertexColor(col[1], col[2], col[3], col[4] or 1)
+                else
+                    btn.ico:SetVertexColor(1, 1, 1, 1)
+                end
+            else
+                if col and not inactiveDesat then
+                    btn.ico:SetVertexColor(col[1], col[2], col[3], hovered and 0.92 or 0.72)
+                elseif desat then
+                    btn.ico:SetVertexColor(0.72, 0.74, 0.78, hovered and 0.92 or 0.78)
+                else
+                    btn.ico:SetVertexColor(0.85, 0.87, 0.90, hovered and 0.92 or 0.78)
+                end
+            end
+        end
     else
-        bg = hovered and p.btnHoverBg or p.btnBg
-        border = hovered and p.accentBorder or p.btnBorder
-        textColor = p.text
+        if btn._scToggleRing then
+            for _, edge in pairs(btn._scToggleRing) do
+                edge:Hide()
+            end
+        end
+        if not btn:IsEnabled() then
+            bg = isBlizz and { 0.07, 0.065, 0.06, 0.88 } or p.insetBg
+            border = isBlizz and { 0.24, 0.21, 0.16, 0.75 } or p.surfaceBorder
+            textColor = p.textDim
+        elseif variant == "primary" or (active and not isBlizz) then
+            bg = hovered and p.accent or p.accentDim
+            border = p.accentBorder
+            textColor = (isBlizz and hovered) and { 1.0, 1.0, 1.0 } or p.text
+        elseif active and isBlizz then
+            bg = hovered and { 0.28, 0.21, 0.09, 0.98 } or { 0.21, 0.16, 0.07, 0.96 }
+            border = { 0.90, 0.72, 0.26, 1.0 }
+            textColor = { 1.0, 0.95, 0.78 }
+        elseif variant == "danger" then
+            bg = hovered and p.dangerHoverBg or p.dangerBg
+            border = p.dangerBorder
+            textColor = isBlizz and (hovered and { 1.0, 1.0, 1.0 } or { 1.0, 0.86, 0.82 }) or p.text
+        elseif variant == "tab" then
+            bg = hovered and p.rowHoverBg or p.surfaceBg
+            border = p.surfaceBorder
+            textColor = hovered and p.text or p.textMuted
+        elseif variant == "ghost" then
+            if btn._scHelpRing then
+                bg = { 0, 0, 0, 0 }
+                border = { 0, 0, 0, 0 }
+                textColor = hovered and { 1.0, 0.95, 0.72 } or { 0.84, 0.72, 0.38 }
+            else
+                bg = hovered and (isBlizz and { 0.22, 0.17, 0.09, 0.85 } or p.rowHoverBg) or { 0, 0, 0, 0 }
+                border = hovered and (isBlizz and { 0.68, 0.54, 0.22, 0.85 } or p.surfaceBorder) or { 0, 0, 0, 0 }
+                textColor = hovered and (isBlizz and { 1.0, 0.90, 0.55 } or p.text) or p.textMuted
+            end
+        elseif isBlizz then
+            -- Sleek Modern Blizzard Charcoal-Bronze Matte Button (replaces archaic red boxes on default utility buttons)
+            bg = hovered and { 0.20, 0.17, 0.12, 0.98 } or { 0.12, 0.11, 0.095, 0.96 }
+            border = hovered and { 0.84, 0.66, 0.24, 1.0 } or { 0.40, 0.34, 0.21, 0.92 }
+            textColor = hovered and { 1.0, 0.96, 0.82 } or { 0.94, 0.86, 0.64 }
+        else
+            bg = hovered and p.btnHoverBg or p.btnBg
+            border = hovered and p.accentBorder or p.btnBorder
+            textColor = p.text
+        end
     end
 
     ApplyBackdropSpec(btn, BACKDROP_SPEC, bg, border, false)
@@ -962,6 +970,196 @@ function Theme:AutoFitButton(btn, minWidth, padding, maxWidth)
     end
     ApplyButtonColors(btn, false)
     return btn._scAutoFitW or btn:GetWidth() or w
+end
+
+--- Clear icon-button texture/tooltip state before restoring text mode.
+function Theme:ClearButtonIcon(btn)
+    if not btn then return end
+    btn._scIconOpts = nil
+    btn._scIconToggle = nil
+    btn._scToggleActiveCol = nil
+    if btn._scToggleRing then
+        for _, edge in pairs(btn._scToggleRing) do
+            edge:Hide()
+        end
+    end
+    if btn.ico then
+        btn.ico:Hide()
+    end
+end
+
+--- Toggle colored-square (active) vs gray-square (inactive) state on an icon filter/toggle button.
+function Theme:SetIconToggle(btn, active, activeColor)
+    if not btn then return end
+    btn._scIconToggle = true
+    btn._scActive = (active == true)
+    if activeColor ~= nil then
+        btn._scToggleActiveCol = activeColor
+    end
+    local over = MouseIsOver and MouseIsOver(btn) or false
+    local enabled = (not btn.IsEnabled) or btn:IsEnabled()
+    ApplyButtonColors(btn, over and enabled)
+end
+
+--- Configure or update an icon-only button with cropped game textures, disabled dimming, and hover tooltip.
+function Theme:ConfigureIconButton(btn, width, height, tex, opts)
+    if not btn then return end
+    opts = type(opts) == "table" and opts or {}
+    self:SyncButtonLayers(btn)
+    btn._scAutoFit = false
+    if width and height then
+        btn:SetSize(width, height)
+        btn._scAutoFitW = width
+    end
+    self:SetButtonText(btn, "")
+    local layer = btn._textLayer or btn
+    if not btn.ico then
+        btn.ico = layer:CreateTexture(nil, "OVERLAY", nil, 2)
+        btn.ico:SetPoint("CENTER", 0, 0)
+    end
+    local sz = opts.size or 14
+    btn.ico:SetSize(sz, sz)
+    if opts.atlas and self.HasAtlas and self:HasAtlas(opts.atlas) and btn.ico.SetAtlas then
+        btn.ico:SetAtlas(opts.atlas, false)
+    else
+        btn.ico:SetTexture(tex)
+        local tc = opts.texCoord
+        if not tc and ((type(tex) == "string" and tex:find("Interface\\Icons\\", 1, true)) or type(tex) == "number") then
+            tc = { 0.08, 0.92, 0.08, 0.92 }
+        end
+        if tc then
+            btn.ico:SetTexCoord(tc[1], tc[2], tc[3], tc[4])
+        else
+            btn.ico:SetTexCoord(0, 1, 0, 1)
+        end
+    end
+    local isDis = (opts.disabled == true) or (btn.IsEnabled and not btn:IsEnabled())
+    if btn.ico.SetDesaturated then
+        btn.ico:SetDesaturated(isDis)
+    end
+    local col = opts.color
+    if col then
+        btn.ico:SetVertexColor(col[1], col[2], col[3], isDis and 0.50 or (col[4] or 1))
+    else
+        btn.ico:SetVertexColor(1, 1, 1, isDis and 0.50 or 1)
+    end
+    btn.ico:Show()
+    btn._scIconOpts = opts
+    if opts.toggle or opts.active ~= nil or btn._scIconToggle then
+        self:SetIconToggle(btn, opts.active, opts.activeColor)
+    elseif btn._scToggleRing then
+        for _, edge in pairs(btn._scToggleRing) do
+            edge:Hide()
+        end
+    end
+    if not btn._scIconTipHooked then
+        btn._scIconTipHooked = true
+        if btn.SetMotionScriptsWhileDisabled then
+            btn:SetMotionScriptsWhileDisabled(true)
+        end
+        btn:HookScript("OnEnter", function(selfBtn)
+            local cur = selfBtn._scIconOpts
+            if not (cur and GameTooltip) then return end
+            local title, desc
+            if type(cur.tooltipFn) == "function" then
+                title, desc = cur.tooltipFn(selfBtn)
+            else
+                title, desc = cur.title, cur.desc
+            end
+            if title and title ~= "" then
+                GameTooltip:SetOwner(selfBtn, cur.anchor or "ANCHOR_TOP")
+                GameTooltip:ClearLines()
+                GameTooltip:AddLine(title, 1.0, 0.88, 0.35, true)
+                if desc and desc ~= "" then
+                    GameTooltip:AddLine(desc, 0.85, 0.88, 0.94, true)
+                end
+                GameTooltip:Show()
+            end
+        end)
+        btn:HookScript("OnLeave", function(selfBtn)
+            if GameTooltip and GameTooltip:IsOwned(selfBtn) then
+                GameTooltip:Hide()
+            end
+        end)
+    end
+end
+
+--- Apply green (Online Only) vs red (Showing Offline) orb visual to an online/offline toggle button.
+function Theme:ApplyOnlineOfflineOrb(btn, showOffline, width, height)
+    if not btn then return end
+    local L = ns.L
+    local isShowOff = (showOffline == true)
+    btn._scShowOffline = isShowOff
+    local tex = isShowOff
+        and (FRIENDS_TEXTURE_DND or "Interface\\FriendsFrame\\StatusIcon-DnD")
+        or (FRIENDS_TEXTURE_ONLINE or "Interface\\FriendsFrame\\StatusIcon-Online")
+    local ringCol = isShowOff and { 0.95, 0.32, 0.32 } or { 0.25, 0.88, 0.45 }
+    self:ConfigureIconButton(btn, width or 24, height or 22, tex, {
+        size = 15,
+        toggle = true,
+        active = true,
+        activeColor = ringCol,
+        tooltipFn = function(selfBtn)
+            local offOn = (selfBtn._scShowOffline == true)
+            if offOn then
+                return "|cfff54747" .. L["Showing Offline"] .. "|r",
+                    L["Click to show online players only"] .. "\n" .. L["Green = Online Only · Red = Showing Offline"]
+            end
+            return "|cff3fb950" .. L["Online Only"] .. "|r",
+                L["Click to show offline players"] .. "\n" .. L["Green = Online Only · Red = Showing Offline"]
+        end,
+    })
+end
+
+--- Create a compact hoverable 'Legend' pill that lists all icons and meanings for a toolbar.
+function Theme:CreateLegendTag(parent, getItemsFn)
+    local L = ns.L
+    local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    btn:SetSize(74, 20)
+    self:ApplyBackdrop(btn, "surface")
+    local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    lbl:SetPoint("CENTER", 0, 0)
+    lbl:SetText(L["Legend"])
+    lbl:SetTextColor(0.92, 0.82, 0.48)
+    btn.label = lbl
+    local tw = math.ceil((lbl:GetStringWidth() or 52) + 16)
+    btn:SetWidth(math.max(62, tw))
+    btn._scAutoFitW = math.max(62, tw)
+    btn:SetScript("OnEnter", function(selfBtn)
+        local p = Theme:GetPalette()
+        if selfBtn.SetBackdropBorderColor then
+            local ac = p.accentBorder or { 0.96, 0.76, 0.22 }
+            selfBtn:SetBackdropBorderColor(ac[1], ac[2], ac[3], 1.0)
+        end
+        lbl:SetTextColor(1.0, 0.94, 0.70)
+        if not GameTooltip then return end
+        local items = type(getItemsFn) == "function" and getItemsFn() or getItemsFn
+        if type(items) ~= "table" or #items == 0 then return end
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["Icon Legend"], 1.0, 0.85, 0.25)
+        for _, it in ipairs(items) do
+            if it.tex then
+                local ico = "|T" .. tostring(it.tex) .. ":14:14:0:0|t "
+                if it.desc and it.desc ~= "" then
+                    GameTooltip:AddDoubleLine(ico .. tostring(it.title or ""), tostring(it.desc), 0.96, 0.96, 0.98, 0.76, 0.82, 0.90)
+                else
+                    GameTooltip:AddLine(ico .. tostring(it.title or ""), 0.94, 0.95, 0.98, true)
+                end
+            elseif it.title then
+                GameTooltip:AddLine(tostring(it.title), 0.85, 0.88, 0.94, true)
+            end
+        end
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function(selfBtn)
+        Theme:ApplyBackdrop(selfBtn, "surface")
+        lbl:SetTextColor(0.92, 0.82, 0.48)
+        if GameTooltip and GameTooltip:IsOwned(selfBtn) then
+            GameTooltip:Hide()
+        end
+    end)
+    return btn
 end
 
 --- Style an existing BackdropTemplate button with hover/disabled visuals.
@@ -1044,6 +1242,9 @@ function Theme:SetButtonText(btn, text)
     if btn and btn.label then
         self:SyncButtonLayers(btn)
         local cleanText = text or ""
+        if cleanText ~= "" and btn._scIconOpts ~= nil then
+            self:ClearButtonIcon(btn)
+        end
         local p = self:GetPalette()
         if btn._scLastBtnText == cleanText and btn._scThemeKey == p.key and btn.label:GetText() == cleanText then
             return
@@ -1172,14 +1373,27 @@ function Theme:InstallEditBoxLinkHook()
     self._editBoxLinkHooked = true
     if type(_G.ChatEdit_InsertLink) == "function" then
         hooksecurefunc("ChatEdit_InsertLink", function(text)
-            local box = Theme._focusedEditBox
-            if not (box and box.HasFocus and box:HasFocus() and box:IsVisible()) then
-                return
-            end
             if ns.Safe and ns.Safe.IsSecret and ns.Safe.IsSecret(text) then
                 return
             end
             if type(text) ~= "string" or text == "" then
+                return
+            end
+            local blizzBox = _G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow() or nil
+            if blizzBox and blizzBox.IsVisible and blizzBox:IsVisible() then
+                return
+            end
+            local box = Theme._focusedEditBox
+            if not (box and box.HasFocus and box:HasFocus() and box:IsVisible() and (not box.IsEnabled or box:IsEnabled())) then
+                box = nil
+                local qr = ns.QuickReply and ns.QuickReply.frame
+                if qr and qr.IsVisible and qr:IsVisible() and qr.inputBox and qr.inputBox.IsVisible and qr.inputBox:IsVisible() and (not qr.inputBox.IsEnabled or qr.inputBox:IsEnabled()) then
+                    box = qr.inputBox
+                elseif Theme._activeChatReplyBox and Theme._activeChatReplyBox.IsVisible and Theme._activeChatReplyBox:IsVisible() and (not Theme._activeChatReplyBox.IsEnabled or Theme._activeChatReplyBox:IsEnabled()) then
+                    box = Theme._activeChatReplyBox
+                end
+            end
+            if not box then
                 return
             end
             local inserted = text
@@ -1189,12 +1403,168 @@ function Theme:InstallEditBoxLinkHook()
                     :gsub("|H[^|]+|h%[?([^%]]*)%]?|h", "%1")
                     :gsub("^%s+", "")
                     :gsub("%s+$", "")
+            elseif box.GetText and box.GetCursorPosition then
+                local cur = box:GetText() or ""
+                local pos = box:GetCursorPosition() or #cur
+                if pos > 0 and cur:sub(pos, pos) ~= " " then
+                    inserted = " " .. inserted
+                end
+                if inserted:sub(-1) ~= " " then
+                    inserted = inserted .. " "
+                end
             end
             if inserted ~= "" and box.Insert then
                 box:Insert(inserted)
+                if box.SetFocus and not (box.HasFocus and box:HasFocus()) and not (InCombatLockdown and InCombatLockdown()) then
+                    pcall(box.SetFocus, box)
+                end
+                if box._scInsertLinkMode == "full" and _G.StackSplitFrame and _G.StackSplitFrame.IsShown and _G.StackSplitFrame:IsShown() and not (InCombatLockdown and InCombatLockdown()) then
+                    pcall(_G.StackSplitFrame.Hide, _G.StackSplitFrame)
+                end
             end
         end)
     end
+end
+
+local RAID_MARK_MENU_DEFS = {
+    { tag = "{rt1}", labelKey = "Star" },
+    { tag = "{rt2}", labelKey = "Circle" },
+    { tag = "{rt3}", labelKey = "Diamond" },
+    { tag = "{rt4}", labelKey = "Triangle" },
+    { tag = "{rt5}", labelKey = "Moon" },
+    { tag = "{rt6}", labelKey = "Square" },
+    { tag = "{rt7}", labelKey = "Cross" },
+    { tag = "{rt8}", labelKey = "Skull" },
+}
+
+function Theme:OpenRaidMarkPickerMenu(anchorBtn, inputBox)
+    if not (MenuUtil and MenuUtil.CreateContextMenu and inputBox) then return end
+    MenuUtil.CreateContextMenu(anchorBtn, function(_, root)
+        root:CreateTitle(L["Raid Target Icons ({rt1}..{rt8})"])
+        for idx, def in ipairs(RAID_MARK_MENU_DEFS) do
+            local ico = "|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_" .. tostring(idx) .. ":14|t "
+            root:CreateButton(ico .. L[def.labelKey] .. "  |cff9da7b5" .. def.tag .. "|r", function()
+                local cur = inputBox.GetText and inputBox:GetText() or ""
+                local pos = inputBox.GetCursorPosition and inputBox:GetCursorPosition() or #cur
+                local needsPre = (pos > 0 and cur:sub(pos, pos) ~= " ")
+                local ins = (needsPre and " " or "") .. def.tag .. " "
+                if inputBox.Insert then
+                    inputBox:Insert(ins)
+                else
+                    inputBox:SetText(cur .. ins)
+                end
+                if inputBox.SetFocus and not (InCombatLockdown and InCombatLockdown()) then
+                    pcall(inputBox.SetFocus, inputBox)
+                end
+            end)
+        end
+    end)
+end
+
+function Theme:ShowHyperlinkTooltip(owner, link)
+    if not owner or type(link) ~= "string" or link == "" then
+        return false
+    end
+    owner._scHoveredHyperlink = link
+    if not GameTooltip then return false end
+    if link:find("addon:SCentral:w:", 1, true) then
+        local who = link:match("addon:SCentral:w:([^|]+)") or "?"
+        GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(who, 1.0, 0.88, 0.35, true)
+        GameTooltip:AddLine(L["Click to whisper · Right-click for options"], 0.82, 0.88, 0.94, true)
+        GameTooltip:Show()
+        return true
+    elseif link:find("addon:SCentral:msgact:", 1, true) then
+        GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["Message Actions"], 1.0, 0.88, 0.35, true)
+        GameTooltip:AddLine(L["Click to quote, copy, or save to notes."], 0.82, 0.88, 0.94, true)
+        GameTooltip:Show()
+        return true
+    elseif link:find("addon:SCentral:url:", 1, true) then
+        GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["Copy Link"], 0.40, 0.74, 1.0, true)
+        GameTooltip:AddLine(L["Press Ctrl+C to copy this link to your clipboard."], 0.82, 0.88, 0.94, true)
+        GameTooltip:Show()
+        return true
+    elseif link:find("^addon:") or link:find("^player") or link:find("^BNplayer") or link:find("^channel:") then
+        return false
+    end
+
+    if GameTooltip.SetHyperlink then
+        GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        local ok = pcall(GameTooltip.SetHyperlink, GameTooltip, link)
+        if ok and GameTooltip:NumLines() and GameTooltip:NumLines() > 0 then
+            if (IsModifiedClick and IsModifiedClick("COMPAREITEMS")) or (IsShiftKeyDown and IsShiftKeyDown()) then
+                if _G.GameTooltip_ShowCompareItem then
+                    pcall(_G.GameTooltip_ShowCompareItem, GameTooltip)
+                end
+            else
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(L["Click to view · Shift+Click to link"], 0.62, 0.72, 0.84, true)
+                GameTooltip:AddLine(L["Hold Shift to compare"], 0.54, 0.64, 0.74, true)
+            end
+            GameTooltip:Show()
+            return true
+        else
+            GameTooltip:Hide()
+        end
+    end
+    return false
+end
+
+function Theme:HideHyperlinkTooltip(owner)
+    if owner then
+        owner._scHoveredHyperlink = nil
+    end
+    if GameTooltip and (not owner or GameTooltip:IsOwned(owner)) then
+        GameTooltip:Hide()
+    end
+    if _G.ShoppingTooltip1 and _G.ShoppingTooltip1.Hide then _G.ShoppingTooltip1:Hide() end
+    if _G.ShoppingTooltip2 and _G.ShoppingTooltip2.Hide then _G.ShoppingTooltip2:Hide() end
+end
+
+function Theme:HandleGameHyperlinkClick(link, text, button, ownerFrame, insertBox)
+    if type(link) ~= "string" or link == "" or link:find("^addon:") then
+        return false
+    end
+    local isLinkMod = (IsModifiedClick and IsModifiedClick("CHATLINK")) or (IsShiftKeyDown and IsShiftKeyDown())
+    if isLinkMod and type(text) == "string" and text ~= "" then
+        local blizzBox = _G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow() or nil
+        if blizzBox and blizzBox.IsVisible and blizzBox:IsVisible() and _G.ChatEdit_InsertLink then
+            pcall(_G.ChatEdit_InsertLink, text)
+            return true
+        end
+        if insertBox and insertBox.IsVisible and insertBox:IsVisible() and (not insertBox.IsEnabled or insertBox:IsEnabled()) and insertBox.Insert then
+            local cur = insertBox.GetText and insertBox:GetText() or ""
+            local pos = insertBox.GetCursorPosition and insertBox:GetCursorPosition() or #cur
+            local ins = ((pos > 0 and cur:sub(pos, pos) ~= " ") and " " or "") .. text .. " "
+            insertBox:Insert(ins)
+            if insertBox.SetFocus and not (InCombatLockdown and InCombatLockdown()) then
+                pcall(insertBox.SetFocus, insertBox)
+            end
+            return true
+        end
+        if _G.ChatEdit_InsertLink then
+            pcall(_G.ChatEdit_InsertLink, text)
+            return true
+        end
+    end
+    if IsModifiedClick and IsModifiedClick("DRESSUP") and link:find("^item:") and _G.DressUpItemLink then
+        pcall(_G.DressUpItemLink, text or link)
+        return true
+    end
+    if _G.ChatFrame_OnHyperlinkShow then
+        pcall(_G.ChatFrame_OnHyperlinkShow, ownerFrame, link, text, button)
+        return true
+    elseif _G.SetItemRef and not (InCombatLockdown and InCombatLockdown()) then
+        pcall(_G.SetItemRef, link, text, button, ownerFrame)
+        return true
+    end
+    return false
 end
 
 function Theme:CreateEditBox(parent, opts)
@@ -1372,13 +1742,37 @@ local movableRegistry = {}
 
 local function CanDragWindow(win, opts)
     if not win then return false end
+    if win.IsShown and not win:IsShown() then return false end
     if win._scLocked or win._scSizing then return false end
-    if UIParent and win.GetParent and win:GetParent() ~= UIParent then return false end
+    if UIParent and win.GetParent and win:GetParent() ~= UIParent then
+        local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+        if not inCombat and win.SetParent then
+            pcall(win.SetParent, win, UIParent)
+        end
+        if win:GetParent() ~= UIParent then
+            return false
+        end
+    end
     if opts and type(opts.locked) == "function" and opts.locked() then return false end
     if opts and opts.combatLock and InCombatLockdown and InCombatLockdown() then
         return false
     end
     return true
+end
+
+local function GetRelativeScaleToUIParent(win)
+    local scale = (win and win.GetScale and win:GetScale()) or 1
+    if win and UIParent and win.GetParent and win:GetParent() == UIParent and win.GetEffectiveScale and UIParent.GetEffectiveScale then
+        local we = win:GetEffectiveScale()
+        local ue = UIParent:GetEffectiveScale()
+        if we and ue and ue > 0 then
+            scale = we / ue
+        end
+    end
+    if not scale or scale <= 0 then
+        scale = 1
+    end
+    return scale
 end
 
 local function SaveWindowCenterOffset(win, posKey, opts)
@@ -1387,8 +1781,7 @@ local function SaveWindowCenterOffset(win, posKey, opts)
     if type(ns.db.windowPositions) ~= "table" then
         ns.db.windowPositions = {}
     end
-    local scale = win:GetScale() or 1
-    if scale <= 0 then scale = 1 end
+    local scale = GetRelativeScaleToUIParent(win)
     local cx, cy = win:GetCenter()
     local ux, uy = UIParent and UIParent:GetCenter()
     local anchor = opts and opts.anchor or "CENTER"
@@ -1433,8 +1826,7 @@ function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
     end
     local uw, uh = UIParent and UIParent:GetSize()
     local ww, wh = win:GetSize()
-    local scale = win:GetScale() or 1
-    if scale <= 0 then scale = 1 end
+    local scale = GetRelativeScaleToUIParent(win)
     local dx = tonumber(saved.dx)
     local dy = tonumber(saved.dy)
     if not (dx and dy and dx == dx and dy == dy) then
@@ -1466,17 +1858,51 @@ function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
     end
 end
 
+local function IsHandleAttachedToWindow(handle, win)
+    if not (handle and win) then return false end
+    if win.IsVisible and not win:IsVisible() then return false end
+    if handle == win then return true end
+    local parent = handle.GetParent and handle:GetParent() or nil
+    if not parent or (UIParent and parent == UIParent) then
+        return true
+    end
+    local cur = parent
+    for _ = 1, 10 do
+        if cur == win then
+            return true
+        end
+        if not cur or (UIParent and cur == UIParent) or (WorldFrame and cur == WorldFrame) then
+            break
+        end
+        cur = cur.GetParent and cur:GetParent() or nil
+    end
+    return false
+end
+
+local function ShouldStartInstantDragOnMouseDown(obj)
+    if not obj then return false end
+    if obj._scHoveredHyperlink ~= nil then
+        return false
+    end
+    if obj.GetObjectType and obj:GetObjectType() == "Button" and obj.GetScript and obj.GetScript(obj, "OnClick") then
+        return false
+    end
+    return true
+end
+
 function Theme:AttachDragHandle(handle, win)
     if not (handle and win and win._scBeginDrag and win._scEndDrag) then
         return
     end
-    handle:EnableMouse(true)
+    if not win._scLocked then
+        handle:EnableMouse(true)
+    end
     handle:RegisterForDrag("LeftButton")
     if handle.HookScript and not handle._scHandleHooked then
         handle._scHandleHooked = true
-        handle:HookScript("OnMouseDown", function(_, btn)
-            if btn == "LeftButton" and not (win._scCombatLock and InCombatLockdown and InCombatLockdown()) and win.Raise then
-                pcall(win.Raise, win)
+        handle:HookScript("OnMouseDown", function(selfHandle, btn)
+            if btn == "LeftButton" and IsHandleAttachedToWindow(selfHandle, win) and ShouldStartInstantDragOnMouseDown(selfHandle) then
+                win._scBeginDrag()
             end
         end)
         handle:HookScript("OnMouseUp", function(_, btn)
@@ -1484,7 +1910,11 @@ function Theme:AttachDragHandle(handle, win)
                 win._scEndDrag()
             end
         end)
-        handle:HookScript("OnDragStart", function() win._scBeginDrag() end)
+        handle:HookScript("OnDragStart", function(selfHandle)
+            if selfHandle._scHoveredHyperlink == nil and IsHandleAttachedToWindow(selfHandle, win) then
+                win._scBeginDrag()
+            end
+        end)
         handle:HookScript("OnDragStop", function() win._scEndDrag() end)
         handle:HookScript("OnHide", function()
             if win._scDragging then
@@ -1508,37 +1938,11 @@ function Theme:MakeMovable(win, opts)
         pcall(win.SetUserPlaced, win, false)
     end
 
-    local function BeginDrag()
-        if not CanDragWindow(win, opts) then
-            return
-        end
-        if win._scDragging then
-            pcall(win.StopMovingOrSizing, win)
-            win._scDragging = false
-        end
-        win:SetMovable(true)
-        win:SetClampedToScreen(true)
-        if win:GetParent() == UIParent and win.GetNumPoints and win:GetNumPoints() > 1 then
-            local cx, cy = win:GetCenter()
-            local ux, uy = UIParent and UIParent:GetCenter()
-            if cx and cy and ux and uy then
-                local scale = win:GetScale() or 1
-                if scale <= 0 then scale = 1 end
-                win:ClearAllPoints()
-                win:SetPoint("CENTER", UIParent, "CENTER", (cx * scale - ux) / scale, (cy * scale - uy) / scale)
-            end
-        end
-        win._scDragging = true
-        if not (opts.combatLock and InCombatLockdown and InCombatLockdown()) and win.Raise then
-            pcall(win.Raise, win)
-        end
-        local ok = pcall(win.StartMoving, win)
-        if not ok then
-            win._scDragging = false
-        end
-    end
-
     local function EndDrag()
+        if win._scDragWatch then
+            win._scDragWatch:SetScript("OnUpdate", nil)
+            win._scDragWatch:Hide()
+        end
         if not win._scDragging then
             if win._scSizing then
                 win._scSizing = false
@@ -1549,9 +1953,61 @@ function Theme:MakeMovable(win, opts)
         win._scDragging = false
         pcall(win.StopMovingOrSizing, win)
         SaveWindowCenterOffset(win, opts.key, opts)
+        if opts.key and UIParent and win.GetParent and win:GetParent() == UIParent then
+            Theme:RestoreWindowPosition(win, opts.key, opts.combatLock, opts)
+        end
         if type(opts.onStop) == "function" then
             pcall(opts.onStop, win)
         end
+    end
+
+    local function BeginDrag()
+        if not CanDragWindow(win, opts) then
+            return
+        end
+        if win._scDragging then
+            pcall(win.StopMovingOrSizing, win)
+            win._scDragging = false
+        end
+        win:SetMovable(true)
+        win:SetClampedToScreen(true)
+        local nPts = win.GetNumPoints and win:GetNumPoints() or 0
+        if win:GetParent() == UIParent and (nPts == 0 or nPts > 1) then
+            local cx, cy = win:GetCenter()
+            local ux, uy = UIParent and UIParent:GetCenter()
+            if cx and cy and ux and uy then
+                local scale = GetRelativeScaleToUIParent(win)
+                win:ClearAllPoints()
+                win:SetPoint("CENTER", UIParent, "CENTER", (cx * scale - ux) / scale, (cy * scale - uy) / scale)
+            elseif nPts == 0 then
+                win:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            end
+        end
+        win._scDragging = true
+        if not (opts.combatLock and InCombatLockdown and InCombatLockdown()) and win.Raise then
+            pcall(win.Raise, win)
+        end
+        local ok = pcall(win.StartMoving, win)
+        if not ok then
+            win._scDragging = false
+            return
+        end
+        if not win._scDragWatch then
+            local dw = CreateFrame("Frame", nil, win)
+            dw:Hide()
+            win._scDragWatch = dw
+        end
+        win._scDragWatch:Show()
+        win._scDragWatch:SetScript("OnUpdate", function()
+            if not win._scDragging then
+                win._scDragWatch:SetScript("OnUpdate", nil)
+                win._scDragWatch:Hide()
+                return
+            end
+            if IsMouseButtonDown and not IsMouseButtonDown("LeftButton") then
+                EndDrag()
+            end
+        end)
     end
 
     win._scCombatLock = opts.combatLock and true or false
@@ -1566,8 +2022,8 @@ function Theme:MakeMovable(win, opts)
     if not win._scMovableHooked then
         win._scMovableHooked = true
         win:HookScript("OnMouseDown", function(f, btn)
-            if btn == "LeftButton" and not (opts.combatLock and InCombatLockdown and InCombatLockdown()) and f.Raise then
-                pcall(f.Raise, f)
+            if btn == "LeftButton" and ShouldStartInstantDragOnMouseDown(f) then
+                BeginDrag()
             end
         end)
         win:HookScript("OnMouseUp", function(_, btn)
@@ -2575,6 +3031,25 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
         end
     end
 
+    --- Dynamically update scroll row height and re-pool rows to support compact/standard density modes.
+    function list:SetRowHeight(newHeight)
+        local h = tonumber(newHeight)
+        if not h or h < 16 or self.rowHeight == h then
+            return
+        end
+        self.rowHeight = h
+        for _, row in ipairs(self.rows) do
+            if row.SetHeight then
+                row:SetHeight(h)
+            end
+        end
+        local maxOffset = GetMaxOffset()
+        if (self.offset or 0) > maxOffset then
+            self.offset = maxOffset
+        end
+        self:Render()
+    end
+
     function list:Render()
         local cLvl = SyncScrollListLayers()
         EnsureRowPool()
@@ -2614,7 +3089,6 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
                 local y = -((poolIdx - 1) * self.rowHeight) + subOffset
                 if row._scRenderedY ~= y then
                     row._scRenderedY = y
-                    row:ClearAllPoints()
                     row:SetPoint("TOPLEFT", viewport, "TOPLEFT", 0, y)
                     row:SetPoint("TOPRIGHT", viewport, "TOPRIGHT", 0, y)
                 end
@@ -2643,7 +3117,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
             end
             local totalH = total * self.rowHeight
             local ratio = math.min(1, vpH / totalH)
-            local thumbH = math.max(24, math.floor(trackH * ratio))
+            local thumbH = math.min(trackH, math.max(24, math.floor(trackH * ratio)))
             if list._scThumbH ~= thumbH then
                 list._scThumbH = thumbH
                 thumb:SetHeight(thumbH)
@@ -3000,7 +3474,9 @@ local function CreateCounterPillBand(animFrame, layer, subLevel, inset)
     end
 
     function band:SetVerticalGradient(cTop, cBot)
-        if gradColorA and gradColorB and capL.SetGradient and CreateColor then
+        if capL.SetGradient and CreateColor then
+            if not gradColorA then gradColorA = CreateColor(0, 0, 0, 1) end
+            if not gradColorB then gradColorB = CreateColor(0, 0, 0, 1) end
             gradColorA:SetRGBA(cBot[1], cBot[2], cBot[3], cBot[4] or 1)
             gradColorB:SetRGBA(cTop[1], cTop[2], cTop[3], cTop[4] or 1)
             capL:SetVertexColor(1, 1, 1, 1)
