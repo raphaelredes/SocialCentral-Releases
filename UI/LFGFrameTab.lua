@@ -9074,6 +9074,24 @@ function LFGFrameTab:AttachChatButton()
                 root:CreateCheckbox(L["Mirror Alliance Chat in Official Chat (/ali)"], function()
                     return not s or s.clanOfficialGreenWall ~= false
                 end, function() ToggleChatOpt("clanOfficialGreenWall", true) end)
+                local hideSub = root:CreateButton(L["Hide in Official Chat (Keep in SC)"])
+                if hideSub and hideSub.CreateCheckbox then
+                    hideSub:CreateCheckbox(L["Group (Party / Raid / Instance)"], function()
+                        return s and s.officialHideGroup == true
+                    end, function() ToggleChatOpt("officialHideGroup", false) end)
+                    hideSub:CreateCheckbox(L["Guild & Officer"], function()
+                        return s and s.officialHideGuild == true
+                    end, function() ToggleChatOpt("officialHideGuild", false) end)
+                    hideSub:CreateCheckbox(L["Whispers & Battle.net"], function()
+                        return s and s.officialHideWhispers == true
+                    end, function() ToggleChatOpt("officialHideWhispers", false) end)
+                end
+                root:CreateCheckbox(L["Dock Quick Reply over Official WoW Chat (exact size)"], function()
+                    return not s or s.quickReplyDockToChat ~= false
+                end, function() ToggleChatOpt("quickReplyDockToChat", true) end)
+                root:CreateCheckbox(L["Open Quick Reply on ENTER when messages are pending"], function()
+                    return not s or s.quickReplyEnterOpen ~= false
+                end, function() ToggleChatOpt("quickReplyEnterOpen", true) end)
 
                 root:CreateDivider()
                 root:CreateButton(L["Copy Official Chat"], function()
@@ -9926,7 +9944,7 @@ function LFGFrameTab:Init()
         tryAttachPending = false
         if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
             if ns.RunAfterCombat then
-                ns:RunAfterCombat("lfg_try_attach_all", TryAttachAll)
+                ns:RunAfterCombat("lfg_try_attach_all", TryAttachAll, false)
             end
             return
         end

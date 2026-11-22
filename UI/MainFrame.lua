@@ -240,12 +240,18 @@ local function IsSingleTabEmbedded()
 end
 
 local function GetStandaloneResizeBounds()
-    local minW, minH = 760, 460
     local uw = (UIParent and UIParent.GetWidth and UIParent:GetWidth()) or 1400
     local uh = (UIParent and UIParent.GetHeight and UIParent:GetHeight()) or 1000
+    local minW = math.min(760, math.max(580, math.floor(uw - 24)))
+    local minH = math.min(460, math.max(380, math.floor(uh - 24)))
     local maxW = math.max(minW, math.min(1400, math.floor(uw - 24)))
     local maxH = math.max(minH, math.min(1000, math.floor(uh - 24)))
     return minW, minH, maxW, maxH
+end
+
+local function GetResponsiveDefaultMainSize()
+    local minW, minH, maxW, maxH = GetStandaloneResizeBounds()
+    return math.max(minW, math.min(maxW, 790)), math.max(minH, math.min(maxH, 520))
 end
 
 local function ApplyStandaloneResizeBounds(targetFrame)
@@ -269,7 +275,7 @@ local function SaveGeometry()
     if not (ns.db and ns.db.window) then
         return
     end
-    local savedCenter = ns.db.windowPositions and ns.db.windowPositions.main
+    local savedCenter = Theme and Theme.GetSavedWindowPosition and Theme:GetSavedWindowPosition("main")
     if type(savedCenter) == "table" and savedCenter.dx ~= nil and savedCenter.dy ~= nil then
         ns.db.window.point = "CENTER"
         ns.db.window.relativePoint = "CENTER"
@@ -285,10 +291,16 @@ local function SaveGeometry()
         end
     end
     local minW, minH, maxW, maxH = GetStandaloneResizeBounds()
-    local curW = math.floor((frame:GetWidth() or 790) + 0.5)
-    local curH = math.floor((frame:GetHeight() or 520) + 0.5)
-    ns.db.window.width = math.max(minW, math.min(maxW, curW))
-    ns.db.window.height = math.max(minH, math.min(maxH, curH))
+    local defW, defH = GetResponsiveDefaultMainSize()
+    local curW = math.floor((frame:GetWidth() or defW) + 0.5)
+    local curH = math.floor((frame:GetHeight() or defH) + 0.5)
+    local clampedW = math.max(minW, math.min(maxW, curW))
+    local clampedH = math.max(minH, math.min(maxH, curH))
+    ns.db.window.width = clampedW
+    ns.db.window.height = clampedH
+    if Theme and Theme.SaveWindowSize then
+        Theme:SaveWindowSize("main", clampedW, clampedH)
+    end
 end
 
 local function ClearSearchFilter()
@@ -2177,22 +2189,24 @@ local function OpenRowMenu(row, item, tabOverride)
     MenuUtil.CreateContextMenu(row, function(_, root)
         root:CreateTitle(targetName or "")
         if tab == "watchlist" then
-            if type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1 then
-                root:CreateButton(L["Choose Exact Character..."], function()
-                    UI:OpenWatchlistDisambiguation(item.id)
-                end)
-            elseif type(item.observedCandidate) == "string" and item.observedCandidate ~= "" then
-                root:CreateButton(L["Confirm: %s"]:format(item.observedCandidate), function()
-                    if ns.Watchlist and ns.Watchlist.ResolveDisambiguation then
-                        ns.Watchlist:ResolveDisambiguation(item.id, item.observedCandidate)
+            if not item.isSessionBNet then
+                if type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1 then
+                    root:CreateButton(L["Choose Exact Character..."], function()
+                        UI:OpenWatchlistDisambiguation(item.id)
+                    end)
+                elseif type(item.observedCandidate) == "string" and item.observedCandidate ~= "" then
+                    root:CreateButton(L["Confirm: %s"]:format(item.observedCandidate), function()
+                        if ns.Watchlist and ns.Watchlist.ResolveDisambiguation then
+                            ns.Watchlist:ResolveDisambiguation(item.id, item.observedCandidate)
+                        end
+                    end)
+                end
+                root:CreateButton(L["Check"], function()
+                    if ns.Watchlist then
+                        ns.Watchlist:CheckEntry(item.id)
                     end
                 end)
             end
-            root:CreateButton(L["Check"], function()
-                if ns.Watchlist then
-                    ns.Watchlist:CheckEntry(item.id)
-                end
-            end)
             root:CreateButton(item.favorite and L["Unfavorite"] or L["Favorite"], function()
                 if ns.Watchlist then
                     ns.Watchlist:ToggleFavorite(item.id)
@@ -2204,11 +2218,21 @@ local function OpenRowMenu(row, item, tabOverride)
             root:CreateButton(L["Edit Note"], function()
                 OpenNoteModal(item)
             end)
-            root:CreateButton(L["Pin to Character Friends"], function()
-                if ns.Watchlist then
-                    ns.Watchlist:PinToFriends(item.id)
-                end
-            end)
+            if not item.isSessionBNet then
+                root:CreateButton(
+                    (item.watchAllAlts == true and "|cff3fb950[x]|r " or "") .. L["Track all Battle.net / linked alts"],
+                    function()
+                        if ns.Watchlist and ns.Watchlist.ToggleWatchAllAlts then
+                            ns.Watchlist:ToggleWatchAllAlts(item.id)
+                        end
+                    end
+                )
+                root:CreateButton(L["Pin to Character Friends"], function()
+                    if ns.Watchlist then
+                        ns.Watchlist:PinToFriends(item.id)
+                    end
+                end)
+            end
             local _, bellActive = GetRowNotifyBellState("watchlist", item)
             root:CreateButton(bellActive and L["Mute Login Alerts"] or L["Enable Login Alerts"], function()
                 ToggleRowNotifyBell("watchlist", item)
@@ -2230,7 +2254,32 @@ local function OpenRowMenu(row, item, tabOverride)
                 end)
             end
 
-            if charKey or tab == "nearby" then
+            local isBNetRow = (tab == "social") and item.sources and item.sources.bnet == true and item.bnetAccountID ~= nil
+            if isBNetRow and ns.Watchlist then
+                local bWatched, bWlKey, bWlEntry = ns.Watchlist.IsBNetAccountWatched and ns.Watchlist:IsBNetAccountWatched(item.bnetAccountID)
+                if bWatched and bWlKey then
+                    root:CreateButton(L["Remove from Watchlist"], function()
+                        UI:OpenConfirmModal({
+                            title = L["Remove from Watchlist"],
+                            message = L["Are you sure you want to remove %s from your Watchlist?"]:format((bWlEntry and bWlEntry.displayName) or item.bnetName or targetName or "?"),
+                            confirmText = L["Remove"],
+                            onConfirm = function()
+                                if ns.Watchlist then
+                                    ns.Watchlist:Remove(bWlKey)
+                                    UI:QueueRefresh(false)
+                                end
+                            end,
+                        })
+                    end)
+                else
+                    root:CreateButton(L["Watch Battle.net Account (All Alts)"], function()
+                        if ns.Watchlist and ns.Watchlist.AddBNetAccount then
+                            ns.Watchlist:AddBNetAccount(item)
+                            UI:QueueRefresh(false)
+                        end
+                    end)
+                end
+            elseif charKey or tab == "nearby" then
                 local wlLookup = charKey or targetName
                 local isWatched = ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(wlLookup)
                 if isWatched then
@@ -2704,8 +2753,12 @@ local function CreateListRow(parent, _, rowHeight)
         local item = row._item
         if not item then return end
         local tab = item._tab or activeTab
-        local targetKey = item.lookupKey or item.id or item.displayName
+        local targetDisp = (tab == "watchlist" and item.activeAltName) or item.displayName
+        local targetKey = (tab == "watchlist" and item.activeAltLookup) or item.lookupKey or item.id or targetDisp
         local bnetInfo = (targetKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(targetKey) or nil
+        if (not bnetInfo) and tab == "watchlist" and item.id and ns.Social and ns.Social.GetBNetLinkInfo then
+            bnetInfo = ns.Social:GetBNetLinkInfo(item.id)
+        end
         local dirRow = (targetKey and ns.Store and ns.Store.socialDirectoryByLookup) and ns.Store.socialDirectoryByLookup[targetKey] or nil
         local bnetAccId = item.bnetAccountID or (bnetInfo and bnetInfo.bnetAccountID)
         local bnetName = item.bnetName or (bnetInfo and bnetInfo.bnetName)
@@ -2713,29 +2766,30 @@ local function CreateListRow(parent, _, rowHeight)
         local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(targetKey, bnetAccId)
         if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
             ns.Chat:OpenDirectConversation({
-                targetName = item.hasCharacterName ~= false and item.displayName or nil,
+                targetName = (item.hasCharacterName ~= false and not item.isSessionBNet) and targetDisp or nil,
                 bnetAccountID = bnetAccId,
                 bnetName = bnetName,
-                classFile = item.classFile,
+                classFile = item.activeAltClass or item.classFile,
                 autoProbe = item.online ~= false,
             })
             UI:OpenTab("chat")
-        elseif tab == "social" and ((item.samePool == false or item.hasCharacterName == false or item.bnetState == "bnet_app" or item.bnetState == "wow_other") and bnetName) then
-            Compat.BNetWhisper(bnetName, item.hasCharacterName ~= false and item.displayName or nil)
+        elseif ((tab == "social" or (tab == "watchlist" and item.isSessionBNet)) and ((item.samePool == false or item.hasCharacterName == false or item.isSessionBNet or item.bnetState == "bnet_app" or item.bnetState == "wow_other") and bnetName)) then
+            Compat.BNetWhisper(bnetName, (item.hasCharacterName ~= false and not item.isSessionBNet) and targetDisp or nil)
         elseif isCrossFaction and bnetName then
-            Compat.BNetWhisper(bnetName, item.hasCharacterName ~= false and item.displayName or nil)
+            Compat.BNetWhisper(bnetName, (item.hasCharacterName ~= false and not item.isSessionBNet) and targetDisp or nil)
         else
-            Compat.Whisper(item.displayName)
+            Compat.Whisper(targetDisp)
         end
     end)
 
     row.btnInvite:SetScript("OnClick", function()
         local item = row._item
         if not item then return end
-        local targetKey = item.lookupKey or item.id or item.displayName
+        local tab = item._tab or activeTab
+        local targetKey = (tab == "watchlist" and item.activeAltLookup) or item.lookupKey or item.id or item.displayName
         local bInfo = (targetKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(targetKey) or nil
         local bnetAccId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
-        local target = item.displayName or item.name or item.id
+        local target = (tab == "watchlist" and item.activeAltName) or item.displayName or item.name or item.id
         if target then
             Compat.Invite(target, bnetAccId)
         end
@@ -2754,7 +2808,11 @@ local function CreateListRow(parent, _, rowHeight)
                 ns.Watchlist:CheckEntry(item.id)
             end
         elseif (tab == "social" or tab == "nearby") and ns.Watchlist then
-            ns.Watchlist:Add(item.displayName or item.lookupKey)
+            if item.sources and item.sources.bnet and item.bnetAccountID and ns.Watchlist.AddBNetAccount then
+                ns.Watchlist:AddBNetAccount(item)
+            else
+                ns.Watchlist:Add(item.displayName or item.lookupKey)
+            end
         end
     end)
 
@@ -2946,7 +3004,19 @@ local sublineTagsScratch = {}
 local function FormatWatchlistSubline(item)
     local parts = sublinePartsScratch
     wipe(parts)
-    local lfgInfo = (ns.Clan and ns.Clan.GetActiveLfgForPlayer) and ns.Clan:GetActiveLfgForPlayer(item.lookupKey or item.id) or nil
+    if item.isSessionBNet then
+        parts[#parts + 1] = "Battle.net"
+        if item.richPresence and item.richPresence ~= "" then
+            parts[#parts + 1] = item.richPresence
+        elseif item.online then
+            parts[#parts + 1] = L["Online"]
+        else
+            parts[#parts + 1] = L["Offline"]
+        end
+        parts[#parts + 1] = L["Session (auto-saves on WoW login)"]
+        return table.concat(parts, "  ·  ")
+    end
+    local lfgInfo = (ns.Clan and ns.Clan.GetActiveLfgForPlayer) and ns.Clan:GetActiveLfgForPlayer(item.activeAltLookup or item.lookupKey or item.id) or nil
     if lfgInfo then
         parts[#parts + 1] = "|cff3fb950[" .. tostring(lfgInfo.mode or "LFG") .. ": " .. tostring(lfgInfo.activity or L["Group"]) .. "]|r"
     end
@@ -2958,6 +3028,9 @@ local function FormatWatchlistSubline(item)
         parts[#parts + 1] = L["Unchecked"]
     end
 
+    if item.activeAltName and item.displayName and item.activeAltName ~= item.displayName then
+        parts[#parts + 1] = "|cff70b5f9" .. L["Account: %s"]:format(item.displayName) .. "|r"
+    end
     if item.area and item.area ~= "" then
         parts[#parts + 1] = item.area
     end
@@ -3346,8 +3419,10 @@ local function UpdateListRow(row, item, idx, palette)
     local persistentActionBtn = nil
 
     if row.dot then row.dot:Show() end
-    local hex = item.classFile and Compat.ClassHex(item.classFile) or ((palette.key == "blizzard" and item.status ~= "offline") and "|cffffd100" or Compat.ClassHex(nil))
-    local levelStr = item.level and item.level > 0 and (" |cff9da7b5" .. L["Lv %d"]:format(item.level) .. "|r") or ""
+    local effClass = (tab == "watchlist" and item.activeAltClass) or item.classFile
+    local effLevel = (tab == "watchlist" and item.activeAltLevel) or item.level
+    local hex = effClass and Compat.ClassHex(effClass) or ((palette.key == "blizzard" and item.status ~= "offline") and "|cffffd100" or Compat.ClassHex(nil))
+    local levelStr = effLevel and effLevel > 0 and (" |cff9da7b5" .. L["Lv %d"]:format(effLevel) .. "|r") or ""
 
     local showBell, bellActive = GetRowNotifyBellState(tab, item)
     if showBell and row.btnNotifyBell then
@@ -3358,7 +3433,7 @@ local function UpdateListRow(row, item, idx, palette)
     end
 
     local isRowOffline = (tab == "watchlist" and item.status == "offline") or (tab == "social" and item.online ~= true)
-    local classCoords = item.classFile and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[item.classFile]
+    local classCoords = effClass and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[effClass]
     local showClassIcon = classCoords ~= nil
     local isSocialAvatar = (tab == "social") and (not isCompactRows) and showClassIcon
     if row.btnNotifyBell then
@@ -3423,34 +3498,41 @@ local function UpdateListRow(row, item, idx, palette)
             Theme:ApplyStatusColor(row.statusBar, item.status or "unknown")
             row.statusBar:SetAlpha((item.status == "online") and 0.90 or ((item.status == "unknown") and 0.45 or 0.25))
         end
-        local bnetInfo = (item.id and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(item.id) or nil
-        local bnetBadge = (bnetInfo and bnetInfo.isBNet) and (" " .. (Compat.BNetIconMarkup and Compat.BNetIconMarkup(14) or "|cff00b4ff[BNet]|r")) or ""
+        local activeWlKey = item.activeAltLookup or item.id
+        local activeWlName = item.activeAltName or item.displayName
+        local bnetInfo = (activeWlKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(activeWlKey) or nil
+        if (not bnetInfo) and item.id and ns.Social and ns.Social.GetBNetLinkInfo then
+            bnetInfo = ns.Social:GetBNetLinkInfo(item.id)
+        end
+        local bnetBadge = (item.isSessionBNet or (bnetInfo and bnetInfo.isBNet)) and (" " .. (Compat.BNetIconMarkup and Compat.BNetIconMarkup(14) or "|cff00b4ff[BNet]|r")) or ""
+        local altsBadge = (item.watchAllAlts == true) and (" |cff70b5f9[" .. L["All Alts"] .. "]|r") or ""
         local isFav = (item.favorite == true) or (itemKey ~= nil and ns.Store and ns.Store.IsSocialFavorite and ns.Store:IsSocialFavorite(itemKey) == true)
         local star = isFav and (Compat.FavoriteStarMarkup and Compat.FavoriteStarMarkup(13) or "|cffffd24d* |r") or ""
         local grp = (type(item.group) == "string" and item.group ~= "") and (" |cff8ab4f8[" .. item.group .. "]|r") or ""
-        local hasAmbig = type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1
-        local hasObsCand = (not hasAmbig) and (not item.surname or item.surname == "") and type(item.observedCandidate) == "string" and item.observedCandidate ~= ""
+        local hasAmbig = (not item.isSessionBNet) and type(item.ambiguousChoices) == "table" and #item.ambiguousChoices > 1
+        local hasObsCand = (not item.isSessionBNet) and (not hasAmbig) and (not item.surname or item.surname == "") and type(item.observedCandidate) == "string" and item.observedCandidate ~= ""
         local warn = hasAmbig and (" |cffff9b3d[?" .. tostring(#item.ambiguousChoices) .. "]|r")
             or (item.truncatedWarning and " |cffff9b3d[!50+]|r" or "")
         local fac = (bnetInfo and bnetInfo.faction)
-            or (Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(item.id or item.displayName, item.guid, item.bnetAccountID))
-            or (ns.Chat and ns.Chat.GetKnownCharacterFaction and ns.Chat:GetKnownCharacterFaction(item.id or item.displayName, item.guid, item.bnetAccountID))
+            or (not item.isSessionBNet and Compat.ResolveCharacterFaction and Compat.ResolveCharacterFaction(activeWlName or item.displayName, item.guid, item.bnetAccountID))
+            or (not item.isSessionBNet and ns.Chat and ns.Chat.GetKnownCharacterFaction and ns.Chat:GetKnownCharacterFaction(activeWlName or item.displayName, item.guid, item.bnetAccountID))
         local facIco = (Compat.FactionIconMarkup and Compat.FactionIconMarkup(fac, 12)) or ""
-        local wMeta = (itemKey and ns.Store) and ((ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(itemKey)) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(itemKey))) or nil
+        local wMeta = (itemKey and not item.isSessionBNet and ns.Store) and ((ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(itemKey)) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(itemKey))) or nil
         local wNick = (wMeta and wMeta.nickname and wMeta.nickname ~= "") and (" |cffffd24d(" .. wMeta.nickname .. ")|r") or ""
         local watchSub = FormatWatchlistSubline(item)
         local compactSuffix = (isCompactRows and watchSub ~= "") and ("  |cff9da7b5·  " .. watchSub .. "|r") or ""
-        row.nameText:SetText(star .. facIco .. hex .. (item.displayName or "") .. "|r" .. wNick .. levelStr .. compactSuffix)
+        local altTitleSuffix = (item.activeAltName and item.displayName and item.activeAltName ~= item.displayName) and (" |cff9da7b5(" .. item.displayName .. ")|r") or ""
+        row.nameText:SetText(star .. facIco .. hex .. (activeWlName or "") .. "|r" .. altTitleSuffix .. wNick .. levelStr .. compactSuffix)
         row.subText:SetText(watchSub)
-        metaRightText = grp .. scBadge .. bnetBadge .. warn
+        metaRightText = grp .. scBadge .. altsBadge .. bnetBadge .. warn
 
         row.btnRemove:Hide()
         row.btnAction:Hide()
         if item.status == "online" then
-            local dirRow = (item.id and ns.Store and ns.Store.socialDirectoryByLookup) and ns.Store.socialDirectoryByLookup[item.id] or nil
-            local isSelfWatch = (Compat.IsMe and Compat.IsMe(item.displayName, item.guid)) == true
-            local inGroupWatch = (Compat.IsInMyGroup and Compat.IsInMyGroup(item.displayName, item.guid)) == true
-            local canInviteWatch = (not isSelfWatch) and (not inGroupWatch) and not ((dirRow and dirRow.sameFaction == false) or (bnetInfo and bnetInfo.sameFaction == false))
+            local dirRow = (activeWlKey and ns.Store and ns.Store.socialDirectoryByLookup) and ns.Store.socialDirectoryByLookup[activeWlKey] or nil
+            local isSelfWatch = (not item.isSessionBNet) and (Compat.IsMe and Compat.IsMe(activeWlName, item.guid)) == true
+            local inGroupWatch = (not item.isSessionBNet) and (Compat.IsInMyGroup and Compat.IsInMyGroup(activeWlName, item.guid)) == true
+            local canInviteWatch = (not item.isSessionBNet) and (not isSelfWatch) and (not inGroupWatch) and not ((dirRow and dirRow.sameFaction == false) or (bnetInfo and bnetInfo.sameFaction == false))
             ApplyWhisperButtonPreference(row, row.btnWhisper, scConfirmed, true, minWhispW, minInvW, btnPad, maxRowBtnW)
             row._hasHoverWhisper = true
             row.btnWhisper:ClearAllPoints()
@@ -7219,6 +7301,8 @@ local function CreateClanPanel(parent)
                     { tex = "Interface\\Buttons\\UI-GuildButton-PublicNote-Up", title = L["Filters"], desc = L["Presence / Status"] .. " · " .. L["Rank"] .. " · " .. L["Class"] },
                     { tex = "Interface\\Icons\\INV_Misc_PocketWatch_01", title = L["Guild Roster History"] },
                     { tex = "Interface\\PaperDollInfoFrame\\Character-Plus", title = L["Guild Invite"] },
+                    { tex = (FRIENDS_TEXTURE_ONLINE or "Interface\\FriendsFrame\\StatusIcon-Online"), title = L["Online"] .. " / " .. L["Offline"], desc = L["Live Guild member online status"] },
+                    { title = "|cffffd24d*|r · |cff3fb950[SC]|r · [AFK] · [DND]", desc = L["Favorite · SocialCentral · Away · Busy"] },
                 }
             end)
         end
@@ -9108,8 +9192,9 @@ local function SetupMainFrameResizeHandles(targetFrame)
         if btn == "LeftButton" then
             StopActiveResize(true)
         elseif btn == "RightButton" and not embeddedState.active and not targetFrame._scLocked then
-            local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(targetFrame)
-            targetFrame:SetSize(math.max(minW, math.min(maxW, 790)), math.max(minH, math.min(maxH, 520)))
+            ApplyStandaloneResizeBounds(targetFrame)
+            local defW, defH = GetResponsiveDefaultMainSize()
+            targetFrame:SetSize(defW, defH)
             if targetFrame._scSavePosition then
                 targetFrame._scSavePosition()
             end
@@ -9210,14 +9295,17 @@ local function RestoreStandalonePlacement()
     frame:SetResizable(true)
     frame:SetClampedToScreen(true)
     local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
-    local w = ns.db and ns.db.window or { width = 790, height = 520 }
-    local targetW = math.max(minW, math.min(maxW, w.width or 790))
-    local targetH = math.max(minH, math.min(maxH, w.height or 520))
+    local defW, defH = GetResponsiveDefaultMainSize()
+    local savedW, savedH = Theme and Theme.GetSavedWindowSize and Theme:GetSavedWindowSize("main")
+    local hasResPos = Theme and Theme.HasSavedWindowPosition and Theme:HasSavedWindowPosition("main")
+    local targetW = math.max(minW, math.min(maxW, savedW or defW))
+    local targetH = math.max(minH, math.min(maxH, savedH or defH))
     frame:SetSize(targetW, targetH)
     local restored = Theme and Theme.RestoreWindowPosition and Theme:RestoreWindowPosition(frame, "main", false)
     if not restored then
         frame:ClearAllPoints()
-        if w.point and w.x and w.y then
+        local w = ns.db and ns.db.window
+        if (not hasResPos) and (not (Theme and Theme.EnsureResolutionPositionsMigrated)) and w and w.point and w.x and w.y then
             frame:SetPoint(w.point, UIParent, w.relativePoint or w.point, w.x, w.y)
             if frame._scSavePosition then
                 frame._scSavePosition()
@@ -9383,6 +9471,9 @@ function UI._CreateSocialChipsBar(parentFrame, filterBar, themeTargets)
             title = L["Show Offline"],
             desc = L["Green = Online Only · Red = Showing Offline"],
         }
+        items[#items + 1] = { tex = "Interface\\AddOns\\SocialCentral\\Media\\bell-on", title = L["Login Alerts"], desc = L["Bell ON = Notify when online"] }
+        items[#items + 1] = { title = "|cffffd24d*|r · |cff3fb950[SC]|r · |TInterface\\ChatFrame\\UI-ChatIcon-BattleNet:12:12:0:0|t", desc = L["Favorite · SocialCentral · Battle.net"] }
+        items[#items + 1] = { title = "|TInterface\\RAIDFRAME\\ReadyCheck-Ready:12:12:0:0|t · |TInterface\\RAIDFRAME\\ReadyCheck-NotReady:12:12:0:0|t", desc = L["Good Partner (+)"] .. " · " .. L["Flag: Avoid"] }
         return items
     end)
     bar.legendBtn = legendBtn
@@ -9597,9 +9688,21 @@ local function BuildMainFrame()
     local dragHandles = { header, blizzTitleDrag, blizzPortraitDrag }
     Theme:MakeMovable(frame, {
         key = "main",
+        skipAutoRestore = true,
         handles = dragHandles,
         onStop = SaveGeometry,
-        onReset = SaveGeometry,
+        onReset = function(win)
+            if embeddedState.active or not win then return end
+            ApplyStandaloneResizeBounds(win)
+            local defW, defH = GetResponsiveDefaultMainSize()
+            win:SetSize(defW, defH)
+            win:ClearAllPoints()
+            win:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            if win._scReflowResize then
+                win._scReflowResize()
+            end
+            UI:SyncFrameSectionLayers()
+        end,
     })
 
     local headerIcon = header:CreateTexture(nil, "ARTWORK")
@@ -10030,7 +10133,10 @@ local function BuildMainFrame()
                 desc = L["Green = Online Only · Red = Showing Offline"],
             },
             { tex = "Interface\\PaperDollInfoFrame\\Character-Plus", title = L["Add to Watchlist"] },
+            { tex = "Interface\\ChatFrame\\UI-ChatIcon-BattleNet", title = L["Add Battle.net Account to Watchlist"], desc = "|cff70b5f9[" .. L["All Alts"] .. "]|r" },
             { tex = "Interface\\Buttons\\UI-RefreshButton", title = L["Verify next Watchlist player"] },
+            { tex = (FRIENDS_TEXTURE_ONLINE or "Interface\\FriendsFrame\\StatusIcon-Online"), title = L["Online"] .. " / " .. L["Offline"] .. " / " .. L["Unchecked"], desc = L["Green = Online · Grey = Offline · Amber = /who pending"] },
+            { title = "|cffffd24d*|r · |cff3fb950[SC]|r · |TInterface\\AddOns\\SocialCentral\\Media\\bell-on:12:12:0:0|t", desc = L["Favorite · SocialCentral · Login Alerts"] },
         }
     end)
     frame.watchLegendBtn:Hide()
@@ -10680,10 +10786,15 @@ local function BuildMainFrame()
                     local picked = selfBtn._cand
                     if not picked or not ns.Watchlist then return end
                     HideWatchSuggestions()
-                    local addedOk = ns.Watchlist:Add(picked.displayName)
+                    local addedOk
+                    if picked._isBNetAccountCandidate and ns.Watchlist.AddBNetAccount then
+                        addedOk = ns.Watchlist:AddBNetAccount(picked)
+                    else
+                        addedOk = ns.Watchlist:Add(picked.displayName)
+                    end
                     addBox:SetText("")
                     addBox:ClearFocus()
-                    if addedOk and not picked.online and ns.Watchlist.AutoCheckNextFromHardwareClick then
+                    if addedOk and (not picked._isBNetAccountCandidate) and not picked.online and ns.Watchlist.AutoCheckNextFromHardwareClick then
                         ns.Watchlist:AutoCheckNextFromHardwareClick(picked.lookupKey)
                     end
                 end)
@@ -10778,6 +10889,43 @@ local function BuildMainFrame()
         if ReflowWatchBar then ReflowWatchBar() end
     end)
 
+    frame.bnetAddBtn = Theme:CreateButton(watchBar, 24, 24, "", "default")
+    Theme:ConfigureIconButton(frame.bnetAddBtn, 24, 24, "Interface\\ChatFrame\\UI-ChatIcon-BattleNet", {
+        size = 15,
+        title = L["Add Battle.net Account to Watchlist"],
+        desc = L["Select any Battle.net friend to follow all of their characters and alts under a single Watchlist entry."],
+    })
+    frame.bnetAddBtn:SetScript("OnClick", function(selfBtn)
+        if not (MenuUtil and MenuUtil.CreateContextMenu and ns.Social and ns.Social.GetBNetFriendsList and ns.Watchlist) then
+            return
+        end
+        local bList = ns.Social:GetBNetFriendsList()
+        MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            root:CreateTitle(L["Add Battle.net Account to Watchlist"])
+            if not bList or #bList == 0 then
+                root:CreateTitle("|cff9da7b5" .. L["No Battle.net friends found."] .. "|r")
+                return
+            end
+            for _, bf in ipairs(bList) do
+                local isWatched = ns.Watchlist.IsBNetAccountWatched and ns.Watchlist:IsBNetAccountWatched(bf.bnetAccountID)
+                local prefix = isWatched and "|cff3fb950[x]|r " or ""
+                local stTxt
+                if bf.bnetState == "wow_forever" and bf.activeDisplayName then
+                    stTxt = " · |cff3fb950" .. bf.activeDisplayName .. "|r"
+                elseif bf.online then
+                    stTxt = " · |cff70b5f9Battle.net|r"
+                else
+                    stTxt = " · |cff9da7b5" .. L["Offline"] .. "|r"
+                end
+                local label = prefix .. tostring(bf.bnetName or bf.displayName or "Battle.net") .. stTxt
+                root:CreateButton(label, function()
+                    ns.Watchlist:AddBNetAccount(bf)
+                end)
+            end
+        end)
+    end)
+    themeTargets[#themeTargets + 1] = { btn = frame.bnetAddBtn, variant = "default" }
+
     frame.verifyBtn = Theme:CreateButton(watchBar, 24, 24, "", "default")
     frame.verifyBtn.ico = (frame.verifyBtn._textLayer or frame.verifyBtn):CreateTexture(nil, "OVERLAY", nil, 2)
     frame.verifyBtn.ico:SetSize(14, 14)
@@ -10812,8 +10960,8 @@ local function BuildMainFrame()
         watchBar,
         watchBar,
         L["Help: Manual Watchlist & /who"],
-        L["Lets you add any character manually (or your current target) and run an official single /who query outside combat with cooldown >= 5s."],
-        L["Type Name or Name-Surname and click '+ Add' (or leave empty while targeting a player)."],
+        L["Lets you add any character manually (or your current target), pick a Battle.net friend account across all alts, and run an official single /who query outside combat with cooldown >= 5s."],
+        L["Type Name or Name-Surname and click '+ Add', click the Battle.net globe icon to track a Battle.net friend's entire account, or leave empty while targeting a player."],
         "RIGHT",
         "RIGHT",
         -2,
@@ -10860,6 +11008,16 @@ local function BuildMainFrame()
             frame.verifyBtn:ClearAllPoints()
             frame.verifyBtn:SetPoint("RIGHT", rightAnchor, rightRel, -4, 0)
             rightAnchor = frame.verifyBtn
+            rightRel = "LEFT"
+        end
+        if frame.bnetAddBtn then
+            local bSz = compact and 22 or 24
+            if math.abs((frame.bnetAddBtn:GetWidth() or 0) - bSz) >= 1 then
+                frame.bnetAddBtn:SetSize(bSz, bSz)
+            end
+            frame.bnetAddBtn:ClearAllPoints()
+            frame.bnetAddBtn:SetPoint("RIGHT", rightAnchor, rightRel, -4, 0)
+            rightAnchor = frame.bnetAddBtn
             rightRel = "LEFT"
         end
         addBtn:ClearAllPoints()
@@ -13173,19 +13331,13 @@ local function OnViewportGeometryChanged()
     if UIParent and frame:GetParent() ~= UIParent then
         return
     end
-    local minW, minH, maxW, maxH = ApplyStandaloneResizeBounds(frame)
-    local curW = math.floor((frame:GetWidth() or 790) + 0.5)
-    local curH = math.floor((frame:GetHeight() or 520) + 0.5)
-    local clampedW = math.max(minW, math.min(maxW, curW))
-    local clampedH = math.max(minH, math.min(maxH, curH))
-    if clampedW ~= curW or clampedH ~= curH then
-        frame:SetSize(clampedW, clampedH)
+    RestoreStandalonePlacement()
+    if frame._scReflowResize then
+        frame._scReflowResize()
     end
-    if Theme and Theme.RestoreWindowPosition then
-        Theme:RestoreWindowPosition(frame, "main", false)
-    end
-    SaveGeometry()
+    UI:SyncFrameSectionLayers()
 end
 
-ns.RegisterEvent(UI, "DISPLAY_SIZE_CHANGED", OnViewportGeometryChanged)
-ns.RegisterEvent(UI, "UI_SCALE_CHANGED", OnViewportGeometryChanged)
+if Theme and Theme.RegisterViewportListener then
+    Theme:RegisterViewportListener("main", OnViewportGeometryChanged)
+end

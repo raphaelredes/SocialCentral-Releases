@@ -826,6 +826,27 @@ local function IsNativeDamageMeterAvailable()
     return true
 end
 
+local function DeepCopyMetricsMap(srcMap)
+    local copy = {}
+    if type(srcMap) ~= "table" then return copy end
+    for k, rec in pairs(srcMap) do
+        if type(rec) == "table" then
+            local c = {}
+            if rec.guid then c.guid = rec.guid end
+            if rec.name then c.name = rec.name end
+            if rec.classFile then c.classFile = rec.classFile end
+            for i = 1, #DM_METRIC_DEFS do
+                local f = DM_METRIC_DEFS[i].field
+                if rec[f] ~= nil then
+                    c[f] = rec[f]
+                end
+            end
+            copy[k] = c
+        end
+    end
+    return copy
+end
+
 local function ResolveDamageMeterSourceKey(run, src)
     if type(src) ~= "table" then return nil end
     local isLocal = Safe.Value(src.isLocalPlayer) == true
@@ -835,29 +856,48 @@ local function ResolveDamageMeterSourceKey(run, src)
 
     if isLocal or (guid and run and run.myGuid and guid == run.myGuid) then
         if run and run.myKey then
-            return run.myKey, run.myName or rawName, cls or run.myClass
+            return run.myKey, run.myName or rawName, cls or run.myClass, guid
         end
     end
     if guid and run and run.guidToKey and run.guidToKey[guid] then
         local gk = run.guidToKey[guid]
         local mem = run.membersByKey and run.membersByKey[gk]
-        return gk, (mem and mem.n) or rawName, cls or (mem and mem.c)
+        return gk, (mem and mem.n) or rawName, cls or (mem and mem.c), guid
     end
-    if rawName and rawName ~= "" and Compat.ParseCharacterName then
-        local parsed = Compat.ParseCharacterName(rawName)
-        if parsed and parsed.lookupKey then
-            if run and run.membersByKey and run.membersByKey[parsed.lookupKey] then
-                return parsed.lookupKey, run.membersByKey[parsed.lookupKey].n or parsed.displayName, cls
+    local parsed = (rawName and rawName ~= "" and Compat.ParseCharacterName) and Compat.ParseCharacterName(rawName) or nil
+    if guid and Compat.LookupForeverFullName then
+        local looked = Compat.LookupForeverFullName(guid, parsed and parsed.firstName or nil, false)
+        if looked and looked.fullName and Compat.ParseCharacterName then
+            local lp = Compat.ParseCharacterName(looked.fullName)
+            if lp and lp.lookupKey then
+                parsed = lp
             end
-            if run and run.firstToKey and parsed.firstName then
-                local fk = run.firstToKey[parsed.firstName:lower()]
-                if fk then
+        end
+    end
+    if parsed and parsed.lookupKey then
+        if run and run.membersByKey and run.membersByKey[parsed.lookupKey] then
+            local mem = run.membersByKey[parsed.lookupKey]
+            return parsed.lookupKey, mem.n or parsed.displayName, cls or mem.c, guid
+        end
+        if run and run.firstToKey and parsed.firstName then
+            local fk = run.firstToKey[parsed.firstName:lower()]
+            if fk then
+                local guidConflict = false
+                if guid and guid ~= "" and run.guidToKey then
+                    for g, k in pairs(run.guidToKey) do
+                        if k == fk and g ~= guid then
+                            guidConflict = true
+                            break
+                        end
+                    end
+                end
+                if not guidConflict then
                     local mem = run.membersByKey and run.membersByKey[fk]
-                    return fk, (mem and mem.n) or parsed.displayName, cls or (mem and mem.c)
+                    return fk, (mem and mem.n) or parsed.displayName, cls or (mem and mem.c), guid
                 end
             end
-            return parsed.lookupKey, parsed.displayName, cls
         end
+        return parsed.lookupKey, parsed.displayName, cls, guid
     end
     return nil
 end
@@ -869,19 +909,23 @@ local function ReadDamageMeterSessionByKey(run, sessionType)
     local dmTypes = Enum and Enum.DamageMeterType
     local out = {}
     local maxDurationSec = 0
+    local sessionId = nil
     for i = 1, #DM_METRIC_DEFS do
         local def = DM_METRIC_DEFS[i]
         local dmType = (dmTypes and dmTypes[def.enumKey] ~= nil) and dmTypes[def.enumKey] or ((not dmTypes) and def.fallback or nil)
         if dmType ~= nil then
             local ok, session = pcall(C_DamageMeter.GetCombatSessionFromType, sessionType, dmType)
             if ok and type(session) == "table" and type(session.combatSources) == "table" then
+                if sessionId == nil then
+                    sessionId = Safe.Number(session.sessionID) or Safe.String(session.sessionID) or Safe.Number(session.startTime)
+                end
                 local sDur = Safe.Number(session.durationSeconds)
                 if sDur and sDur > maxDurationSec then
                     maxDurationSec = sDur
                 end
                 local seenInMetric = {}
                 for _, src in ipairs(session.combatSources) do
-                    local key, dispName, cls = ResolveDamageMeterSourceKey(run, src)
+                    local key, dispName, cls, guid = ResolveDamageMeterSourceKey(run, src)
                     if key then
                         local amt = math.max(0, math.floor((Safe.Number(src.totalAmount) or 0) + 0.5))
                         local ps = math.max(0, math.floor((Safe.Number(src.amountPerSecond) or 0) + 0.5))
@@ -889,8 +933,10 @@ local function ReadDamageMeterSessionByKey(run, sessionType)
                             seenInMetric[key] = true
                             local rec = out[key]
                             if not rec then
-                                rec = { name = dispName, classFile = cls }
+                                rec = { name = dispName, classFile = cls, guid = (guid and guid ~= "") and guid or nil }
                                 out[key] = rec
+                            elseif (not rec.guid) and guid and guid ~= "" then
+                                rec.guid = guid
                             end
                             rec[def.field] = math.max(rec[def.field] or 0, amt)
                             if def.psField and ps > 0 then
@@ -902,16 +948,133 @@ local function ReadDamageMeterSessionByKey(run, sessionType)
             end
         end
     end
-    return out, maxDurationSec
+    return out, maxDurationSec, sessionId
+end
+
+local function ReconcileDamageMeterKeys(run)
+    if not run then return end
+    local validCanonical = {}
+    local guidMap = {}
+    local firstCounts = {}
+    local unambiguousFirst = {}
+
+    local function registerFirst(displayName, canonicalKey)
+        if not (displayName and canonicalKey and Compat.ParseCharacterName) then return end
+        local p = Compat.ParseCharacterName(displayName)
+        local fl = p and p.firstName and p.firstName:lower()
+        if not (fl and fl ~= "") then return end
+        local c = (firstCounts[fl] or 0) + 1
+        firstCounts[fl] = c
+        if c == 1 then
+            unambiguousFirst[fl] = canonicalKey
+        else
+            unambiguousFirst[fl] = nil
+        end
+    end
+
+    if run.myKey then
+        validCanonical[run.myKey] = true
+        registerFirst(run.myName or run.myKey, run.myKey)
+        if run.myGuid then
+            guidMap[run.myGuid] = run.myKey
+        end
+    end
+    for k, mem in pairs(run.membersByKey or {}) do
+        validCanonical[k] = true
+        if k ~= run.myKey then
+            registerFirst((mem and mem.n) or k, k)
+        end
+    end
+    for g, k in pairs(run.guidToKey or {}) do
+        if g and k then
+            guidMap[g] = k
+        end
+    end
+
+    local dmTables = {
+        run.dmBaselineByKey,
+        run.dmResetAccumByKey,
+        run.dmLiveByKey,
+        run.dmLastOverallByKey,
+        run.dmPullAccumByKey,
+    }
+    for tIdx = 1, #dmTables do
+        local tbl = dmTables[tIdx]
+        if type(tbl) == "table" then
+            local moves = {}
+            for oldK, rec in pairs(tbl) do
+                if not validCanonical[oldK] and type(rec) == "table" then
+                    local newK = rec.guid and guidMap[rec.guid] or nil
+                    if not newK and type(oldK) == "string" and not oldK:find("-", 1, true) and not oldK:find(" ", 1, true) then
+                        newK = unambiguousFirst[oldK:lower()]
+                    end
+                    if newK and newK ~= oldK then
+                        moves[#moves + 1] = { oldK = oldK, newK = newK }
+                    end
+                end
+            end
+            for mIdx = 1, #moves do
+                local mv = moves[mIdx]
+                local srcRec = tbl[mv.oldK]
+                local dstRec = tbl[mv.newK]
+                if srcRec then
+                    if not dstRec then
+                        tbl[mv.newK] = srcRec
+                    else
+                        if srcRec.guid and not dstRec.guid then dstRec.guid = srcRec.guid end
+                        if srcRec.name and not dstRec.name then dstRec.name = srcRec.name end
+                        if srcRec.classFile and not dstRec.classFile then dstRec.classFile = srcRec.classFile end
+                        for i = 1, #DM_METRIC_DEFS do
+                            local f = DM_METRIC_DEFS[i].field
+                            if srcRec[f] ~= nil then
+                                dstRec[f] = math.max(dstRec[f] or 0, srcRec[f])
+                            end
+                        end
+                    end
+                    tbl[mv.oldK] = nil
+                end
+            end
+        end
+    end
+end
+
+local function FoldDungeonRunOverallIntoReset(run)
+    if not run then return end
+    run.dmResetAccumByKey = run.dmResetAccumByKey or {}
+    for k, live in pairs(run.dmLiveByKey or {}) do
+        local ra = run.dmResetAccumByKey[k]
+        if not ra then
+            ra = {}
+            run.dmResetAccumByKey[k] = ra
+        end
+        if live.guid and not ra.guid then ra.guid = live.guid end
+        for i = 1, #DM_METRIC_DEFS do
+            local f = DM_METRIC_DEFS[i].field
+            ra[f] = math.max(ra[f] or 0, live[f] or 0)
+        end
+    end
+    run.dmOverallDurResetAccum = math.max(run.dmOverallDurResetAccum or 0, run.dmOverallDurLive or 0)
+    run.dmBaselineByKey = {}
+    run.dmLastOverallByKey = {}
+    run.dmOverallDurBase = 0
+    run.dmLastOverallDur = 0
 end
 
 local function SnapshotDungeonRunDamageMeterBaseline(run)
     if not run then return end
-    run.dmBaselineByKey = ReadDamageMeterSessionByKey(run, (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Overall) or 0) or {}
+    local sessOverall = (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Overall) or 0
+    local baseMap, baseDur = ReadDamageMeterSessionByKey(run, sessOverall)
+    run.dmBaselineByKey = baseMap or {}
+    run.dmLastOverallByKey = DeepCopyMetricsMap(baseMap)
     run.dmResetAccumByKey = run.dmResetAccumByKey or {}
-    run.dmPullAccumByKey = run.dmPullAccumByKey or {}
     run.dmLiveByKey = run.dmLiveByKey or {}
+    run.dmOverallDurBase = baseDur or 0
+    run.dmLastOverallDur = baseDur or 0
+    run.dmOverallDurResetAccum = run.dmOverallDurResetAccum or 0
+    run.dmOverallDurLive = run.dmOverallDurLive or 0
+    run.dmPullAccumByKey = run.dmPullAccumByKey or {}
     run.dmPullDurAccum = run.dmPullDurAccum or 0
+    run.dmLastCurrentSessionSig = nil
     run.dmBaselineCaptured = true
 end
 
@@ -924,74 +1087,165 @@ local function UpdateDungeonRunDamageMeter(run, isPullEnd)
     end
     local sessOverall = (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Overall) or 0
     local sessCurrent = (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Current) or 1
-    local overallNow = ReadDamageMeterSessionByKey(run, sessOverall) or {}
+    local overallNow, overallDur = ReadDamageMeterSessionByKey(run, sessOverall)
+    local overallHasData = (overallNow ~= nil and next(overallNow) ~= nil)
+
+    run.dmLiveByKey = run.dmLiveByKey or {}
+
+    if overallHasData then
+        local sessionReset = false
+        if (run.dmLastOverallDur or 0) > 1 and (overallDur or 0) > 0 and overallDur < (run.dmLastOverallDur - 1) then
+            sessionReset = true
+        elseif run.dmLastOverallByKey then
+            for k, ov in pairs(overallNow) do
+                local prev = run.dmLastOverallByKey[k]
+                if prev then
+                    for i = 1, #DM_METRIC_DEFS do
+                        local f = DM_METRIC_DEFS[i].field
+                        local curV = ov[f] or 0
+                        local prevV = prev[f] or 0
+                        if curV > 0 and prevV > 0 and curV < (prevV - 1) then
+                            sessionReset = true
+                            break
+                        end
+                    end
+                end
+                if sessionReset then break end
+            end
+        end
+        if sessionReset then
+            FoldDungeonRunOverallIntoReset(run)
+        end
+
+        if (overallDur or 0) > 0 then
+            local durBase = run.dmOverallDurBase or 0
+            local durDelta = (overallDur >= durBase) and (overallDur - durBase) or overallDur
+            run.dmOverallDurLive = math.max(run.dmOverallDurLive or 0, (run.dmOverallDurResetAccum or 0) + durDelta)
+            run.dmLastOverallDur = overallDur
+        end
+
+        local allKeys = {}
+        for k in pairs(overallNow) do allKeys[k] = true end
+        for k in pairs(run.dmResetAccumByKey or {}) do allKeys[k] = true end
+        for k in pairs(run.dmLiveByKey) do allKeys[k] = true end
+
+        run.dmLastOverallByKey = run.dmLastOverallByKey or {}
+        for k in pairs(allKeys) do
+            local ov = overallNow[k]
+            local bs = run.dmBaselineByKey and run.dmBaselineByKey[k]
+            local ra = run.dmResetAccumByKey and run.dmResetAccumByKey[k]
+            local live = run.dmLiveByKey[k]
+            if not live then
+                live = {}
+                run.dmLiveByKey[k] = live
+            end
+            local lastOv = run.dmLastOverallByKey[k]
+            if not lastOv then
+                lastOv = {}
+                run.dmLastOverallByKey[k] = lastOv
+            end
+            if ov and ov.guid then
+                live.guid = ov.guid
+                lastOv.guid = ov.guid
+            elseif bs and bs.guid and not live.guid then
+                live.guid = bs.guid
+            elseif ra and ra.guid and not live.guid then
+                live.guid = ra.guid
+            end
+            for i = 1, #DM_METRIC_DEFS do
+                local f = DM_METRIC_DEFS[i].field
+                local curOv = (ov and ov[f]) or 0
+                local baseOv = (bs and bs[f]) or 0
+                if curOv > (lastOv[f] or 0) or (ov and curOv > 0) then
+                    lastOv[f] = curOv
+                end
+                local ovDelta = (curOv >= baseOv) and (curOv - baseOv) or curOv
+                local fromOverall = ((ra and ra[f]) or 0) + ovDelta
+                live[f] = math.max(live[f] or 0, fromOverall)
+            end
+        end
+        return
+    end
 
     if isPullEnd and run.lastPullMetered ~= (run.pulls or 0) then
         run.lastPullMetered = run.pulls or 0
-        local currNow, currDur = ReadDamageMeterSessionByKey(run, sessCurrent)
-        if currDur and currDur > 0 then
-            run.dmPullDurAccum = (run.dmPullDurAccum or 0) + currDur
-        end
-        if currNow then
-            run.dmPullAccumByKey = run.dmPullAccumByKey or {}
-            for k, vals in pairs(currNow) do
-                local pa = run.dmPullAccumByKey[k]
-                if not pa then
-                    pa = {}
-                    run.dmPullAccumByKey[k] = pa
+        local currNow, currDur, currSessId = ReadDamageMeterSessionByKey(run, sessCurrent)
+        if currNow and next(currNow) ~= nil then
+            local parts = { tostring(currSessId or ""), string.format("%.2f", currDur or 0) }
+            local sortedKeys = {}
+            for k in pairs(currNow) do
+                sortedKeys[#sortedKeys + 1] = k
+            end
+            table.sort(sortedKeys)
+            for idx = 1, #sortedKeys do
+                local k = sortedKeys[idx]
+                local vals = currNow[k]
+                parts[#parts + 1] = k .. ":" .. tostring(vals.dmg or 0) .. ":" .. tostring(vals.heal or 0) .. ":" .. tostring(vals.tkn or 0)
+            end
+            local sig = table.concat(parts, "|")
+            if sig ~= run.dmLastCurrentSessionSig then
+                run.dmLastCurrentSessionSig = sig
+                if currDur and currDur > 0 then
+                    run.dmPullDurAccum = (run.dmPullDurAccum or 0) + currDur
                 end
-                for i = 1, #DM_METRIC_DEFS do
-                    local f = DM_METRIC_DEFS[i].field
-                    pa[f] = (pa[f] or 0) + (vals[f] or 0)
+                run.dmPullAccumByKey = run.dmPullAccumByKey or {}
+                for k, vals in pairs(currNow) do
+                    local pa = run.dmPullAccumByKey[k]
+                    if not pa then
+                        pa = {}
+                        run.dmPullAccumByKey[k] = pa
+                    end
+                    if vals.guid and not pa.guid then
+                        pa.guid = vals.guid
+                    end
+                    for i = 1, #DM_METRIC_DEFS do
+                        local f = DM_METRIC_DEFS[i].field
+                        pa[f] = (pa[f] or 0) + (vals[f] or 0)
+                    end
                 end
             end
         end
-    end
-
-    run.dmLiveByKey = run.dmLiveByKey or {}
-    local allKeys = {}
-    for k in pairs(overallNow) do allKeys[k] = true end
-    for k in pairs(run.dmResetAccumByKey or {}) do allKeys[k] = true end
-    for k in pairs(run.dmPullAccumByKey or {}) do allKeys[k] = true end
-
-    for k in pairs(allKeys) do
-        local ov = overallNow[k]
-        local bs = run.dmBaselineByKey and run.dmBaselineByKey[k]
-        local ra = run.dmResetAccumByKey and run.dmResetAccumByKey[k]
-        local pa = run.dmPullAccumByKey and run.dmPullAccumByKey[k]
-        local live = run.dmLiveByKey[k]
-        if not live then
-            live = {}
-            run.dmLiveByKey[k] = live
-        end
-        for i = 1, #DM_METRIC_DEFS do
-            local f = DM_METRIC_DEFS[i].field
-            local curOv = (ov and ov[f]) or 0
-            local baseOv = (bs and bs[f]) or 0
-            local ovDelta = (curOv >= baseOv) and (curOv - baseOv) or curOv
-            local fromOverall = ((ra and ra[f]) or 0) + ovDelta
-            local fromPulls = (pa and pa[f]) or 0
-            live[f] = math.max(live[f] or 0, fromOverall, fromPulls)
+        for k, pa in pairs(run.dmPullAccumByKey or {}) do
+            local ra = run.dmResetAccumByKey and run.dmResetAccumByKey[k]
+            local live = run.dmLiveByKey[k]
+            if not live then
+                live = {}
+                run.dmLiveByKey[k] = live
+            end
+            if pa.guid and not live.guid then
+                live.guid = pa.guid
+            end
+            for i = 1, #DM_METRIC_DEFS do
+                local f = DM_METRIC_DEFS[i].field
+                local fromPulls = ((ra and ra[f]) or 0) + (pa[f] or 0)
+                live[f] = math.max(live[f] or 0, fromPulls)
+            end
         end
     end
 end
 
 local function OnDungeonRunDamageMeterReset()
     local run = Group._activeRun
-    if not (run and run.started) then return end
-    run.dmResetAccumByKey = run.dmResetAccumByKey or {}
-    for k, live in pairs(run.dmLiveByKey or {}) do
-        local ra = run.dmResetAccumByKey[k]
-        if not ra then
-            ra = {}
-            run.dmResetAccumByKey[k] = ra
-        end
-        for i = 1, #DM_METRIC_DEFS do
-            local f = DM_METRIC_DEFS[i].field
-            ra[f] = math.max(ra[f] or 0, live[f] or 0)
-        end
+    if not run then return end
+    if not run.started then
+        run.dmBaselineByKey = {}
+        run.dmLastOverallByKey = {}
+        run.dmResetAccumByKey = {}
+        run.dmLiveByKey = {}
+        run.dmOverallDurBase = 0
+        run.dmLastOverallDur = 0
+        run.dmOverallDurResetAccum = 0
+        run.dmOverallDurLive = 0
+        run.dmPullAccumByKey = {}
+        run.dmPullDurAccum = 0
+        run.dmLastCurrentSessionSig = nil
+        run.dmBaselineCaptured = true
+        return
     end
-    run.dmBaselineByKey = {}
+    FoldDungeonRunOverallIntoReset(run)
+    run.dmPullAccumByKey = {}
+    run.dmPullDurAccum = 0
+    run.dmLastCurrentSessionSig = nil
 end
 
 function Group:FormatCompactNumber(n)
@@ -1516,6 +1770,7 @@ function Group:CaptureActiveRunMembers(isInitial)
     if liveCount > (run.peakSize or 0) then
         run.peakSize = liveCount
     end
+    ReconcileDamageMeterKeys(run)
 end
 
 function Group:FinalizeActiveDungeonRun(reason, silent)
@@ -1531,7 +1786,20 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
         run.inCombatNow = false
         run.combatStartedAt = nil
     end
+
+    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local myName = run.myName or (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player")) or "Player"
+    local parsedSelf = Compat.ParseCharacterName and Compat.ParseCharacterName(myName)
+    local myKey = run.myKey or (parsedSelf and parsedSelf.lookupKey)
+    if myKey and not run.myKey then
+        run.myKey = myKey
+    end
+    if myName and not run.myName then
+        run.myName = myName
+    end
+
     UpdateDungeonRunDamageMeter(run, true)
+    ReconcileDamageMeterKeys(run)
 
     local startedAt = run.startedAt or run.enteredAt or now
     local endedAt
@@ -1552,8 +1820,15 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
         return false
     end
 
-    local combatDur = math.max(1, run.combatSeconds or 0, math.floor((run.dmPullDurAccum or 0) + 0.5), 1)
-    if (run.combatSeconds or 0) == 0 and (run.dmPullDurAccum or 0) == 0 then
+    local dmDur = math.floor((run.dmOverallDurLive or 0) + 0.5)
+    local combatDur
+    if dmDur > 0 then
+        combatDur = math.max(1, dmDur)
+    elseif (run.combatSeconds or 0) > 0 then
+        combatDur = math.max(1, run.combatSeconds)
+    elseif (run.dmPullDurAccum or 0) > 0 then
+        combatDur = math.max(1, math.floor(run.dmPullDurAccum + 0.5))
+    else
         combatDur = duration
     end
 
@@ -1562,11 +1837,6 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
     local roleRank = { TANK = 1, HEALER = 2, DAMAGER = 3, NONE = 4 }
     for _, m in pairs(run.membersByKey or {}) do
         local mDm = m.k and dmLive[m.k]
-        if not mDm and m.n and Compat.ParseCharacterName then
-            local pm = Compat.ParseCharacterName(m.n)
-            local altK = pm and pm.firstName and run.firstToKey and run.firstToKey[pm.firstName:lower()]
-            mDm = altK and dmLive[altK]
-        end
         if m.deaths and m.deaths > 0 then
             m.d = m.deaths
         end
@@ -1596,10 +1866,6 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
         table.remove(memberList)
     end
 
-    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
-    local myName = run.myName or (resolvedSelf and resolvedSelf.fullName) or Safe.String(Safe.Call(UnitName, "player")) or "Player"
-    local parsedSelf = Compat.ParseCharacterName and Compat.ParseCharacterName(myName)
-    local myKey = run.myKey or (parsedSelf and parsedSelf.lookupKey)
     local _, rawMyClass = Safe.Call(UnitClass, "player")
     local myClass = run.myClass or Safe.String(rawMyClass)
     local myLevel = run.myLevel or Safe.Number(Safe.Call(UnitLevel, "player"))
@@ -1655,7 +1921,7 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
         st = startedAt,
         en = endedAt,
         dur = duration,
-        cdur = (run.combatSeconds and run.combatSeconds > 0) and run.combatSeconds or nil,
+        cdur = (dmDur > 0 or (run.combatSeconds or 0) > 0) and combatDur or nil,
         pulls = (run.pulls and run.pulls > 0) and run.pulls or nil,
         bk = bossKills,
         bn = run.lastBossName,
@@ -1702,13 +1968,228 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
                 end
             end
             if ns.RunAfterCombat then
-                ns:RunAfterCombat("dungeon_log_first_prompt", showFn)
+                ns:RunAfterCombat("dungeon_log_first_prompt", showFn, false)
             else
                 showFn()
             end
         end
     end
 
+    return true, rec.id
+end
+
+local function SavePendingDungeonRunForReload(run, savedRecId)
+    if type(SocialCentralCharDB) ~= "table" or not (run and run.started and savedRecId) then
+        return
+    end
+    local membersCopy = {}
+    for k, m in pairs(run.membersByKey or {}) do
+        if type(m) == "table" then
+            local dCount = m.deaths or m.d
+            membersCopy[k] = {
+                n = m.n,
+                k = m.k,
+                c = m.c,
+                r = m.r,
+                l = m.l,
+                g = m.g,
+                j = m.j,
+                lv = m.lv,
+                deaths = (dCount and dCount > 0) and dCount or nil,
+            }
+        end
+    end
+    local bossesCopy = {}
+    for i = 1, #(run.bosses or {}) do
+        bossesCopy[i] = run.bosses[i]
+    end
+    local lootCopy = {}
+    for i = 1, #(run.loot or {}) do
+        local it = run.loot[i]
+        if type(it) == "table" then
+            lootCopy[#lootCopy + 1] = { id = it.id, n = it.n, q = it.q, w = it.w }
+        end
+    end
+    SocialCentralCharDB._pendingDungeonRun = {
+        savedRecId = savedRecId,
+        savedAt = time(),
+        sig = run.sig,
+        zone = run.zone,
+        instType = run.instType,
+        difficultyName = run.difficultyName,
+        maxPlayers = run.maxPlayers,
+        enteredAt = run.enteredAt,
+        startedAt = run.startedAt,
+        lastCombatAt = run.lastCombatAt,
+        combatSeconds = run.combatSeconds or 0,
+        pulls = run.pulls or 0,
+        lastPullMetered = run.lastPullMetered,
+        wipes = run.wipes or 0,
+        totalDeaths = run.totalDeaths or 0,
+        myDeaths = run.myDeaths or 0,
+        xpGained = run.xpGained or 0,
+        levelsGained = run.levelsGained or 0,
+        moneyGained = run.moneyGained or 0,
+        bossKills = run.bossKills or 0,
+        lastBossName = run.lastBossName,
+        bosses = bossesCopy,
+        loot = lootCopy,
+        membersByKey = membersCopy,
+        myName = run.myName,
+        myKey = run.myKey,
+        myClass = run.myClass,
+        myLevel = run.myLevel,
+        myRole = run.myRole,
+        myGuid = run.myGuid,
+        peakSize = run.peakSize or 0,
+        dmBaselineByKey = DeepCopyMetricsMap(run.dmBaselineByKey),
+        dmResetAccumByKey = DeepCopyMetricsMap(run.dmResetAccumByKey),
+        dmLiveByKey = DeepCopyMetricsMap(run.dmLiveByKey),
+        dmLastOverallByKey = DeepCopyMetricsMap(run.dmLastOverallByKey),
+        dmPullAccumByKey = DeepCopyMetricsMap(run.dmPullAccumByKey),
+        dmOverallDurBase = run.dmOverallDurBase or 0,
+        dmOverallDurResetAccum = run.dmOverallDurResetAccum or 0,
+        dmOverallDurLive = run.dmOverallDurLive or 0,
+        dmLastOverallDur = run.dmLastOverallDur or 0,
+        dmPullDurAccum = run.dmPullDurAccum or 0,
+        dmLastCurrentSessionSig = run.dmLastCurrentSessionSig,
+    }
+end
+
+local function TryResumePendingDungeonRun(sig, instName, instType, diffName, maxPlayers)
+    if type(SocialCentralCharDB) ~= "table" then return false end
+    local pending = SocialCentralCharDB._pendingDungeonRun
+    if type(pending) ~= "table" then return false end
+    local now = time()
+    if pending.sig ~= sig or (now - (pending.savedAt or 0)) > 1200 then
+        SocialCentralCharDB._pendingDungeonRun = nil
+        return false
+    end
+
+    if pending.savedRecId then
+        local hist = Group:GetDungeonHistoryTable()
+        for i = #hist, 1, -1 do
+            if hist[i] and hist[i].id == pending.savedRecId then
+                table.remove(hist, i)
+                ns:Emit("DUNGEON_HISTORY_UPDATED")
+                break
+            end
+        end
+    end
+
+    local bossSeen = {}
+    local bosses = {}
+    for i = 1, #(pending.bosses or {}) do
+        local bn = pending.bosses[i]
+        if bn and not bossSeen[bn] then
+            bossSeen[bn] = true
+            bosses[#bosses + 1] = bn
+        end
+    end
+
+    local lootSeen = {}
+    local loot = {}
+    for i = 1, #(pending.loot or {}) do
+        local it = pending.loot[i]
+        if type(it) == "table" and it.id and it.n then
+            local sk = tostring(it.id) .. ":" .. (it.w or "")
+            if not lootSeen[sk] then
+                lootSeen[sk] = true
+                loot[#loot + 1] = { id = it.id, n = it.n, q = it.q, w = it.w }
+            end
+        end
+    end
+
+    local members = {}
+    for k, m in pairs(pending.membersByKey or {}) do
+        if type(m) == "table" then
+            members[k] = {
+                n = m.n,
+                k = m.k,
+                c = m.c,
+                r = m.r,
+                l = m.l,
+                g = m.g,
+                j = m.j,
+                lv = m.lv,
+                deaths = m.deaths,
+            }
+        end
+    end
+
+    Group._activeRun = {
+        sig = sig,
+        zone = (instName and instName ~= "") and instName or pending.zone,
+        instType = instType or pending.instType,
+        difficultyName = (diffName and diffName ~= "") and diffName or pending.difficultyName,
+        maxPlayers = maxPlayers or pending.maxPlayers,
+        enteredAt = pending.enteredAt or now,
+        started = true,
+        startedAt = pending.startedAt or pending.enteredAt or now,
+        lastCombatAt = pending.lastCombatAt or now,
+        combatSeconds = pending.combatSeconds or 0,
+        combatStartedAt = nil,
+        inCombatNow = false,
+        pulls = pending.pulls or 0,
+        lastPullMetered = pending.lastPullMetered,
+        wipes = pending.wipes or 0,
+        lastWipeAt = 0,
+        totalDeaths = pending.totalDeaths or 0,
+        myDeaths = pending.myDeaths or 0,
+        deadStateByKey = {},
+        lastDeathAtByKey = {},
+        xpGained = pending.xpGained or 0,
+        levelsGained = pending.levelsGained or 0,
+        lastXp = Safe.Number(Safe.Call(UnitXP, "player")) or 0,
+        lastXpMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0,
+        lastLevel = Safe.Number(Safe.Call(UnitLevel, "player")) or 0,
+        moneyGained = pending.moneyGained or 0,
+        lastMoney = Safe.Number(GetMoney and Safe.Call(GetMoney)) or 0,
+        loot = loot,
+        lootSeen = lootSeen,
+        guidToKey = {},
+        firstToKey = {},
+        myName = pending.myName,
+        myKey = pending.myKey,
+        myClass = pending.myClass,
+        myLevel = pending.myLevel,
+        myRole = pending.myRole,
+        myGuid = pending.myGuid or (UnitGUID and Safe.String(Safe.Call(UnitGUID, "player")) or nil),
+        exitedAt = nil,
+        pendingLeaveAt = nil,
+        leftSinceCombat = 0,
+        bossKills = pending.bossKills or 0,
+        lastBossName = pending.lastBossName,
+        bosses = bosses,
+        bossSeen = bossSeen,
+        membersByKey = members,
+        presentKeys = {},
+        peakSize = pending.peakSize or 0,
+        _exitSeq = 0,
+        _leaveSeq = 0,
+        dmBaselineCaptured = true,
+        dmBaselineByKey = DeepCopyMetricsMap(pending.dmBaselineByKey),
+        dmResetAccumByKey = DeepCopyMetricsMap(pending.dmResetAccumByKey),
+        dmLiveByKey = DeepCopyMetricsMap(pending.dmLiveByKey),
+        dmLastOverallByKey = DeepCopyMetricsMap(pending.dmLastOverallByKey),
+        dmPullAccumByKey = DeepCopyMetricsMap(pending.dmPullAccumByKey),
+        dmOverallDurBase = pending.dmOverallDurBase or 0,
+        dmOverallDurResetAccum = pending.dmOverallDurResetAccum or 0,
+        dmOverallDurLive = pending.dmOverallDurLive or 0,
+        dmLastOverallDur = pending.dmLastOverallDur or 0,
+        dmPullDurAccum = pending.dmPullDurAccum or 0,
+        dmLastCurrentSessionSig = pending.dmLastCurrentSessionSig,
+    }
+    SocialCentralCharDB._pendingDungeonRun = nil
+
+    Group:CaptureActiveRunMembers(false)
+    for _, mem in ipairs(Group.members or {}) do
+        if mem and mem.isDead == true and mem.lookupKey then
+            Group._activeRun.deadStateByKey[mem.lookupKey] = true
+        end
+    end
+    UpdateDungeonRunDamageMeter(Group._activeRun, false)
+    ns:Emit("GROUP_UPDATED")
     return true
 end
 
@@ -1735,6 +2216,9 @@ function Group:CheckActiveDungeonRunZone()
         end
         if run and run.started then
             self:FinalizeActiveDungeonRun("zone_change", false)
+        end
+        if TryResumePendingDungeonRun(sig, instName, instType, diffName, maxPlayers) then
+            return
         end
         self._activeRun = {
             sig = sig,
@@ -1787,6 +2271,20 @@ function Group:CheckActiveDungeonRunZone()
     end
 
     if not run then
+        if type(SocialCentralCharDB) == "table" and type(SocialCentralCharDB._pendingDungeonRun) == "table" then
+            local pending = SocialCentralCharDB._pendingDungeonRun
+            local isDeadOrGhost = UnitIsDeadOrGhost and Safe.Value(Safe.Call(UnitIsDeadOrGhost, "player")) == true
+            if (not inGroup) or ((not isDeadOrGhost) and (time() - (pending.savedAt or 0)) > 30) then
+                SocialCentralCharDB._pendingDungeonRun = nil
+            elseif (not isDeadOrGhost) and C_Timer and C_Timer.After and not pending._cleanupTimerArmed then
+                pending._cleanupTimerArmed = true
+                C_Timer.After(32, function()
+                    if not Group._activeRun then
+                        Group:CheckActiveDungeonRunZone()
+                    end
+                end)
+            end
+        end
         return
     end
 
@@ -1830,7 +2328,15 @@ end
 function Group:OnActiveRunRosterUpdated(inGroupNow)
     local run = self._activeRun
     if not run then
-        if inGroupNow and self:IsDungeonRunLogEnabled() then
+        if not inGroupNow then
+            if type(SocialCentralCharDB) == "table" and type(SocialCentralCharDB._pendingDungeonRun) == "table" then
+                if (time() - (SocialCentralCharDB._pendingDungeonRun.savedAt or 0)) > 30 then
+                    SocialCentralCharDB._pendingDungeonRun = nil
+                end
+            end
+            return
+        end
+        if self:IsDungeonRunLogEnabled() then
             local inInst = IsInPartyOrRaidInstanceNow()
             if inInst then
                 self:CheckActiveDungeonRunZone()
@@ -2226,8 +2732,12 @@ function Group:Init()
     end)
 
     ns.RegisterEvent(self, "PLAYER_LOGOUT", function()
-        if Group._activeRun and Group._activeRun.started then
-            Group:FinalizeActiveDungeonRun("logout", true)
+        local activeRun = Group._activeRun
+        if activeRun and activeRun.started then
+            local ok, savedRecId = Group:FinalizeActiveDungeonRun("logout", true)
+            if ok and savedRecId then
+                SavePendingDungeonRunForReload(activeRun, savedRecId)
+            end
         end
     end)
 

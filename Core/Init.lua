@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.24"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.24" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.25"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.25" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -11,8 +11,19 @@ ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
 ns.modules = {}
 ns.listeners = {}
 
+local lastPrintText = nil
+local lastPrintAt = 0
+
 function ns:Print(fmt, ...)
     local text = select("#", ...) > 0 and fmt:format(...) or tostring(fmt)
+    if text:sub(1, 2) ~= "  " then
+        local now = (GetTime and GetTime()) or 0
+        if lastPrintText == text and (now - lastPrintAt) < 3.0 then
+            return
+        end
+        lastPrintText = text
+        lastPrintAt = now
+    end
     if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
         DEFAULT_CHAT_FRAME:AddMessage("|cff58a6ffSocialCentral|r: " .. text)
     end
@@ -97,6 +108,7 @@ local DEFAULTS = {
         minimap = {
             hide = false,
             angle = 215,
+            anglesByRes = {},
             lock = false,
         },
         minimapLeftClickAction = "smart", -- "smart" (unread chat or main hub) | "hub" | "menu"
@@ -123,7 +135,12 @@ local DEFAULTS = {
         chatMirrorChannels = true,  -- mirror native WoW Guild/Party/Raid channels inside Conversations
         chatChannelUnread = false,  -- opt-in: allow mirrored WoW channels to increment unread badges
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
-        chatHistoryLimit = 30,      -- local lines kept per character conversation thread
+        chatHistoryLimit = 100,     -- local lines kept per character conversation thread (0 to 300)
+        guildChatHistorySave = true, -- persist Guild & Officer chat history locally across /reload and logins (toggleable)
+        guildChatHistoryLimit = 125, -- saved Guild & Officer lines retained per channel (50 to 500, default 125)
+        generalChatHistorySave = true, -- persist Private Rooms, Alliance & Mentions history across /reload and logins
+        groupChatHistorySave = true, -- persist Party, Raid & Instance chat history across /reload and logins
+        generalChatHistoryLimit = 150, -- saved lines per Room, Group, Alliance & Mentions thread (25 to 300, default 150)
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
         chatDirectOfficialSend = true, -- send official /w, Battle.net, and guild/group replies in 1 click from Conversations (hardware-event only)
         mentionAlertsEnabled = true, -- Mentions & Custom Keyword Radar in chat
@@ -174,11 +191,19 @@ local DEFAULTS = {
         msgPreviewSilenceCombat = true, -- retract & hold message previews and popups while actively in combat
         msgPreviewDuration = 6,         -- seconds to display preview before retracting back into SC icon (default 6s)
         quickReplyEnabled = true,       -- clicking Minimap icon with pending message notifications opens compact Quick Reply popup
-        quickReplyAutoClose = true,     -- auto-close Quick Reply popup after 10s of inactivity while preserving typed draft
+        quickReplyDockToChat = true,    -- snap Quick Reply directly over Blizzard ChatFrame1 matching its exact size & position
+        quickReplyEnterOpen = true,     -- press ENTER when pending notifications/drafts exist to open Quick Reply over Blizzard chat
+        quickReplyAutoClose = true,     -- auto-close Quick Reply popup on inactivity while preserving typed draft
+        quickReplyAutoCloseDelay = 10,  -- seconds before Quick Reply auto-closes when idle or interacting outside (default 10s)
+        quickReplyTutorialShown = false, -- one-time account-wide Quick Reply walkthrough tutorial shown on first view
+        officialHideGroup = false,      -- opt-in: hide Party/Raid/Instance chat in Blizzard Official Chat while keeping in SocialCentral
+        officialHideGuild = false,      -- opt-in: hide Guild/Officer chat in Blizzard Official Chat while keeping in SocialCentral
+        officialHideWhispers = false,   -- opt-in: hide Whispers & Battle.net in Blizzard Official Chat while keeping in SocialCentral
         quickReplyNotifyWhisper = true, -- include Whispers & SocialCentral Direct Chat in Quick Reply notifications
         quickReplyNotifyBNet = true,    -- include Battle.net messages in Quick Reply notifications
         quickReplyNotifyParty = true,   -- include Party / Instance chat in Quick Reply notifications
-        quickReplyNotifyRaid = false,   -- include Raid chat in Quick Reply notifications
+        quickReplyNotifyRaid = true,    -- include Raid chat in Quick Reply & orange Raid Minimap notifications
+        quickReplyNotifyRaidMigrated = false, -- one-time upgrade enabling Raid Minimap & Quick Reply notifications
         quickReplyNotifyGuild = false,  -- include Guild / Officer chat in Quick Reply notifications
         msgPreviewMaxVisible = 3,       -- max simultaneous minimap preview rows (1..3); extras wait in FIFO queue
         msgPreviewDefault6Migrated = false, -- one-time upgrade from initial 5s default to 6s default
@@ -264,7 +289,8 @@ local DEFAULTS = {
         width = 790,
         height = 520,
     },
-    windowPositions = {},            -- [windowKey] = { dx, dy } center-normalized positions across all frames
+    windowPositions = {},            -- legacy fallback [windowKey] = { dx, dy }
+    windowPositionsByRes = {},       -- [resKey] = { [windowKey] = { anchor, dx, dy, width, height } } per-resolution saved positions & sizes
     accountTutorials = {},           -- [tutorialKey] = true account-wide one-time tutorial completion flags (never repeated on alts)
     accountIgnores = {},             -- [lookupKey] = { name, reason, note, addedAt, expiresAt, hideChat } unlimited account-wide ignores (zero BattleTag/Real ID)
     watchlist = {},                -- [scopeKey] = { [id] = entry }
@@ -718,6 +744,12 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         SocialCentralDB.settings.msgPreviewPromptAnswered = true
         SocialCentralDB.settings.focusUpgradeV1Migrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.quickReplyNotifyRaidMigrated ~= true then
+        if SocialCentralDB.settings.quickReplyNotifyRaid == false then
+            SocialCentralDB.settings.quickReplyNotifyRaid = true
+        end
+        SocialCentralDB.settings.quickReplyNotifyRaidMigrated = true
+    end
     ns._accountSettings = SocialCentralDB.settings
     if SocialCentralCharDB.useCharProfile == true then
         if type(SocialCentralCharDB.settings) ~= "table" then
@@ -745,6 +777,12 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
                 end
                 SocialCentralCharDB.settings.msgPreviewPromptAnswered = true
                 SocialCentralCharDB.settings.focusUpgradeV1Migrated = true
+            end
+            if SocialCentralCharDB.settings.quickReplyNotifyRaidMigrated ~= true then
+                if SocialCentralCharDB.settings.quickReplyNotifyRaid == false then
+                    SocialCentralCharDB.settings.quickReplyNotifyRaid = true
+                end
+                SocialCentralCharDB.settings.quickReplyNotifyRaidMigrated = true
             end
         end
         SocialCentralDB.settings = SocialCentralCharDB.settings
@@ -804,6 +842,7 @@ function ns:ResetCurrentSettingsToDefaults()
     fresh.chatSoundCooldownDefault6Migrated = true
     fresh.toastBelowChatMigrated = true
     fresh.focusUpgradeV1Migrated = true
+    fresh.quickReplyNotifyRaidMigrated = true
     if ns:IsCharProfileEnabled() then
         SocialCentralCharDB = SocialCentralCharDB or {}
         SocialCentralCharDB.settings = fresh
@@ -1096,7 +1135,7 @@ local pendingNavigation = nil
 local pendingCombatTasks = {}
 local pendingCombatTaskSeq = 0
 
---- Run a non-protected UI/UX callback right away outside combat, or defer once until combat ends.
+--- Run a non-protected UI/UX callback right away outside combat, or defer silently once until combat ends.
 function ns:RunAfterCombat(actionId, fn, noticeText)
     if type(fn) ~= "function" then return false end
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
@@ -1112,9 +1151,10 @@ function ns:RunAfterCombat(actionId, fn, noticeText)
         pendingCombatTaskSeq = pendingCombatTaskSeq + 1
         key = "task_" .. tostring(pendingCombatTaskSeq)
     end
+    local alreadyQueued = (pendingCombatTasks[key] ~= nil)
     pendingCombatTasks[key] = fn
-    if noticeText ~= false then
-        ns:Print("%s", (type(noticeText) == "string" and noticeText ~= "") and noticeText or L["Will finish right after combat ends."])
+    if (not alreadyQueued) and type(noticeText) == "string" and noticeText ~= "" then
+        ns:Print("%s", noticeText)
     end
     return false
 end
@@ -1284,7 +1324,7 @@ if EventRegistry and EventRegistry.RegisterCallback then
                 ns:RunAfterCombat("watchlist_disambig", function()
                     ns:NavigateToModule("watchlist")
                     ns.UI:OpenWatchlistDisambiguation(entryId)
-                end)
+                end, L["Will finish right after combat ends."])
             end
         elseif link:find("addon:SCentral:delnote:", 1, true) then
             local noteId = link:match("addon:SCentral:delnote:([^|]+)")

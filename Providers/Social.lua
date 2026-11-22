@@ -765,6 +765,14 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                 end
 
                 if bnetState == "wow_forever" and parsed then
+                    if bnetAccId and ns.Watchlist and ns.Watchlist.PromoteSessionBNetAccount then
+                        ns.Watchlist:PromoteSessionBNetAccount(bnetAccId, parsed.displayName, {
+                            classFile = cleanClass,
+                            level = cleanLevel,
+                            area = cleanArea,
+                            guid = guid,
+                        })
+                    end
                     local onKey = FindMergeKey(onlineCtx, defaultKey, guid, patch.bnetAccountID, parsed.lookupKey, true)
                     MergeEntry(onlineCtx, onKey, patch)
                     if samePool then
@@ -773,6 +781,41 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                         end
                         if hasWatchlist and wlObsMap then
                             QueueWatchlistObs(wlObsMap, parsed.lookupKey, parsed.displayName, true, cleanLevel, cleanClass, cleanArea, nil, "bnet")
+                            local bRecLive = bnetAccId and bnetInfoByAccId[bnetAccId] or nil
+                            for wlKey, wlEntry in pairs(wlTable) do
+                                if type(wlEntry) == "table" and wlEntry.watchAllAlts == true and wlKey ~= parsed.lookupKey then
+                                    local sameAcc = (bRecLive and type(bRecLive.chars) == "table" and bRecLive.chars[wlKey] ~= nil)
+                                        or (bnetAccId and bnetAccByLookup[wlKey] == bnetAccId)
+                                    if not sameAcc and Store.GetAllLinkedCharacters then
+                                        local linked = Store:GetAllLinkedCharacters(wlKey)
+                                        for _, altRec in ipairs(linked) do
+                                            local altLk = altRec and altRec.lookupKey
+                                            if altLk and (altLk == parsed.lookupKey or (bRecLive and type(bRecLive.chars) == "table" and bRecLive.chars[altLk] ~= nil)) then
+                                                sameAcc = true
+                                                break
+                                            end
+                                        end
+                                    end
+                                    if sameAcc then
+                                        if bnetAccId then
+                                            bnetAccByLookup[wlKey] = bnetAccId
+                                            if bRecLive and type(bRecLive.chars) == "table" and not bRecLive.chars[wlKey] then
+                                                bRecLive.chars[wlKey] = wlEntry.displayName or wlKey
+                                            end
+                                        end
+                                        if Store.RecordObservedAltPair then
+                                            Store:RecordObservedAltPair(wlKey, parsed.lookupKey)
+                                        end
+                                        QueueWatchlistObs(wlObsMap, wlKey, wlEntry.displayName or parsed.displayName, true, cleanLevel, cleanClass, cleanArea, nil, "bnet")
+                                        if wlObsMap[wlKey] then
+                                            wlObsMap[wlKey].altLookupKey = parsed.lookupKey
+                                            wlObsMap[wlKey].altDisplayName = parsed.displayName
+                                            wlObsMap[wlKey].altClassFile = cleanClass
+                                            wlObsMap[wlKey].altLevel = cleanLevel
+                                        end
+                                    end
+                                end
+                            end
                         end
                     end
                 end
@@ -1055,13 +1098,16 @@ function Social:Scan()
                 if not bRec.activeForeverLookups[otherLk] and verifiedFriendConnected[otherLk] ~= true then
                     local existingObs = wlObsMap[otherLk]
                     if existingObs and existingObs.online == true then
-                        existingObs.online = false
+                        if not (existingObs.altLookupKey and bRec.activeForeverLookups[existingObs.altLookupKey]) then
+                            existingObs.online = false
+                        end
                     elseif type(wlTable) == "table" then
                         local wlRec = wlTable[otherLk]
-                        if type(wlRec) == "table" and wlRec.status == "online" then
+                        if type(wlRec) == "table" and wlRec.status == "online" and not (wlRec.watchAllAlts == true and wlRec.activeAltLookup and bRec.activeForeverLookups[wlRec.activeAltLookup]) then
                             QueueWatchlistObs(wlObsMap, otherLk, wlRec.displayName or otherDisp, false, nil, nil, nil, nil, "bnet")
                             if wlObsMap[otherLk] then
                                 wlObsMap[otherLk].online = false
+                                wlObsMap[otherLk].clearAlt = true
                             end
                         end
                     end
@@ -1080,14 +1126,17 @@ function Social:Scan()
         for wlKey, wlEntry in pairs(wlTable) do
             if type(wlEntry) == "table" and wlEntry.status == "online" then
                 local lk = wlEntry.id or wlKey
-                if lk and not wlObsMap[lk] and not onlineCtx.byLookup[lk] then
+                local altOn = wlEntry.watchAllAlts == true and wlEntry.activeAltLookup and onlineCtx.byLookup[wlEntry.activeAltLookup] ~= nil
+                if lk and not wlObsMap[lk] and not onlineCtx.byLookup[lk] and not altOn then
                     local dirKey = dirCtx.byLookup[lk]
                     local dirRow = dirKey and dirCtx.map[dirKey]
                     if dirRow and not IsRowWoWOnline(dirRow) then
                         local src = (dirRow.sources and ((dirRow.sources.bnet and "bnet") or (dirRow.sources.friend and "friend") or (dirRow.sources.guild and "guild"))) or wlEntry.source
                         QueueWatchlistObs(wlObsMap, lk, wlEntry.displayName or dirRow.displayName, false, nil, nil, nil, nil, src)
+                        if wlObsMap[lk] then wlObsMap[lk].clearAlt = true end
                     elseif wlEntry.source == "bnet" and bnetReady then
                         QueueWatchlistObs(wlObsMap, lk, wlEntry.displayName, false, nil, nil, nil, nil, "bnet")
+                        if wlObsMap[lk] then wlObsMap[lk].clearAlt = true end
                     end
                 end
             end
@@ -1344,6 +1393,59 @@ function Social:GetBNetLinkInfo(lookupKey)
         sameFaction = isSameFac,
         otherChars = otherChars,
     }
+end
+
+--- Return live Battle.net friend accounts sorted online-first for Watchlist / Social pickers (session RAM only).
+function Social:GetBNetFriendsList()
+    local byAcc = {}
+    for _, row in pairs(Store.socialDirectory or {}) do
+        if type(row) == "table" and row.sources and row.sources.bnet and row.bnetAccountID then
+            local accId = row.bnetAccountID
+            local prev = byAcc[accId]
+            local rowRank = (row.bnetState == "wow_forever" and 3) or (row.online and 2) or 1
+            local prevRank = prev and ((prev.bnetState == "wow_forever" and 3) or (prev.online and 2) or 1) or 0
+            if not prev or rowRank > prevRank then
+                local bRec = bnetInfoByAccId[accId]
+                local charsMap = {}
+                if bRec and type(bRec.chars) == "table" then
+                    for lk, disp in pairs(bRec.chars) do
+                        charsMap[lk] = disp
+                    end
+                end
+                if row.hasCharacterName ~= false and row.lookupKey and row.displayName then
+                    charsMap[row.lookupKey] = row.displayName
+                end
+                byAcc[accId] = {
+                    bnetAccountID = accId,
+                    bnetName = row.bnetName or (bRec and bRec.bnetName) or row.displayName or "Battle.net",
+                    displayName = row.displayName,
+                    lookupKey = (row.hasCharacterName ~= false) and row.lookupKey or (bRec and bRec.activeLookupKey) or nil,
+                    hasCharacterName = (row.hasCharacterName ~= false) or (bRec and bRec.activeLookupKey ~= nil),
+                    online = row.online == true,
+                    bnetState = row.bnetState or "offline",
+                    activeLookupKey = bRec and bRec.activeLookupKey or nil,
+                    activeDisplayName = bRec and bRec.activeDisplayName or nil,
+                    classFile = row.classFile,
+                    level = row.level,
+                    area = row.area,
+                    richPresence = row.richPresence,
+                    clientProgram = row.clientProgram,
+                    knownChars = charsMap,
+                }
+            end
+        end
+    end
+    local out = {}
+    for _, item in pairs(byAcc) do
+        out[#out + 1] = item
+    end
+    table.sort(out, function(a, b)
+        local ra = (a.bnetState == "wow_forever" and 3) or (a.online and 2) or 1
+        local rb = (b.bnetState == "wow_forever" and 3) or (b.online and 2) or 1
+        if ra ~= rb then return ra > rb end
+        return tostring(a.bnetName or a.displayName or ""):lower() < tostring(b.bnetName or b.displayName or ""):lower()
+    end)
+    return out
 end
 
 function Social:GetPendingBNetInvites()

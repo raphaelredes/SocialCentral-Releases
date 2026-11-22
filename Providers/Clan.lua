@@ -10976,7 +10976,7 @@ function Clan:Init()
                 if ns.RunAfterCombat then
                     ns:RunAfterCombat("clan_pew_sync_steps", function()
                         RunPewSyncSteps(idx)
-                    end)
+                    end, false)
                 end
                 return
             end
@@ -11013,7 +11013,7 @@ function Clan:Init()
             end
             if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
                 if ns.RunAfterCombat then
-                    ns:RunAfterCombat("clan_pew_init_sync", ExecutePewInitSync)
+                    ns:RunAfterCombat("clan_pew_init_sync", ExecutePewInitSync, false)
                 end
                 return
             end

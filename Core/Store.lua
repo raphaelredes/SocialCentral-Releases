@@ -578,6 +578,16 @@ function Store:NotifyWatchlistOnline(entry, opts)
     end
     entry.lastAlertAt = now
 
+    local shownSender = entry.activeAltName or entry.displayName or "?"
+    local shownClass = entry.activeAltClass or entry.classFile
+    local shownLookup = entry.activeAltLookup or entry.id or (entry.displayName and entry.displayName:lower()) or nil
+    local textSuffix = (entry.area and entry.area ~= "")
+        and ((L["Online"] or "Online") .. " · " .. entry.area)
+        or (L["Is now online in WoW: Forever"] or "Is now online in WoW: Forever")
+    if entry.activeAltName and entry.displayName and entry.activeAltName ~= entry.displayName then
+        textSuffix = "(" .. entry.displayName .. ") · " .. textSuffix
+    end
+
     local didAny = false
     if alerts.toast ~= false and not (opts and opts.suppressToast) then
         local L = ns.L or {}
@@ -585,13 +595,11 @@ function Store:NotifyWatchlistOnline(entry, opts)
             id = "watchlist:" .. tostring(entry.id or entry.displayName or "?") .. ":" .. tostring(now),
             kind = "WATCHLIST_ONLINE",
             sourceTag = L["Watchlist"] or "Watchlist",
-            sender = entry.displayName or "?",
-            senderClass = entry.classFile,
-            lookupKey = entry.id or (entry.displayName and entry.displayName:lower()) or nil,
-            text = (entry.area and entry.area ~= "")
-                and ((L["Online"] or "Online") .. " · " .. entry.area)
-                or (L["Is now online in WoW: Forever"] or "Is now online in WoW: Forever"),
-            searchHint = entry.displayName or "",
+            sender = shownSender,
+            senderClass = shownClass,
+            lookupKey = shownLookup,
+            text = textSuffix,
+            searchHint = shownSender,
             ts = now,
             priority = 1,
         })
@@ -599,8 +607,11 @@ function Store:NotifyWatchlistOnline(entry, opts)
     end
 
     if alerts.chat and not (opts and opts.suppressChat) then
-        local hex = Compat.ClassHex(entry.classFile)
-        local label = hex .. (entry.displayName or "") .. "|r"
+        local hex = Compat.ClassHex(shownClass)
+        local label = hex .. shownSender .. "|r"
+        if entry.activeAltName and entry.displayName and entry.activeAltName ~= entry.displayName then
+            label = label .. " (" .. entry.displayName .. ")"
+        end
         if entry.area and entry.area ~= "" then
             ns:Print(ns.L["%s appears online (%s)."]:format(label, entry.area))
         else
@@ -722,12 +733,25 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
             entry.lastChecked = now
             entry.truncatedWarning = nil
         end
+        if data.altLookupKey and data.altDisplayName and obsOnline == true then
+            entry.activeAltLookup = data.altLookupKey
+            entry.activeAltName = data.altDisplayName
+            entry.activeAltClass = data.altClassFile or data.classFile
+            entry.activeAltLevel = data.altLevel or data.level
+        elseif obsOnline == true or obsOnline == false or data.clearAlt then
+            entry.activeAltLookup = nil
+            entry.activeAltName = nil
+            entry.activeAltClass = nil
+            entry.activeAltLevel = nil
+        end
         if data.source then entry.source = data.source end
-        if data.level and data.level > 0 then entry.level = data.level end
-        if data.classFile then entry.classFile = data.classFile end
+        if not (data.altLookupKey and data.altDisplayName) then
+            if data.level and data.level > 0 then entry.level = data.level end
+            if data.classFile then entry.classFile = data.classFile end
+        end
         if data.area and data.area ~= "" then entry.area = data.area end
         if data.guild and data.guild ~= "" then entry.guild = data.guild end
-        if data.guid and data.guid ~= "" and (not entry.guid or trustedSurnameSource) then
+        if not (data.altLookupKey and data.altDisplayName) and data.guid and data.guid ~= "" and (not entry.guid or trustedSurnameSource) then
             entry.guid = data.guid
         end
         if parsed.surname and parsed.surname ~= "" and (not entry.surname or entry.surname == "") then
@@ -1795,6 +1819,8 @@ local function MergeMissingEntries(dst, src, fieldKind)
                 cur.updatedAt = math.max(tonumber(cur.updatedAt) or 0, tonumber(v.updatedAt) or 0)
                 if not cur.faction and v.faction then cur.faction = v.faction end
                 if not cur.targetName and v.targetName then cur.targetName = v.targetName end
+                if not cur.guildName and v.guildName then cur.guildName = v.guildName end
+                if not cur.title and v.title then cur.title = v.title end
             elseif fieldKind == "watchlist" then
                 if v.favorite == true then cur.favorite = true end
                 if v.notifyMuted == true then cur.notifyMuted = true end

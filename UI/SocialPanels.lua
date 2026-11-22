@@ -1138,6 +1138,35 @@ local function GetLocalizedClassShort(cf)
     return loc
 end
 
+local function ResolveRecentCompanionPresence(item)
+    if type(item) ~= "table" then
+        return false, false, "unknown"
+    end
+    if item.inCurrentGroup == true then
+        return true, false, "online"
+    end
+    local lk = item.lookupKey or (item.displayName and Compat.ParseCharacterFields and Compat.ParseCharacterFields(item.displayName))
+    if lk and ns.Store and ns.Store.socialByLookup and ns.Store.socialByLookup[lk] then
+        return true, false, "online"
+    end
+    local wlEntry = lk and ns.Watchlist and ns.Watchlist.GetEntry and ns.Watchlist:GetEntry(lk) or nil
+    if wlEntry then
+        if wlEntry.status == "online" then
+            return true, false, "online"
+        elseif wlEntry.status == "offline" then
+            return false, true, "offline"
+        end
+    end
+    local dirRow = lk and ns.Store and ns.Store.socialDirectoryByLookup and ns.Store.socialDirectoryByLookup[lk] or nil
+    if dirRow then
+        if dirRow.online == true then
+            return true, false, "online"
+        end
+        return false, true, "offline"
+    end
+    return false, false, "unknown"
+end
+
 local function OpenGroupMemberMenu(anchor, panel, item)
     if not (anchor and item and MenuUtil and MenuUtil.CreateContextMenu) then return end
     local rKey = item.lookupKey or item.displayName
@@ -1217,9 +1246,32 @@ local function OpenGroupMemberMenu(anchor, panel, item)
                     Compat.Invite(item.displayName, bnetId)
                 end)
             end
-            root:CreateButton(L["Add to Watchlist"], function()
-                if ns.Watchlist then ns.Watchlist:Add(item.displayName or item.lookupKey) end
-            end)
+            local isWatched = rKey and ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(rKey)
+            if isWatched then
+                root:CreateButton(L["Check"], function()
+                    if ns.Watchlist and ns.Watchlist.CheckEntry then
+                        ns.Watchlist:CheckEntry(rKey)
+                    end
+                end)
+                root:CreateButton(L["Remove from Watchlist"], function()
+                    if ns.UI and ns.UI.OpenConfirmModal then
+                        ns.UI:OpenConfirmModal({
+                            title = L["Remove from Watchlist"],
+                            message = L["Are you sure you want to remove %s from your Watchlist?"]:format(item.displayName or rKey or "?"),
+                            confirmText = L["Remove"],
+                            onConfirm = function()
+                                if ns.Watchlist then ns.Watchlist:Remove(rKey) end
+                            end,
+                        })
+                    elseif ns.Watchlist then
+                        ns.Watchlist:Remove(rKey)
+                    end
+                end)
+            else
+                root:CreateButton(L["Add to Watchlist"], function()
+                    if ns.Watchlist then ns.Watchlist:Add(item.displayName or item.lookupKey) end
+                end)
+            end
             root:CreateButton(L["Edit Social Card"], function()
                 SocialPanels:OpenSocialMetaModal(item.displayName, item.lookupKey or item.displayName)
             end)
@@ -2794,6 +2846,12 @@ function SocialPanels:CreateGroupPanel(parent)
                         { tex = 135964, title = L["Raid & Party Buff Auditor"] },
                         { tex = "Interface\\RAIDFRAME\\ReadyCheck-Ready", title = L["Ready Check"] },
                         { tex = "Interface\\Buttons\\UI-GuildButton-MOTD-Up", title = L["Broadcast Group to Clan & Friends"] },
+                        { title = "|cff58a6ff[T]|r · |cff3fb950[H]|r · |cffff7b72[D]|r", desc = L["Tank · Healer · DPS Role"] },
+                        { title = "|cff58a6ff[MT]|r · |cffffb833[MA]|r · |cfff2c94c[ML]|r", desc = L["Main Tank · Main Assist · Master Looter"] },
+                        { tex = (FRIENDS_TEXTURE_ONLINE or "Interface\\FriendsFrame\\StatusIcon-Online"), title = L["Online"] .. " / " .. L["Group"], desc = L["Confirmed online (Group, Friends, Guild, BNet, Watchlist)"] },
+                        { tex = (FRIENDS_TEXTURE_OFFLINE or "Interface\\FriendsFrame\\StatusIcon-Offline"), title = L["Offline"], desc = L["Confirmed offline in Friends, Guild, or Watchlist"] },
+                        { tex = (FRIENDS_TEXTURE_AFK or "Interface\\FriendsFrame\\StatusIcon-Away"), title = L["Unverified History"], desc = L["Outside Friends/Guild — right-click to add to Watchlist (/who)"] },
+                        { title = "|cffffd24d*|r · |cff3fb950[SC]|r · |TInterface\\RAIDFRAME\\ReadyCheck-Ready:12:12:0:0|t · |TInterface\\RAIDFRAME\\ReadyCheck-NotReady:12:12:0:0|t", desc = L["Favorite · SocialCentral · Good Partner · Avoid"] },
                     }
                 end)
             end
@@ -2985,14 +3043,15 @@ function SocialPanels:CreateGroupPanel(parent)
             if item.isDead then raidRoleTag = raidRoleTag .. " " .. (Compat.StatusIconMarkup and Compat.StatusIconMarkup("DEAD", 13) or ("|cffff4d4d[" .. L["Dead"] .. "]|r")) end
         end
         local leadTag = item.isLeader and (" " .. (Compat.StatusIconMarkup and Compat.StatusIconMarkup("LEADER", 13) or ("|cffffd24d[" .. L["Leader"] .. "]|r"))) or (item.isAssistant and (" |cff58a6ff[" .. L["Assistant"] .. "]|r") or "")
+        local recentOn, recentOff, recentStatusKey = ResolveRecentCompanionPresence(item)
         local readyTag = ""
         if item.ready == true then
             readyTag = " " .. (Compat.StatusIconMarkup and Compat.StatusIconMarkup("READY", 13) or "|cff3fb950[OK]|r")
         elseif item.ready == false then
             readyTag = " " .. (Compat.StatusIconMarkup and Compat.StatusIconMarkup("NOTREADY", 13) or "|cffff6b6b[NO]|r")
         elseif item.inCurrentGroup then
-            readyTag = " " .. (Compat.StatusIconMarkup and Compat.StatusIconMarkup("GROUP", 13) or ("|cff3fb950[" .. L["Group"] .. "]|r"))
-        elseif panel._view == "recent" and ns.Store and ns.Store.socialByLookup and item.lookupKey and ns.Store.socialByLookup[item.lookupKey] then
+            readyTag = " |cff3fb950[" .. L["Group"] .. "]|r"
+        elseif panel._view == "recent" and recentOn then
             readyTag = " |cff3fb950[" .. L["Online"] .. "]|r"
         end
         local scTag = (not item.isMe and ns.Chat and ns.Chat.IsLookupKeyVerified and ns.Chat:IsLookupKeyVerified(item.lookupKey or item.displayName))
@@ -3034,13 +3093,16 @@ function SocialPanels:CreateGroupPanel(parent)
                 Theme:ApplyStatusColor(row.statusBar, st)
                 row.statusBar:SetAlpha(item.online ~= false and 0.90 or 0.25)
             end
+            row.nameText:SetAlpha(item.online ~= false and 1.0 or 0.65)
+            row.subText:SetAlpha(item.online ~= false and 0.94 or 0.58)
         else
-            local st = item.inCurrentGroup and "online" or "nearby"
-            Theme:ApplyStatusColor(row.dot, st)
+            Theme:ApplyStatusColor(row.dot, recentStatusKey)
             if row.statusBar then
-                Theme:ApplyStatusColor(row.statusBar, st)
-                row.statusBar:SetAlpha(0.85)
+                Theme:ApplyStatusColor(row.statusBar, recentStatusKey)
+                row.statusBar:SetAlpha(recentOn and 0.90 or (recentOff and 0.24 or 0.36))
             end
+            row.nameText:SetAlpha(recentOn and 1.0 or (recentOff and 0.62 or 0.78))
+            row.subText:SetAlpha(recentOn and 0.94 or (recentOff and 0.56 or 0.68))
         end
 
         if panel._view == "current" and item.isMe then
@@ -3207,7 +3269,7 @@ function SocialPanels:CreateGroupPanel(parent)
             local filteredRecent = {}
             local rf = panel._recentFilter or "ALL"
             for _, rec in ipairs(allRecent) do
-                local isOn = rec.inCurrentGroup or (ns.Store and ns.Store.socialByLookup and rec.lookupKey and ns.Store.socialByLookup[rec.lookupKey]) ~= nil
+                local isOn = ResolveRecentCompanionPresence(rec)
                 local passFilter = true
                 if rf == "ONLINE" then
                     passFilter = isOn == true
@@ -3221,9 +3283,19 @@ function SocialPanels:CreateGroupPanel(parent)
                     if isOn then
                         onlineRecent = onlineRecent + 1
                     end
+                    rec._isOnlineRecent = isOn
                     filteredRecent[#filteredRecent + 1] = rec
                 end
             end
+            table.sort(filteredRecent, function(a, b)
+                local aOn = a._isOnlineRecent == true
+                local bOn = b._isOnlineRecent == true
+                if aOn ~= bOn then return aOn end
+                local aSeen = tonumber(a.lastSeen) or 0
+                local bSeen = tonumber(b.lastSeen) or 0
+                if aSeen ~= bSeen then return aSeen > bSeen end
+                return tostring(a.displayName or "") < tostring(b.displayName or "")
+            end)
             titleLbl:SetText(L["Recent Companions"])
             countLbl:SetText(string.format("%s: %d  |cff3fb950(%d %s)|r%s", L["Recent Companions"], #filteredRecent, onlineRecent, L["Online"], instTag))
             rows = filteredRecent
@@ -4730,6 +4802,8 @@ function SocialPanels:CreateChatPanel(parent)
                     { tex = "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", title = L["New 1-on-1 Chat"] },
                     { tex = "Interface\\GroupFrame\\UI-Group-LeaderIcon", title = L["+ Room"] },
                     { tex = "Interface\\Buttons\\UI-OptionsButton", title = L["More"] },
+                    { title = "|cffff7fff" .. L["Whisper"] .. "|r · |cff7aaeff" .. L["Group"] .. "|r · |cffff8a2e" .. L["Raid"] .. "|r · |cff47ef66" .. L["Guild"] .. "|r · |cff1ad1ffBNet|r · |cffbd80ff" .. L["Private Rooms"] .. "|r", desc = L["Chat Colors"] },
+                    { title = "|cffffd24d*|r · |cff3fb950[SC]|r · |TInterface\\ChatFrame\\UI-ChatIcon-BattleNet:12:12:0:0|t", desc = L["Favorite · SocialCentral · Battle.net"] },
                 }
             end)
         end
@@ -5016,6 +5090,12 @@ function SocialPanels:CreateChatPanel(parent)
                             local isPinned = ns.Chat:IsThreadPinned(key)
                             root:CreateButton(isPinned and L["Unpin Conversation"] or L["Pin Conversation"], function()
                                 ns.Chat:ToggleThreadPinned(key)
+                            end)
+                        end
+                        if key ~= "notes:self" and key ~= "mentions:radar" and ns.Chat.ToggleQuickReplyPinned then
+                            local qrPinned = ns.Chat.IsQuickReplyPinned and ns.Chat:IsQuickReplyPinned(key) == true
+                            root:CreateButton(qrPinned and L["Unpin from Quick Reply"] or L["Pin in Quick Reply"], function()
+                                ns.Chat:ToggleQuickReplyPinned(key)
                             end)
                         end
                         if favKey and Store and Store.IsSocialFavorite and Store.ToggleSocialFavorite then
@@ -10591,6 +10671,7 @@ function SocialPanels:CreateAltsPanel(parent)
                         { tex = "Interface\\Icons\\INV_Misc_Bag_08", title = L["Filter Items"], desc = L["All"] .. " / " .. L["Equipped"] .. " / " .. L["Bags"] .. " / " .. L["Bank"] },
                         { tex = "Interface\\FriendsFrame\\UI-Toast-FriendOnlineIcon", title = L["This Alt"] .. " / " .. L["All Alts"] },
                         { tex = "Interface\\Buttons\\UI-GuildButton-PublicNote-Up", title = L["Grid"] .. " / " .. L["List"] },
+                        { title = "|cff70b5ff[A]|r · |cffff7878[H]|r", desc = L["Alliance / Horde Faction Tag"] },
                     }
                 end)
             end

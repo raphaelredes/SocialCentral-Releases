@@ -2412,20 +2412,72 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         L["When no notifications or drafts are pending, clicking the Minimap icon opens the main SocialCentral window normally. You can drag the Quick Reply window anywhere on screen and close it with ESC or X."]
     )
 
+    local qrDockChatCb = CreateCheckbox(
+        nf, L["Dock Quick Reply over Official WoW Chat (exact size)"], qrMasterCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyDockToChat ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyDockToChat = checked
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Dock Quick Reply Over Official Chat"],
+        L["Automatically places the Quick Reply window directly on top of Blizzard's main chat window, matching its exact current width and height."],
+        L["Uncheck if you prefer to place Quick Reply freely anywhere else on screen."]
+    )
+
+    local qrEnterOpenCb = CreateCheckbox(
+        nf, L["Open Quick Reply on ENTER when messages are pending"], qrDockChatCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyEnterOpen ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyEnterOpen = checked
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Open Quick Reply on ENTER"],
+        L["When you have unread Minimap notifications or saved drafts, pressing ENTER opens Quick Reply directly so you can read and reply without cluttering Blizzard's chat window."],
+        L["When no notifications are pending, ENTER opens Blizzard's normal chat bar as usual (and '/' always opens slash commands)."]
+    )
+
     local qrAutoCloseCb = CreateCheckbox(
-        nf, L["Auto-close Quick Reply after 10s of inactivity (saves draft)"], qrMasterCb, -6,
+        nf, L["Auto-close Quick Reply on inactivity (saves draft)"], qrEnterOpenCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyAutoClose ~= false end,
         function(checked)
             ns.db.settings.quickReplyAutoClose = checked
             NotifySettingChanged()
         end,
         L["Help: Quick Reply Auto-Close & Drafts"],
-        L["Automatically closes the Quick Reply popup 10 seconds after you stop typing or leave the window (e.g. to focus on combat), keeping your typed message saved as a draft."],
-        L["Click the Minimap icon anytime to jump right back to that conversation with your draft restored so you can finish sending it."]
+        L["Automatically closes the Quick Reply popup after the configured inactivity timer (or when interacting outside it, e.g. to focus on combat), keeping your typed message saved as a draft."],
+        L["Click the Minimap icon anytime to jump right back to that conversation with your draft restored, or adjust the delay directly in the Quick Reply header."]
+    )
+
+    local qrAutoCloseDurLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    qrAutoCloseDurLbl:SetPoint("TOPLEFT", qrAutoCloseCb, "BOTTOMLEFT", 24, -6)
+    qrAutoCloseDurLbl:SetText(L["Quick Reply auto-close delay (seconds):"])
+    HelpBtn(
+        nf, qrAutoCloseDurLbl, L["Help: Quick Reply Auto-Close Delay"],
+        L["Sets how many seconds the Quick Reply popup waits after inactivity or outside interaction before closing automatically."],
+        L["You can also change this timer or disable auto-close directly from the button in the Quick Reply window header."]
+    )
+
+    Search.SetPendingMeta(
+        L["Quick Reply auto-close delay (seconds):"],
+        L["Help: Quick Reply Auto-Close Delay"],
+        L["Sets how many seconds the Quick Reply popup waits after inactivity or outside interaction before closing automatically."],
+        L["You can also change this timer or disable auto-close directly from the button in the Quick Reply window header."]
+    )
+    local qrAutoCloseDurStep = CreateStepperRow(
+        nf, qrAutoCloseDurLbl, -4, 5, 60, "s",
+        function() return (ns.db and ns.db.settings and tonumber(ns.db.settings.quickReplyAutoCloseDelay)) or 10 end,
+        function(val)
+            if ns.db and ns.db.settings then
+                ns.db.settings.quickReplyAutoCloseDelay = val
+                ns.db.settings.quickReplyAutoClose = true
+                NotifySettingChanged()
+            end
+        end,
+        5
     )
 
     local qrWhisperCb = CreateCheckbox(
-        nf, L["Quick Reply notifications: Whispers & SocialCentral Chat"], qrAutoCloseCb, -6,
+        nf, L["Quick Reply notifications: Whispers & SocialCentral Chat"], qrAutoCloseDurStep, -8,
         function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyNotifyWhisper ~= false end,
         function(checked)
             ns.db.settings.quickReplyNotifyWhisper = checked
@@ -2436,6 +2488,8 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         L["Marks incoming personal Whispers and SocialCentral direct/room messages as pending notifications for the Minimap Quick Reply popup."],
         L["Leave checked to reply to whispers in one click from the Minimap without opening the full Conversations tab."]
     )
+    qrWhisperCb:ClearAllPoints()
+    qrWhisperCb:SetPoint("TOPLEFT", qrAutoCloseDurStep, "BOTTOMLEFT", -24, -8)
 
     local qrBNetCb = CreateCheckbox(
         nf, L["Quick Reply notifications: Battle.net Messages"], qrWhisperCb, -6,
@@ -2468,7 +2522,7 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
 
     local qrRaidCb = CreateCheckbox(
         nf, L["Quick Reply notifications: Raid Chat"], qrPartyCb, -6,
-        function() return ns.db and ns.db.settings and ns.db.settings.quickReplyNotifyRaid == true end,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyNotifyRaid ~= false end,
         function(checked)
             ns.db.settings.quickReplyNotifyRaid = checked
             if checked and ns.Chat and ns.Chat.UnmuteChannelKeysForSetting then
@@ -2478,8 +2532,8 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
             NotifySettingChanged("CHAT_UPDATED")
         end,
         L["Help: Quick Reply Raid"],
-        L["Marks incoming Raid chat messages as pending notifications for the Minimap Quick Reply popup."],
-        L["Off by default to keep large raids uncluttered; enable if you want 1-click raid replies from the Minimap."]
+        L["Marks incoming Raid chat messages as pending notifications for the Minimap Quick Reply popup and displays a separate orange Raid circle on the Minimap."],
+        L["Enabled by default so Raid messages show an orange Raid circle on the Minimap and can be answered via Quick Reply; uncheck in noisy raids if preferred."]
     )
 
     local qrGuildCb = CreateCheckbox(
@@ -2498,7 +2552,7 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         L["Off by default for busy guilds; enable if you want Guild chat to trigger the Minimap Quick Reply popup."]
     )
 
-    AddDeps(deps.chat, qrMasterCb, qrAutoCloseCb, qrWhisperCb, qrBNetCb, qrPartyCb, qrRaidCb, qrGuildCb)
+    AddDeps(deps.chat, qrMasterCb, qrDockChatCb, qrEnterOpenCb, qrAutoCloseCb, qrAutoCloseDurLbl, qrAutoCloseDurStep, qrWhisperCb, qrBNetCb, qrPartyCb, qrRaidCb, qrGuildCb)
     return qrGuildCb
 end
 
@@ -2508,14 +2562,14 @@ local function BuildMinimapBadgeStyleControls(nf, anchorTo, deps, NotifySettingC
     styleLbl:SetText(L["Minimap counter badge style:"])
     HelpBtn(
         nf, styleLbl, L["Help: Minimap Badge Style"],
-        L["Choose how multiple unread message types appear on the Minimap icon: either a single chat-colored Fusion Circle directly under the SC icon (blending Whisper pink, Group blue, Guild green, and Battle.net cyan, splitting cleanly on hover) or separate non-overlapping numbers orbiting around the icon."],
+        L["Choose how multiple unread message types appear on the Minimap icon: either a single chat-colored Fusion Circle directly under the SC icon (blending Whisper pink, Group blue, Raid orange, Guild green, and Battle.net cyan, splitting cleanly on hover) or separate non-overlapping numbers orbiting around the icon."],
         L["Pick 'Fusion Circle (Under Icon)' for the animated color-merge orb directly beneath the icon, or 'Around Icon (Separate)' to keep each chat type spaced around the icon at all times."]
     )
 
     Search.SetPendingMeta(
         L["Minimap counter badge style:"],
         L["Help: Minimap Badge Style"],
-        L["Choose how multiple unread message types appear on the Minimap icon: either a single chat-colored Fusion Circle directly under the SC icon (blending Whisper pink, Group blue, Guild green, and Battle.net cyan, splitting cleanly on hover) or separate non-overlapping numbers orbiting around the icon."],
+        L["Choose how multiple unread message types appear on the Minimap icon: either a single chat-colored Fusion Circle directly under the SC icon (blending Whisper pink, Group blue, Raid orange, Guild green, and Battle.net cyan, splitting cleanly on hover) or separate non-overlapping numbers orbiting around the icon."],
         L["Pick 'Fusion Circle (Under Icon)' for the animated color-merge orb directly beneath the icon, or 'Around Icon (Separate)' to keep each chat type spaced around the icon at all times."]
     )
     local styleRow = CreateChoiceRow(nf, styleLbl, -4, {
@@ -3612,9 +3666,45 @@ local function BuildOfficialChatSettingsSection(gn, anchorTo, deps, NotifySettin
         L["Disable anytime if you prefer standard single-line WoW mousewheel scrolling."]
     )
 
+    local hideOfficialGroupCb = CreateCheckbox(
+        gn, L["Hide Group chat (Party / Raid / Instance) in Official Chat (keep in SocialCentral)"], fastScrollCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.officialHideGroup == true end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialHideGroup = checked end
+            if NotifySettingChanged then NotifySettingChanged("CHAT_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CHAT_UPDATED") end
+        end,
+        L["Help: Hide Group in Official Chat"],
+        L["Keeps Party, Raid, and Instance messages out of Blizzard's Official Chat window (leaving it clean for server shutdown warnings, system alerts, and loot) while continuing to receive and reply normally inside SocialCentral."],
+        L["Pair with Quick Reply docked over Official Chat + ENTER to read and answer group messages cleanly without cluttering Blizzard's window."]
+    )
+
+    local hideOfficialGuildCb = CreateCheckbox(
+        gn, L["Hide Guild & Officer chat in Official Chat (keep in SocialCentral)"], hideOfficialGroupCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.officialHideGuild == true end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialHideGuild = checked end
+            if NotifySettingChanged then NotifySettingChanged("CHAT_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CHAT_UPDATED") end
+        end,
+        L["Help: Hide Guild in Official Chat"],
+        L["Keeps Guild and Officer messages out of Blizzard's Official Chat window while continuing to receive and reply normally inside SocialCentral."],
+        L["Check anytime to keep Blizzard's chat window dedicated solely to server and system announcements."]
+    )
+
+    local hideOfficialWhisperCb = CreateCheckbox(
+        gn, L["Hide Whispers & Battle.net in Official Chat (keep in SocialCentral)"], hideOfficialGuildCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.officialHideWhispers == true end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.officialHideWhispers = checked end
+            if NotifySettingChanged then NotifySettingChanged("CHAT_UPDATED") else ns:Emit("SETTINGS_UPDATED"); ns:Emit("CHAT_UPDATED") end
+        end,
+        L["Help: Hide Whispers in Official Chat"],
+        L["Keeps character Whispers and Battle.net friend messages out of Blizzard's Official Chat window while continuing to receive and reply normally inside SocialCentral."],
+        L["Check anytime to handle all personal whispers strictly through Quick Reply and Conversations."]
+    )
+
     local copyChatRow = CreateFrame("Frame", nil, gn)
     copyChatRow:SetSize(540, 26)
-    copyChatRow:SetPoint("TOPLEFT", fastScrollCb, "BOTTOMLEFT", 0, -6)
+    copyChatRow:SetPoint("TOPLEFT", hideOfficialWhisperCb, "BOTTOMLEFT", 0, -6)
 
     local copyChatBtn = ns.Theme:CreateButton(copyChatRow, 176, 22, L["Copy Official Chat"], "default")
     ns.Theme:AutoFitButton(copyChatBtn, 150, 16, 220)
@@ -3642,7 +3732,7 @@ local function BuildOfficialChatSettingsSection(gn, anchorTo, deps, NotifySettin
         onTrigger = function() copyChatBtn:Click() end,
     })
 
-    AddDeps(deps.officialChat, quickBtnCb, shortChanCb, senderTagsCb, editHistCb, fastScrollCb, copyChatBtn)
+    AddDeps(deps.officialChat, quickBtnCb, shortChanCb, senderTagsCb, editHistCb, fastScrollCb, hideOfficialGroupCb, hideOfficialGuildCb, hideOfficialWhisperCb, copyChatBtn)
     AddDeps(deps.defaultBtns, copyChatBtn)
     return copyChatRow
 end
@@ -3958,18 +4048,89 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
     local histHeader = CreateFieldLabel(
         gn, L["Character Whisper history per thread (0 = off)"], nearbyRow, -10,
         L["Help: Whisper History Limit"],
-        L["Saves the last N lines per Character Whisper locally (0 to 60 lines). Battle.net Real IDs and BattleTags are never persisted to disk."],
+        L["Saves the last N lines per Character Whisper locally (0 to 300 lines; lightweight storage, ~0.2 KB per line). Battle.net Real IDs and BattleTags are never persisted to disk."],
         L["Use '-' and '+' in steps of 10. Set to 0 if you want session-only whispers without SavedVariables history."]
     )
-    local histRow = CreateStepperRow(gn, histHeader, -6, 0, 60, L["lines"], function()
-        return ns.db and ns.db.settings.chatHistoryLimit or 30
+    local histRow = CreateStepperRow(gn, histHeader, -6, 0, 300, L["lines"], function()
+        if ns.db and ns.db.settings and ns.db.settings.chatHistoryLimit ~= nil then
+            return ns.db.settings.chatHistoryLimit
+        end
+        return 100
     end, function(val)
         ns.db.settings.chatHistoryLimit = val
         ns:Emit("CHAT_UPDATED")
     end, 10)
 
+    local guildHistCb = CreateCheckbox(
+        gn, L["Save Guild & Officer chat history across reloads/logins"], histRow, -10,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.guildChatHistorySave ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.guildChatHistorySave = checked end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Save Guild Chat History"],
+        L["Keeps recent Guild and Officer chat messages saved locally so you can still read what happened before a /reload, disconnect, or relog."],
+        L["Enabled by default (125 lines). Uncheck if you prefer Guild chat to reset on every reload or login."]
+    )
+
+    local guildHistHeader = CreateFieldLabel(
+        gn, L["Saved Guild & Officer chat lines"], guildHistCb, -6,
+        L["Help: Guild Chat History Limit"],
+        L["Defines how many recent messages (50 to 500 lines, default 125) are kept saved per Guild and Officer channel across reloads and logins."],
+        L["Use '-' and '+' in steps of 25. Requires 'Save Guild & Officer chat history across reloads/logins' to be checked."]
+    )
+    local guildHistRow = CreateStepperRow(gn, guildHistHeader, -6, 50, 500, L["lines"], function()
+        local raw = ns.db and ns.db.settings and ns.db.settings.guildChatHistoryLimit
+        local num = tonumber(raw) or 125
+        if num < 50 then num = 50 elseif num > 500 then num = 500 end
+        return num
+    end, function(val)
+        ns.db.settings.guildChatHistoryLimit = val
+        ns:Emit("CHAT_UPDATED")
+    end, 25)
+
+    local generalHistCb = CreateCheckbox(
+        gn, L["Save Private Rooms, Alliance & Mentions history across reloads/logins"], guildHistRow, -10,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.generalChatHistorySave ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.generalChatHistorySave = checked end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Save General Conversations History"],
+        L["Keeps recent messages from Private Rooms, Alliance Chat, and the Mentions Radar saved locally across /reload and logins with very low memory footprint (~0.2 KB per message)."],
+        L["Enabled by default (150 lines). Uncheck if you prefer Private Rooms, Alliance, and Mentions to reset each session."]
+    )
+
+    local groupHistCb = CreateCheckbox(
+        gn, L["Save Party, Raid & Instance chat history across reloads/logins"], generalHistCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.groupChatHistorySave ~= false end,
+        function(checked)
+            if ns.db and ns.db.settings then ns.db.settings.groupChatHistorySave = checked end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Save Group Chat History"],
+        L["Keeps recent Party, Raid, and Instance messages saved locally so dungeon or raid calls remain readable in Conversations after a /reload, disconnect, or relog."],
+        L["Enabled by default. Uncheck if you run heavy Raids and prefer not to store Party/Raid history on disk."]
+    )
+
+    local generalHistHeader = CreateFieldLabel(
+        gn, L["Saved lines per Room, Group, Alliance & Mentions"], groupHistCb, -6,
+        L["Help: General Conversation History Limit"],
+        L["Controls how many recent messages (25 to 300 lines, default 150) are stored per Private Room, Party/Raid/Instance channel, Alliance Chat, and Mentions Radar. Up to 400 total conversations are retained automatically."],
+        L["Use '-' and '+' in steps of 25. Lower this value only if you want an even smaller SavedVariables file."]
+    )
+    local generalHistRow = CreateStepperRow(gn, generalHistHeader, -6, 25, 300, L["lines"], function()
+        local raw = ns.db and ns.db.settings and ns.db.settings.generalChatHistoryLimit
+        local num = tonumber(raw) or 150
+        if num < 25 then num = 25 elseif num > 300 then num = 300 end
+        return num
+    end, function(val)
+        ns.db.settings.generalChatHistoryLimit = val
+        ns:Emit("CHAT_UPDATED")
+    end, 25)
+
     local expRow = CreateFrame("Frame", nil, gn)
-    expRow:SetPoint("TOPLEFT", histRow, "BOTTOMLEFT", 0, -8)
+    expRow:SetPoint("TOPLEFT", generalHistRow, "BOTTOMLEFT", 0, -8)
     expRow:SetSize(490, 26)
     local expBtn = ns.Theme:CreateButton(expRow, 260, 22, L["Export / Import Social Notes & Ignores..."], "default")
     ns.Theme:AutoFitButton(expBtn, 250, 22, 450)
@@ -3999,6 +4160,7 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
     AddDeps(deps.social, folderCb)
     AddDeps(deps.group, rcAuditCb)
     AddDeps(deps.nearby, nearbyRow)
+    AddDeps(deps.chat, histHeader, histRow, guildHistCb, guildHistHeader, guildHistRow, generalHistCb, groupHistCb, generalHistHeader, generalHistRow)
     AddDeps(deps.defaultBtns, expBtn)
     return expRow
 end

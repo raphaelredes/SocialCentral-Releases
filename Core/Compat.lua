@@ -2581,7 +2581,7 @@ function Compat.CheckExpiredDnd(scheduleTimerIfPending, deferEmit)
                         if ns.Settings and ns.Settings.Refresh then
                             ns.Settings:Refresh()
                         end
-                    end)
+                    end, false)
                 end
                 return
             end
@@ -2674,7 +2674,7 @@ function Compat.InitFocusWatcher()
                             if ns.Settings and ns.Settings.Refresh then
                                 ns.Settings:Refresh()
                             end
-                        end)
+                        end, false)
                     end
                     return
                 end

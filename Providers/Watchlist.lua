@@ -29,6 +29,7 @@ local Watchlist = {
     restoreSeq = 0,
     chatFilterActive = false,
     tokenCounter = 0,
+    _sessionBNetWatched = {}, -- session-only BNet friend watch slots before a WoW char name is observed (never saved to SavedVariables)
 }
 
 ns.Watchlist = Watchlist
@@ -344,13 +345,21 @@ function Watchlist:IsBusy()
     return self.pending ~= nil
 end
 
-function Watchlist:Add(rawName, note)
+function Watchlist:Add(rawName, note, opts)
     local parsed = Compat.ParseCharacterName(rawName)
     if not parsed or #(parsed.firstName or "") < 2 then return false, "invalid" end
 
+    opts = type(opts) == "table" and opts or {}
     local list = Store:GetWatchlistTable()
     if list[parsed.lookupKey] then
-        ns:Print(L["%s is already on your Watchlist."]:format(parsed.displayName))
+        if opts.watchAllAlts and not list[parsed.lookupKey].watchAllAlts then
+            list[parsed.lookupKey].watchAllAlts = true
+            ns:Emit("WATCHLIST_UPDATED")
+            return true, list[parsed.lookupKey]
+        end
+        if not opts.silent then
+            ns:Print(L["%s is already on your Watchlist."]:format(parsed.displayName))
+        end
         return false, "duplicate"
     end
 
@@ -371,12 +380,16 @@ function Watchlist:Add(rawName, note)
         end
     end
 
+    local trackAlts = (opts.watchAllAlts == true) or (dirEntry and dirEntry.sources and dirEntry.sources.bnet == true) or nil
     list[parsed.lookupKey] = {
         id = parsed.lookupKey,
         displayName = parsed.displayName,
         firstName = parsed.firstName,
         surname = parsed.surname,
         note = cleanNote,
+        group = (type(opts.group) == "string" and opts.group ~= "") and opts.group or nil,
+        favorite = (opts.favorite == true) and true or nil,
+        watchAllAlts = trackAlts,
         status = initStatus,
         source = (initStatus == "online" and dirEntry and dirEntry.sources)
             and ((dirEntry.sources.friend and "friend") or (dirEntry.sources.guild and "guild") or (dirEntry.sources.bnet and "bnet"))
@@ -391,7 +404,13 @@ function Watchlist:Add(rawName, note)
         addedAt = time(),
     }
 
-    ns:Print(L["Added %s to your Watchlist."]:format(parsed.displayName))
+    if not opts.silent then
+        if trackAlts then
+            ns:Print(L["Added %s to your Watchlist (tracking all Battle.net / linked alts)."]:format(parsed.displayName))
+        else
+            ns:Print(L["Added %s to your Watchlist."]:format(parsed.displayName))
+        end
+    end
     Watchlist._wlIndexDirty = true
     if Store and Store.InvalidateWatchlistIndex then Store:InvalidateWatchlistIndex() end
     if ns.Spotter and ns.Spotter.TrackPlayer then
@@ -406,6 +425,208 @@ function Watchlist:Add(rawName, note)
     end
     ns:Emit("WATCHLIST_UPDATED")
     return true, list[parsed.lookupKey]
+end
+
+local function LinkKnownCharsPairwise(primaryKey, charsMap)
+    if not (primaryKey and type(charsMap) == "table" and Store and Store.RecordObservedAltPair) then
+        return
+    end
+    for altKey in pairs(charsMap) do
+        if type(altKey) == "string" and altKey ~= "" and altKey ~= primaryKey then
+            Store:RecordObservedAltPair(primaryKey, altKey)
+        end
+    end
+end
+
+function Watchlist:IsBNetAccountWatched(bnetAccId)
+    if not bnetAccId then
+        return false, nil, nil
+    end
+    if self._sessionBNetWatched and self._sessionBNetWatched[bnetAccId] then
+        local sess = self._sessionBNetWatched[bnetAccId]
+        return true, sess.id, sess
+    end
+    local list = Store:GetWatchlistTable()
+    if type(list) ~= "table" or next(list) == nil then
+        return false, nil, nil
+    end
+    local friends = (ns.Social and ns.Social.GetBNetFriendsList) and ns.Social:GetBNetFriendsList() or {}
+    local targetItem
+    for _, bf in ipairs(friends) do
+        if bf.bnetAccountID == bnetAccId then
+            targetItem = bf
+            break
+        end
+    end
+    if targetItem then
+        if targetItem.lookupKey and list[targetItem.lookupKey] then
+            return true, targetItem.lookupKey, list[targetItem.lookupKey]
+        end
+        if targetItem.activeLookupKey and list[targetItem.activeLookupKey] then
+            return true, targetItem.activeLookupKey, list[targetItem.activeLookupKey]
+        end
+        if type(targetItem.knownChars) == "table" then
+            for ck in pairs(targetItem.knownChars) do
+                if list[ck] then
+                    return true, ck, list[ck]
+                end
+            end
+        end
+    end
+    for wlKey, wlEntry in pairs(list) do
+        if type(wlEntry) == "table" and ns.Social and ns.Social.GetBNetLinkInfo then
+            local bInfo = ns.Social:GetBNetLinkInfo(wlEntry.id or wlKey)
+            if bInfo and bInfo.bnetAccountID == bnetAccId then
+                return true, wlKey, wlEntry
+            end
+        end
+    end
+    return false, nil, nil
+end
+
+function Watchlist:AddBNetAccount(bnetItem)
+    if type(bnetItem) ~= "table" then
+        return false, "invalid"
+    end
+    local accId = bnetItem.bnetAccountID
+    local bnetName = bnetItem.bnetName or bnetItem.displayName or "Battle.net"
+    local list = Store:GetWatchlistTable()
+
+    local primaryName = bnetItem.activeDisplayName
+        or ((bnetItem.hasCharacterName ~= false and bnetItem.displayName and not tostring(bnetItem.displayName):find("#", 1, true) and not tostring(bnetItem.displayName):find("|K", 1, true)) and bnetItem.displayName or nil)
+    if not primaryName and type(bnetItem.knownChars) == "table" then
+        for _, disp in pairs(bnetItem.knownChars) do
+            if type(disp) == "string" and disp ~= "" then
+                primaryName = disp
+                break
+            end
+        end
+    end
+
+    local already, existingKey, existingEntry = self:IsBNetAccountWatched(accId)
+    if already and existingEntry then
+        if existingEntry.isSessionBNet and primaryName then
+            return self:PromoteSessionBNetAccount(accId, primaryName, bnetItem)
+        end
+        if not existingEntry.isSessionBNet then
+            existingEntry.watchAllAlts = true
+            LinkKnownCharsPairwise(existingKey, bnetItem.knownChars)
+            ns:Print(L["%s now tracks all Battle.net & linked characters."]:format(existingEntry.displayName or bnetName))
+            ns:Emit("WATCHLIST_UPDATED")
+            return true, existingEntry
+        end
+        ns:Print(L["%s is already on your Watchlist."]:format(bnetName))
+        return false, "duplicate"
+    end
+
+    if primaryName then
+        local parsedPrimary = Compat.ParseCharacterName and Compat.ParseCharacterName(primaryName)
+        local primaryKey = parsedPrimary and parsedPrimary.lookupKey or nil
+        if primaryKey and Store.GetAllLinkedCharacters then
+            for _, altRec in ipairs(Store:GetAllLinkedCharacters(primaryKey)) do
+                if altRec and altRec.lookupKey and list[altRec.lookupKey] then
+                    local altEntry = list[altRec.lookupKey]
+                    altEntry.watchAllAlts = true
+                    LinkKnownCharsPairwise(altRec.lookupKey, bnetItem.knownChars)
+                    Store:RecordObservedAltPair(altRec.lookupKey, primaryKey)
+                    if bnetItem.activeLookupKey and bnetItem.activeDisplayName and bnetItem.activeLookupKey ~= altRec.lookupKey then
+                        altEntry.activeAltLookup = bnetItem.activeLookupKey
+                        altEntry.activeAltName = bnetItem.activeDisplayName
+                        altEntry.activeAltClass = bnetItem.classFile
+                        altEntry.activeAltLevel = bnetItem.level
+                        altEntry.status = "online"
+                        altEntry.source = "bnet"
+                        altEntry.lastSeen = time()
+                    end
+                    ns:Print(L["%s now tracks all Battle.net & linked characters."]:format(altEntry.displayName or primaryName))
+                    ns:Emit("WATCHLIST_UPDATED")
+                    return true, altEntry
+                end
+            end
+        end
+        local ok, entry = self:Add(primaryName, nil, { watchAllAlts = true })
+        if ok and entry then
+            LinkKnownCharsPairwise(entry.id, bnetItem.knownChars)
+            if accId then
+                self._sessionBNetWatched[accId] = nil
+            end
+            return true, entry
+        end
+        return ok, entry
+    end
+
+    if not accId then
+        ns:Print(L["Could not add this Battle.net account right now."])
+        return false, "invalid"
+    end
+    local sessId = "bnet_session:" .. tostring(accId)
+    self._sessionBNetWatched[accId] = {
+        id = sessId,
+        bnetAccountID = accId,
+        displayName = bnetName,
+        bnetName = bnetName,
+        isSessionBNet = true,
+        watchAllAlts = true,
+        online = bnetItem.online == true,
+        bnetState = bnetItem.bnetState or "offline",
+        richPresence = bnetItem.richPresence,
+        clientProgram = bnetItem.clientProgram,
+        status = (bnetItem.online == true) and "online" or "offline",
+        source = "bnet",
+        addedAt = time(),
+        lastSeen = (bnetItem.online == true) and time() or nil,
+    }
+    ns:Print(L["Added Battle.net friend %s for this session. As soon as they log into WoW on any character, it will stay saved permanently across all their alts."]:format(bnetName))
+    ns:Emit("WATCHLIST_UPDATED")
+    return true, self._sessionBNetWatched[accId]
+end
+
+function Watchlist:PromoteSessionBNetAccount(bnetAccId, charDisplayName, obsData)
+    local sess = bnetAccId and self._sessionBNetWatched and self._sessionBNetWatched[bnetAccId]
+    if not sess or not charDisplayName or charDisplayName == "" then
+        return false, nil
+    end
+    self._sessionBNetWatched[bnetAccId] = nil
+    local ok, entry = self:Add(charDisplayName, sess.note, {
+        watchAllAlts = true,
+        silent = true,
+        group = sess.group,
+        favorite = sess.favorite == true,
+    })
+    if not ok then
+        entry = self:GetEntry(charDisplayName)
+        if entry then
+            entry.watchAllAlts = true
+        end
+    end
+    if entry and type(obsData) == "table" then
+        entry.status = "online"
+        entry.source = "bnet"
+        entry.lastSeen = time()
+        if obsData.classFile then entry.classFile = obsData.classFile end
+        if obsData.level and obsData.level > 0 then entry.level = obsData.level end
+        if obsData.area and obsData.area ~= "" then entry.area = obsData.area end
+        if obsData.guid and obsData.guid ~= "" then entry.guid = obsData.guid end
+    end
+    ns:Emit("WATCHLIST_UPDATED")
+    return entry ~= nil, entry
+end
+
+function Watchlist:ToggleWatchAllAlts(id)
+    local entry = self:GetEntry(id)
+    if not entry or entry.isSessionBNet then
+        return false
+    end
+    local nextVal = not (entry.watchAllAlts == true)
+    entry.watchAllAlts = nextVal and true or nil
+    if not nextVal then
+        entry.activeAltLookup = nil
+        entry.activeAltName = nil
+        entry.activeAltClass = nil
+        entry.activeAltLevel = nil
+    end
+    ns:Emit("WATCHLIST_UPDATED")
+    return nextVal
 end
 
 function Watchlist:AddTarget()
@@ -510,6 +731,16 @@ function Watchlist:IsWatched(nameOrKey)
 end
 
 function Watchlist:Remove(id)
+    if type(id) == "string" and id:sub(1, 13) == "bnet_session:" then
+        local accNum = tonumber(id:sub(14))
+        local sess = accNum and self._sessionBNetWatched and self._sessionBNetWatched[accNum]
+        if sess then
+            self._sessionBNetWatched[accNum] = nil
+            ns:Print(L["Removed %s from your Watchlist."]:format(sess.displayName or "Battle.net"))
+            ns:Emit("WATCHLIST_UPDATED")
+            return true
+        end
+    end
     local list = Store:GetWatchlistTable()
     local entry = list[id] or self:GetEntry(id)
     if not entry then return false end
@@ -594,11 +825,17 @@ local function IsEntryLiveConfirmed(entry, now)
     if socRow and socRow.online == true then
         return true
     end
-    if Compat.IsInMyGroup and Compat.IsInMyGroup(entry.displayName, entry.guid) then
+    if entry.activeAltLookup and Store and Store.socialByLookup and Store.socialByLookup[entry.activeAltLookup] and Store.socialByLookup[entry.activeAltLookup].online == true then
+        return true
+    end
+    if Compat.IsInMyGroup and Compat.IsInMyGroup(entry.activeAltName or entry.displayName, entry.guid) then
         return true
     end
     local nearbyRow = Store and Store.nearby and entry.id and Store.nearby[entry.id]
     if nearbyRow and (now - (nearbyRow.lastSeen or 0)) <= 180 then
+        return true
+    end
+    if entry.activeAltLookup and Store and Store.nearby and Store.nearby[entry.activeAltLookup] and (now - (Store.nearby[entry.activeAltLookup].lastSeen or 0)) <= 180 then
         return true
     end
     return false
@@ -645,6 +882,35 @@ function Watchlist:GetEntries(groupFilter, sortBy)
         end
         if include then
             table.insert(out, entry)
+        end
+    end
+    if self._sessionBNetWatched and next(self._sessionBNetWatched) ~= nil then
+        local liveBNet = {}
+        if ns.Social and ns.Social.GetBNetFriendsList then
+            for _, bf in ipairs(ns.Social:GetBNetFriendsList()) do
+                liveBNet[bf.bnetAccountID] = bf
+            end
+        end
+        for accId, sess in pairs(self._sessionBNetWatched) do
+            local bf = liveBNet[accId]
+            if bf then
+                sess.online = bf.online == true
+                sess.bnetState = bf.bnetState or sess.bnetState
+                sess.richPresence = bf.richPresence
+                sess.bnetName = bf.bnetName or sess.bnetName
+                sess.displayName = bf.bnetName or sess.displayName
+                sess.status = (bf.online == true) and "online" or "offline"
+                if bf.online == true then sess.lastSeen = time() end
+            end
+            local include = true
+            if groupFilter == "__fav" then
+                include = (sess.favorite == true)
+            elseif groupFilter and groupFilter ~= "all" then
+                include = sess.group == groupFilter
+            end
+            if include then
+                table.insert(out, sess)
+            end
         end
     end
 
@@ -838,6 +1104,39 @@ function Watchlist:GetNameSuggestions(queryText, maxResults)
         for _, comp in ipairs(Store:GetRecentCompanionsList()) do
             if type(comp) == "table" and (comp.displayName or comp.name) then
                 Consider(comp.displayName or comp.name, comp.classFile, comp.level, false, nil, L["Recent"], 20)
+            end
+        end
+    end
+
+    if ns.Social and ns.Social.GetBNetFriendsList then
+        for _, bf in ipairs(ns.Social:GetBNetFriendsList()) do
+            if not self:IsBNetAccountWatched(bf.bnetAccountID) then
+                local bn = bf.bnetName or ""
+                local disp = bf.activeDisplayName or bf.displayName or bn
+                local bnLow = bn:lower()
+                local dLow = disp:lower()
+                if (bnLow ~= "" and bnLow:find(qLow, 1, true)) or (dLow ~= "" and dLow:find(qLow, 1, true)) then
+                    local bKey = "bnet_acc:" .. tostring(bf.bnetAccountID)
+                    candidates[bKey] = {
+                        _isBNetAccountCandidate = true,
+                        bnetAccountID = bf.bnetAccountID,
+                        bnetName = bn,
+                        displayName = (bf.activeDisplayName and (bf.activeDisplayName .. " (" .. bn .. ")")) or bn,
+                        lookupKey = bf.lookupKey or bKey,
+                        hasCharacterName = bf.hasCharacterName,
+                        activeLookupKey = bf.activeLookupKey,
+                        activeDisplayName = bf.activeDisplayName,
+                        knownChars = bf.knownChars,
+                        classFile = bf.classFile,
+                        level = bf.level,
+                        online = bf.online == true,
+                        bnetState = bf.bnetState,
+                        richPresence = bf.richPresence,
+                        clientProgram = bf.clientProgram,
+                        sourceLabel = "Battle.net · " .. (L["All Alts"] or "All Alts"),
+                        score = (bf.online and 110 or 75),
+                    }
+                end
             end
         end
     end

@@ -1147,7 +1147,11 @@ function Theme:CreateLegendTag(parent, getItemsFn)
                     GameTooltip:AddLine(ico .. tostring(it.title or ""), 0.94, 0.95, 0.98, true)
                 end
             elseif it.title then
-                GameTooltip:AddLine(tostring(it.title), 0.85, 0.88, 0.94, true)
+                if it.desc and it.desc ~= "" then
+                    GameTooltip:AddDoubleLine(tostring(it.title), tostring(it.desc), 0.96, 0.96, 0.98, 0.76, 0.82, 0.90)
+                else
+                    GameTooltip:AddLine(tostring(it.title), 0.85, 0.88, 0.94, true)
+                end
             end
         end
         GameTooltip:Show()
@@ -1775,12 +1779,213 @@ local function GetRelativeScaleToUIParent(win)
     return scale
 end
 
-local function SaveWindowCenterOffset(win, posKey, opts)
-    if not (win and posKey and ns.db) then return end
-    if UIParent and win.GetParent and win:GetParent() ~= UIParent then return end
+Theme._viewportListeners = Theme._viewportListeners or {}
+
+function Theme:GetScreenDimensions()
+    local uw, uh = UIParent and UIParent.GetSize and UIParent:GetSize()
+    uw = tonumber(uw)
+    uh = tonumber(uh)
+    if not uw or not uh or uw < 300 or uh < 200 then
+        if GetPhysicalScreenSize then
+            local okP, pw, ph = pcall(GetPhysicalScreenSize)
+            if okP and tonumber(pw) and tonumber(ph) and pw >= 300 and ph >= 200 then
+                uw, uh = pw, ph
+            end
+        end
+    end
+    uw = math.floor((uw or 1280) + 0.5)
+    uh = math.floor((uh or 720) + 0.5)
+    return uw, uh, tostring(uw) .. "x" .. tostring(uh)
+end
+
+function Theme:GetScreenProfileKey()
+    local _, _, key = self:GetScreenDimensions()
+    return key
+end
+
+function Theme:ResolveResolutionBucket(rootTbl, createIfMissing)
+    if type(rootTbl) ~= "table" then
+        return nil, nil, false
+    end
+    local uw, uh, curKey = self:GetScreenDimensions()
+    if type(rootTbl[curKey]) == "table" then
+        return rootTbl[curKey], curKey, false
+    end
+    if not createIfMissing then
+        local bestKey, bestBucket, bestDist = nil, nil, 999999
+        for k, v in pairs(rootTbl) do
+            if type(k) == "string" and type(v) == "table" then
+                local bw, bh = k:match("^(%d+)x(%d+)$")
+                bw = tonumber(bw)
+                bh = tonumber(bh)
+                if bw and bh then
+                    local dw = math.abs(bw - uw)
+                    local dh = math.abs(bh - uh)
+                    if dw <= 24 and dh <= 24 then
+                        local dist = dw + dh
+                        if dist < bestDist then
+                            bestDist = dist
+                            bestKey = k
+                            bestBucket = v
+                        end
+                    end
+                end
+            end
+        end
+        if bestBucket then
+            return bestBucket, bestKey, true
+        end
+        return nil, curKey, false
+    end
+    rootTbl[curKey] = {}
+    return rootTbl[curKey], curKey, false
+end
+
+function Theme:EnsureResolutionPositionsMigrated()
+    if not ns.db or ns.db.windowPositionsMigratedToRes == true then
+        return
+    end
+    local uw, uh, curKey = self:GetScreenDimensions()
+    if uw < 300 or uh < 200 then
+        return
+    end
+    if type(ns.db.windowPositionsByRes) ~= "table" then
+        ns.db.windowPositionsByRes = {}
+    end
+    local bucket = ns.db.windowPositionsByRes[curKey]
+    if type(bucket) ~= "table" then
+        bucket = {}
+        ns.db.windowPositionsByRes[curKey] = bucket
+    end
+    if type(ns.db.windowPositions) == "table" then
+        for posKey, posData in pairs(ns.db.windowPositions) do
+            if type(posKey) == "string" and type(posData) == "table" and bucket[posKey] == nil then
+                bucket[posKey] = {
+                    anchor = posData.anchor,
+                    dx = posData.dx,
+                    dy = posData.dy,
+                    width = posData.width,
+                    height = posData.height,
+                }
+            end
+        end
+    end
+    if type(ns.db.window) == "table" then
+        local winW = tonumber(ns.db.window.width)
+        local winH = tonumber(ns.db.window.height)
+        if (winW and winW > 0 and winW ~= 790) or (winH and winH > 0 and winH ~= 520) or bucket["main"] ~= nil then
+            if type(bucket["main"]) ~= "table" then
+                bucket["main"] = {}
+            end
+            if winW and winW > 0 and bucket["main"].width == nil then
+                bucket["main"].width = math.floor(winW + 0.5)
+            end
+            if winH and winH > 0 and bucket["main"].height == nil then
+                bucket["main"].height = math.floor(winH + 0.5)
+            end
+        end
+    end
+    ns.db.windowPositionsMigratedToRes = true
+end
+
+function Theme:GetSavedWindowPosition(posKey)
+    if not (posKey and ns.db) then return nil end
+    self:EnsureResolutionPositionsMigrated()
+    local byRes = ns.db.windowPositionsByRes
+    local bucket = type(byRes) == "table" and self:ResolveResolutionBucket(byRes, false) or nil
+    local rec = type(bucket) == "table" and bucket[posKey] or nil
+    if type(rec) == "table" and rec.dx ~= nil and rec.dy ~= nil then
+        return rec
+    end
+    return nil
+end
+
+function Theme:HasSavedWindowPosition(posKey)
+    return self:GetSavedWindowPosition(posKey) ~= nil
+end
+
+function Theme:SetSavedWindowPosition(posKey, data)
+    if not (posKey and ns.db and type(data) == "table") then return end
+    self:EnsureResolutionPositionsMigrated()
+    if type(ns.db.windowPositionsByRes) ~= "table" then
+        ns.db.windowPositionsByRes = {}
+    end
     if type(ns.db.windowPositions) ~= "table" then
         ns.db.windowPositions = {}
     end
+    local bucket = self:ResolveResolutionBucket(ns.db.windowPositionsByRes, true)
+    local prev = type(bucket[posKey]) == "table" and bucket[posKey] or nil
+    local rec = {
+        anchor = data.anchor or (prev and prev.anchor) or "CENTER",
+        dx = data.dx,
+        dy = data.dy,
+        width = data.width or (prev and prev.width) or nil,
+        height = data.height or (prev and prev.height) or nil,
+    }
+    bucket[posKey] = rec
+    ns.db.windowPositions[posKey] = {
+        anchor = rec.anchor,
+        dx = rec.dx,
+        dy = rec.dy,
+    }
+end
+
+function Theme:SaveWindowSize(posKey, w, h)
+    if not (posKey and ns.db and tonumber(w) and tonumber(h)) then return end
+    self:EnsureResolutionPositionsMigrated()
+    if type(ns.db.windowPositionsByRes) ~= "table" then
+        ns.db.windowPositionsByRes = {}
+    end
+    local bucket = self:ResolveResolutionBucket(ns.db.windowPositionsByRes, true)
+    if type(bucket[posKey]) ~= "table" then
+        bucket[posKey] = {}
+    end
+    bucket[posKey].width = math.floor(tonumber(w) + 0.5)
+    bucket[posKey].height = math.floor(tonumber(h) + 0.5)
+end
+
+function Theme:GetSavedWindowSize(posKey)
+    if not (posKey and ns.db) then return nil, nil end
+    self:EnsureResolutionPositionsMigrated()
+    local byRes = ns.db.windowPositionsByRes
+    local bucket = type(byRes) == "table" and self:ResolveResolutionBucket(byRes, false) or nil
+    local rec = type(bucket) == "table" and bucket[posKey] or nil
+    if type(rec) == "table" and tonumber(rec.width) and tonumber(rec.height) then
+        return tonumber(rec.width), tonumber(rec.height)
+    end
+    return nil, nil
+end
+
+function Theme:ClearSavedWindowPosition(posKey, clearSizeAlso)
+    if not (posKey and ns.db) then return end
+    self:EnsureResolutionPositionsMigrated()
+    local byRes = ns.db.windowPositionsByRes
+    if type(byRes) == "table" then
+        local bucket, _, isNeighbor = self:ResolveResolutionBucket(byRes, false)
+        if type(bucket) == "table" and not isNeighbor and type(bucket[posKey]) == "table" then
+            if clearSizeAlso ~= false or (bucket[posKey].width == nil and bucket[posKey].height == nil) then
+                bucket[posKey] = nil
+            else
+                bucket[posKey].dx = nil
+                bucket[posKey].dy = nil
+                bucket[posKey].anchor = nil
+            end
+        end
+    end
+    if type(ns.db.windowPositions) == "table" then
+        ns.db.windowPositions[posKey] = nil
+    end
+end
+
+function Theme:RegisterViewportListener(ownerKey, fn)
+    if not ownerKey or type(fn) ~= "function" then return end
+    self._viewportListeners = self._viewportListeners or {}
+    self._viewportListeners[ownerKey] = fn
+end
+
+local function SaveWindowCenterOffset(win, posKey, opts)
+    if not (win and posKey and ns.db) then return end
+    if UIParent and win.GetParent and win:GetParent() ~= UIParent then return end
     local scale = GetRelativeScaleToUIParent(win)
     local cx, cy = win:GetCenter()
     local ux, uy = UIParent and UIParent:GetCenter()
@@ -1790,19 +1995,19 @@ local function SaveWindowCenterOffset(win, posKey, opts)
         local top = win:GetTop()
         local utop = UIParent and UIParent:GetTop()
         if cx and top and ux and utop and cx == cx and top == top then
-            ns.db.windowPositions[posKey] = {
+            Theme:SetSavedWindowPosition(posKey, {
                 anchor = "TOP",
                 dx = math.floor((cx * scale - ux) + 0.5),
                 dy = math.floor((top * scale - utop) + 0.5),
-            }
+            })
         end
     else
         if cx and cy and ux and uy and cx == cx and cy == cy then
-            ns.db.windowPositions[posKey] = {
+            Theme:SetSavedWindowPosition(posKey, {
                 anchor = "CENTER",
                 dx = math.floor((cx * scale - ux) + 0.5),
                 dy = math.floor((cy * scale - uy) + 0.5),
-            }
+            })
         end
     end
 end
@@ -1814,10 +2019,10 @@ function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
     if UIParent and win.GetParent and win:GetParent() ~= UIParent then
         return false
     end
-    if not (posKey and ns.db and type(ns.db.windowPositions) == "table") then
+    if not (posKey and ns.db) then
         return false
     end
-    local saved = ns.db.windowPositions[posKey]
+    local saved = self:GetSavedWindowPosition(posKey)
     if type(saved) ~= "table" or saved.dx == nil or saved.dy == nil then
         return false
     end
@@ -2053,6 +2258,8 @@ function Theme:MakeMovable(win, opts)
             win = win,
             combatLock = opts.combatLock,
             onReset = opts.onReset,
+            opts = opts,
+            skipAutoRestore = opts.skipAutoRestore == true,
         }
     end
     return win
@@ -2065,14 +2272,14 @@ function Theme:ResetWindowPosition(key, silent)
     end
     if not key or key == "" then return false end
     if ns.db then
-        if type(ns.db.windowPositions) == "table" then
-            ns.db.windowPositions[key] = nil
-        end
+        self:ClearSavedWindowPosition(key, true)
         if key == "main" and type(ns.db.window) == "table" then
             ns.db.window.point = nil
             ns.db.window.relativePoint = nil
             ns.db.window.x = nil
             ns.db.window.y = nil
+            ns.db.window.width = nil
+            ns.db.window.height = nil
         end
     end
     local entry = movableRegistry[key]
@@ -2096,19 +2303,81 @@ function Theme:ResetAllWindowPositions()
         return false
     end
     if ns.db then
+        self:EnsureResolutionPositionsMigrated()
+        local curKey = self:GetScreenProfileKey()
+        if type(ns.db.windowPositionsByRes) == "table" then
+            ns.db.windowPositionsByRes[curKey] = {}
+        end
         ns.db.windowPositions = {}
         if type(ns.db.window) == "table" then
             ns.db.window.point = nil
             ns.db.window.relativePoint = nil
             ns.db.window.x = nil
             ns.db.window.y = nil
+            ns.db.window.width = nil
+            ns.db.window.height = nil
+        end
+        if ns.db.settings and type(ns.db.settings.minimap) == "table" then
+            if type(ns.db.settings.minimap.anglesByRes) == "table" then
+                ns.db.settings.minimap.anglesByRes[curKey] = nil
+            end
+            if type(ns.db.settings.minimap.anglesByRes) ~= "table" or next(ns.db.settings.minimap.anglesByRes) == nil then
+                ns.db.settings.minimap.angle = 215
+            end
         end
     end
     for key in pairs(movableRegistry) do
         self:ResetWindowPosition(key, true)
     end
+    if ns.MsgPreview and ns.MsgPreview.ResetPosition then
+        pcall(ns.MsgPreview.ResetPosition, ns.MsgPreview, true)
+    end
+    if ns.Minimap and ns.Minimap.Update then
+        pcall(ns.Minimap.Update, ns.Minimap)
+    end
     ns:Print(L["All window positions reset to center."])
     return true
+end
+
+function Theme:HandleViewportChanged()
+    local curKey = self:GetScreenProfileKey()
+    for key, entry in pairs(movableRegistry) do
+        if type(entry) == "table" and entry.win and not entry.skipAutoRestore then
+            local win = entry.win
+            if not (win.GetParent and UIParent and win:GetParent() ~= UIParent) then
+                local ok = self:RestoreWindowPosition(win, key, entry.combatLock, entry.opts)
+                if not ok then
+                    if not (entry.combatLock and InCombatLockdown and InCombatLockdown()) then
+                        if type(entry.onReset) == "function" then
+                            pcall(entry.onReset, win)
+                        else
+                            win:ClearAllPoints()
+                            win:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if type(self._viewportListeners) == "table" then
+        for _, fn in pairs(self._viewportListeners) do
+            pcall(fn, curKey)
+        end
+    end
+end
+
+function Theme:QueueViewportChanged()
+    if self._viewportTimerPending then return end
+    self._viewportTimerPending = true
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.08, function()
+            Theme._viewportTimerPending = false
+            Theme:HandleViewportChanged()
+        end)
+    else
+        self._viewportTimerPending = false
+        self:HandleViewportChanged()
+    end
 end
 
 --- Configure any shared modal/popup to sit above all native & World Map hosts with a 100% opaque backing.
@@ -3352,9 +3621,9 @@ function Theme:GetChatToneForKind(kind)
         return "bnet"
     elseif k == "GUILD" or k == "OFFICER" then
         return "guild"
-    elseif k == "RAID" or k == "INSTANCE_CHAT" or k == "INSTANCE" then
+    elseif k == "RAID" then
         return "raid"
-    elseif k == "PARTY" or k == "GROUP" then
+    elseif k == "PARTY" or k == "GROUP" or k == "INSTANCE_CHAT" or k == "INSTANCE" then
         return "group"
     elseif k == "ROOM" or k == "ALLIANCE" then
         return "room"
@@ -3605,7 +3874,7 @@ function Theme:CreateCounterBadge(parent, opts)
             mask:SetSize(math.max(12, h - 3), math.max(12, h - 3))
         end
         local lobes = {}
-        for i = 1, 5 do
+        for i = 1, 6 do
             local outer = anim:CreateTexture(nil, "ARTWORK", nil, 3)
             outer:SetTexture(BADGE_GLOW_TEX)
             outer:SetBlendMode("BLEND")
@@ -3653,7 +3922,7 @@ function Theme:CreateCounterBadge(parent, opts)
     local function HideFusionVisuals()
         local fz = b._fusion
         if not fz then return end
-        for i = 1, 5 do
+        for i = 1, 6 do
             local lb = fz.lobes[i]
             lb.outer:Hide()
             lb.inner:Hide()
@@ -3678,7 +3947,7 @@ function Theme:CreateCounterBadge(parent, opts)
         end
         fz.vignette:SetSize(coreW * 0.78, coreH * 0.78)
 
-        local count = math.min(5, #tones)
+        local count = math.min(6, #tones)
         local step = (math.pi * 2) / count
         local rx = coreW * 0.36
         local ry = coreH * 0.36
@@ -3687,7 +3956,7 @@ function Theme:CreateCounterBadge(parent, opts)
         local auraW, auraH = bw + 12, bh + 12
         local auraAlpha = b._pulseEnabled and (baseHaloAlpha * 0.72) or (baseHaloAlpha * 0.42)
 
-        for i = 1, 5 do
+        for i = 1, 6 do
             local lb = fz.lobes[i]
             if i <= count then
                 local ang = angleOffset + (i - 1) * step
@@ -3915,7 +4184,7 @@ function Theme:CreateCounterBadge(parent, opts)
                 if key and BADGE_TONES[key] and not seen[key] then
                     seen[key] = true
                     cleanTones[#cleanTones + 1] = key
-                    if #cleanTones >= 5 then break end
+                    if #cleanTones >= 6 then break end
                 end
             end
         end
@@ -3942,7 +4211,7 @@ function Theme:CreateCounterBadge(parent, opts)
         coreBand:SetSolidColor(0.11, 0.10, 0.15, 1.0)
         halo:Hide()
 
-        for i = 1, 5 do
+        for i = 1, 6 do
             local lb = fz.lobes[i]
             local tKey = cleanTones[i]
             if tKey then
@@ -4122,4 +4391,13 @@ function Theme:CreateOfficialQuickButton(parent, opts)
         end
     end)
     return btn
+end
+
+if ns.RegisterEvent then
+    ns.RegisterEvent(Theme, "DISPLAY_SIZE_CHANGED", function()
+        Theme:QueueViewportChanged()
+    end)
+    ns.RegisterEvent(Theme, "UI_SCALE_CHANGED", function()
+        Theme:QueueViewportChanged()
+    end)
 end

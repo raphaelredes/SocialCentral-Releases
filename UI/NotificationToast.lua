@@ -335,6 +335,9 @@ function Toast:ActivateHistoryItem(item)
 end
 
 local function HasSavedCustomToastPosition()
+    if Theme and Theme.HasSavedWindowPosition then
+        return Theme:HasSavedWindowPosition("notification_toast")
+    end
     local posTbl = ns.db and ns.db.windowPositions
     local saved = type(posTbl) == "table" and posTbl["notification_toast"] or nil
     return type(saved) == "table" and saved.dx ~= nil and saved.dy ~= nil
@@ -403,6 +406,18 @@ local function EnsureAnchorFrame()
     end
 
     Toast.anchorFrame = anchor
+    if Theme and Theme.RegisterViewportListener then
+        Theme:RegisterViewportListener("notification_toast", function()
+            if Toast.anchorFrame then
+                if not Theme:RestoreWindowPosition(Toast.anchorFrame, "notification_toast", false, { anchor = "TOP" }) then
+                    PositionToastAnchorBelowChat(Toast.anchorFrame)
+                end
+                if Toast.LayoutStack then
+                    Toast:LayoutStack()
+                end
+            end
+        end)
+    end
     return anchor
 end
 
