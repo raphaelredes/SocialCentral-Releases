@@ -12,7 +12,7 @@ ns.Social = Social
 table.insert(ns.modules, Social)
 
 local LAST_ROSTER_ASK = 0
-local ROSTER_MIN_GAP = 30
+local ROSTER_MIN_GAP = 15
 local FRIEND_ALERT_DEBOUNCE = 120
 local FRIEND_LOGIN_GRACE_SEC = 8.0
 
@@ -120,7 +120,9 @@ local function QueueWatchlistObs(wlObsMap, lookupKey, displayName, online, level
         elseif verifiedFriendConnected[lookupKey] == false then
             rec.online = false
         end
-        if level and level > 0 then rec.level = level end
+        if level and level > 0 and (online ~= true or rec.online ~= true or level > (rec.level or 0) or (rec.level or 0) <= 0) then
+            rec.level = level
+        end
         if classFile then rec.classFile = classFile end
         if area and area ~= "" then rec.area = area end
         if guildName and guildName ~= "" then rec.guild = guildName end
@@ -198,7 +200,9 @@ local function MergeEntry(ctx, key, patch)
             end
         elseif k == "level" then
             local numV = tonumber(v)
-            if numV and (numV > 0 or (tonumber(row.level) or 0) <= 0) then
+            local curV = tonumber(row.level) or 0
+            local keepHigherOnline = (row.online == true and incomingOnline == true and curV > 0)
+            if numV and ((keepHigherOnline and numV > curV) or (not keepHigherOnline and (numV > 0 or curV <= 0))) then
                 row.level = numV
             end
         elseif k == "area" then
@@ -240,6 +244,35 @@ local function MergeEntry(ctx, key, patch)
         end
     end
     return row
+end
+
+-- Keep freshly observed UNIT_LEVEL / /who levels ahead of stale cached roster snapshots while continuously online.
+local function ApplyLiveUnitObs(lookupKey, cleanLevel, cleanArea, isOnline)
+    local obsMap = Store and Store.liveUnitObs
+    local obs = (lookupKey and obsMap) and obsMap[lookupKey] or nil
+    if not obs then
+        return cleanLevel, cleanArea
+    end
+    if isOnline == false then
+        obsMap[lookupKey] = nil
+        return cleanLevel, cleanArea
+    end
+    local nowClock = (GetTime and GetTime()) or time()
+    local obsLevel = tonumber(obs.level) or 0
+    local curLevel = tonumber(cleanLevel) or 0
+    if (nowClock - (obs.observedAt or 0)) >= 1800 or (obsLevel > 0 and curLevel >= obsLevel) then
+        if obsLevel <= 0 or curLevel >= obsLevel then
+            obsMap[lookupKey] = nil
+        end
+        return cleanLevel, cleanArea
+    end
+    if obsLevel > curLevel then
+        cleanLevel = obsLevel
+    end
+    if (not cleanArea or cleanArea == "") and type(obs.area) == "string" and obs.area ~= "" then
+        cleanArea = obs.area
+    end
+    return cleanLevel, cleanArea
 end
 
 local function NewScanContext()
@@ -350,6 +383,7 @@ local function ScanGuild(onlineCtx, dirCtx, wlObsMap)
                     if verifiedFriendConnected[lk] == false then
                         isOnline = false
                     end
+                    cleanLevel, cleanArea = ApplyLiveUnitObs(lk, cleanLevel, cleanArea, isOnline)
                     if isOnline or includeOffline or isMe then
                         local rec = rosterRanks[lk]
                         if not rec then
@@ -452,6 +486,7 @@ local function ProcessCharacterFriendRecord(onlineCtx, dirCtx, wlObsMap, hasWatc
 
     local pres = Store.GetFriendPresence and Store:GetFriendPresence(parsed.lookupKey)
     if isOnline then
+        cleanLevel, cleanArea = ApplyLiveUnitObs(parsed.lookupKey, cleanLevel, cleanArea, true)
         TouchPresence(parsed.lookupKey, true, cleanArea, cleanClass, cleanLevel)
         pres = Store.GetFriendPresence and Store:GetFriendPresence(parsed.lookupKey) or pres
     else
@@ -684,6 +719,7 @@ local function ScanBattleNet(onlineCtx, dirCtx, wlObsMap, nextBNetWatchlistOnlin
                 end
 
                 if bnetState == "wow_forever" and parsed then
+                    cleanLevel, cleanArea = ApplyLiveUnitObs(parsed.lookupKey, cleanLevel, cleanArea, true)
                     TouchPresence(parsed.lookupKey, true, cleanArea, cleanClass, cleanLevel)
                     if parsed.surname and Store.MigrateSocialSurnameRecords then
                         Store:MigrateSocialSurnameRecords(parsed.firstName, parsed.lookupKey)
@@ -1118,7 +1154,22 @@ function Social:Scan()
     if type(wlTable) == "table" and next(wlTable) ~= nil then
         for lookupKey, prevDispName in pairs(prevBNetWatchlistOnline) do
             if not onlineCtx.byLookup[lookupKey] and not wlObsMap[lookupKey] then
-                QueueWatchlistObs(wlObsMap, lookupKey, prevDispName, false, nil, nil, nil, nil, "bnet")
+                if verifiedFriendConnected[lookupKey] == false then
+                    QueueWatchlistObs(wlObsMap, lookupKey, prevDispName, false, nil, nil, nil, nil, "friend")
+                else
+                    -- Battle.net account went offline or invisible; do not force character offline without in-game check.
+                    wlObsMap[lookupKey] = {
+                        lookupKey = lookupKey,
+                        displayName = prevDispName,
+                        online = nil,
+                        status = "unknown",
+                        clearAlt = true,
+                        source = nil,
+                    }
+                    if ns.Chat and ns.Chat.QueuePresenceProbe then
+                        ns.Chat:QueuePresenceProbe(lookupKey, prevDispName, true)
+                    end
+                end
             end
         end
         local bnetReady = (not BNConnected or Safe.Value(BNConnected()) == true)
@@ -1130,13 +1181,61 @@ function Social:Scan()
                 if lk and not wlObsMap[lk] and not onlineCtx.byLookup[lk] and not altOn then
                     local dirKey = dirCtx.byLookup[lk]
                     local dirRow = dirKey and dirCtx.map[dirKey]
-                    if dirRow and not IsRowWoWOnline(dirRow) then
-                        local src = (dirRow.sources and ((dirRow.sources.bnet and "bnet") or (dirRow.sources.friend and "friend") or (dirRow.sources.guild and "guild"))) or wlEntry.source
+                    local isAuthoritativeCharOffline = dirRow and not IsRowWoWOnline(dirRow)
+                        and dirRow.sources and (dirRow.sources.friend == true or (dirRow.sources.guild == true and wlEntry.source == "guild"))
+                    if isAuthoritativeCharOffline then
+                        local src = (dirRow.sources.friend and "friend") or (dirRow.sources.guild and "guild") or wlEntry.source
                         QueueWatchlistObs(wlObsMap, lk, wlEntry.displayName or dirRow.displayName, false, nil, nil, nil, nil, src)
                         if wlObsMap[lk] then wlObsMap[lk].clearAlt = true end
                     elseif wlEntry.source == "bnet" and bnetReady then
-                        QueueWatchlistObs(wlObsMap, lk, wlEntry.displayName, false, nil, nil, nil, nil, "bnet")
-                        if wlObsMap[lk] then wlObsMap[lk].clearAlt = true end
+                        wlObsMap[lk] = {
+                            lookupKey = lk,
+                            displayName = wlEntry.displayName,
+                            online = nil,
+                            status = "unknown",
+                            clearAlt = true,
+                            source = nil,
+                        }
+                        if ns.Chat and ns.Chat.QueuePresenceProbe then
+                            ns.Chat:QueuePresenceProbe(lk, wlEntry.displayName, true)
+                        end
+                    end
+                end
+            end
+        end
+        local nowTs = time()
+        for wlKey, wlEntry in pairs(wlTable) do
+            if type(wlEntry) == "table" and not wlEntry.isSessionBNet and wlEntry.status == "online" then
+                local lk = wlEntry.id or wlKey
+                local pendingObs = lk and wlObsMap[lk]
+                local stayingOnline = not pendingObs or (pendingObs.online ~= false and pendingObs.status ~= "unknown")
+                if stayingOnline then
+                    local activeLk = (wlEntry.watchAllAlts == true and wlEntry.activeAltLookup) or lk
+                    local activeDisp = (wlEntry.watchAllAlts == true and wlEntry.activeAltName) or wlEntry.displayName
+                    if activeLk and activeDisp and not onlineCtx.byLookup[activeLk] then
+                        local effClass = (wlEntry.watchAllAlts == true and wlEntry.activeAltClass) or wlEntry.classFile
+                        local effLevel = (wlEntry.watchAllAlts == true and wlEntry.activeAltLevel) or wlEntry.level
+                        local wlGuid = (activeLk == lk) and wlEntry.guid or nil
+                        local wlPatch = {
+                            displayName = activeDisp,
+                            lookupKey = activeLk,
+                            hasCharacterName = true,
+                            guid = wlGuid,
+                            level = effLevel,
+                            classFile = effClass,
+                            area = wlEntry.area or "",
+                            guild = wlEntry.guild,
+                            online = true,
+                            samePool = true,
+                            sameFaction = true,
+                            bnetState = "wow_forever",
+                            lastSeen = wlEntry.lastSeen or nowTs,
+                            sources = { watchlist = true },
+                        }
+                        local onKey = FindMergeKey(onlineCtx, wlGuid or ("char:" .. activeLk), wlGuid, nil, activeLk, true)
+                        MergeEntry(onlineCtx, onKey, wlPatch)
+                        local dirKey = FindMergeKey(dirCtx, wlGuid or ("char:" .. activeLk), wlGuid, nil, activeLk, true)
+                        MergeEntry(dirCtx, dirKey, wlPatch)
                     end
                 end
             end
@@ -1738,10 +1837,8 @@ function Social:Init()
     end)
 
     if C_Timer and C_Timer.NewTicker then
-        C_Timer.NewTicker(60, function()
-            local mainShown = _G.SocialCentralFrame and _G.SocialCentralFrame.IsShown and _G.SocialCentralFrame:IsShown()
-            local socialShown = _G.FriendsFrame and _G.FriendsFrame.IsShown and _G.FriendsFrame:IsShown()
-            if not mainShown and not socialShown then
+        C_Timer.NewTicker(20, function()
+            if not IsGuildOrSocialUiOpen() then
                 -- When UI is closed, native Blizzard push events (FRIENDLIST_UPDATE, GUILD_ROSTER_UPDATE, BN_FRIEND_*)
                 -- keep social lists up to date with zero polling overhead.
                 return

@@ -449,13 +449,54 @@ function Group:GetRecentCompanions(query)
 
     local q = type(query) == "string" and query ~= "" and query:lower() or nil
     local out = {}
+    local seenKeys = {}
     for _, rec in ipairs(all) do
         local isCurrent = inGroupKeys[rec.lookupKey] == true
+        if rec.lookupKey then seenKeys[rec.lookupKey] = true end
         if not q or ((rec.displayName or "") .. " " .. (rec.zone or "")):lower():find(q, 1, true) then
             local copy = {}
             for k, v in pairs(rec) do copy[k] = v end
             copy.inCurrentGroup = isCurrent
             table.insert(out, copy)
+        end
+    end
+
+    -- Passively merge Blizzard's cached Recent Allies (read-only GetRecentAllies only; never TryRequestRecentAlliesData)
+    if C_RecentAllies and C_RecentAllies.GetRecentAllies then
+        local okAllies, allies = pcall(C_RecentAllies.GetRecentAllies)
+        if okAllies and type(allies) == "table" then
+            for _, ally in ipairs(allies) do
+                local ch = type(ally) == "table" and ally.characterData
+                if type(ch) == "table" then
+                    local rawName = Safe.String(ch.fullName) or Safe.String(ch.name)
+                    if rawName and rawName ~= "" and Compat.ParseCharacterName then
+                        local parsed = Compat.ParseCharacterName(rawName)
+                        if parsed and parsed.lookupKey and not seenKeys[parsed.lookupKey] and not (Compat.IsMe and Compat.IsMe(parsed.displayName)) then
+                            seenKeys[parsed.lookupKey] = true
+                            local inter = type(ally.interactionData) == "table" and type(ally.interactionData.interactions) == "table" and ally.interactionData.interactions[1] or nil
+                            local zone = inter and type(inter.contextData) == "table" and Safe.String(inter.contextData.locationName) or ""
+                            local ts = inter and Safe.Number(inter.timestamp) or nil
+                            local classID = Safe.Number(ch.classID)
+                            local classInfo = (classID and C_CreatureInfo and C_CreatureInfo.GetClassInfo) and Safe.Call(C_CreatureInfo.GetClassInfo, classID) or nil
+                            local cf = type(classInfo) == "table" and Safe.String(classInfo.classFile) or nil
+                            local lvl = Safe.Number(ch.level)
+                            if not q or (parsed.displayName .. " " .. zone):lower():find(q, 1, true) then
+                                table.insert(out, {
+                                    displayName = parsed.displayName,
+                                    lookupKey = parsed.lookupKey,
+                                    guid = Safe.String(ch.guid),
+                                    classFile = cf,
+                                    level = (lvl and lvl > 0) and lvl or nil,
+                                    zone = zone,
+                                    lastSeen = ts,
+                                    runs = 1,
+                                    inCurrentGroup = (inGroupKeys[parsed.lookupKey] == true),
+                                })
+                            end
+                        end
+                    end
+                end
+            end
         end
     end
     return out
@@ -2628,6 +2669,119 @@ function Group:GetMissingRaidBuffsAudit()
         missingCount = totalMiss,
         detailLines = detailLines,
         summaryText = summary,
+    }
+end
+
+local WORLD_BUFF_DEFS = {
+    { id = "DRAG", labelKey = "Dragonslayer", spells = { [22888] = true }, terms = { "dragonslayer", "mata-drag", "matadrag", "oni" } },
+    { id = "ZAND", labelKey = "Zandalar", spells = { [24425] = true }, terms = { "zandalar" } },
+    { id = "SONG", labelKey = "Songflower", spells = { [15366] = true }, terms = { "songflower", "flor-da-can", "flor de can" } },
+    { id = "WARCHIEF", labelKey = "Warchief", spells = { [16609] = true }, terms = { "warchief", "chefe guerreiro", "jefe de guerra" } },
+    { id = "DM", labelKey = "Dire Maul", spells = { [22817] = true, [22818] = true, [22820] = true }, terms = { "fengus", "mol'dar", "slip'kik" } },
+    { id = "DMF", labelKey = "Darkmoon", spells = { [23768] = true, [23766] = true, [23767] = true, [23769] = true, [23735] = true, [23736] = true, [23737] = true, [23738] = true }, terms = { "sayge" } },
+    { id = "BOON", labelKey = "Chronoboon", spells = { [349981] = true }, terms = { "chronoboon", "cronobon", "supercharged chronoboon" }, isBoon = true },
+}
+
+local function ScanUnitWorldBuffs(unit)
+    if not (C_UnitAuras and (C_UnitAuras.GetAuraDataByIndex or C_UnitAuras.GetBuffDataByIndex)) then
+        return 0, false, {}
+    end
+    local seen = {}
+    local activeLabels = {}
+    local hasBoon = false
+    for idx = 1, 40 do
+        local ok, aura
+        if C_UnitAuras.GetAuraDataByIndex then
+            ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, idx, "HELPFUL")
+        else
+            ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, unit, idx)
+        end
+        if not ok or not aura then
+            break
+        end
+        local sid = Safe.Number(aura.spellId)
+        local nm = Safe.String(aura.name)
+        local low = nm and nm:lower() or nil
+        for _, def in ipairs(WORLD_BUFF_DEFS) do
+            if not seen[def.id] then
+                local matched = (sid and def.spells[sid] == true) or false
+                if (not matched) and low and low ~= "" then
+                    for _, term in ipairs(def.terms) do
+                        if low:find(term, 1, true) then
+                            matched = true
+                            break
+                        end
+                    end
+                end
+                if matched then
+                    seen[def.id] = true
+                    if def.isBoon then
+                        hasBoon = true
+                    else
+                        activeLabels[#activeLabels + 1] = L[def.labelKey]
+                    end
+                end
+            end
+        end
+    end
+    return #activeLabels, hasBoon, activeLabels
+end
+
+function Group:GetWorldBuffsAudit()
+    local units = { "player" }
+    local inRaid = Compat.IsInRaid and Compat.IsInRaid()
+    if inRaid then
+        local total = GetNumGroupMembers and Safe.Number(Safe.Call(GetNumGroupMembers)) or 0
+        units = {}
+        for i = 1, math.min(total, 40) do
+            units[#units + 1] = "raid" .. i
+        end
+    elseif IsInGroup and Safe.Call(IsInGroup) == true then
+        for i = 1, 4 do
+            local u = "party" .. i
+            if UnitExists and UnitExists(u) then
+                units[#units + 1] = u
+            end
+        end
+    else
+        return { totalMembers = 0, withActiveCount = 0, withBoonCount = 0, rows = {} }
+    end
+
+    local rows = {}
+    local withActive, withBoon = 0, 0
+    for _, u in ipairs(units) do
+        if UnitExists and UnitExists(u) and UnitIsConnected and Safe.Call(UnitIsConnected, u) == true then
+            local _, cls = Safe.Call(UnitClass, u)
+            cls = Safe.String(cls)
+            local rawName = Safe.String(Safe.Call(UnitName, u))
+            local resolved = rawName and Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(u, nil, rawName, true)
+            local disp = (resolved and resolved.fullName) or rawName or "?"
+            local activeCnt, hasBoon, labels = ScanUnitWorldBuffs(u)
+            if activeCnt > 0 then withActive = withActive + 1 end
+            if hasBoon then withBoon = withBoon + 1 end
+            rows[#rows + 1] = {
+                name = disp,
+                classFile = cls,
+                activeCount = activeCnt,
+                hasBoon = hasBoon,
+                buffsText = (#labels > 0) and table.concat(labels, ", ") or "",
+            }
+        end
+    end
+    table.sort(rows, function(a, b)
+        if (a.activeCount or 0) ~= (b.activeCount or 0) then
+            return (a.activeCount or 0) > (b.activeCount or 0)
+        end
+        if (a.hasBoon == true) ~= (b.hasBoon == true) then
+            return a.hasBoon == true
+        end
+        return tostring(a.name or "") < tostring(b.name or "")
+    end)
+    return {
+        totalMembers = #rows,
+        withActiveCount = withActive,
+        withBoonCount = withBoon,
+        rows = rows,
     }
 end
 

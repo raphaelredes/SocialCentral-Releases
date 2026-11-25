@@ -298,7 +298,7 @@ local function NavigateForItem(item)
             ns:NavigateToModule("chat", { threadKey = item.threadKey or "mentions:radar" })
         end
     elseif k == "FOCUS_SUMMARY" then
-        if ns.QuickReply and ns.QuickReply.OpenLatest and ns.QuickReply:OpenLatest() then
+        if ns.QuickReply and ns.QuickReply.OpenLatest and ns.QuickReply:OpenLatest(true) then
             return
         end
         if ns.NavigateToModule then
@@ -343,24 +343,92 @@ local function HasSavedCustomToastPosition()
     return type(saved) == "table" and saved.dx ~= nil and saved.dy ~= nil
 end
 
+local function GetToastAnchorMode()
+    local m = ns.db and ns.db.settings and ns.db.settings.msgPreviewAnchor
+    if m == "chat_side" or m == "chat_top" then
+        return m
+    end
+    return "minimap"
+end
+
 local function PositionToastAnchorBelowChat(anchor)
     if not anchor then return end
     anchor:ClearAllPoints()
-    local cf = _G.ChatFrame1
-    local eb = _G.ChatFrame1EditBox
-    if cf and cf.GetLeft and cf.GetRight and cf.GetBottom then
+    local uiW = (UIParent and UIParent.GetWidth and UIParent:GetWidth()) or 1280
+    local uiH = (UIParent and UIParent.GetHeight and UIParent:GetHeight()) or 720
+    local anchorScale = (anchor.GetEffectiveScale and anchor:GetEffectiveScale()) or 1
+    if anchorScale <= 0 then anchorScale = 1 end
+    local mode = GetToastAnchorMode()
+
+    if mode == "minimap" and Minimap and Minimap:IsShown() and Minimap.GetLeft and Minimap.GetCenter then
+        local mmScale = Minimap:GetEffectiveScale() or 1
+        local ratio = mmScale / anchorScale
+        local mmLeft = Minimap:GetLeft()
+        local mmRight = Minimap:GetRight()
+        local _, mmCy = Minimap:GetCenter()
+        if mmLeft and mmRight and mmCy then
+            local ml = mmLeft * ratio
+            local mr = mmRight * ratio
+            local mcy = mmCy * ratio
+            local cx
+            if ml >= (TOAST_WIDTH + 24) then
+                cx = ml - (TOAST_WIDTH * 0.5) - 16
+            else
+                cx = math.min(uiW - (TOAST_WIDTH * 0.5) - 12, mr + (TOAST_WIDTH * 0.5) + 16)
+            end
+            local topY = math.max(160, math.min(uiH - 24, mcy - 54))
+            anchor:SetPoint("TOP", UIParent, "BOTTOMLEFT", cx, topY)
+            return
+        end
+    end
+
+    local cf = (_G.ChatFrame1Background and _G.ChatFrame1Background.GetLeft and _G.ChatFrame1Background) or _G.ChatFrame1
+    if cf and cf.GetLeft and cf.GetRight and cf.GetBottom and cf.GetTop then
+        local cfScale = (cf.GetEffectiveScale and cf:GetEffectiveScale()) or 1
+        local ratio = cfScale / anchorScale
         local cLeft = cf:GetLeft()
         local cRight = cf:GetRight()
         local cBottom = cf:GetBottom()
-        if cLeft and cRight and cBottom and cRight > cLeft then
-            local cx = (cLeft + cRight) * 0.5
+        local cTop = cf:GetTop()
+        if cLeft and cRight and cBottom and cTop and cRight > cLeft then
+            local cl = cLeft * ratio
+            local cr = cRight * ratio
+            local cb = cBottom * ratio
+            local ct = cTop * ratio
+            if mode == "chat_side" then
+                local cx
+                if (uiW - cr) >= (TOAST_WIDTH + 24) or ((cl + cr) * 0.5) < (uiW * 0.5) then
+                    cx = cr + (TOAST_WIDTH * 0.5) + 14
+                else
+                    cx = math.max((TOAST_WIDTH * 0.5) + 12, cl - (TOAST_WIDTH * 0.5) - 14)
+                end
+                local topY = math.max(150, math.min(uiH - 24, ct - 12))
+                anchor:SetPoint("TOP", UIParent, "BOTTOMLEFT", cx, topY)
+                return
+            elseif mode == "chat_top" then
+                local tabRef = _G.GeneralDockManager or _G.ChatFrame1Tab
+                local tabTop = 0
+                if tabRef and tabRef.GetTop and tabRef.IsShown and tabRef:IsShown() then
+                    local trScale = (tabRef.GetEffectiveScale and tabRef:GetEffectiveScale()) or 1
+                    local tt = tabRef:GetTop()
+                    if tt then
+                        tabTop = tt * (trScale / anchorScale)
+                    end
+                end
+                local cx = math.max((TOAST_WIDTH * 0.5) + 12, math.min(uiW - (TOAST_WIDTH * 0.5) - 12, cl + (TOAST_WIDTH * 0.5)))
+                local topY = math.min(uiH - 20, math.max(ct, tabTop) + 96)
+                anchor:SetPoint("TOP", UIParent, "BOTTOMLEFT", cx, topY)
+                return
+            end
+            local cx = (cl + cr) * 0.5
             local minX = (TOAST_WIDTH * 0.5) + 12
             if cx < minX then cx = minX end
-            local topY = cBottom - 36
+            local topY = cb - 36
+            local eb = _G.ChatFrame1EditBox
             if eb and eb.GetBottom then
                 local ebBot = eb:GetBottom()
                 if ebBot and ebBot < cBottom and ebBot >= (cBottom - 56) then
-                    topY = ebBot - 6
+                    topY = (ebBot * ratio) - 6
                 end
             end
             topY = math.max(96, topY)
@@ -419,6 +487,15 @@ local function EnsureAnchorFrame()
         end)
     end
     return anchor
+end
+
+function Toast:RefreshAnchorMode()
+    if self.anchorFrame and not HasSavedCustomToastPosition() then
+        PositionToastAnchorBelowChat(self.anchorFrame)
+        if self.LayoutStack then
+            self:LayoutStack()
+        end
+    end
 end
 
 local function RemoveActiveToastAt(i)
@@ -517,7 +594,7 @@ local function BuildToastNavBar(f)
     local navBar = CreateFrame("Frame", nil, f)
     navBar:SetHeight(NAV_H)
     navBar:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -3)
-    navBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -26, -3)
+    navBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -46, -3)
     navBar:SetFrameLevel(math.max((f:GetFrameLevel() or 180) + 10, 190))
     if navBar.SetClipsChildren then
         navBar:SetClipsChildren(true)
@@ -856,6 +933,24 @@ function Toast:EnsureFrame(index)
     end)
     f.closeBtn = closeBtn
 
+    if Theme and Theme.CreateHelpButton then
+        local helpBtn = Theme:CreateHelpButton(
+            f,
+            L["Floating Notifications & Pagination"],
+            L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)),
+            L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
+            16,
+            { target = f }
+        )
+        helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
+        helpBtn:SetFrameLevel(f:GetFrameLevel() + 10)
+        helpBtn:SetScript("OnClick", function()
+            if GameTooltip then GameTooltip:Hide() end
+            Toast:ShowTutorial(true)
+        end)
+        f.helpBtn = helpBtn
+    end
+
     local muteNotifBtn = Theme:CreateButton(f, 18, 18, "", "default")
     muteNotifBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
     muteNotifBtn:SetFrameLevel(f:GetFrameLevel() + 10)
@@ -885,7 +980,8 @@ function Toast:EnsureFrame(index)
     end)
     f.muteNotifBtn = muteNotifBtn
 
-    local markReadBtn = Theme:CreateButton(f, 24, 18, L["ok"], "default")
+    local markReadBtn = Theme:CreateButton(f, 26, 18, L["ok"], "default")
+    Theme:AutoFitButton(markReadBtn, 26, 10, 54)
     markReadBtn:SetPoint("RIGHT", muteNotifBtn, "LEFT", -3, 0)
     markReadBtn:SetFrameLevel(f:GetFrameLevel() + 10)
     markReadBtn:SetScript("OnClick", function()
@@ -1043,12 +1139,35 @@ function Toast:EnsureFrame(index)
                             Toast:DismissItem(curItem)
                         end)
                     end
-                    if curItem.threadKey and ns.Chat and ns.Chat.ToggleThreadMuted then
+                    if curItem.threadKey and ns.Chat and ns.Chat.PopulateThreadMuteMenu then
+                        local muteSub = root:CreateButton(L["Silence Notifications"])
+                        ns.Chat:PopulateThreadMuteMenu(muteSub, curItem.threadKey, tostring(curItem.sender or curItem.threadKey), function(mutedNow)
+                            if mutedNow then
+                                Toast:DismissItem(curItem)
+                            end
+                        end)
+                    elseif curItem.threadKey and ns.Chat and ns.Chat.ToggleThreadMuted then
                         local isMuted = ns.Chat.IsThreadMuted and ns.Chat:IsThreadMuted(curItem.threadKey)
                         root:CreateButton(isMuted and L["Unmute Conversation"] or L["Mute Conversation"], function()
                             ns.Chat:ToggleThreadMuted(curItem.threadKey)
                             Toast:DismissItem(curItem)
                         end)
+                    end
+                    local posSub = root:CreateButton(L["Notification & Preview Position"])
+                    if posSub and posSub.CreateRadio then
+                        for _, opt in ipairs({
+                            { id = "minimap", label = L["Beside Minimap"] },
+                            { id = "chat_side", label = L["Beside Official Chat"] },
+                            { id = "chat_top", label = L["Above Official Chat"] },
+                        }) do
+                            posSub:CreateRadio(opt.label, function()
+                                return GetToastAnchorMode() == opt.id
+                            end, function()
+                                if ns.Minimap and ns.Minimap.SetPreviewAnchorMode then
+                                    ns.Minimap:SetPreviewAnchorMode(opt.id)
+                                end
+                            end)
+                        end
                     end
                     root:CreateButton(L["Reset Position"], function()
                         if Theme and Theme.ResetWindowPosition then
@@ -1161,14 +1280,21 @@ local function RenderItemOnFrame(f, item, showNav)
         end
     end
 
+    local streamerOn = Compat and Compat.IsStreamerMode and Compat.IsStreamerMode()
     local sourceTag = item.sourceTag or "SocialCentral"
     local hex = (item.senderClass and Compat and Compat.ClassHex) and Compat.ClassHex(item.senderClass) or "|cffffffff"
-    local senderText = hex .. tostring(item.sender or "?") .. "|r"
+    local senderRaw = tostring(item.sender or "?")
+    if streamerOn and (item.bnetAccountID ~= nil or item.kind == "BN_WHISPER" or senderRaw:find("#", 1, true)) then
+        senderRaw = Compat.MaskStreamerBNetName(senderRaw)
+    end
+    local senderText = hex .. senderRaw .. "|r"
     local mult = (item.coalescedCount and item.coalescedCount > 1) and (" |cff9da7b5(x" .. tostring(item.coalescedCount) .. ")|r") or ""
     f.titleLbl:SetText(string.format("|cff%02x%02x%02x%s|r  ·  %s%s", math.floor(rgb[1] * 255), math.floor(rgb[2] * 255), math.floor(rgb[3] * 255), sourceTag, senderText, mult))
 
     local bodyText = tostring(item.text or "")
-    if isInvite then
+    if streamerOn and (item.kind == "DIRECT" or item.kind == "ROOM" or item.kind == "INVITE" or item.kind == "WHISPER" or item.kind == "BN_WHISPER") then
+        bodyText = "|cff9da7b5" .. L["[Hidden in Streamer Mode]"] .. "|r"
+    elseif isInvite then
         bodyText = string.format(L["Invite to room: %s"], bodyText)
     elseif item.countdownUntil then
         local remSec = math.max(0, math.ceil(item.countdownUntil - (GetTime and GetTime() or 0)))
@@ -1186,13 +1312,14 @@ local function RenderItemOnFrame(f, item, showNav)
         f.closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -4)
     end
     local canMuteItem = (item.kind ~= "FOCUS_SUMMARY")
+    local topAnchorRight = f.helpBtn or f.closeBtn
     if f.muteNotifBtn then
         f.muteNotifBtn:SetShown(canMuteItem)
         f.muteNotifBtn:ClearAllPoints()
         if showNav then
             f.muteNotifBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -(6 + navOffset))
         else
-            f.muteNotifBtn:SetPoint("RIGHT", f.closeBtn, "LEFT", -3, 0)
+            f.muteNotifBtn:SetPoint("RIGHT", topAnchorRight, "LEFT", -3, 0)
         end
     end
     if f.markReadBtn then
@@ -1202,7 +1329,7 @@ local function RenderItemOnFrame(f, item, showNav)
         elseif showNav then
             f.markReadBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -(6 + navOffset))
         else
-            f.markReadBtn:SetPoint("RIGHT", f.closeBtn, "LEFT", -3, 0)
+            f.markReadBtn:SetPoint("RIGHT", topAnchorRight, "LEFT", -3, 0)
         end
     end
 
@@ -1218,7 +1345,7 @@ local function RenderItemOnFrame(f, item, showNav)
         f.queueLbl:Hide()
     end
 
-    local rightPad = showNav and (canMuteItem and -29 or -8) or (canMuteItem and -51 or -29)
+    local rightPad = showNav and (canMuteItem and -29 or -8) or (canMuteItem and -70 or -48)
     if showQuickRead then rightPad = rightPad - 27 end
     f.titleLbl:ClearAllPoints()
     f.titleLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -(8 + navOffset))
@@ -1274,174 +1401,6 @@ function Toast:SortActiveItems()
     -- Preserve arrival order so pagination (1/N) stays stable and predictable.
 end
 
-local function ApplyToastTutorialTheme(dlg, p)
-    if not dlg or not Theme then return end
-    p = p or Theme:GetPalette()
-    if not p then return end
-    Theme:ApplyBackdrop(dlg, "window", p)
-    if dlg.box then
-        Theme:ApplyBackdrop(dlg.box, "inset", p)
-    end
-    local titleColor = p.textGold or p.accent or { 1.0, 0.82, 0.20 }
-    if dlg.title then
-        dlg.title:SetTextColor(titleColor[1], titleColor[2], titleColor[3])
-    end
-    if dlg.body then
-        dlg.body:SetTextColor(p.text[1], p.text[2], p.text[3])
-    end
-    if dlg.b1 then
-        dlg.b1:SetTextColor(p.text[1], p.text[2], p.text[3])
-    end
-    if dlg.b2 then
-        dlg.b2:SetTextColor(p.text[1], p.text[2], p.text[3])
-    end
-    if dlg.b3 then
-        local muted = p.textMuted or p.text
-        dlg.b3:SetTextColor(muted[1], muted[2], muted[3])
-    end
-    if dlg.closeX then
-        Theme:StyleButton(dlg.closeX, "default")
-    end
-    if dlg.okBtn then
-        Theme:StyleButton(dlg.okBtn, "primary")
-    end
-end
-
-local function LayoutToastTutorialDialog(dlg)
-    if not dlg then return end
-    local bodyH = math.max(32, math.ceil((dlg.body and dlg.body.GetStringHeight and dlg.body:GetStringHeight()) or 36))
-    local b1H = math.max(24, math.ceil((dlg.b1 and dlg.b1.GetStringHeight and dlg.b1:GetStringHeight()) or 28))
-    local b2H = math.max(24, math.ceil((dlg.b2 and dlg.b2.GetStringHeight and dlg.b2:GetStringHeight()) or 28))
-    local b3H = math.max(22, math.ceil((dlg.b3 and dlg.b3.GetStringHeight and dlg.b3:GetStringHeight()) or 24))
-    local boxH = 10 + b1H + 8 + b2H + 8 + b3H + 10
-    if dlg.box then
-        dlg.box:SetHeight(boxH)
-    end
-    local totalH = 44 + bodyH + 10 + boxH + 48
-    dlg:SetHeight(math.max(236, math.min(360, totalH)))
-end
-
-function Toast:CreateTutorialDialog()
-    if self.tutorialDialog then return self.tutorialDialog end
-    if not Theme then return nil end
-
-    local dlg = CreateFrame("Frame", "SocialCentralToastTutorialDialog", UIParent, "BackdropTemplate")
-    dlg:Hide()
-    dlg:SetSize(430, 260)
-    dlg:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
-    if Theme.PrepareTopOverlayModal then
-        Theme:PrepareTopOverlayModal(dlg, 858)
-    else
-        dlg:SetFrameStrata("FULLSCREEN_DIALOG")
-        dlg:SetFrameLevel(858)
-        dlg:SetToplevel(true)
-        dlg:SetClampedToScreen(true)
-    end
-    dlg:EnableMouse(true)
-    Theme:ApplyBackdrop(dlg, "window")
-    Theme:MakeMovable(dlg, { key = "toastTutorial" })
-    if _G.UISpecialFrames then
-        table.insert(_G.UISpecialFrames, "SocialCentralToastTutorialDialog")
-    end
-
-    local iconTex = dlg:CreateTexture(nil, "ARTWORK")
-    iconTex:SetSize(22, 22)
-    iconTex:SetPoint("TOPLEFT", 14, -12)
-    iconTex:SetTexture(ICON_MAIL)
-    dlg.iconTex = iconTex
-
-    local title = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("LEFT", iconTex, "RIGHT", 8, 0)
-    title:SetPoint("RIGHT", dlg, "RIGHT", -38, 0)
-    title:SetJustifyH("LEFT")
-    title:SetWordWrap(false)
-    title:SetText(L["Floating Notifications & Pagination"])
-    dlg.title = title
-
-    local closeX = Theme:CreateButton(dlg, 22, 20, "X", "default")
-    closeX:SetPoint("TOPRIGHT", -10, -10)
-    closeX:SetScript("OnClick", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("toastTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.toastTutorialShown = true
-        end
-        dlg:Hide()
-    end)
-    dlg.closeX = closeX
-
-    local body = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    body:SetPoint("TOPLEFT", 16, -42)
-    body:SetPoint("TOPRIGHT", -16, -42)
-    body:SetJustifyH("LEFT")
-    body:SetWordWrap(true)
-    body:SetSpacing(3)
-    body:SetText(L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)))
-    dlg.body = body
-
-    local box = CreateFrame("Frame", nil, dlg, "BackdropTemplate")
-    box:SetPoint("TOPLEFT", body, "BOTTOMLEFT", 0, -10)
-    box:SetPoint("TOPRIGHT", body, "BOTTOMRIGHT", 0, -10)
-    box:SetHeight(112)
-    Theme:ApplyBackdrop(box, "inset")
-    dlg.box = box
-
-    local b1 = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    b1:SetPoint("TOPLEFT", 10, -10)
-    b1:SetPoint("TOPRIGHT", -10, -10)
-    b1:SetJustifyH("LEFT")
-    b1:SetWordWrap(true)
-    b1:SetSpacing(2)
-    b1:SetText("|cffffd100•|r " .. L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."])
-    dlg.b1 = b1
-
-    local b2 = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    b2:SetPoint("TOPLEFT", b1, "BOTTOMLEFT", 0, -8)
-    b2:SetPoint("TOPRIGHT", b1, "BOTTOMRIGHT", 0, -8)
-    b2:SetJustifyH("LEFT")
-    b2:SetWordWrap(true)
-    b2:SetSpacing(2)
-    b2:SetText("|cffffd100•|r " .. L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."])
-    dlg.b2 = b2
-
-    local b3 = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    b3:SetPoint("TOPLEFT", b2, "BOTTOMLEFT", 0, -8)
-    b3:SetPoint("TOPRIGHT", b2, "BOTTOMRIGHT", 0, -8)
-    b3:SetJustifyH("LEFT")
-    b3:SetWordWrap(true)
-    b3:SetSpacing(2)
-    b3:SetText("|cff4ade80•|r " .. L["Tip: You can change the 6s display timer or reset the position below chat anytime in Settings -> Notifications."])
-    dlg.b3 = b3
-
-    local okBtn = Theme:CreateButton(dlg, 210, 24, L["Got it, don't show again"], "primary")
-    if Theme.AutoFitButton then
-        Theme:AutoFitButton(okBtn, 196, 24, 320)
-    end
-    okBtn:SetPoint("BOTTOM", 0, 12)
-    okBtn:SetScript("OnClick", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("toastTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.toastTutorialShown = true
-        end
-        dlg:Hide()
-    end)
-    dlg.okBtn = okBtn
-
-    dlg:SetScript("OnHide", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("toastTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.toastTutorialShown = true
-        end
-    end)
-
-    ApplyToastTutorialTheme(dlg)
-    LayoutToastTutorialDialog(dlg)
-    self.tutorialDialog = dlg
-    return dlg
-end
-
 function Toast:ShowTutorial(forceShow)
     local alreadyShown = (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("toastTutorialShown"))
         or (ns.db and ns.db.settings and ns.db.settings.toastTutorialShown == true)
@@ -1453,29 +1412,98 @@ function Toast:ShowTutorial(forceShow)
         return
     end
     self.pendingTutorial = false
-    local dlg = self:CreateTutorialDialog()
-    if not dlg then return end
     if ns.SetAccountTutorialShown then
         ns:SetAccountTutorialShown("toastTutorialShown", true)
     elseif ns.db and ns.db.settings then
         ns.db.settings.toastTutorialShown = true
     end
-    if dlg.body then
-        dlg.body:SetText(L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)))
+    if not (Theme and Theme.ShowNpcGuide) then
+        return
     end
-    ApplyToastTutorialTheme(dlg)
-    LayoutToastTutorialDialog(dlg)
-    if Theme and Theme.PrepareTopOverlayModal then
-        Theme:PrepareTopOverlayModal(dlg, 858)
+    local function ResolveActiveToastFrame()
+        if Toast.framePool then
+            for _, f in ipairs(Toast.framePool) do
+                if f and f.IsShown and f:IsShown() then
+                    return f
+                end
+            end
+        end
+        return nil
     end
-    dlg:Show()
-    dlg:Raise()
+    self.tutorialDialog = Theme:ShowNpcGuide({
+        key = "toast",
+        doneLabel = L["Got it, don't show again"],
+        defaultTarget = ResolveActiveToastFrame,
+        steps = {
+            {
+                title = L["Floating Notifications & Pagination"],
+                text = L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)),
+            },
+            {
+                title = L["Floating Notifications & Pagination"],
+                text = L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."] .. "\n\n" .. L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
+            },
+            {
+                title = L["Toast Tutorial"],
+                text = L["Tip: You can change the 6s display timer or reset the position below chat anytime in Settings -> Notifications."],
+            },
+        },
+    })
 end
 
 function Toast:ShowTutorialIfNeeded()
     local alreadyShown = (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown("toastTutorialShown"))
         or (ns.db and ns.db.settings and ns.db.settings.toastTutorialShown == true)
     if alreadyShown then return end
+    if Theme and Theme.PromptWindowTutorial then
+        local function ResolveActiveToastFrame()
+            if Toast.framePool then
+                for _, f in ipairs(Toast.framePool) do
+                    if f and f.IsShown and f:IsShown() then
+                        return f
+                    end
+                end
+            end
+            return nil
+        end
+        Theme:PromptWindowTutorial({
+            tutorialKey = "toastTutorialShown",
+            title = L["Floating Notifications"],
+            guideSpec = {
+                key = "toast",
+                doneLabel = L["Got it, don't show again"],
+                defaultTarget = ResolveActiveToastFrame,
+                isAnchorVisible = function()
+                    return ResolveActiveToastFrame() ~= nil
+                end,
+                steps = {
+                    {
+                        title = L["Floating Notifications & Pagination"],
+                        text = L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)),
+                    },
+                    {
+                        title = L["Floating Notifications & Pagination"],
+                        text = L["Pagination (1/N): When 2 or more notifications are active, use the < 1 2 3 > buttons or scroll your mouse wheel to switch between them."] .. "\n\n" .. L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
+                    },
+                    {
+                        title = L["Toast Tutorial"],
+                        text = L["Tip: You can change the 6s display timer or reset the position below chat anytime in Settings -> Notifications."],
+                    },
+                },
+            },
+            isWindowVisible = function()
+                return ResolveActiveToastFrame() ~= nil
+            end,
+            onSkip = function()
+                if ns.SetAccountTutorialShown then
+                    ns:SetAccountTutorialShown("toastTutorialShown", true)
+                elseif ns.db and ns.db.settings then
+                    ns.db.settings.toastTutorialShown = true
+                end
+            end,
+        })
+        return
+    end
     self:ShowTutorial(false)
 end
 
@@ -2000,7 +2028,7 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
 
     if spec.playerMuteFn and spec.playerMuteLabel then
         Theme:SetButtonText(pop.playerBtn, spec.playerMuteLabel)
-        Theme:AutoFitButton(pop.playerBtn, 74, 12, 118)
+        Theme:AutoFitButton(pop.playerBtn, 78, 14, 155)
         pop.playerBtn:ClearAllPoints()
         pop.playerBtn:SetPoint("LEFT", pop.confirmBtn, "RIGHT", 6, 0)
         pop.playerBtn:SetScript("OnClick", function()
@@ -2009,10 +2037,10 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         end)
         pop.playerBtn:Show()
         Theme:SetButtonText(pop.confirmBtn, L["Disable All"])
-        Theme:AutoFitButton(pop.confirmBtn, 84, 12, 108)
-        Theme:AutoFitButton(pop.cancelBtn, 68, 12, 86)
-        local neededW = (pop.confirmBtn:GetWidth() or 92) + (pop.playerBtn:GetWidth() or 88) + (pop.cancelBtn:GetWidth() or 74) + 38
-        pop:SetWidth(math.max(288, math.min(340, neededW)))
+        Theme:AutoFitButton(pop.confirmBtn, 84, 14, 134)
+        Theme:AutoFitButton(pop.cancelBtn, 70, 14, 108)
+        local neededW = (pop.confirmBtn:GetWidth() or 92) + (pop.playerBtn:GetWidth() or 96) + (pop.cancelBtn:GetWidth() or 78) + 42
+        pop:SetWidth(math.max(296, math.min(420, neededW)))
     else
         pop.playerBtn:Hide()
         Theme:SetButtonText(pop.confirmBtn, L["Disable"])
@@ -2420,7 +2448,14 @@ function Toast:Init()
     ns:On("CHAT_UPDATED", function()
         -- Automatically dismiss any active toast if the player opened and read that exact thread elsewhere.
         local changed, removedActive = PruneActiveToasts(function(cur)
-            return cur and cur.threadKey and ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible(cur.threadKey)
+            if not (cur and cur.threadKey) then return false end
+            if ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible(cur.threadKey) then
+                return true
+            end
+            if ns.QuickReply and ns.QuickReply.IsViewingThread and ns.QuickReply:IsViewingThread(cur.threadKey) then
+                return true
+            end
+            return false
         end)
         if changed then
             DrainToastQueueAndResetElapsed(removedActive)
@@ -2458,6 +2493,7 @@ function Toast:Init()
     end
 
     ns:On("SETTINGS_UPDATED", function()
+        Toast:RefreshAnchorMode()
         PruneForSettingsOrInstance()
         if #Toast.activeItems > 0 then
             Toast:LayoutStack()
@@ -2496,9 +2532,6 @@ function Toast:Init()
         Theme:RegisterListener(function()
             for _, f in ipairs(Toast.framePool) do
                 ApplyToastThemeToFrame(f)
-            end
-            if Toast.tutorialDialog then
-                ApplyToastTutorialTheme(Toast.tutorialDialog)
             end
         end)
     end

@@ -259,23 +259,140 @@ local function RemoveChatFilter(fn)
     end
 end
 
+local whoChatPatterns = nil
+
+local function FormatTemplateToWhoPattern(fmt)
+    if type(fmt) ~= "string" or fmt == "" then return nil end
+    local out, order, i, n = { "^" }, {}, 1, 0
+    while i <= #fmt do
+        local spec = fmt:match("^%%%d*%$?[sd]", i)
+        if spec then
+            n = n + 1
+            local pos = spec:match("^%%(%d+)%$")
+            order[#order + 1] = pos and tonumber(pos) or n
+            out[#out + 1] = (spec:sub(-1) == "d") and "(%d+)" or "(.-)"
+            i = i + #spec
+        elseif fmt:sub(i, i + 1) == "%%" then
+            out[#out + 1] = "%%"
+            i = i + 2
+        else
+            local c = fmt:sub(i, i)
+            out[#out + 1] = c:find("[%(%)%.%+%-%*%?%[%]%^%$%%]") and ("%" .. c) or c
+            i = i + 1
+        end
+    end
+    out[#out + 1] = "$"
+    return table.concat(out), order
+end
+
+local function EnsureWhoChatPatterns()
+    if whoChatPatterns then return whoChatPatterns end
+    whoChatPatterns = {}
+    for _, gName in ipairs({ "WHO_LIST_GUILD_FORMAT", "WHO_LIST_FORMAT" }) do
+        local pat, ord = FormatTemplateToWhoPattern(_G[gName])
+        if pat then
+            whoChatPatterns[#whoChatPatterns + 1] = {
+                pattern = pat,
+                order = ord,
+                hasGuild = (gName == "WHO_LIST_GUILD_FORMAT"),
+            }
+        end
+    end
+    return whoChatPatterns
+end
+
+local function MatchClassTokenAtEnd(raceClassText)
+    if type(raceClassText) ~= "string" or raceClassText == "" then return nil end
+    local direct = Compat.ClassFileFromLocalized and Compat.ClassFileFromLocalized(raceClassText)
+    if direct then return direct end
+    local bestToken, bestLen = nil, nil
+    for _, tbl in ipairs({ _G.LOCALIZED_CLASS_NAMES_MALE or {}, _G.LOCALIZED_CLASS_NAMES_FEMALE or {} }) do
+        if type(tbl) == "table" then
+            for token, locName in pairs(tbl) do
+                if type(locName) == "string" and #locName > 0 then
+                    if (raceClassText == locName or raceClassText:sub(-(#locName + 1)) == " " .. locName)
+                        and (not bestLen or #locName > bestLen)
+                    then
+                        bestToken, bestLen = token, #locName
+                    end
+                end
+            end
+        end
+    end
+    return bestToken
+end
+
+local function ParseWhoSystemLine(clean)
+    if type(clean) ~= "string" or clean == "" then return nil end
+    for _, p in ipairs(EnsureWhoChatPatterns()) do
+        local caps = { clean:match(p.pattern) }
+        if #caps > 0 then
+            local args = {}
+            for j, idx in ipairs(p.order) do
+                args[idx] = caps[j]
+            end
+            local rawName = args[1] or args[2]
+            local parsed = rawName and Compat.ParseCharacterName(rawName)
+            if parsed then
+                local raceClass = ((args[4] or "") .. " " .. (args[5] or "")):gsub("^%s+", "")
+                return {
+                    parsed = parsed,
+                    level = tonumber(args[3]),
+                    classFile = MatchClassTokenAtEnd(raceClass),
+                    guild = p.hasGuild and (args[6] or "") or "",
+                    area = p.hasGuild and args[7] or args[6],
+                    rawLine = clean,
+                }
+            end
+        end
+    end
+    local playerLink, rest = clean:match("^|Hplayer:([^|]+)|h%[.-%]|?h?:%s*(.*)$")
+    if not playerLink then
+        playerLink = clean:match("^|Hplayer:([^|]+)|h%[.-%]:")
+    end
+    if playerLink then
+        local parsed = Compat.ParseCharacterName(playerLink)
+        if parsed then
+            local lvl = rest and tonumber(rest:match("(%d+)")) or nil
+            local guild = rest and rest:match("<([^>]+)>") or nil
+            local area = rest and rest:match("%-%s*([^%-]+)$") or nil
+            if area then area = Compat.Trim and Compat.Trim(area) or area end
+            return {
+                parsed = parsed,
+                level = lvl,
+                guild = guild or "",
+                area = area,
+                rawLine = clean,
+            }
+        end
+    end
+    return nil
+end
+
 local function SystemChatFilter(_, _, msg)
-    if not Watchlist.pending or Watchlist.pending.mode ~= "chat_filter" then
+    if not Watchlist.pending then
         return false
     end
     local clean = Safe.String(msg)
     if not clean then return false end
 
-    -- Only match genuine /who output formats so unrelated system messages stay visible.
-    local playerLink = clean:match("^|Hplayer:([^|]+)|h%[.-%]:")
-    if playerLink then
-        local parsed = Compat.ParseCharacterName(playerLink)
-        if parsed then
-            Watchlist.pending.chatMatches = Watchlist.pending.chatMatches or {}
-            table.insert(Watchlist.pending.chatMatches, {
-                parsed = parsed,
-                rawLine = clean,
-            })
+    -- Match genuine /who output formats (both in chat_filter and silent_ui when server routes < 3 results to chat).
+    local whoMatch = ParseWhoSystemLine(clean)
+    if whoMatch and whoMatch.parsed then
+        Watchlist.pending.chatMatches = Watchlist.pending.chatMatches or {}
+        local dup = false
+        for _, existing in ipairs(Watchlist.pending.chatMatches) do
+            if existing.parsed and existing.parsed.lookupKey == whoMatch.parsed.lookupKey then
+                dup = true
+                if whoMatch.level and whoMatch.level > 0 then existing.level = whoMatch.level end
+                if whoMatch.classFile then existing.classFile = whoMatch.classFile end
+                if whoMatch.area and whoMatch.area ~= "" then existing.area = whoMatch.area end
+                if whoMatch.guild and whoMatch.guild ~= "" then existing.guild = whoMatch.guild end
+                break
+            end
+        end
+        if not dup then
+            table.insert(Watchlist.pending.chatMatches, whoMatch)
         end
         return true
     end
@@ -285,8 +402,9 @@ local function SystemChatFilter(_, _, msg)
     local looksLikeWhoSummary = clean:find("%d+") and (lower:find("total") or lower:find("player") or lower:find("jogador") or lower:find("jugador") or lower:find("encontrad") or lower:find("pessoa"))
     if looksLikeWhoSummary then
         Watchlist.pending.sawSummary = true
-        C_Timer.After(0.05, function()
-            if Watchlist.pending and Watchlist.pending.mode == "chat_filter" then
+        local pendingTok = Watchlist.pending.token
+        C_Timer.After(0.06, function()
+            if Watchlist.pending and Watchlist.pending.token == pendingTok then
                 Watchlist:FinishChatFilterQuery()
             end
         end)
@@ -375,7 +493,7 @@ function Watchlist:Add(rawName, note, opts)
     if dirEntry then
         if dirEntry.online and (dirEntry.bnetState == "wow_forever" or (dirEntry.sources and (dirEntry.sources.friend or dirEntry.sources.guild))) then
             initStatus = "online"
-        elseif (not dirEntry.online) or (dirEntry.sources and (dirEntry.sources.friend or dirEntry.sources.guild)) then
+        elseif (not dirEntry.online) and (dirEntry.sources and (dirEntry.sources.friend or dirEntry.sources.guild)) then
             initStatus = "offline"
         end
     end
@@ -399,10 +517,14 @@ function Watchlist:Add(rawName, note, opts)
         area = dirEntry and dirEntry.area or nil,
         guild = dirEntry and dirEntry.guild or nil,
         guid = dirEntry and dirEntry.guid or nil,
-        lastChecked = dirEntry and time() or nil,
+        lastChecked = (initStatus ~= "unknown" and dirEntry) and time() or nil,
         lastSeen = (initStatus == "online") and time() or (dirEntry and dirEntry.lastSeen) or nil,
         addedAt = time(),
     }
+
+    if initStatus ~= "online" and ns.Chat and ns.Chat.QueuePresenceProbe then
+        ns.Chat:QueuePresenceProbe(parsed.lookupKey, parsed.displayName, true)
+    end
 
     if not opts.silent then
         if trackAlts then
@@ -819,13 +941,26 @@ end
 local STALE_ONLINE_SECONDS = 300
 local INIT_STALE_ONLINE_SECONDS = 180
 
+local function IsRosterConfirmedOnline(socRow)
+    if type(socRow) ~= "table" or socRow.online ~= true then
+        return false
+    end
+    if socRow.friendOnline == true or socRow.guildOnline == true then
+        return true
+    end
+    if socRow.bnetOnline == true and socRow.bnetState == "wow_forever" then
+        return true
+    end
+    return false
+end
+
 local function IsEntryLiveConfirmed(entry, now)
     if type(entry) ~= "table" then return false end
     local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
-    if socRow and socRow.online == true then
+    if IsRosterConfirmedOnline(socRow) then
         return true
     end
-    if entry.activeAltLookup and Store and Store.socialByLookup and Store.socialByLookup[entry.activeAltLookup] and Store.socialByLookup[entry.activeAltLookup].online == true then
+    if entry.activeAltLookup and Store and Store.socialByLookup and IsRosterConfirmedOnline(Store.socialByLookup[entry.activeAltLookup]) then
         return true
     end
     if Compat.IsInMyGroup and Compat.IsInMyGroup(entry.activeAltName or entry.displayName, entry.guid) then
@@ -1214,20 +1349,42 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
         else
             for _, m in ipairs(matches) do
                 local parsed = m.parsed
-                if parsed and MatchEntry(entry, parsed) then
+                local isDirectMatch = parsed and MatchEntry(entry, parsed)
+                local isAltMatch = false
+                if not isDirectMatch and parsed and entry.watchAllAlts == true and Store and Store.GetAllLinkedCharacters then
+                    for _, altRec in ipairs(Store:GetAllLinkedCharacters(entry.id or listKey)) do
+                        if altRec and altRec.lookupKey == parsed.lookupKey then
+                            isAltMatch = true
+                            break
+                        end
+                    end
+                end
+                if parsed and (isDirectMatch or isAltMatch) then
                     local prevStatus = entry.status
                     local wasExpired = (entry._expiredOnline == true)
                     local hasSurname = type(entry.surname) == "string" and entry.surname ~= ""
-                    local candidateOnly = (not hasSurname) and parsed.surname and parsed.surname ~= ""
+                    local candidateOnly = isDirectMatch and (not hasSurname) and parsed.surname and parsed.surname ~= ""
                     entry.status = "online"
                     entry._expiredOnline = nil
+                    entry._needsWhoEnrich = nil
                     entry.source = "who"
                     entry.lastChecked = now
                     entry.lastSeen = now
                     entry.truncatedWarning = nil
                     entry.ambiguousChoices = nil
-                    if m.level and m.level > 0 then entry.level = m.level end
-                    if m.classFile then entry.classFile = m.classFile end
+                    if isAltMatch then
+                        entry.activeAltLookup = parsed.lookupKey
+                        entry.activeAltName = parsed.displayName
+                        if m.classFile then entry.activeAltClass = m.classFile end
+                        if m.level and m.level > 0 then entry.activeAltLevel = m.level end
+                    else
+                        entry.activeAltLookup = nil
+                        entry.activeAltName = nil
+                        entry.activeAltClass = nil
+                        entry.activeAltLevel = nil
+                        if m.level and m.level > 0 then entry.level = m.level end
+                        if m.classFile then entry.classFile = m.classFile end
+                    end
                     if m.area and m.area ~= "" then entry.area = m.area end
                     if m.guild and m.guild ~= "" then entry.guild = m.guild end
                     if candidateOnly then
@@ -1239,7 +1396,7 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                         Store:NotifyWatchlistOnline(entry)
                     end
                     if not candidateOnly and parsed.surname and parsed.surname ~= "" and ns.Clan and ns.Clan.QueueCooperativeSighting then
-                        ns.Clan:QueueCooperativeSighting(parsed.displayName, entry.guid, m.level, m.classFile, m.guild, m.area)
+                        ns.Clan:QueueCooperativeSighting(parsed.displayName, (not isAltMatch) and entry.guid or nil, m.level, m.classFile, m.guild, m.area)
                     end
                     if isPendingTarget then
                         matchedTarget = true
@@ -1290,12 +1447,22 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
             end
         else
             local socRow = Store.socialByLookup and Store.socialByLookup[pending.id]
-            if socRow and socRow.online == true then
+            if IsRosterConfirmedOnline(socRow) then
                 targetEntry.status = "online"
                 targetEntry._expiredOnline = nil
+            elseif pending.probedAltKey and pending.probedAltKey ~= targetEntry.id and targetEntry.status == "online" and targetEntry.activeAltLookup ~= pending.probedAltKey then
+                -- Keep current online state if another alt is already confirmed active.
+                targetEntry._expiredOnline = nil
             else
+                if pending.probedAltKey and targetEntry.activeAltLookup == pending.probedAltKey then
+                    targetEntry.activeAltLookup = nil
+                    targetEntry.activeAltName = nil
+                    targetEntry.activeAltClass = nil
+                    targetEntry.activeAltLevel = nil
+                end
                 targetEntry.status = "offline"
                 targetEntry._expiredOnline = nil
+                targetEntry._needsWhoEnrich = nil
             end
             targetEntry.truncatedWarning = nil
         end
@@ -1305,6 +1472,23 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
         Watchlist.suppressPopupUntil = GetTime() + 0.35
     end
     CleanupPending(true)
+    if Store and Store.RecordLiveUnitObservation then
+        for _, m in ipairs(matches) do
+            local p = m and m.parsed
+            if p and p.displayName and ((m.level and m.level > 0) or (m.area and m.area ~= "")) then
+                Store:RecordLiveUnitObservation(p.displayName, {
+                    level = m.level,
+                    classFile = m.classFile,
+                    area = m.area,
+                    guild = m.guild,
+                    source = "who",
+                })
+            end
+        end
+    end
+    if ns.Social and ns.Social.QueueScan then
+        ns.Social:QueueScan(0.15)
+    end
     ns:Emit("WATCHLIST_UPDATED")
     if disambiguateTarget then
         local pickLink = "|Haddon:SCentral:wldisambig:" .. tostring(disambiguateTarget.id) .. "|h|cff58a6ff[" .. L["Choose"] .. "]|r|h"
@@ -1314,37 +1498,22 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
 end
 
 function Watchlist:FinishChatFilterQuery()
-    if not self.pending or self.pending.mode ~= "chat_filter" then return end
+    if not self.pending then return end
     local results = {}
     for _, item in ipairs(self.pending.chatMatches or {}) do
-        table.insert(results, { parsed = item.parsed })
+        table.insert(results, {
+            parsed = item.parsed,
+            level = item.level,
+            classFile = item.classFile,
+            area = item.area,
+            guild = item.guild,
+        })
     end
     self:ApplyWhoResults(results, #results)
 end
 
--- Must ONLY be called directly inside a hardware event (button click, slash command, keybind).
-function Watchlist:CheckEntry(id, silent)
-    local list = Store:GetWatchlistTable()
-    local entry = list[id]
-    if not entry then return false, "missing" end
-
-    local socRow = Store.socialByLookup and Store.socialByLookup[entry.id]
-    if socRow and socRow.online == true then
-        local src = (socRow.sources and socRow.sources.bnet and "bnet")
-            or (socRow.sources and socRow.sources.friend and "friend")
-            or "guild"
-        Store:SyncWatchlistObservation(entry.displayName, {
-            online = true,
-            level = socRow.level,
-            classFile = socRow.classFile,
-            area = socRow.area,
-            guildName = socRow.guild,
-            guild = socRow.guild,
-            source = src,
-        }, { suppressAlert = true })
-        return true, "social_online"
-    end
-
+-- Shared single C_FriendList.SendWho hardware-event dispatcher (never invoked from timers/passive events).
+local function DispatchHardwareWho(self, targetId, probedAltKey, queryDisplay, fallbackSurname, fallbackFirst, silent, entry)
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     if inCombat then
         if not silent then
@@ -1369,21 +1538,14 @@ function Watchlist:CheckEntry(id, silent)
         return false, "unavailable"
     end
 
-    if (not entry.surname or entry.surname == "") and entry.displayName and (entry.displayName:find(" ") or entry.displayName:find("-")) then
-        local normalized = Compat.ParseCharacterName(entry.displayName)
-        if normalized then
-            entry.firstName = normalized.firstName
-            entry.surname = normalized.surname
-            entry.displayName = normalized.displayName
-        end
-    end
-
-    local cleanFirst = (entry.firstName or ""):gsub('["\\%*%?%c|]', "")
+    local queryParsed = Compat.ParseCharacterName and Compat.ParseCharacterName(queryDisplay)
+    local cleanFirst = ((queryParsed and queryParsed.firstName) or fallbackFirst or ""):gsub('["\\%*%?%c|]', "")
     if #cleanFirst < 2 then
         return false, "invalid"
     end
 
-    local rawFull = (entry.surname and entry.surname ~= "") and (cleanFirst .. " " .. entry.surname) or (entry.displayName or cleanFirst)
+    local qSurname = (queryParsed and queryParsed.surname) or fallbackSurname or nil
+    local rawFull = (qSurname and qSurname ~= "") and (cleanFirst .. " " .. qSurname) or (queryDisplay or cleanFirst)
     local cleanQuery = rawFull:gsub('["\\%*%?%c|]', "")
     if #cleanQuery < 2 then
         cleanQuery = cleanFirst
@@ -1402,8 +1564,9 @@ function Watchlist:CheckEntry(id, silent)
     end
 
     self.pending = {
-        id = entry.id,
-        displayName = entry.displayName,
+        id = targetId,
+        probedAltKey = probedAltKey,
+        displayName = queryDisplay,
         mode = mode,
         prevWhoToUi = prevWhoToUi,
         token = token,
@@ -1425,12 +1588,20 @@ function Watchlist:CheckEntry(id, silent)
         elseif SetWhoToUI then
             pcall(SetWhoToUI, 0)
         end
-        self.chatFilterActive = true
-        AddChatFilter(SystemChatFilter)
     end
+    self.chatFilterActive = true
+    AddChatFilter(SystemChatFilter)
 
     local query = ('n-"%s"'):format(cleanQuery)
     local sentOk = pcall(C_FriendList.SendWho, query)
+    if sentOk then
+        if entry then
+            entry._lastWhoCheckedAt = time()
+        end
+        if ns.Chat and ns.Chat.RecordOutboundOrigin then
+            ns.Chat:RecordOutboundOrigin("WHO", "WHO", cleanQuery, "SocialCentral")
+        end
+    end
     if not sentOk then
         CleanupPending()
         return false, "send_failed"
@@ -1439,7 +1610,7 @@ function Watchlist:CheckEntry(id, silent)
     -- Safety timeout in case server silently throttles the query; back off extra 10s.
     C_Timer.After(3.5, function()
         if Watchlist.pending and Watchlist.pending.token == token then
-            if Watchlist.pending.mode == "chat_filter" and Watchlist.pending.chatMatches and #Watchlist.pending.chatMatches > 0 then
+            if Watchlist.pending.chatMatches and #Watchlist.pending.chatMatches > 0 then
                 Watchlist:FinishChatFilterQuery()
             else
                 local wasSilent = Watchlist.pending.silent
@@ -1460,21 +1631,104 @@ function Watchlist:CheckEntry(id, silent)
     return true
 end
 
+-- Must ONLY be called directly inside a hardware event (button click, slash command, keybind).
+function Watchlist:CheckEntry(id, silent, forceWho)
+    local list = Store:GetWatchlistTable()
+    local entry = list[id]
+    if not entry then return false, "missing" end
+
+    if (not silent or forceWho) and ns.Social and ns.Social.RequestRosters then
+        ns.Social:RequestRosters(true)
+    end
+
+    local socRow = Store.socialByLookup and Store.socialByLookup[entry.id]
+    if (not forceWho) and IsRosterConfirmedOnline(socRow) then
+        local src = (socRow.bnetOnline and socRow.bnetState == "wow_forever" and "bnet")
+            or (socRow.friendOnline and "friend")
+            or "guild"
+        Store:SyncWatchlistObservation(entry.displayName, {
+            online = true,
+            level = socRow.level,
+            classFile = socRow.classFile,
+            area = socRow.area,
+            guildName = socRow.guild,
+            guild = socRow.guild,
+            source = src,
+        }, { suppressAlert = true })
+        return true, "social_online"
+    end
+
+    if (not entry.surname or entry.surname == "") and entry.displayName and (entry.displayName:find(" ") or entry.displayName:find("-")) then
+        local normalized = Compat.ParseCharacterName(entry.displayName)
+        if normalized then
+            entry.firstName = normalized.firstName
+            entry.surname = normalized.surname
+            entry.displayName = normalized.displayName
+        end
+    end
+
+    local queryDisplay = entry.displayName
+    local probedAltKey = entry.id
+    if entry.status == "online" and entry.activeAltName and entry.activeAltName ~= "" then
+        queryDisplay = entry.activeAltName
+        probedAltKey = entry.activeAltLookup or entry.id
+    elseif entry.watchAllAlts == true and entry.status ~= "online" and Store and Store.GetAllLinkedCharacters then
+        local linked = Store:GetAllLinkedCharacters(entry.id)
+        if type(linked) == "table" and #linked > 0 then
+            local pool = { { lookupKey = entry.id, displayName = entry.displayName } }
+            for _, altRec in ipairs(linked) do
+                if altRec and altRec.displayName and altRec.lookupKey and altRec.lookupKey ~= entry.id then
+                    pool[#pool + 1] = altRec
+                end
+            end
+            if #pool > 1 then
+                local idx = ((entry._whoAltCursor or 0) % #pool) + 1
+                entry._whoAltCursor = idx
+                queryDisplay = pool[idx].displayName
+                probedAltKey = pool[idx].lookupKey
+            end
+        end
+    end
+
+    local fallbackSurname = (probedAltKey == entry.id) and entry.surname or nil
+    return DispatchHardwareWho(self, entry.id, probedAltKey, queryDisplay, fallbackSurname, entry.firstName, silent, entry)
+end
+
+-- Must ONLY be called directly inside a hardware event (Social / Nearby context click).
+function Watchlist:CheckCharacter(rawName, silent)
+    if type(rawName) ~= "string" or rawName == "" then return false, "invalid" end
+    if ns.Social and ns.Social.RequestRosters then
+        ns.Social:RequestRosters(true)
+    end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(rawName)
+    local lookupKey = parsed and parsed.lookupKey or nil
+    local existing = lookupKey and self.GetEntry and self:GetEntry(lookupKey) or nil
+    if existing then
+        return self:CheckEntry(existing.id, silent, true)
+    end
+    local disp = (parsed and parsed.displayName) or rawName
+    return DispatchHardwareWho(self, lookupKey or disp:lower(), lookupKey, disp, parsed and parsed.surname or nil, parsed and parsed.firstName or nil, silent, nil)
+end
+
 -- Expected Information Gain (VOI) priority for /who checks (unknown & active favorites first, O(M) single pass).
 local function ComputeWatchlistCheckPriority(entry, now)
-    if type(entry) ~= "table" then return -1 end
+    if type(entry) ~= "table" or entry.isSessionBNet then return -1 end
     local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
-    if socRow and socRow.online == true then
+    if IsRosterConfirmedOnline(socRow) then
+        return -1
+    end
+    if entry.activeAltLookup and Store and Store.socialByLookup and IsRosterConfirmedOnline(Store.socialByLookup[entry.activeAltLookup]) then
         return -1
     end
     local dirRow = Store and Store.socialDirectoryByLookup and entry.id and Store.socialDirectoryByLookup[entry.id]
-    local isPassiveKnown = (socRow ~= nil)
-        or (dirRow ~= nil and dirRow.sources ~= nil and (dirRow.sources.friend == true or dirRow.sources.bnet == true or dirRow.sources.guild == true))
+    -- Battle.net being offline never confirms a character is offline in WoW (players may Appear Offline / Invisible on BNet).
+    local isPassiveKnown = (dirRow ~= nil and dirRow.sources ~= nil and (dirRow.sources.friend == true or dirRow.sources.guild == true))
     local age = entry.lastChecked and math.max(0, now - entry.lastChecked) or 999999
     local isUnknown = (entry.status == "unknown")
+    local needsEnrich = (entry.status == "online" and entry._needsWhoEnrich == true)
     local isUnverifiedOnline = (entry.status == "online")
-    if not isUnknown then
-        local minAge = isUnverifiedOnline and 20 or (isPassiveKnown and 120 or 45)
+    if not isUnknown and not needsEnrich then
+        local minAge = isUnverifiedOnline and 20 or (isPassiveKnown and 120 or 30)
         if age < minAge then
             return -1
         end
@@ -1484,12 +1738,17 @@ local function ComputeWatchlistCheckPriority(entry, now)
     local activePrior = 1.0 + (0.5 / (1 + (seenAge / 86400)))
     local passivePenalty = isPassiveKnown and 0.15 or 1.0
     local base = isUnknown and (1000000 + (entry._expiredOnline and 50000 or 0) + math.min(age, 86400))
-        or (isUnverifiedOnline and (50000 + math.min(age, 86400)) or (math.min(age, 86400) * 0.2))
+        or (needsEnrich and (850000 + math.min(age, 86400)))
+        or (isUnverifiedOnline and (50000 + math.min(age, 86400)) or (math.min(age, 86400) * 0.35))
     return base * favMult * activePrior * passivePenalty
 end
 
--- Picks the entry needing verification most urgently, skipping Friends/Guildmates already confirmed online in Social.
+-- Picks the entry needing verification most urgently; when all entries are online in Social/Friends/Guild,
+-- refreshes rosters and runs a safe /who on the stalest online character so levels/zones stay accurate.
 function Watchlist:CheckNext(silent)
+    if ns.Social and ns.Social.RequestRosters then
+        ns.Social:RequestRosters(true)
+    end
     if ns.Social and ns.Social.Scan then
         pcall(ns.Social.Scan, ns.Social)
     end
@@ -1505,27 +1764,46 @@ function Watchlist:CheckNext(silent)
     local needCount = 0
     local best, bestPrio = nil, -1
     local oldestFallback, oldestChecked, oldestAdded = nil, nil, nil
+    local oldestOnlineFallback, oldestOnlineWhoAt, oldestOnlineChecked, oldestOnlineAdded = nil, nil, nil, nil
     for _, entry in ipairs(entries) do
-        local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
-        local isPassiveOnline = (socRow ~= nil and socRow.online == true)
-        if not isPassiveOnline then
-            needCount = needCount + 1
-            local prio = ComputeWatchlistCheckPriority(entry, now)
-            if prio > bestPrio then
-                bestPrio = prio
-                best = entry
-            end
-            local lc = entry.lastChecked or 0
-            local aa = entry.addedAt or 0
-            if (not oldestFallback) or lc < oldestChecked or (lc == oldestChecked and aa < oldestAdded) then
-                oldestFallback = entry
-                oldestChecked = lc
-                oldestAdded = aa
+        if not entry.isSessionBNet then
+            local socRow = Store and Store.socialByLookup and entry.id and Store.socialByLookup[entry.id]
+            local altRow = (entry.activeAltLookup and Store and Store.socialByLookup) and Store.socialByLookup[entry.activeAltLookup] or nil
+            local isPassiveOnline = IsRosterConfirmedOnline(socRow) or IsRosterConfirmedOnline(altRow)
+            if not isPassiveOnline then
+                needCount = needCount + 1
+                local prio = ComputeWatchlistCheckPriority(entry, now)
+                if prio > bestPrio then
+                    bestPrio = prio
+                    best = entry
+                end
+                local lc = entry.lastChecked or 0
+                local aa = entry.addedAt or 0
+                if (not oldestFallback) or lc < oldestChecked or (lc == oldestChecked and aa < oldestAdded) then
+                    oldestFallback = entry
+                    oldestChecked = lc
+                    oldestAdded = aa
+                end
+            else
+                local wAt = entry._lastWhoCheckedAt or 0
+                local lc = entry.lastChecked or 0
+                local aa = entry.addedAt or 0
+                if (not oldestOnlineFallback) or wAt < oldestOnlineWhoAt
+                    or (wAt == oldestOnlineWhoAt and (lc < oldestOnlineChecked or (lc == oldestOnlineChecked and aa < oldestOnlineAdded)))
+                then
+                    oldestOnlineFallback = entry
+                    oldestOnlineWhoAt = wAt
+                    oldestOnlineChecked = lc
+                    oldestOnlineAdded = aa
+                end
             end
         end
     end
 
     if needCount == 0 then
+        if oldestOnlineFallback then
+            return self:CheckEntry(oldestOnlineFallback.id, silent, true)
+        end
         if not silent then
             ns:Print(L["All %d Watchlist players are already confirmed online via Friends or Guild."]:format(#entries))
         end
@@ -1534,7 +1812,7 @@ function Watchlist:CheckNext(silent)
     end
 
     local chosen = best or oldestFallback
-    return chosen and self:CheckEntry(chosen.id, silent) or false
+    return chosen and self:CheckEntry(chosen.id, silent, true) or false
 end
 
 -- Automatically checks the next non-friend/non-guild (or stale) Watchlist entry from a genuine hardware click.
@@ -1642,6 +1920,36 @@ local function OnWhoListUpdate()
                     guild = Safe.String(guild) or "",
                 })
             end
+        end
+    end
+
+    if Watchlist.pending and type(Watchlist.pending.chatMatches) == "table" then
+        for _, cm in ipairs(Watchlist.pending.chatMatches) do
+            if cm and cm.parsed then
+                local seen = false
+                for _, m in ipairs(matches) do
+                    if m.parsed and m.parsed.lookupKey == cm.parsed.lookupKey then
+                        seen = true
+                        if (not m.level or m.level <= 0) and cm.level then m.level = cm.level end
+                        if not m.classFile and cm.classFile then m.classFile = cm.classFile end
+                        if (not m.area or m.area == "") and cm.area then m.area = cm.area end
+                        if (not m.guild or m.guild == "") and cm.guild then m.guild = cm.guild end
+                        break
+                    end
+                end
+                if not seen then
+                    matches[#matches + 1] = {
+                        parsed = cm.parsed,
+                        level = cm.level,
+                        classFile = cm.classFile,
+                        area = cm.area,
+                        guild = cm.guild or "",
+                    }
+                end
+            end
+        end
+        if #matches > totalCount then
+            totalCount = #matches
         end
     end
 
@@ -1792,6 +2100,23 @@ local function AppendPlayerTooltipLines(tooltip, isLegacyHook)
     end
     if activeLfg then
         tooltip:AddLine("|cff3fb950[" .. tostring(activeLfg.mode or "LFG") .. "]|r " .. tostring(activeLfg.activity or L["Group"]), 0.35, 0.92, 0.55, true)
+    end
+    local socProf = (lookup and ns.Clan and ns.Clan.GetPlayerSocialProfile) and ns.Clan:GetPlayerSocialProfile(lookup) or nil
+    if socProf then
+        local spParts = {}
+        if socProf.role and socProf.role ~= "" then spParts[#spParts + 1] = socProf.role end
+        if socProf.availability and socProf.availability ~= "" then
+            local availLabels = { OPEN = L["Open to Groups"], QUEST = L["Questing"], BUSY = L["Busy"] }
+            spParts[#spParts + 1] = availLabels[socProf.availability] or socProf.availability
+        end
+        if socProf.langs and socProf.langs ~= "" then spParts[#spParts + 1] = socProf.langs end
+        if socProf.hours and socProf.hours ~= "" then spParts[#spParts + 1] = socProf.hours end
+        if #spParts > 0 then
+            tooltip:AddLine("|cff6ec1e4" .. L["Social Profile"] .. ":|r " .. table.concat(spParts, " · "), 0.85, 0.92, 0.98, true)
+        end
+        if socProf.bio and socProf.bio ~= "" then
+            tooltip:AddLine("  " .. socProf.bio, 0.78, 0.84, 0.90, true)
+        end
     end
 
     if isLegacyHook then
@@ -2168,6 +2493,13 @@ function Watchlist:NormalizeStoredEntries()
                 end
             elseif entry.status == "offline" then
                 entry._expiredOnline = nil
+                local lastCheck = entry.lastChecked or 0
+                if entry.source == "bnet" or (now - lastCheck) >= INIT_STALE_ONLINE_SECONDS then
+                    entry.status = "unknown"
+                    if entry.source == "bnet" or entry.source == "friend" or entry.source == "guild" then
+                        entry.source = nil
+                    end
+                end
             end
         end
     end

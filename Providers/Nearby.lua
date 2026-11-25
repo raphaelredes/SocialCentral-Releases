@@ -81,8 +81,16 @@ end
 
 local function RecordSighting(rawName, guid, level, classFile, area, source, guild)
     if not rawName or Compat.IsMe(rawName, guid) then return end
-    local parsed = Compat.ParseCharacterName(rawName)
-    if not parsed then return end
+    local lKey, fName, dName, sName
+    if Compat.ParseCharacterFields then
+        lKey, fName, dName, sName = Compat.ParseCharacterFields(rawName)
+    else
+        local p = Compat.ParseCharacterName(rawName)
+        if p then
+            lKey, fName, dName, sName = p.lookupKey, p.firstName, p.displayName, p.surname
+        end
+    end
+    if not lKey then return end
 
     local now = time()
     if (now - lastAutoPrune) >= 60 then
@@ -95,13 +103,13 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     local upgraded
     if guid then
         local prevRow = nearbyByGuid[guid]
-        if prevRow and prevRow.key and prevRow.key ~= parsed.lookupKey and Store.nearby[prevRow.key] == prevRow then
+        if prevRow and prevRow.key and prevRow.key ~= lKey and Store.nearby[prevRow.key] == prevRow then
             local prevHasSurname = type(prevRow.displayName) == "string" and prevRow.displayName:find("%s") ~= nil
             local prevFirst = prevRow.displayName and prevRow.displayName:match("^([^%s%-]+)")
-            if (not parsed.surname) and prevHasSurname and prevFirst and parsed.firstName and prevFirst:lower() == parsed.firstName:lower() then
-                local prevParsed = Compat.ParseCharacterName(prevRow.displayName)
-                if prevParsed then
-                    parsed = prevParsed
+            if (not sName) and prevHasSurname and prevFirst and fName and prevFirst:lower() == fName:lower() then
+                local pLk, pFn, pDn, pSn = Compat.ParseCharacterFields(prevRow.displayName)
+                if pLk then
+                    lKey, fName, dName, sName = pLk, pFn, pDn, pSn
                 end
             else
                 upgraded = prevRow
@@ -112,7 +120,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
             end
         end
     end
-    local firstLowerKey = parsed.surname and parsed.firstName and parsed.firstName:lower() or nil
+    local firstLowerKey = sName and fName and fName:lower() or nil
     if firstLowerKey and Store.nearby[firstLowerKey] then
         local oldRow = Store.nearby[firstLowerKey]
         if not (guid and oldRow.guid and oldRow.guid ~= guid) then
@@ -126,11 +134,11 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         end
     end
 
-    if guid and parsed and parsed.surname and Compat.CacheForeverFullName then
-        Compat.CacheForeverFullName(guid, parsed.displayName, parsed.firstName)
+    if guid and sName and Compat.CacheForeverFullName then
+        Compat.CacheForeverFullName(guid, dName, fName)
     end
 
-    local existing = Store.nearby[parsed.lookupKey] or upgraded
+    local existing = Store.nearby[lKey] or upgraded
     if not existing then
         if not nearbyCountSynced then
             SyncNearbyCount()
@@ -181,7 +189,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         if guid and sRow.guid then
             return sRow.guid == guid
         end
-        return sRow.lookupKey == parsed.lookupKey
+        return sRow.lookupKey == lKey
     end
 
     -- Fallback class, guild, and level resolution from existing row or a single Store.social pass
@@ -219,7 +227,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         if Store.socialByGuid or Store.socialByLookup then
             local matchedGuid = guid and Store.socialByGuid and Store.socialByGuid[guid]
             if not ApplySocialRow(matchedGuid) then
-                local matchedKey = Store.socialByLookup and Store.socialByLookup[parsed.lookupKey]
+                local matchedKey = Store.socialByLookup and Store.socialByLookup[lKey]
                 if matchedKey ~= matchedGuid then
                     ApplySocialRow(matchedKey)
                 end
@@ -234,12 +242,12 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     end
 
     local row = existing or {
-        key = parsed.lookupKey,
-        displayName = parsed.displayName,
+        key = lKey,
+        displayName = dName,
     }
-    row.key = parsed.lookupKey
+    row.key = lKey
 
-    row.displayName = parsed.displayName
+    row.displayName = dName
     row.guid = guid or row.guid
     if level and level > 0 then row.level = level end
     if classFile then row.classFile = classFile end
@@ -247,15 +255,26 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     if guild and guild ~= "" then row.guild = guild end
     row.source = source or row.source
     row.lastSeen = now
-    if nearbyCountSynced and Store.nearby[parsed.lookupKey] == nil then
+    if nearbyCountSynced and Store.nearby[lKey] == nil then
         nearbyCount = nearbyCount + 1
     end
-    Store.nearby[parsed.lookupKey] = row
+    Store.nearby[lKey] = row
     if row.guid then
         nearbyByGuid[row.guid] = row
     end
 
-    Store:SyncWatchlistObservation(parsed.displayName, {
+    if row.level and row.level > 0 and Store.RecordLiveUnitObservation then
+        Store:RecordLiveUnitObservation(dName, {
+            guid = row.guid,
+            level = row.level,
+            classFile = row.classFile,
+            area = row.area,
+            guild = row.guild,
+            source = source or "nearby",
+        })
+    end
+
+    Store:SyncWatchlistObservation(dName, {
         online = true,
         guid = row.guid,
         source = source or "nearby",
@@ -268,7 +287,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
     QueueEmit()
 end
 
-local function InspectUnit(unit, source, fromTicker)
+local function InspectUnit(unit, source, fromTicker, bypassCooldown)
     if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then return end
     if not unit then return end
     local exists = Safe.Value(Safe.Call(UnitExists, unit))
@@ -331,7 +350,7 @@ local function InspectUnit(unit, source, fromTicker)
     local isDirectFocus = (unit == "target" or unit == "focus")
     local uiOpen = IsMainWindowOpen()
     local minCooldown = (not uiOpen and not isDirectFocus) and 12.0 or (fromTicker and 3.5 or (isDirectFocus and 0.75 or 2.0))
-    if guid and nearbyInspectCooldown[guid] and nowClock < nearbyInspectCooldown[guid] then
+    if guid and (not bypassCooldown) and nearbyInspectCooldown[guid] and nowClock < nearbyInspectCooldown[guid] then
         -- Allow first-time explicit target/focus selection immediately while throttling repeats.
         if not (isDirectFocus and not nearbyByGuid[guid]) then
             return
@@ -392,16 +411,28 @@ local function InspectUnit(unit, source, fromTicker)
 
     if source == "group" and not isPhysicalGroupNear then
         local parsed = Compat.ParseCharacterName(name)
-        if parsed and Store and Store.SyncWatchlistObservation then
-            Store:SyncWatchlistObservation(parsed.displayName, {
-                online = true,
-                guid = guid,
-                source = "group",
-                level = level,
-                classFile = classFile,
-                area = area,
-                guild = guild,
-            })
+        if parsed then
+            if level and level > 0 and Store and Store.RecordLiveUnitObservation then
+                Store:RecordLiveUnitObservation(parsed.displayName, {
+                    guid = guid,
+                    level = level,
+                    classFile = classFile,
+                    area = area,
+                    guild = guild,
+                    source = "group",
+                })
+            end
+            if Store and Store.SyncWatchlistObservation then
+                Store:SyncWatchlistObservation(parsed.displayName, {
+                    online = true,
+                    guid = guid,
+                    source = "group",
+                    level = level,
+                    classFile = classFile,
+                    area = area,
+                    guild = guild,
+                })
+            end
         end
         return
     end
@@ -839,6 +870,15 @@ function Nearby:Init()
         if UnitExists and UnitExists(unit .. "target") then
             InspectUnit(unit .. "target", "nearby")
         end
+    end)
+    ns.RegisterEvent(self, "UNIT_LEVEL", function(_, _, unit)
+        if not unit or unit == "player" then return end
+        local isGroupUnit = unit:match("^party") ~= nil or unit:match("^raid") ~= nil
+        local isCore = isGroupUnit or unit == "target" or unit == "focus" or unit == "mouseover"
+        if not isCore and ((InCombatLockdown and InCombatLockdown()) or not IsMainWindowOpen()) then
+            return
+        end
+        InspectUnit(unit, isGroupUnit and "group" or "nearby", false, true)
     end)
     for _, envEv in ipairs({ "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA", "ZONE_CHANGED_INDOORS", "ZONE_CHANGED" }) do
         ns.RegisterEvent(self, envEv, function()

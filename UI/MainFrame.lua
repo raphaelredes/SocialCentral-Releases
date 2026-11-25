@@ -154,6 +154,15 @@ function UI:SetAltsNavigation(opts)
     self:QueueRefresh(true)
 end
 
+function UI:SetChatNavigation(opts)
+    if type(opts) ~= "table" then return end
+    UI._pendingChatNav = opts
+    if chatPanel and chatPanel.ApplyNavigation and frame and frame:IsShown() and activeTab == "chat" then
+        chatPanel:ApplyNavigation(opts)
+    end
+    self:QueueRefresh(true)
+end
+
 function UI:SetClanProfessionQuery(q)
     local clean = Compat.CleanInput(q or "") or ""
     clanProfQuery = clean
@@ -310,11 +319,11 @@ local function ClearSearchFilter()
     end
 end
 
-local function AddHelp(parent, anchorTo, title, whatText, howText, point, relPoint, xOff, yOff)
+local function AddHelp(parent, anchorTo, title, whatText, howText, point, relPoint, xOff, yOff, opts)
     if not (Theme and Theme.CreateHelpButton) then
         return nil
     end
-    local btn = Theme:CreateHelpButton(parent, title, whatText, howText, 18)
+    local btn = Theme:CreateHelpButton(parent, title, whatText, howText, 18, opts)
     btn:SetPoint(point or "LEFT", anchorTo, relPoint or "RIGHT", xOff or 6, yOff or 0)
     return btn
 end
@@ -371,6 +380,9 @@ local function EnsureModal()
         end
         Theme:ApplyBackdrop(modalFrame, "window")
         Theme:StyleButton(modalFrame.topCloseBtn, "default")
+        if modalFrame.helpBtn then
+            Theme:StyleButton(modalFrame.helpBtn, "ghost")
+        end
         Theme:StyleButton(modalFrame.btnSave, "primary")
         Theme:StyleButton(modalFrame.btnCancel, "default")
         if Theme and Theme.SyncSubtreeLayers then
@@ -406,15 +418,6 @@ local function EnsureModal()
         end
     end
 
-    m.title = m:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    m.title:SetPoint("TOPLEFT", 16, -14)
-    m.title:SetPoint("TOPRIGHT", -42, -14)
-    m.title:SetJustifyH("LEFT")
-    m.title:SetWordWrap(true)
-    if Theme.DecorateSectionHeader then
-        Theme:DecorateSectionHeader(m, m.title, 360)
-    end
-
     local topCloseBtn = Theme:CreateButton(m, 22, 20, "X", "default")
     topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
     topCloseBtn:SetScript("OnClick", function()
@@ -422,6 +425,28 @@ local function EnsureModal()
         m:Hide()
     end)
     m.topCloseBtn = topCloseBtn
+
+    m.helpBtn = AddHelp(
+        m,
+        topCloseBtn,
+        L["Help: Quick Input"],
+        L["Lets you view, edit, or copy text directly from SocialCentral."],
+        L["Type or press Ctrl+C in the field below, then use the button at the bottom right."],
+        "RIGHT",
+        "LEFT",
+        -4,
+        0,
+        { target = m }
+    )
+
+    m.title = m:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    m.title:SetPoint("TOPLEFT", 16, -14)
+    m.title:SetPoint("TOPRIGHT", m.helpBtn or topCloseBtn, "LEFT", -6, 0)
+    m.title:SetJustifyH("LEFT")
+    m.title:SetWordWrap(true)
+    if Theme.DecorateSectionHeader then
+        Theme:DecorateSectionHeader(m, m.title, 332)
+    end
 
     local input = Theme:CreateEditBox(m, { height = 24, maxLetters = 120 })
     input:SetPoint("TOPLEFT", m, "TOPLEFT", 16, -56)
@@ -458,6 +483,15 @@ end
 
 local function OpenNoteModal(entry)
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Watchlist Character Note"],
+            L["Saves a private local note for this player inside your SocialCentral Watchlist so you always remember why you added them."],
+            L["Type any reminder (role, craft, trade, run notes) and click Save."],
+            { target = m }
+        )
+    end
     m.title:SetText(L["Enter a character note for %s:"]:format(entry.displayName or ""))
     m.input:SetText(entry.note or "")
     m.btnSave:Show()
@@ -480,6 +514,15 @@ end
 
 local function OpenGroupModal(entry)
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Watchlist Group Tag"],
+            L["Assigns a custom category tag so you can organize and filter Watchlist players by team, raid, or activity."],
+            L["Enter a tag name like Raid, Dungeons, or Crafters and click Save. Clear the field to remove the tag."],
+            { target = m }
+        )
+    end
     m.title:SetText(L["Enter a group tag for %s (e.g. Raid, M+, Friends):"]:format(entry.displayName or ""))
     m.input:SetText(entry.group or "")
     m.btnSave:Show()
@@ -502,6 +545,15 @@ end
 
 local function OpenCopyModal(name, customTitle, noteText)
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Copy Text"],
+            L["Highlights text or a safe game command so you can copy it cleanly without WoW blocking addon actions."],
+            L["Press Ctrl+C while the text is selected, then paste it into chat or outside the game with Ctrl+V."],
+            { target = m }
+        )
+    end
     local head = customTitle or (L["Copy Name"] .. " (Ctrl+C)")
     if noteText and noteText ~= "" then
         m:SetHeight(196)
@@ -568,9 +620,11 @@ function UI:OpenConfirmModal(opts)
         m.desc:SetWordWrap(true)
 
         m.btnConfirm = Theme:CreateButton(m, 108, 24, L["Remove"], "danger")
+        Theme:AutoFitButton(m.btnConfirm, 96, 16, 150)
         m.btnConfirm:SetPoint("BOTTOMRIGHT", -16, 14)
 
         m.btnCancel = Theme:CreateButton(m, 92, 24, L["Cancel"], "default")
+        Theme:AutoFitButton(m.btnCancel, 84, 14, 136)
         m.btnCancel:SetPoint("RIGHT", m.btnConfirm, "LEFT", -8, 0)
         m.btnCancel:SetScript("OnClick", function() m:Hide() end)
 
@@ -763,6 +817,15 @@ end
 
 local function OpenAddFriendModal()
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Add WoW Friend"],
+            L["Adds a same-faction character directly to your official WoW Friends list (pre-filled if you currently target a friendly player)."],
+            L["Enter the character name (including two-word names when applicable) and click Add. Unavailable during combat."],
+            { target = m }
+        )
+    end
     m.title:SetText(L["Add WoW Character Friend (Name or Name Surname):"])
     local prefill = ""
     if UnitExists and UnitExists("target") and UnitIsPlayer and ns.Safe and ns.Safe.Bool(ns.Safe.Call(UnitIsPlayer, "target")) == true then
@@ -805,6 +868,15 @@ local function OpenNativeFriendNoteModal(item)
     if not isChar and not isBNet then return end
 
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Blizzard Friend Note"],
+            L["Updates the official note stored on your WoW or Battle.net Friends list for this contact."],
+            L["Type the new note and click Save. Unavailable while you are in combat."],
+            { target = m }
+        )
+    end
     local shownName = item.displayName or item.bnetName or "?"
     if isChar then
         m.title:SetText(L["Edit Blizzard Friend Note for %s:"]:format(shownName))
@@ -843,6 +915,15 @@ local function OpenRemoveFriendConfirmModal(item)
     if not targetName or targetName == "" then return end
 
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Remove WoW Friend"],
+            L["Asks for confirmation before removing this character from your official WoW Friends list."],
+            L["Click Remove to confirm or Cancel to keep this friend. Local SocialCentral notes/aliases stay safe unless you remove them too."],
+            { target = m }
+        )
+    end
     m:SetHeight(148)
     m.title:SetText(L["Remove %s from your WoW Character Friends list?"]:format(targetName))
     m.input:ClearFocus()
@@ -894,6 +975,15 @@ local ROLE_LABELS = {
 
 local function OpenClanNoteModal(currentTag, currentNote)
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Clan Status Note"],
+            L["Adds an optional short note next to your current Guild Hub status (such as Looking for Tank or Crafting Enchants)."],
+            L["Write a brief message and click Save to share it with online guildmates using Guild Sync."],
+            { target = m }
+        )
+    end
     Theme:ApplyBackdrop(m, "window")
     m.title:SetText(L["Set Clan Status Note (optional):"])
     m.input:SetText(currentNote or "")
@@ -947,6 +1037,15 @@ end
 
 local function OpenMotdModal()
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Guild Message of the Day"],
+            L["Updates your Guild's official Message of the Day shown whenever guild members log in."],
+            L["Edit the announcement text below and click Save (requires guild MOTD permission)."],
+            { target = m }
+        )
+    end
     Theme:ApplyBackdrop(m, "window")
     m.title:SetText(L["Edit Guild Message of the Day (MOTD):"])
     local info = ns.Store and ns.Store.guildInfo
@@ -975,6 +1074,15 @@ local function OpenGuildInviteModal()
         return
     end
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Safe Guild Invite"],
+            L["Prepares a safe /ginvite chat command (pre-filled from your current target if friendly and not in your guild)."],
+            L["Confirm the player name and click Generate /ginvite, then press Ctrl+C and paste into WoW chat."],
+            { target = m }
+        )
+    end
     Theme:ApplyBackdrop(m, "window")
     m.title:SetText(L["Invite to Guild (Safe /ginvite Command):"])
     local prefill = ""
@@ -1023,6 +1131,15 @@ end
 local function OpenPublicNoteModal(memberItem)
     if not memberItem or not memberItem.lookupKey then return end
     local m = EnsureModal()
+    if Theme.SetHelpButtonInfo then
+        Theme:SetHelpButtonInfo(
+            m.helpBtn,
+            L["Help: Guild Public Note"],
+            L["Edits this member's official Guild Public Note (visible to the entire guild, up to 31 characters)."],
+            L["Enter the note and click Save (requires guild permission to edit public notes)."],
+            { target = m }
+        )
+    end
     Theme:ApplyBackdrop(m, "window")
     m.title:SetText(L["Edit Guild Public Note (%s):"]:format(memberItem.displayName or "?"))
     m.input:SetText(memberItem.note or "")
@@ -1080,6 +1197,20 @@ local function OpenEventModal(prefillTitle, prefillWhen, prefillCat)
             m:Hide()
         end)
         m.topCloseBtn = topCloseBtn
+
+        m.helpBtn = AddHelp(
+            m,
+            topCloseBtn,
+            L["Help: Create Clan Event Call"],
+            L["Schedules a Guild or Allied Clan event with presets, role slots (Tank/Healer/DPS), and optional in-game Blizzard Guild Calendar sync."],
+            L["Pick a category or quick preset, enter title & date/time, set slot caps or Alliance sharing, and click Publish Event."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or topCloseBtn, "LEFT", -6, 0)
 
         local catLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         catLbl:SetPoint("TOPLEFT", 16, -42)
@@ -1420,7 +1551,7 @@ end
 local function OpenClanInfoModal()
     if not clanInfoModalFrame then
         local m = CreateFrame("Frame", "SocialCentralClanInfoModal", UIParent, "BackdropTemplate")
-        m:SetSize(530, 424)
+        m:SetSize(590, 424)
         m:SetPoint("CENTER")
         PrepareTopOverlayModal(m, 840)
         if m.SetClipsChildren then m:SetClipsChildren(false) end
@@ -1444,6 +1575,20 @@ local function OpenClanInfoModal()
             m:Hide()
         end)
         m.topCloseBtn = topCloseBtn
+
+        m.helpBtn = AddHelp(
+            m,
+            topCloseBtn,
+            L["Help: Clan Management & Info"],
+            L["Stores your guild's shared identity card — focus, raid schedule, loot & comms rules, contacts, and who can edit or announce diplomacy."],
+            L["Fill out your guild details and click Save to sync them with guildmates who have Guild Sync active."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or topCloseBtn, "LEFT", -6, 0)
 
         local metaLbl = m:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         metaLbl:SetPoint("TOPLEFT", 16, -40)
@@ -1535,6 +1680,7 @@ local function OpenClanInfoModal()
         m.permNote = permNote
 
         local btnCancel = Theme:CreateButton(m, 88, 26, L["Close"], "default")
+        Theme:AutoFitButton(btnCancel, 80, 14, 130)
         btnCancel:SetPoint("BOTTOMRIGHT", -16, 14)
         btnCancel:SetScript("OnClick", function() m:Hide() end)
         m.btnCancel = btnCancel
@@ -1561,6 +1707,17 @@ local function OpenClanInfoModal()
         end)
         m.btnSave = btnSave
 
+        local btnRecruit = Theme:CreateButton(m, 128, 26, L["Recruitment..."], "default")
+        Theme:AutoFitButton(btnRecruit, 108, 14, 168)
+        btnRecruit:SetPoint("BOTTOMLEFT", 16, 14)
+        btnRecruit:SetScript("OnClick", function()
+            m:Hide()
+            if UI.OpenGuildRecruitmentModal then
+                UI:OpenGuildRecruitmentModal()
+            end
+        end)
+        m.btnRecruit = btnRecruit
+
         clanInfoModalFrame = m
     end
 
@@ -1579,6 +1736,7 @@ local function OpenClanInfoModal()
     PrepareTopOverlayModal(clanInfoModalFrame, 840)
     Theme:ApplyBackdrop(clanInfoModalFrame, "window")
     Theme:StyleButton(clanInfoModalFrame.topCloseBtn, "default")
+    if clanInfoModalFrame.helpBtn then Theme:StyleButton(clanInfoModalFrame.helpBtn, "ghost") end
     Theme:StyleButton(clanInfoModalFrame.btnCancel, "default")
     Theme:StyleButton(clanInfoModalFrame.btnSync, "default")
     Theme:StyleButton(clanInfoModalFrame.btnSave, "primary")
@@ -1634,6 +1792,20 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
             m:Hide()
         end)
         m.topCloseBtn = topCloseBtn
+
+        m.helpBtn = AddHelp(
+            m,
+            topCloseBtn,
+            L["Help: Guild Diplomacy Registry"],
+            L["Marks another guild as Ally, Neutral, or Enemy so Spotter HUD alerts, Target Radar, and optional shared Allied Calendars know how to react."],
+            L["Type the exact guild name (or click + Target Guild), choose Ally/Neutral/Enemy, add a reason, and click Save."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or topCloseBtn, "LEFT", -6, 0)
 
         local guildLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         guildLbl:SetPoint("TOPLEFT", 16, -46)
@@ -1734,6 +1906,7 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
         m.tipFs = tipFs
 
         local btnCancel = Theme:CreateButton(m, 88, 26, L["Cancel"], "default")
+        Theme:AutoFitButton(btnCancel, 80, 14, 130)
         btnCancel:SetPoint("BOTTOMRIGHT", -16, 14)
         btnCancel:SetScript("OnClick", function() m:Hide() end)
         m.btnCancel = btnCancel
@@ -1778,6 +1951,7 @@ local function OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
     PrepareTopOverlayModal(diplomacyModalFrame, 840)
     Theme:ApplyBackdrop(diplomacyModalFrame, "window")
     Theme:StyleButton(diplomacyModalFrame.topCloseBtn, "default")
+    if diplomacyModalFrame.helpBtn then Theme:StyleButton(diplomacyModalFrame.helpBtn, "ghost") end
     Theme:StyleButton(diplomacyModalFrame.btnCancel, "default")
     Theme:StyleButton(diplomacyModalFrame.btnSave, "primary")
     Theme:StyleButton(diplomacyModalFrame.tgtGuildBtn, "default")
@@ -1824,6 +1998,626 @@ end
 
 function UI:OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
     OpenDiplomacyModal(prefillGuild, prefillStance, prefillFaction)
+end
+
+UI._modals = UI._modals or {}
+
+function UI:OpenClanAbsenceModal()
+    local f = UI._modals.clanAbsence
+    if not f then
+        local m = CreateFrame("Frame", "SocialCentralClanAbsenceModal", UIParent, "BackdropTemplate")
+        m:SetSize(380, 210)
+        m:SetPoint("CENTER")
+        PrepareTopOverlayModal(m, 845)
+        Theme:MakeMovable(m, { key = "modal_clan_absence" })
+        table.insert(UISpecialFrames, "SocialCentralClanAbsenceModal")
+
+        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", 16, -14)
+        title:SetText(L["Guild Absence / Vacation"])
+
+        local closeX = Theme:CreateButton(m, 22, 20, "X", "default")
+        closeX:SetPoint("TOPRIGHT", -10, -10)
+        closeX:SetScript("OnClick", function() m:Hide() end)
+        m.closeX = closeX
+
+        m.helpBtn = AddHelp(
+            m,
+            closeX,
+            L["Help: Guild Absence / Vacation"],
+            L["Lets guild officers and members know when you will be away and your expected return date so you are not marked inactive."],
+            L["Enter your return date and optional reason, then click Save (synced across Guild Hub). Use Clear when you are back."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or closeX, "LEFT", -6, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+
+        local dateLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        dateLbl:SetPoint("TOPLEFT", 16, -46)
+        dateLbl:SetText(L["Return Date (e.g. 15/12):"])
+        local dateIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 18, placeholder = L["e.g. 15/12 or Next Week"] })
+        dateIn:SetPoint("TOPLEFT", 16, -64)
+        dateIn:SetPoint("TOPRIGHT", -16, -64)
+        m.dateIn = dateIn
+
+        local reasonLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        reasonLbl:SetPoint("TOPLEFT", 16, -98)
+        reasonLbl:SetText(L["Reason (optional):"])
+        local reasonIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 48, placeholder = L["e.g. Traveling, Work, Exam week"] })
+        reasonIn:SetPoint("TOPLEFT", 16, -116)
+        reasonIn:SetPoint("TOPRIGHT", -16, -116)
+        m.reasonIn = reasonIn
+
+        local btnCancel = Theme:CreateButton(m, 80, 24, L["Close"], "default")
+        Theme:AutoFitButton(btnCancel, 76, 14, 126)
+        btnCancel:SetPoint("BOTTOMRIGHT", -16, 12)
+        btnCancel:SetScript("OnClick", function() m:Hide() end)
+        m.btnCancel = btnCancel
+
+        local btnClear = Theme:CreateButton(m, 96, 24, L["Clear"], "danger")
+        Theme:AutoFitButton(btnClear, 84, 14, 136)
+        btnClear:SetPoint("BOTTOMLEFT", 16, 12)
+        btnClear:SetScript("OnClick", function()
+            if ns.Clan and ns.Clan.ClearMyAbsence then
+                ns.Clan:ClearMyAbsence()
+            end
+            m:Hide()
+        end)
+        m.btnClear = btnClear
+
+        local btnSave = Theme:CreateButton(m, 110, 24, L["Save"], "primary")
+        btnSave:SetPoint("RIGHT", btnCancel, "LEFT", -8, 0)
+        btnSave:SetScript("OnClick", function()
+            if ns.Clan and ns.Clan.SetMyAbsence then
+                ns.Clan:SetMyAbsence(m.dateIn:GetText(), m.reasonIn:GetText())
+            end
+            m:Hide()
+        end)
+        m.btnSave = btnSave
+
+        UI._modals.clanAbsence = m
+        f = m
+    end
+
+    PrepareTopOverlayModal(f, 845)
+    Theme:ApplyBackdrop(f, "window")
+    Theme:StyleButton(f.closeX, "default")
+    if f.helpBtn then Theme:StyleButton(f.helpBtn, "ghost") end
+    Theme:StyleButton(f.btnCancel, "default")
+    Theme:StyleButton(f.btnClear, "danger")
+    Theme:StyleButton(f.btnSave, "primary")
+
+    local resolvedSelf = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    local selfKey = resolvedSelf and resolvedSelf.lookupKey or nil
+    local curAbs = (selfKey and ns.Clan and ns.Clan.GetMemberAbsence) and ns.Clan:GetMemberAbsence(selfKey) or nil
+    f.dateIn:SetText(curAbs and curAbs.untilDate or "")
+    f.reasonIn:SetText(curAbs and curAbs.reason or "")
+    f.btnClear:SetShown(curAbs ~= nil)
+    f:Show()
+    f:Raise()
+end
+
+function UI:OpenCreateGuildPollModal(onCreated)
+    local f = UI._modals.guildPollCreate
+    if not f then
+        local m = CreateFrame("Frame", "SocialCentralCreatePollModal", UIParent, "BackdropTemplate")
+        m:SetSize(410, 290)
+        m:SetPoint("CENTER")
+        PrepareTopOverlayModal(m, 855)
+        Theme:MakeMovable(m, { key = "modal_create_poll" })
+        table.insert(UISpecialFrames, "SocialCentralCreatePollModal")
+
+        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", 16, -14)
+        title:SetText(L["Create Guild Poll"])
+
+        local closeX = Theme:CreateButton(m, 22, 20, "X", "default")
+        closeX:SetPoint("TOPRIGHT", -10, -10)
+        closeX:SetScript("OnClick", function() m:Hide() end)
+        m.closeX = closeX
+
+        m.helpBtn = AddHelp(
+            m,
+            closeX,
+            L["Help: Create Guild Poll"],
+            L["Creates an interactive multi-choice vote synced with online guildmates using Guild Sync."],
+            L["Write a question, fill between 2 and 5 answer options, and click Create Poll to publish it."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or closeX, "LEFT", -6, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+
+        local qLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        qLbl:SetPoint("TOPLEFT", 16, -44)
+        qLbl:SetText(L["Question / Title:"])
+        local qIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 48, placeholder = L["e.g. Next Raid Night or Loot Rule?"] })
+        qIn:SetPoint("TOPLEFT", 16, -62)
+        qIn:SetPoint("TOPRIGHT", -16, -62)
+        m.qIn = qIn
+
+        local oLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        oLbl:SetPoint("TOPLEFT", 16, -94)
+        oLbl:SetText(L["Options (2 to 5 choices):"])
+        m.optInputs = {}
+        for i = 1, 5 do
+            local oy = -112 - ((i - 1) * 27)
+            local ob = Theme:CreateEditBox(m, { height = 22, maxLetters = 24, placeholder = L["Option %d"]:format(i) })
+            ob:SetPoint("TOPLEFT", 16, oy)
+            ob:SetPoint("TOPRIGHT", -16, oy)
+            m.optInputs[i] = ob
+        end
+
+        local btnCancel = Theme:CreateButton(m, 84, 24, L["Cancel"], "default")
+        Theme:AutoFitButton(btnCancel, 78, 14, 126)
+        btnCancel:SetPoint("BOTTOMRIGHT", -16, 12)
+        btnCancel:SetScript("OnClick", function() m:Hide() end)
+        m.btnCancel = btnCancel
+
+        local btnSave = Theme:CreateButton(m, 124, 24, L["Create Poll"], "primary")
+        Theme:AutoFitButton(btnSave, 112, 16, 175)
+        btnSave:SetPoint("RIGHT", btnCancel, "LEFT", -8, 0)
+        btnSave:SetScript("OnClick", function()
+            local opts = {}
+            for _, ob in ipairs(m.optInputs) do
+                local val = Compat.Trim and Compat.Trim(ob:GetText() or "") or (ob:GetText() or "")
+                if val ~= "" then opts[#opts + 1] = val end
+            end
+            if ns.Clan and ns.Clan.CreatePoll and ns.Clan:CreatePoll(m.qIn:GetText(), opts) then
+                m:Hide()
+                if type(m._onCreated) == "function" then m._onCreated() end
+            end
+        end)
+        m.btnSave = btnSave
+
+        UI._modals.guildPollCreate = m
+        f = m
+    end
+    f._onCreated = onCreated
+    PrepareTopOverlayModal(f, 855)
+    Theme:ApplyBackdrop(f, "window")
+    Theme:StyleButton(f.closeX, "default")
+    if f.helpBtn then Theme:StyleButton(f.helpBtn, "ghost") end
+    Theme:StyleButton(f.btnCancel, "default")
+    Theme:StyleButton(f.btnSave, "primary")
+    f.qIn:SetText("")
+    for _, ob in ipairs(f.optInputs) do ob:SetText("") end
+    f:Show()
+    f:Raise()
+    f.qIn:SetFocus()
+end
+
+function UI:OpenGuildPollsModal()
+    local f = UI._modals.guildPolls
+    if not f then
+        local m = CreateFrame("Frame", "SocialCentralGuildPollsModal", UIParent, "BackdropTemplate")
+        m:SetSize(450, 380)
+        m:SetPoint("CENTER")
+        PrepareTopOverlayModal(m, 845)
+        Theme:MakeMovable(m, { key = "modal_guild_polls" })
+        table.insert(UISpecialFrames, "SocialCentralGuildPollsModal")
+
+        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", 16, -14)
+        title:SetText(L["Guild Polls & Voting"])
+
+        local closeX = Theme:CreateButton(m, 22, 20, "X", "default")
+        closeX:SetPoint("TOPRIGHT", -10, -10)
+        closeX:SetScript("OnClick", function() m:Hide() end)
+        m.closeX = closeX
+
+        m.helpBtn = AddHelp(
+            m,
+            closeX,
+            L["Help: Guild Polls & Voting"],
+            L["Displays active and closed guild polls so members can cast or change their vote directly in-game."],
+            L["Click any option button to vote; officers can also start New Poll or Close / Delete finished votes."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or closeX, "LEFT", -6, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+
+        local scroll = Theme:CreateScrollList(m, 118, function(rowParent, _, rowHeight)
+            local row = CreateFrame("Frame", nil, rowParent, "BackdropTemplate")
+            row:SetHeight(rowHeight)
+            row.titleLbl = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.titleLbl:SetPoint("TOPLEFT", 8, -6)
+            row.titleLbl:SetPoint("TOPRIGHT", -64, -6)
+            row.titleLbl:SetJustifyH("LEFT")
+            row.titleLbl:SetWordWrap(false)
+
+            row.metaLbl = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+            row.metaLbl:SetPoint("TOPRIGHT", -8, -7)
+            row.metaLbl:SetJustifyH("RIGHT")
+
+            row.optBtns = {}
+            for oi = 1, 5 do
+                local ob = Theme:CreateButton(row, 180, 18, "", "default")
+                ob:SetPoint("TOPLEFT", 8 + ((oi % 2 == 1) and 0 or 196), -26 - (math.floor((oi - 1) / 2) * 21))
+                ob:Hide()
+                row.optBtns[oi] = ob
+            end
+            row.delBtn = Theme:CreateButton(row, 62, 18, L["Close"], "danger")
+            Theme:AutoFitButton(row.delBtn, 58, 12, 104)
+            row.delBtn:SetPoint("BOTTOMRIGHT", -8, 6)
+            row.delBtn:Hide()
+            return row
+        end, function(row, item, _, pal)
+            Theme:ApplyBackdrop(row, "inset", pal)
+            row.titleLbl:SetText((item.closed and "|cff8b949e[" .. L["Closed"] .. "]|r " or "|cffffd24d") .. (item.title or "?") .. "|r")
+            row.metaLbl:SetText(L["%d votes"]:format(item.totalVotes or 0))
+            for oi, ob in ipairs(row.optBtns) do
+                local optTxt = item.options and item.options[oi]
+                if optTxt then
+                    local cnt = (item.counts and item.counts[oi]) or 0
+                    local pct = ((item.totalVotes or 0) > 0) and math.floor((cnt / item.totalVotes) * 100 + 0.5) or 0
+                    local mark = (item.myVote == oi) and "|cff3fb950[x]|r " or ""
+                    Theme:StyleButton(ob, (item.myVote == oi) and "primary" or "default")
+                    Theme:SetButtonText(ob, ("%s%s (%d%%)"):format(mark, optTxt, pct))
+                    ob:SetEnabled(not item.closed)
+                    ob:SetScript("OnClick", function()
+                        if ns.Clan and ns.Clan.VotePoll then
+                            ns.Clan:VotePoll(item.id, oi)
+                            UI:OpenGuildPollsModal()
+                        end
+                    end)
+                    ob:Show()
+                else
+                    ob:Hide()
+                end
+            end
+            local canManage = ns.Clan and ns.Clan.CanManagePolls and ns.Clan:CanManagePolls()
+            row.delBtn:SetShown(canManage == true)
+            if canManage then
+                Theme:StyleButton(row.delBtn, "danger")
+                Theme:SetButtonText(row.delBtn, item.closed and L["Delete"] or L["Close"])
+                row.delBtn:SetScript("OnClick", function()
+                    if ns.Clan and ns.Clan.CloseOrDeletePoll then
+                        ns.Clan:CloseOrDeletePoll(item.id, item.closed == true)
+                        UI:OpenGuildPollsModal()
+                    end
+                end)
+            end
+        end)
+        scroll.container:SetPoint("TOPLEFT", 12, -40)
+        scroll.container:SetPoint("BOTTOMRIGHT", -12, 44)
+        m.scroll = scroll
+
+        local btnNew = Theme:CreateButton(m, 130, 24, "+ " .. L["New Poll"], "primary")
+        Theme:AutoFitButton(btnNew, 116, 16, 185)
+        btnNew:SetPoint("BOTTOMLEFT", 12, 10)
+        btnNew:SetScript("OnClick", function()
+            UI:OpenCreateGuildPollModal(function()
+                if UI._modals.guildPolls and UI._modals.guildPolls:IsShown() then
+                    UI:OpenGuildPollsModal()
+                end
+            end)
+        end)
+        m.btnNew = btnNew
+
+        local btnClose = Theme:CreateButton(m, 84, 24, L["Close"], "default")
+        Theme:AutoFitButton(btnClose, 76, 14, 130)
+        btnClose:SetPoint("BOTTOMRIGHT", -12, 10)
+        btnClose:SetScript("OnClick", function() m:Hide() end)
+        m.btnClose = btnClose
+
+        UI._modals.guildPolls = m
+        f = m
+    end
+
+    PrepareTopOverlayModal(f, 845)
+    Theme:ApplyBackdrop(f, "window")
+    Theme:StyleButton(f.closeX, "default")
+    Theme:StyleButton(f.btnNew, "primary")
+    Theme:StyleButton(f.btnClose, "default")
+    f.scroll:RefreshTheme()
+    local canCreate = ns.Clan and ns.Clan.CanManagePolls and ns.Clan:CanManagePolls()
+    f.btnNew:SetShown(canCreate == true)
+    local polls = (ns.Clan and ns.Clan.GetPollsList) and ns.Clan:GetPollsList() or {}
+    f.scroll:SetData(polls, L["No active Guild Polls yet."], false)
+    f:Show()
+    f:Raise()
+end
+
+function UI:OpenGuildRecruitmentModal()
+    local f = UI._modals.guildRecruit
+    if not f then
+        local m = CreateFrame("Frame", "SocialCentralGuildRecruitModal", UIParent, "BackdropTemplate")
+        m:SetSize(440, 310)
+        m:SetPoint("CENTER")
+        PrepareTopOverlayModal(m, 845)
+        Theme:MakeMovable(m, { key = "modal_guild_recruit" })
+        table.insert(UISpecialFrames, "SocialCentralGuildRecruitModal")
+
+        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", 16, -14)
+        title:SetText(L["Guild Recruitment Card"])
+
+        local closeX = Theme:CreateButton(m, 22, 20, "X", "default")
+        closeX:SetPoint("TOPRIGHT", -10, -10)
+        closeX:SetScript("OnClick", function() m:Hide() end)
+        m.closeX = closeX
+
+        m.helpBtn = AddHelp(
+            m,
+            closeX,
+            L["Help: Guild Recruitment Card"],
+            L["Configures your guild's recruitment pitch, needed classes/roles, schedule, and minimum level — plus a quick /2 and /4 ad formatter."],
+            L["Officers can toggle recruitment active, edit details and Save; anyone can click Copy /2 /4 Ad to copy a clean formatted post."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or closeX, "LEFT", -6, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+
+        local recCb = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
+        recCb:SetSize(22, 22)
+        recCb:SetPoint("TOPLEFT", 14, -42)
+        local recLbl = m:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        recLbl:SetPoint("LEFT", recCb, "RIGHT", 6, 0)
+        recLbl:SetText(L["Guild is actively recruiting"])
+        m.recCb = recCb
+
+        local rLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        rLbl:SetPoint("TOPLEFT", 16, -74)
+        rLbl:SetText(L["Needed Roles / Classes:"])
+        local rIn = Theme:CreateEditBox(m, { height = 22, maxLetters = 28, placeholder = L["e.g. Healers, Warlocks, Tanks"] })
+        rIn:SetPoint("TOPLEFT", 16, -92)
+        rIn:SetPoint("TOPRIGHT", -16, -92)
+        m.rIn = rIn
+
+        local sLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        sLbl:SetPoint("TOPLEFT", 16, -124)
+        sLbl:SetText(L["Raid / Activity Schedule:"])
+        local sIn = Theme:CreateEditBox(m, { height = 22, maxLetters = 36, placeholder = L["e.g. Tue/Thu 20:30 BRT"] })
+        sIn:SetPoint("TOPLEFT", 16, -142)
+        sIn:SetPoint("TOPRIGHT", -110, -142)
+        m.sIn = sIn
+
+        local lvLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        lvLbl:SetPoint("TOPLEFT", sIn, "TOPRIGHT", 10, 18)
+        lvLbl:SetText(L["Min Lv:"])
+        local lvIn = Theme:CreateEditBox(m, { width = 56, height = 22, numeric = true, maxLetters = 2 })
+        lvIn:SetPoint("TOPLEFT", sIn, "TOPRIGHT", 10, 0)
+        m.lvIn = lvIn
+
+        local pLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        pLbl:SetPoint("TOPLEFT", 16, -174)
+        pLbl:SetText(L["Recruitment Pitch:"])
+        local pIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 90, placeholder = L["e.g. Friendly PvE/PvP guild clearing MC & BWL!"] })
+        pIn:SetPoint("TOPLEFT", 16, -192)
+        pIn:SetPoint("TOPRIGHT", -16, -192)
+        m.pIn = pIn
+
+        local btnCancel = Theme:CreateButton(m, 80, 24, L["Close"], "default")
+        Theme:AutoFitButton(btnCancel, 76, 14, 126)
+        btnCancel:SetPoint("BOTTOMRIGHT", -16, 12)
+        btnCancel:SetScript("OnClick", function() m:Hide() end)
+        m.btnCancel = btnCancel
+
+        local btnCopy = Theme:CreateButton(m, 140, 24, L["Copy /2 /4 Ad"], "default")
+        Theme:AutoFitButton(btnCopy, 118, 14, 175)
+        btnCopy:SetPoint("BOTTOMLEFT", 16, 12)
+        btnCopy:SetScript("OnClick", function()
+            if ns.Clan and ns.Clan.FormatGuildRecruitmentAd and UI.OpenCopyModal then
+                UI:OpenCopyModal(ns.Clan:FormatGuildRecruitmentAd(), L["Copy Recruitment Ad"], L["Press Ctrl+C to copy and paste into Trade (/2) or World chat."])
+            end
+        end)
+        m.btnCopy = btnCopy
+
+        local btnSave = Theme:CreateButton(m, 118, 24, L["Save"], "primary")
+        btnSave:SetPoint("RIGHT", btnCancel, "LEFT", -8, 0)
+        btnSave:SetScript("OnClick", function()
+            if ns.Clan and ns.Clan.SaveGuildRecruitment then
+                ns.Clan:SaveGuildRecruitment(m.recCb:GetChecked(), m.rIn:GetText(), m.sIn:GetText(), m.lvIn:GetText(), m.pIn:GetText())
+            end
+            m:Hide()
+        end)
+        m.btnSave = btnSave
+
+        UI._modals.guildRecruit = m
+        f = m
+    end
+
+    PrepareTopOverlayModal(f, 845)
+    Theme:ApplyBackdrop(f, "window")
+    Theme:StyleButton(f.closeX, "default")
+    if f.helpBtn then Theme:StyleButton(f.helpBtn, "ghost") end
+    Theme:StyleButton(f.btnCancel, "default")
+    Theme:StyleButton(f.btnCopy, "default")
+    Theme:StyleButton(f.btnSave, "primary")
+
+    local rec = (ns.Clan and ns.Clan.GetGuildRecruitment) and ns.Clan:GetGuildRecruitment() or {}
+    local canEdit = (ns.Clan and ns.Clan.CanManagePolls and ns.Clan:CanManagePolls()) == true
+    f.recCb:SetChecked(rec.recruiting == true)
+    f.recCb:SetEnabled(canEdit)
+    f.rIn:SetText(rec.roles or "")
+    f.rIn:SetEnabled(canEdit)
+    f.sIn:SetText(rec.schedule or "")
+    f.sIn:SetEnabled(canEdit)
+    f.lvIn:SetText(tostring(rec.minLevel or 1))
+    f.lvIn:SetEnabled(canEdit)
+    f.pIn:SetText(rec.pitch or "")
+    f.pIn:SetEnabled(canEdit)
+    f.btnSave:SetEnabled(canEdit)
+    f:Show()
+    f:Raise()
+end
+
+function UI:OpenMySocialProfileModal()
+    local f = UI._modals.mySocialProfile
+    if not f then
+        local m = CreateFrame("Frame", "SocialCentralMyProfileModal", UIParent, "BackdropTemplate")
+        m:SetSize(430, 325)
+        m:SetPoint("CENTER")
+        PrepareTopOverlayModal(m, 845)
+        Theme:MakeMovable(m, { key = "modal_my_social_profile" })
+        table.insert(UISpecialFrames, "SocialCentralMyProfileModal")
+
+        local title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", 16, -14)
+        title:SetText(L["My Social Profile (Opt-In)"])
+
+        local closeX = Theme:CreateButton(m, 22, 20, "X", "default")
+        closeX:SetPoint("TOPRIGHT", -10, -10)
+        closeX:SetScript("OnClick", function() m:Hide() end)
+        m.closeX = closeX
+
+        m.helpBtn = AddHelp(
+            m,
+            closeX,
+            L["Help: My Social Profile"],
+            L["Shares an optional voluntary badge (main role, play status, languages, schedule, short bio) shown in tooltips for friends and guildmates."],
+            L["Check the share option to opt in, fill what you want others to see, and click Save. Uncheck anytime to stay private."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or closeX, "LEFT", -6, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+
+        local enCb = CreateFrame("CheckButton", nil, m, "UICheckButtonTemplate")
+        enCb:SetSize(22, 22)
+        enCb:SetPoint("TOPLEFT", 14, -42)
+        local enLbl = m:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        enLbl:SetPoint("LEFT", enCb, "RIGHT", 6, 0)
+        enLbl:SetText(L["Share my voluntary Social Profile in tooltips"])
+        m.enCb = enCb
+
+        local roleLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        roleLbl:SetPoint("TOPLEFT", 16, -74)
+        roleLbl:SetText(L["Main Role:"])
+        m._role = "DPS"
+        m._roleBtns = {}
+        local prevR = roleLbl
+        for _, rId in ipairs({ "TANK", "HEALER", "DPS" }) do
+            local rb = Theme:CreateButton(m, 72, 20, ROLE_LABELS[rId] or rId, "default")
+            rb:SetPoint("LEFT", prevR, "RIGHT", 8, 0)
+            rb:SetScript("OnClick", function()
+                m._role = rId
+                for _, item in ipairs(m._roleBtns) do
+                    Theme:SetButtonActive(item.btn, m._role == item.id, "default")
+                end
+            end)
+            m._roleBtns[#m._roleBtns + 1] = { id = rId, btn = rb }
+            prevR = rb
+        end
+
+        local avLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        avLbl:SetPoint("TOPLEFT", 16, -106)
+        avLbl:SetText(L["Status:"])
+        m._avail = "OPEN"
+        m._availBtns = {}
+        local prevA = avLbl
+        for _, av in ipairs({
+            { id = "OPEN", label = L["Open to Groups"] },
+            { id = "QUEST", label = L["Questing"] },
+            { id = "BUSY", label = L["Busy"] },
+        }) do
+            local ab = Theme:CreateButton(m, 96, 20, av.label, "default")
+            Theme:AutoFitButton(ab, 70, 12, 125)
+            ab:SetPoint("LEFT", prevA, "RIGHT", 6, 0)
+            ab:SetScript("OnClick", function()
+                m._avail = av.id
+                for _, item in ipairs(m._availBtns) do
+                    Theme:SetButtonActive(item.btn, m._avail == item.id, "default")
+                end
+            end)
+            m._availBtns[#m._availBtns + 1] = { id = av.id, btn = ab }
+            prevA = ab
+        end
+
+        local langLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        langLbl:SetPoint("TOPLEFT", 16, -138)
+        langLbl:SetText(L["Languages & Play Hours:"])
+        local langIn = Theme:CreateEditBox(m, { width = 120, height = 22, maxLetters = 18, placeholder = "PT / EN" })
+        langIn:SetPoint("TOPLEFT", 16, -156)
+        m.langIn = langIn
+
+        local hrsIn = Theme:CreateEditBox(m, { height = 22, maxLetters = 28, placeholder = L["e.g. Weeknights 20:00-23:00"] })
+        hrsIn:SetPoint("LEFT", langIn, "RIGHT", 8, 0)
+        hrsIn:SetPoint("RIGHT", m, "RIGHT", -16, 0)
+        m.hrsIn = hrsIn
+
+        local bioLbl = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        bioLbl:SetPoint("TOPLEFT", 16, -190)
+        bioLbl:SetText(L["Short Bio (optional):"])
+        local bioIn = Theme:CreateEditBox(m, { height = 24, maxLetters = 70, placeholder = L["e.g. Chill dungeon tank, Discord ready"] })
+        bioIn:SetPoint("TOPLEFT", 16, -208)
+        bioIn:SetPoint("TOPRIGHT", -16, -208)
+        m.bioIn = bioIn
+
+        local btnCancel = Theme:CreateButton(m, 80, 24, L["Close"], "default")
+        Theme:AutoFitButton(btnCancel, 76, 14, 126)
+        btnCancel:SetPoint("BOTTOMRIGHT", -16, 12)
+        btnCancel:SetScript("OnClick", function() m:Hide() end)
+        m.btnCancel = btnCancel
+
+        local btnSave = Theme:CreateButton(m, 118, 24, L["Save"], "primary")
+        Theme:AutoFitButton(btnSave, 96, 16, 150)
+        btnSave:SetPoint("RIGHT", btnCancel, "LEFT", -8, 0)
+        btnSave:SetScript("OnClick", function()
+            if ns.Clan and ns.Clan.SaveMySocialProfile then
+                ns.Clan:SaveMySocialProfile({
+                    enabled = m.enCb:GetChecked(),
+                    role = m._role,
+                    availability = m._avail,
+                    langs = m.langIn:GetText(),
+                    hours = m.hrsIn:GetText(),
+                    bio = m.bioIn:GetText(),
+                })
+            end
+            m:Hide()
+        end)
+        m.btnSave = btnSave
+
+        UI._modals.mySocialProfile = m
+        f = m
+    end
+
+    PrepareTopOverlayModal(f, 845)
+    Theme:ApplyBackdrop(f, "window")
+    Theme:StyleButton(f.closeX, "default")
+    if f.helpBtn then Theme:StyleButton(f.helpBtn, "ghost") end
+    Theme:StyleButton(f.btnCancel, "default")
+    Theme:StyleButton(f.btnSave, "primary")
+
+    local prof = (ns.Clan and ns.Clan.GetMySocialProfile) and ns.Clan:GetMySocialProfile() or {}
+    f.enCb:SetChecked(prof.enabled == true)
+    f._role = prof.role or "DPS"
+    f._avail = prof.availability or "OPEN"
+    for _, item in ipairs(f._roleBtns) do
+        Theme:SetButtonActive(item.btn, f._role == item.id, "default")
+    end
+    for _, item in ipairs(f._availBtns) do
+        Theme:SetButtonActive(item.btn, f._avail == item.id, "default")
+    end
+    f.langIn:SetText(prof.langs or "PT/EN")
+    f.hrsIn:SetText(prof.hours or "")
+    f.bioIn:SetText(prof.bio or "")
+    f:Show()
+    f:Raise()
 end
 
 local allianceModalFrame
@@ -2018,6 +2812,7 @@ local function OpenAllianceManagementModal()
 
         -- Bottom Buttons
         local btnClose = Theme:CreateButton(m, 88, 26, L["Close"], "default")
+        Theme:AutoFitButton(btnClose, 80, 14, 130)
         btnClose:SetPoint("BOTTOMRIGHT", -16, 10)
         btnClose:SetScript("OnClick", function()
             if m.nameIn then m.nameIn:ClearFocus() end
@@ -2203,7 +2998,7 @@ local function OpenRowMenu(row, item, tabOverride)
                 end
                 root:CreateButton(L["Check"], function()
                     if ns.Watchlist then
-                        ns.Watchlist:CheckEntry(item.id)
+                        ns.Watchlist:CheckEntry(item.id, false, true)
                     end
                 end)
             end
@@ -2238,6 +3033,16 @@ local function OpenRowMenu(row, item, tabOverride)
                 ToggleRowNotifyBell("watchlist", item)
             end)
         elseif tab == "social" or tab == "nearby" then
+            if charKey and item.hasCharacterName ~= false and item.samePool ~= false and item.sameFaction ~= false
+                and not (Compat.IsMe and Compat.IsMe(targetName, item.guid))
+                and ns.Watchlist and ns.Watchlist.CheckCharacter
+            then
+                root:CreateButton(L["Check"], function()
+                    if ns.Watchlist and ns.Watchlist.CheckCharacter then
+                        ns.Watchlist:CheckCharacter(targetName, false)
+                    end
+                end)
+            end
             if charKey and not (Compat.IsMe and Compat.IsMe(targetName, item.guid)) then
                 local starMark = Compat.FavoriteStarMarkup and Compat.FavoriteStarMarkup(12) or ""
                 root:CreateButton(isFav and (starMark .. L["Unfavorite"]) or L["Favorite"], function()
@@ -2805,7 +3610,7 @@ local function CreateListRow(parent, _, rowHeight)
             elseif type(item.observedCandidate) == "string" and item.observedCandidate ~= "" then
                 ns.Watchlist:ResolveDisambiguation(item.id, item.observedCandidate)
             else
-                ns.Watchlist:CheckEntry(item.id)
+                ns.Watchlist:CheckEntry(item.id, false, true)
             end
         elseif (tab == "social" or tab == "nearby") and ns.Watchlist then
             if item.sources and item.sources.bnet and item.bnetAccountID and ns.Watchlist.AddBNetAccount then
@@ -2870,10 +3675,16 @@ local function CreateListRow(parent, _, rowHeight)
             local item = self._item
             local tab = item._tab or activeTab
             local titleName = item.fullName or item.displayName or item.name or item.bnetName or ""
+            if Compat and Compat.IsStreamerMode and Compat.IsStreamerMode() and (item.bnetAccountID ~= nil or titleName:find("#", 1, true)) and (titleName == item.bnetName or item.hasCharacterName == false) then
+                titleName = Compat.MaskStreamerBNetName(titleName)
+            end
             GameTooltip:AddLine(titleName, 1, 1, 1)
             local rowKey = item.lookupKey or item.id
             local bnetInfo = (rowKey and ns.Social and ns.Social.GetBNetLinkInfo) and ns.Social:GetBNetLinkInfo(rowKey) or nil
             local bnetDisplay = (item.bnetName and item.bnetName ~= "" and item.bnetName) or (bnetInfo and bnetInfo.bnetName)
+            if Compat and Compat.IsStreamerMode and Compat.IsStreamerMode() and bnetDisplay and bnetDisplay ~= "" then
+                bnetDisplay = Compat.MaskStreamerBNetName(bnetDisplay)
+            end
             if bnetDisplay and bnetDisplay ~= "" and bnetDisplay ~= titleName then
                 GameTooltip:AddDoubleLine(L["Battle.net"], bnetDisplay, 0.50, 0.78, 0.98, 0.72, 0.88, 1.0)
             end
@@ -3227,7 +4038,10 @@ function UI._RenderSocialDetailRow(row, item, palette)
     local srcParts = sublineTagsScratch
     wipe(srcParts)
     if pItem.bnetName and pItem.bnetName ~= "" then
-        srcParts[#srcParts + 1] = "|cff70b5f9" .. pItem.bnetName .. "|r"
+        local bnDisp = (Compat and Compat.IsStreamerMode and Compat.IsStreamerMode())
+            and Compat.MaskStreamerBNetName(pItem.bnetName)
+            or pItem.bnetName
+        srcParts[#srcParts + 1] = "|cff70b5f9" .. bnDisp .. "|r"
     elseif pItem.sources and pItem.sources.friend then
         srcParts[#srcParts + 1] = L["Friends"]
     end
@@ -3563,7 +4377,7 @@ local function UpdateListRow(row, item, idx, palette)
             row._hasHoverWhisper = false
             row._hasHoverInvite = false
             persistentActionBtn = row.btnAction
-        elseif item.status == "unknown" then
+        elseif not item.isSessionBNet and (item.status == "unknown" or item.status == "offline") then
             row._actionVariant = "default"
             Theme:StyleButton(row.btnAction, "default")
             row.btnAction:SetEnabled(true)
@@ -4914,6 +5728,10 @@ local function CreatePeerRow(parent, _, rowHeight)
                 if item.area and item.area ~= "" then
                     GameTooltip:AddLine(item.area, 0.78, 0.84, 0.92)
                 end
+                local abs = (item.lookupKey and ns.Clan and ns.Clan.GetMemberAbsence) and ns.Clan:GetMemberAbsence(item.lookupKey) or nil
+                if abs then
+                    GameTooltip:AddLine(("|cffffb833%s: %s|r%s"):format(L["Absent until"], abs.untilDate, (abs.reason and abs.reason ~= "") and (" — " .. abs.reason) or ""), 1.0, 0.75, 0.30, true)
+                end
             end
             GameTooltip:Show()
         end
@@ -5217,6 +6035,10 @@ local function UpdatePeerRow(row, item, idx, palette)
     local lfgInfo = (item.tag ~= "LFG") and (ns.Clan and ns.Clan.GetActiveLfgForPlayer) and ns.Clan:GetActiveLfgForPlayer(item.lookupKey or item.displayName) or nil
     if lfgInfo then
         sub[#sub + 1] = "|cff3fb950[" .. tostring(lfgInfo.mode or "LFG") .. ": " .. tostring(lfgInfo.activity or L["Group"]) .. "]|r"
+    end
+    local abs = (item.lookupKey and ns.Clan and ns.Clan.GetMemberAbsence) and ns.Clan:GetMemberAbsence(item.lookupKey) or nil
+    if abs then
+        sub[#sub + 1] = "|cffffb833[" .. L["Absent"] .. ": " .. tostring(abs.untilDate) .. "]|r"
     end
     if item.note and item.note ~= "" then
         sub[#sub + 1] = item.note
@@ -5956,6 +6778,9 @@ local function CreateClanPanel(parent)
                 root:CreateButton(L["Clear Note / Custom Note"], function()
                     OpenClanNoteModal(bucket.myTag ~= "NONE" and bucket.myTag or "LFG", bucket.myNote or "")
                 end)
+                root:CreateButton(L["Guild Absence / Vacation..."], function()
+                    UI:OpenClanAbsenceModal()
+                end)
                 root:CreateDivider()
                 root:CreateCheckbox(L["Clan Sync"], function()
                     return ns.db and ns.db.settings and ns.db.settings.clanSync == true
@@ -6163,13 +6988,19 @@ local function CreateClanPanel(parent)
     openLfgFinderBtn:SetPoint("BOTTOMLEFT", sidebar, "BOTTOMLEFT", 8, 8)
     openLfgFinderBtn:SetPoint("BOTTOMRIGHT", sidebar, "BOTTOMRIGHT", -8, 8)
     openLfgFinderBtn:SetScript("OnClick", function()
+        if ns.LFGFrameTab then
+            ns.LFGFrameTab.viewMode = "browse"
+            ns.LFGFrameTab.sourceFilter = "TRUSTED"
+            ns.LFGFrameTab._hasSearchedThisSession = true
+            if ns.LFGFrameTab.SaveBrowseFilters then
+                ns.LFGFrameTab:SaveBrowseFilters()
+            end
+        end
         local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
         if not inCombat and ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
-            ns.LFGFrameTab.viewMode = "browse"
-            ns.LFGFrameTab._hasSearchedThisSession = true
             ns.LFGFrameTab:OpenOfficialModule("lfg")
         else
-            ns:Print(L["In Combat"])
+            UI:OpenGroupBrowseView()
         end
     end)
     openLfgFinderBtn:SetScript("OnEnter", function(selfBtn)
@@ -6296,8 +7127,39 @@ local function CreateClanPanel(parent)
         peerSearch,
         L["Help: Clan Game Info"],
         L["Centralizes Online Guild Roster (Rank/Zone/Note), Events, Diplomacy stances, Guild Crafters, and Saved Dungeon/Raid Lockouts."],
-        L["Type a member name, class, rank, or zone to filter the roster, or switch views in the sidebar."]
+        L["Type a member name, class, rank, or zone to filter the roster, or switch views in the sidebar."],
+        nil,
+        nil,
+        nil,
+        nil,
+        {
+            target = peersToolBar,
+            steps = {
+                {
+                    title = L["Guild Hub Navigation"],
+                    tag = "1/3 · " .. L["Guild"],
+                    text = L["Use the left sidebar to switch between Roster, Guild & Allied Events, Diplomacy, Hierarchy/Polls, Crafters, and Raid Lockouts."],
+                    target = sidebar,
+                },
+                {
+                    title = L["Help: Clan Game Info"],
+                    tag = "2/3 · " .. L["Roster & Status"],
+                    text = L["Filter guildmates by name, class, rank, or zone right here, set your Guild Status tag, or invite targets safely."],
+                    target = peersToolBar,
+                },
+                {
+                    title = L["Spotter Radar & Guild Info"],
+                    tag = "3/3 · " .. L["Radar & Info"],
+                    text = L["Toggle the Target Radar, read or edit your shared Clan Info card, and see live Guild Sync status along this bottom bar."],
+                    target = bottomBar,
+                },
+            },
+        }
     )
+    if frame then
+        frame._scTabHelpBtns = frame._scTabHelpBtns or {}
+        frame._scTabHelpBtns.clan = peersHelp
+    end
 
     local guildInviteBtn = Theme:CreateButton(peersToolBar, 26, 22, "", "primary")
     Theme:ConfigureIconButton(guildInviteBtn, 26, 22, "Interface\\PaperDollInfoFrame\\Character-Plus", {
@@ -6626,6 +7488,22 @@ local function CreateClanPanel(parent)
         L["Help: Clan Event Calls"],
         L["Creates guild-wide group calls for Dungeons, M+, Raids, World Bosses, or PvP where guildmates sign up as Tank, Healer, DPS, or Maybe."],
         L["Click '+ Event Call' to post an event, or use the filter dropdown to inspect 'Calendar' and open the native WoW Calendar."]
+    )
+
+    local pollsBtn = Theme:CreateButton(eventsToolBar, 26, 22, "", "default")
+    Theme:ConfigureIconButton(pollsBtn, 26, 22, "Interface\\Icons\\INV_Misc_Note_06", {
+        size = 14,
+        title = L["Guild Polls & Voting"],
+        desc = L["Vote on active Guild Polls or create a new poll for your guildmates."],
+    })
+    pollsBtn:SetScript("OnClick", function() UI:OpenGuildPollsModal() end)
+    themeTargets[#themeTargets + 1] = { btn = pollsBtn, variant = "default" }
+    pollsBtn._pairedHelp = AddHelp(
+        eventsToolBar,
+        pollsBtn,
+        L["Help: Guild Polls & Voting"],
+        L["Lets officers create quick guild polls (2 to 5 choices) and guildmates vote live in real time."],
+        L["Click to view active polls, vote in 1 click, or create a new guild poll."]
     )
 
     -- 4c) Diplomacy contextual toolbar (1 filter/sync dropdown + 1 primary button)
@@ -7179,7 +8057,7 @@ local function CreateClanPanel(parent)
     eventsScroll.container:SetAllPoints()
     eventsScroll.container:Hide()
 
-    local evtItems = { evtFilterBtn, evtAllyBtn, newEventBtn }
+    local evtItems = { evtFilterBtn, evtAllyBtn, newEventBtn, pollsBtn }
     local profItems = { profViewBtn, profFilterBtn, profSourceBtn, profBtn, profAskBtn, locksRefreshBtn, profSearch }
     local dipItems = { dipFilterBtn, dipAddBtn, dipAuthBtn }
     local hierItems = { hierDipBtn, hierRulesBtn, hierAllyBtn }
@@ -7711,16 +8589,20 @@ function UI:OpenGuildRosterHistoryModal()
         m:SetFrameLevel(840)
         m:SetToplevel(true)
         m:EnableMouse(true)
-        m:SetMovable(true)
-        m:SetClampedToScreen(true)
-        m:RegisterForDrag("LeftButton")
-        m:SetScript("OnDragStart", function(self) self:StartMoving() end)
-        m:SetScript("OnDragStop", function(self)
-            self:StopMovingOrSizing()
-            if Theme and Theme.SaveFramePosition then
-                Theme:SaveFramePosition(self, "rosterHistoryModal")
-            end
-        end)
+        if Theme and Theme.MakeMovable then
+            Theme:MakeMovable(m, {
+                skipAutoRestore = true,
+                onStop = function(selfModal)
+                    if Theme and Theme.SaveFramePosition then
+                        Theme:SaveFramePosition(selfModal, "rosterHistoryModal")
+                    end
+                end,
+            })
+        else
+            m:SetMovable(true)
+            m:SetClampedToScreen(true)
+            m:RegisterForDrag("LeftButton")
+        end
         if UISpecialFrames then
             local exists = false
             for _, fn in ipairs(UISpecialFrames) do
@@ -7746,9 +8628,25 @@ function UI:OpenGuildRosterHistoryModal()
         closeBtn:SetScript("OnClick", function() m:Hide() end)
         m.closeBtn = closeBtn
 
+        m.helpBtn = AddHelp(
+            m,
+            closeBtn,
+            L["Help: Guild Roster History"],
+            L["Tracks guild members who joined, left, or changed ranks with timestamps and levels so officers can review recent roster activity."],
+            L["Filter by Joins, Leaves, or Ranks, search by player name, adjust history retention (Keep:), or copy the filtered log."],
+            "RIGHT",
+            "LEFT",
+            -4,
+            0,
+            { target = m }
+        )
+        title:SetPoint("TOPRIGHT", m.helpBtn or closeBtn, "LEFT", -8, 0)
+        title:SetJustifyH("LEFT")
+        title:SetWordWrap(false)
+
         local summary = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         summary:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
-        summary:SetPoint("RIGHT", closeBtn, "LEFT", -8, 0)
+        summary:SetPoint("RIGHT", m.helpBtn or closeBtn, "LEFT", -8, 0)
         summary:SetJustifyH("LEFT")
         summary:SetWordWrap(false)
         m.summary = summary
@@ -8244,6 +9142,7 @@ local function BuildEmbeddedHostQuickButton(parent, winKey)
                         if ns.LFGFrameTab and ns.LFGFrameTab.RefreshData then
                             ns.LFGFrameTab:RefreshData()
                         end
+                        ns:Emit("LFG_BROWSE_STATE_CHANGED")
                         if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
                     end)
                     root:CreateCheckbox(L["Hide Saved Lockouts"], function()
@@ -8255,6 +9154,7 @@ local function BuildEmbeddedHostQuickButton(parent, winKey)
                         if ns.LFGFrameTab and ns.LFGFrameTab.RefreshData then
                             ns.LFGFrameTab:RefreshData()
                         end
+                        ns:Emit("LFG_BROWSE_STATE_CHANGED")
                         if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
                     end)
                 end
@@ -9824,7 +10724,36 @@ local function BuildMainFrame()
         "RIGHT",
         "LEFT",
         -6,
-        0
+        0,
+        {
+            target = header,
+            steps = {
+                {
+                    title = L["Help: SocialCentral Overview"],
+                    tag = "1/4 · " .. L["Tabs"],
+                    text = L["Switch between Watchlist, Social, Conversations, Guild, Group, Nearby, and Alts right from this top strip."],
+                    target = function() return frame and frame.tabBar end,
+                },
+                {
+                    title = L["Live Search & Filters"],
+                    tag = "2/4 · " .. L["Search & Filters"],
+                    text = L["Every tab includes live search and quick filter icons below the tab strip so you can find friends, guildmates, or alts in one click."],
+                    target = function() return frame and frame.filterBar end,
+                },
+                {
+                    title = L["Themes & Embedded Windows"],
+                    tag = "3/4 · " .. L["Appearance"],
+                    text = L["Switch visual styles right here in the header, use the [SC] side tab inside Friends, Group Finder, Guild, or Character windows, or click the Minimap button for Quick Reply."],
+                    target = function() return frame and (frame.themeBtn or frame.quickBtn or frame.tabBar) end,
+                },
+                {
+                    title = L["Settings & Customization"],
+                    tag = "4/4 · " .. L["Settings"],
+                    text = L["Open Settings from the gear button here to customize alerts, Chromie guides, themes, Radar, and which modules run."],
+                    target = function() return frame and frame.settingsBtn end,
+                },
+            },
+        }
     )
     frame.headerHelp = headerHelp
 
@@ -9929,6 +10858,9 @@ local function BuildMainFrame()
                 ns.Group:Scan()
             end
             UI:Refresh(true)
+            if UI._maybePromptTabTutorial then
+                UI._maybePromptTabTutorial(def.id)
+            end
         end)
         local entry = { id = def.id, btn = btn, baseLabel = def.label }
         tabButtons[def.id] = entry
@@ -9988,8 +10920,33 @@ local function BuildMainFrame()
         "RIGHT",
         "RIGHT",
         -2,
-        0
+        0,
+        {
+            target = socialBar,
+            steps = {
+                {
+                    title = L["Instant Contact Search"],
+                    tag = "1/3 · " .. L["Search"],
+                    text = L["Type any character name, Battle.net name, guild, zone, or personal alias to filter all your friends and guildmates instantly."],
+                    target = searchBox,
+                },
+                {
+                    title = L["Help: Social Filters"],
+                    tag = "2/3 · " .. L["Social Filters"],
+                    text = L["Toggle Favorites, Addon Users, Good Partners, Folders, Sort order, or click '+ Friend' on this bar without spending any /who cooldown."],
+                    target = socialBar,
+                },
+                {
+                    title = L["Contact Cards & Actions"],
+                    tag = "3/3 · " .. L["Social"],
+                    text = L["Left-click any player card to start a chat or quick whisper, or right-click to add Notes, Tags, Watchlist tracking, or Group invites."],
+                    target = function() return frame and frame.scrollContainer end,
+                },
+            },
+        }
     )
+    frame._scTabHelpBtns = frame._scTabHelpBtns or {}
+    frame._scTabHelpBtns.social = socialHelp
 
     local watchFilterBar = CreateFrame("Frame", nil, filterBar)
     watchFilterBar:SetPoint("LEFT", searchBox, "RIGHT", 10, 0)
@@ -10222,8 +11179,27 @@ local function BuildMainFrame()
         "RIGHT",
         "RIGHT",
         -2,
-        0
+        0,
+        {
+            target = nearbyBar,
+            steps = {
+                {
+                    title = L["Help: Nearby Players"],
+                    tag = "1/2 · " .. L["Nearby"],
+                    text = L["Passively collects friendly nearby players spotted on nameplates, target, mouseover, party, or chat (hostile PvP units are ignored)."],
+                    target = nearbyBar,
+                },
+                {
+                    title = L["Follow & Clear Sightings"],
+                    tag = "2/2 · " .. L["Actions"],
+                    text = L["Right-click any sighted player below to whisper, invite, or promote them to your Watchlist, or use Clear to empty recent sightings."],
+                    target = function() return frame and frame.scrollContainer end,
+                },
+            },
+        }
     )
+    frame._scTabHelpBtns = frame._scTabHelpBtns or {}
+    frame._scTabHelpBtns.nearby = nearbyHelp
 
     local socialFilterBtn = Theme:CreateButton(socialBar, 24, 22, "", "default")
     socialFilterBtn:SetPoint("LEFT", socialBar, "LEFT", 0, 0)
@@ -10392,6 +11368,18 @@ local function BuildMainFrame()
 
     UI._CreateSocialChipsBar(frame, filterBar, themeTargets)
 
+    local socialProfileBtn = Theme:CreateButton(socialBar, 24, 22, "", "default")
+    Theme:ConfigureIconButton(socialProfileBtn, 24, 22, "Interface\\Icons\\INV_Misc_Note_01", {
+        size = 14,
+        title = L["My Social Profile"],
+        desc = L["Configure your optional Role, Play Hours, Languages & Bio shown in tooltips."],
+    })
+    themeTargets[#themeTargets + 1] = { btn = socialProfileBtn, variant = "default" }
+    frame.socialProfileBtn = socialProfileBtn
+    socialProfileBtn:SetScript("OnClick", function()
+        UI:OpenMySocialProfileModal()
+    end)
+
     local socialAddBtn = Theme:CreateButton(socialBar, 26, 22, "", "primary")
     Theme:ConfigureIconButton(socialAddBtn, 26, 22, "Interface\\PaperDollInfoFrame\\Character-Plus", {
         size = 14,
@@ -10483,9 +11471,10 @@ local function BuildMainFrame()
             end
             local fltW = math.floor((socialFilterBtn._scAutoFitW or socialFilterBtn:GetWidth() or 86) + 0.5)
             local srtW = math.floor((socialSortBtn._scAutoFitW or socialSortBtn:GetWidth() or 76) + 0.5)
+            local profW = socialProfileBtn and 24 or 0
             local addW = math.floor((socialAddBtn._scAutoFitW or socialAddBtn:GetWidth() or 26) + 0.5)
             local helpW = socialHelp and 24 or 0
-            local rightNeed = fltW + srtW + addW + helpW + 20
+            local rightNeed = fltW + srtW + profW + addW + helpW + 24
             local searchW = math.max(96, avail - rightNeed - 10)
             if math.abs((searchBox:GetWidth() or 0) - searchW) >= 1 then
                 searchBox:SetWidth(searchW)
@@ -10508,8 +11497,10 @@ local function BuildMainFrame()
             end
             socialAddBtn:ClearAllPoints()
             socialAddBtn:SetPoint("RIGHT", rightAnchor, rightRel, -4, 0)
+            socialProfileBtn:ClearAllPoints()
+            socialProfileBtn:SetPoint("RIGHT", socialAddBtn, "LEFT", -4, 0)
             socialSortBtn:ClearAllPoints()
-            socialSortBtn:SetPoint("RIGHT", socialAddBtn, "LEFT", -4, 0)
+            socialSortBtn:SetPoint("RIGHT", socialProfileBtn, "LEFT", -4, 0)
             socialFilterBtn:ClearAllPoints()
             socialFilterBtn:SetPoint("RIGHT", socialSortBtn, "LEFT", -4, 0)
 
@@ -10965,8 +11956,33 @@ local function BuildMainFrame()
         "RIGHT",
         "RIGHT",
         -2,
-        0
+        0,
+        {
+            target = watchBar,
+            steps = {
+                {
+                    title = L["Add Characters or BNet Accounts"],
+                    tag = "1/3 · " .. L["Watchlist"],
+                    text = L["Type any character name (or leave blank with a target selected) and click '+ Add', or use the Battle.net icon to follow all of a friend's characters."],
+                    target = watchBar,
+                },
+                {
+                    title = L["Safe Manual /who Verification"],
+                    tag = "2/3 · /who",
+                    text = L["Click the spyglass Check button whenever you want outside combat to verify the next Watchlist player with Blizzard's safe >= 5s /who cooldown."],
+                    target = function() return frame and frame.verifyBtn end,
+                },
+                {
+                    title = L["Tags, Groups & Alert Bells"],
+                    tag = "3/3 · " .. L["Filters"],
+                    text = L["Filter tracked players by custom Group tag and click any player's bell icon to mute or enable online login alerts."],
+                    target = function() return frame and frame.watchFilterBar end,
+                },
+            },
+        }
     )
+    frame._scTabHelpBtns = frame._scTabHelpBtns or {}
+    frame._scTabHelpBtns.watchlist = watchHelp
 
     ReflowWatchBar = function()
         if not watchBar or not addBox then
@@ -11270,13 +12286,22 @@ local function TriggerTabRefresh(tabId)
     if tabId == "social" and ns.Social then
         if ns.Social.EnsureFullGuildScan then ns.Social:EnsureFullGuildScan() end
         ns.Social:RequestRosters(false)
+    elseif tabId == "watchlist" then
+        if ns.Social and ns.Social.RequestRosters then
+            ns.Social:RequestRosters(false)
+        end
     elseif tabId == "clan" then
         if ns.Social and ns.Social.EnsureFullGuildScan then ns.Social:EnsureFullGuildScan() end
+        if ns.Social and ns.Social.RequestRosters then ns.Social:RequestRosters(false) end
         if ns.Clan then
             ns.Clan:RefreshGameCalendar(false)
             if ns.Clan.ClearNotificationCount then
                 ns.Clan:ClearNotificationCount()
             end
+        end
+    elseif tabId == "nearby" then
+        if ns.Social and ns.Social.RequestRosters then
+            ns.Social:RequestRosters(false)
         end
     elseif tabId == "group" and ns.Group then
         ns.Group:Scan()
@@ -11707,6 +12732,49 @@ local function MaybePromptThemePicker()
         end
     end
 end
+
+local function MaybePromptTabTutorial(tabId)
+    if not (tabId and Theme and Theme.PromptWindowTutorial) then
+        return
+    end
+    if ns.db and ns.db.settings and not ns.db.settings.themeChosen then
+        return
+    end
+    if _G.SocialCentralThemeWelcomePicker and _G.SocialCentralThemeWelcomePicker:IsShown() then
+        return
+    end
+    local hBtn = frame and frame._scTabHelpBtns and frame._scTabHelpBtns[tabId]
+    if not hBtn then
+        if tabId == "group" and groupPanel then hBtn = groupPanel._scHelpBtn
+        elseif tabId == "chat" and chatPanel then hBtn = chatPanel._scHelpBtn
+        elseif tabId == "alts" and altsPanel then hBtn = altsPanel._scHelpBtn
+        end
+    end
+    local hOpts = hBtn and hBtn._scHelpOpts
+    if not (hOpts and type(hOpts.steps) == "table" and #hOpts.steps > 0) then
+        return
+    end
+    local tabLabel = (tabButtons[tabId] and tabButtons[tabId].baseLabel) or (hBtn and hBtn._scHelpTitle) or tabId
+    local function IsTabStillVisible()
+        if activeTab ~= tabId then return false end
+        if frame and frame:IsVisible() then return true end
+        local cont = embedContainers and embedContainers[tabId]
+        return cont and cont._active and cont:IsVisible() == true or false
+    end
+    Theme:PromptWindowTutorial({
+        tutorialKey = "tabPrompt_" .. tostring(tabId),
+        title = tabLabel,
+        guideSpec = {
+            key = "tab_" .. tostring(tabId),
+            title = tabLabel,
+            defaultTarget = hOpts.target,
+            isAnchorVisible = IsTabStillVisible,
+            steps = hOpts.steps,
+        },
+        isWindowVisible = IsTabStillVisible,
+    })
+end
+UI._maybePromptTabTutorial = MaybePromptTabTutorial
 
 local function IsSafeHostObj(obj, allowProtected)
     if not obj then return false end
@@ -13068,13 +14136,19 @@ function UI:OpenEmbedded(hostFrame, allowedTabs, defaultTab, forceKeepOpen)
     end
     embeddedState._suppressingHost = nil
     if activeTab == "chat" and chatPanel then
-        chatPanel._filter = "all"
-        if chatPanel.Refresh then
-            chatPanel:Refresh(true)
+        if UI._pendingChatNav and chatPanel.ApplyNavigation then
+            chatPanel:ApplyNavigation(UI._pendingChatNav)
+            UI._pendingChatNav = nil
+        else
+            chatPanel._filter = "all"
+            if chatPanel.Refresh then
+                chatPanel:Refresh(true)
+            end
         end
         UI:SyncFrameSectionLayers()
     end
     MaybePromptThemePicker()
+    MaybePromptTabTutorial(activeTab)
     if hostFrame and embedLvl then
         ElevateEmbeddedHostChrome(hostFrame, embedLvl + 45)
         if C_Timer and C_Timer.After then
@@ -13157,7 +14231,10 @@ function UI:ShowHub(defaultTab)
         UI:SyncFrameSectionLayers()
     end
     if defaultTab == "chat" and activeTab == "chat" and chatPanel then
-        if chatPanel._filter ~= "all" then
+        if UI._pendingChatNav and chatPanel.ApplyNavigation then
+            chatPanel:ApplyNavigation(UI._pendingChatNav)
+            UI._pendingChatNav = nil
+        elseif chatPanel._filter ~= "all" then
             chatPanel._filter = "all"
             if chatPanel.Refresh then
                 chatPanel:Refresh(true)
@@ -13167,8 +14244,24 @@ function UI:ShowHub(defaultTab)
     end
     UI:EnsureMainFrameDraggable()
     MaybePromptThemePicker()
+    MaybePromptTabTutorial(activeTab)
     if ns.LFGFrameTab and ns.LFGFrameTab.SyncAllEmbeddedTabStates then
         ns.LFGFrameTab:SyncAllEmbeddedTabStates()
+    end
+end
+
+function UI:OpenGroupBrowseView()
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("group") then
+        ns:Print("%s", L["This module is disabled in Settings."])
+        return
+    end
+    self:ShowHub("group")
+    if groupPanel then
+        groupPanel._view = "browse"
+        if groupPanel.Refresh then
+            groupPanel:Refresh(true)
+        end
+        UI:SyncFrameSectionLayers()
     end
 end
 
@@ -13180,6 +14273,21 @@ function UI:OpenGroupRunsView()
     self:ShowHub("group")
     if groupPanel then
         groupPanel._view = "runs"
+        if groupPanel.Refresh then
+            groupPanel:Refresh(true)
+        end
+        UI:SyncFrameSectionLayers()
+    end
+end
+
+function UI:OpenGroupRecentView()
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("group") then
+        ns:Print("%s", L["This module is disabled in Settings."])
+        return
+    end
+    self:ShowHub("group")
+    if groupPanel then
+        groupPanel._view = "recent"
         if groupPanel.Refresh then
             groupPanel:Refresh(true)
         end
@@ -13273,14 +14381,20 @@ function UI:OpenTab(tabId)
         UI:SyncFrameSectionLayers()
     end
     if activeTab == "chat" and chatPanel then
-        chatPanel._filter = "all"
-        if chatPanel.Refresh then
-            chatPanel:Refresh(true)
+        if UI._pendingChatNav and chatPanel.ApplyNavigation then
+            chatPanel:ApplyNavigation(UI._pendingChatNav)
+            UI._pendingChatNav = nil
+        else
+            chatPanel._filter = "all"
+            if chatPanel.Refresh then
+                chatPanel:Refresh(true)
+            end
         end
         UI:SyncFrameSectionLayers()
     end
     UI:EnsureMainFrameDraggable()
     MaybePromptThemePicker()
+    MaybePromptTabTutorial(activeTab)
     if ns.LFGFrameTab and ns.LFGFrameTab.SyncAllEmbeddedTabStates then
         ns.LFGFrameTab:SyncAllEmbeddedTabStates()
     end

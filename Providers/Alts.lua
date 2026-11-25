@@ -459,6 +459,140 @@ local function SnapshotLockouts(prevLockouts)
     return out
 end
 
+local TRACKED_MARK_ITEM_IDS = {
+    [20558] = true,
+    [20559] = true,
+    [20560] = true,
+    [29024] = true,
+    [29434] = true,
+    [22526] = true,
+    [19698] = true,
+    [19699] = true,
+    [19700] = true,
+    [12840] = true,
+    [12841] = true,
+    [12843] = true,
+    [21229] = true,
+}
+
+local function SnapshotReputations(prevReps)
+    local out = {}
+    if GetNumFactions and GetFactionInfo then
+        local total = Safe.Number(Safe.Call(GetNumFactions)) or 0
+        for i = 1, math.min(total, 120) do
+            local ok, name, _, standingId, barMin, barMax, barValue, _, _, isHeader, _, hasRep = pcall(GetFactionInfo, i)
+            if ok then
+                name = Safe.String(name)
+                local st = Safe.Number(standingId) or 0
+                local hdr = Safe.Value(isHeader) == true
+                local hRep = Safe.Value(hasRep) == true
+                if name and name ~= "" and ((not hdr) or hRep) and st >= 5 then
+                    local bMin = Safe.Number(barMin) or 0
+                    local bMax = Safe.Number(barMax) or 1
+                    local bVal = Safe.Number(barValue) or 0
+                    local span = math.max(1, bMax - bMin)
+                    local cur = math.max(0, bVal - bMin)
+                    out[#out + 1] = {
+                        name = name,
+                        standing = st,
+                        cur = cur,
+                        max = span,
+                    }
+                end
+            end
+        end
+        table.sort(out, function(a, b)
+            if (a.standing or 0) ~= (b.standing or 0) then
+                return (a.standing or 0) > (b.standing or 0)
+            end
+            if (a.cur or 0) ~= (b.cur or 0) then
+                return (a.cur or 0) > (b.cur or 0)
+            end
+            return tostring(a.name or "") < tostring(b.name or "")
+        end)
+        while #out > 24 do
+            table.remove(out)
+        end
+    end
+    if #out == 0 and type(prevReps) == "table" then
+        return prevReps
+    end
+    return out
+end
+
+local function SnapshotMarksFromStorage(bags, bank)
+    local byId = {}
+    local function scanList(list)
+        if type(list) ~= "table" then return end
+        for _, it in ipairs(list) do
+            local iid = type(it) == "table" and tonumber(it.id)
+            if iid and TRACKED_MARK_ITEM_IDS[iid] then
+                local rec = byId[iid]
+                if not rec then
+                    rec = { id = iid, name = it.name or ("Item #" .. tostring(iid)), count = 0, icon = it.icon }
+                    byId[iid] = rec
+                end
+                rec.count = rec.count + (tonumber(it.count) or 1)
+            end
+        end
+    end
+    scanList(bags)
+    scanList(bank)
+    if C_CurrencyInfo and C_CurrencyInfo.GetCurrencyListSize and C_CurrencyInfo.GetCurrencyListInfo then
+        local cSize = Safe.Number(Safe.Call(C_CurrencyInfo.GetCurrencyListSize)) or 0
+        for i = 1, math.min(cSize, 60) do
+            local info = Safe.Call(C_CurrencyInfo.GetCurrencyListInfo, i)
+            if type(info) == "table" and Safe.Value(info.isHeader) ~= true then
+                local q = Safe.Number(info.quantity) or 0
+                local nm = Safe.String(info.name)
+                if q > 0 and nm and nm ~= "" then
+                    local key = "cur:" .. nm
+                    byId[key] = { id = 0, name = nm, count = q, icon = Safe.Value(info.iconFileID) }
+                end
+            end
+        end
+    end
+    local out = {}
+    for _, rec in pairs(byId) do
+        if (rec.count or 0) > 0 then
+            out[#out + 1] = rec
+        end
+    end
+    table.sort(out, function(a, b)
+        if (a.count or 0) ~= (b.count or 0) then
+            return (a.count or 0) > (b.count or 0)
+        end
+        return tostring(a.name or "") < tostring(b.name or "")
+    end)
+    while #out > 12 do
+        table.remove(out)
+    end
+    return out
+end
+
+function Alts:GetStandingLabel(standing)
+    if standing == 8 then return L["Exalted"]
+    elseif standing == 7 then return L["Revered"]
+    elseif standing == 6 then return L["Honored"]
+    elseif standing == 5 then return L["Friendly"]
+    end
+    return L["Neutral"]
+end
+
+function Alts:GetReputations(altData)
+    if type(altData) ~= "table" or type(altData.reputations) ~= "table" then
+        return {}
+    end
+    return altData.reputations
+end
+
+function Alts:GetMarks(altData)
+    if type(altData) ~= "table" or type(altData.marks) ~= "table" then
+        return {}
+    end
+    return altData.marks
+end
+
 local function ResolveItemVisuals(itemRef, icon, quality, link)
     if itemRef and C_Item then
         if not icon and C_Item.GetItemIconByID then
@@ -831,6 +965,10 @@ function Alts:Snapshot(includeBank, force)
     local fullLocks = force or (not isOwnerMatch) or (self._dirtyLocks ~= false) or type(prev) ~= "table" or type(prev.lockouts) ~= "table"
     local lockouts = fullLocks and SnapshotLockouts(prev and prev.lockouts) or prev.lockouts
     self._dirtyLocks = false
+    local fullReps = force or (not isOwnerMatch) or (self._dirtyReps ~= false) or type(prev) ~= "table" or type(prev.reputations) ~= "table"
+    local reputations = fullReps and SnapshotReputations(prev and prev.reputations) or prev.reputations
+    self._dirtyReps = false
+    local marks = SnapshotMarksFromStorage(bags, bank)
     local hasNewMail = (HasNewMail and Safe.Value(Safe.Call(HasNewMail)) == true) or false
     local mailSenders = nil
     local mailSince = nil
@@ -954,6 +1092,8 @@ function Alts:Snapshot(includeBank, force)
         recipes = recipes,
         craftCooldowns = type(prev) == "table" and prev.craftCooldowns or nil,
         lockouts = lockouts,
+        reputations = reputations,
+        marks = marks,
         guild = guild,
         equipment = equipment,
         bags = bags,
@@ -3115,6 +3255,11 @@ function Alts:Init()
     ns.RegisterEvent(self, "PLAYER_LEVEL_UP", function()
         self._dirtyLocks = true
         self:QueueSnapshot(false, 1.0)
+    end)
+
+    ns.RegisterEvent(self, "UPDATE_FACTION", function()
+        self._dirtyReps = true
+        self:QueueSnapshot(false, 2.0)
     end)
 
     ns.RegisterEvent(self, "PLAYER_GUILD_UPDATE", function(_, _, unit)

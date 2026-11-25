@@ -102,6 +102,7 @@ function Chat:BumpPeerStateGen()
 end
 
 local STATIC_CHANNEL_ORDER = {
+    ["ch:general"] = { titleKey = "General", kind = "GENERAL", slash = "/s ", order = 0 },
     ["ch:party"] = { titleKey = "Party", kind = "PARTY", slash = "/p ", order = 1 },
     ["ch:instance"] = { titleKey = "Instance", kind = "INSTANCE_CHAT", slash = "/i ", order = 2 },
     ["ch:raid"] = { titleKey = "Raid", kind = "RAID", slash = "/ra ", order = 3 },
@@ -205,10 +206,14 @@ local function IsProtectedThreadRecord(threadKey)
     if type(threadKey) ~= "string" then return false end
     if threadKey == "notes:self"
         or threadKey == "mentions:radar"
+        or threadKey == "ch:general"
         or threadKey == "ch:alliance"
         or threadKey == "ch:party"
         or threadKey == "ch:instance"
         or threadKey == "ch:raid"
+        or threadKey == "ch:say"
+        or threadKey == "ch:yell"
+        or threadKey:sub(1, 7) == "ch:pub:"
         or threadKey:sub(1, 8) == "ch:guild"
         or threadKey:sub(1, 10) == "ch:officer"
         or threadKey:sub(1, 5) == "room:"
@@ -528,34 +533,208 @@ local function PruneProbeTracking(self, nowClock)
 end
 
 local function IsPublicChannelKind(kind)
-    return kind == "GUILD" or kind == "OFFICER" or kind == "PARTY" or kind == "RAID" or kind == "INSTANCE_CHAT"
+    return kind == "GUILD" or kind == "OFFICER" or kind == "PARTY" or kind == "RAID" or kind == "INSTANCE_CHAT" or kind == "LOCAL_SAY" or kind == "LOCAL_YELL" or kind == "PUB_CHANNEL"
+end
+
+function Chat:_IsInDungeonOrRaid()
+    if not IsInInstance then return false end
+    local ok, inInst, instType = pcall(IsInInstance)
+    if ok and Safe and Safe.Value(inInst) == true then
+        local t = Safe.String(instType)
+        if t == "party" or t == "raid" or t == "scenario" then
+            return true
+        end
+    end
+    return false
+end
+
+function Chat:_ResolveMuteTitle(threadKey)
+    if not threadKey then return "?" end
+    local meta = STATIC_CHANNEL_ORDER[threadKey]
+    if meta and meta.titleKey and L[meta.titleKey] then
+        return L[meta.titleKey]
+    end
+    local t = self.threads and self.threads[threadKey]
+    if t then
+        return t.title or t.targetName or threadKey
+    end
+    return tostring(threadKey)
+end
+
+function Chat:_ScheduleMuteCheck(delaySec)
+    if not (C_Timer and C_Timer.After) then return end
+    self._threadMuteTimerGen = (self._threadMuteTimerGen or 0) + 1
+    local gen = self._threadMuteTimerGen
+    local waitSec = math.max(0.5, math.min(86400, tonumber(delaySec) or 1))
+    local chatRef = self
+    C_Timer.After(waitSec, function()
+        if chatRef._threadMuteTimerGen ~= gen then return end
+        if chatRef.CheckExpiredThreadMutes then
+            chatRef:CheckExpiredThreadMutes(true)
+        end
+    end)
+end
+
+function Chat:CheckExpiredThreadMutes(scheduleTimerIfPending)
+    if self._checkingThreadMutes then
+        return false
+    end
+    local s = ns.db and ns.db.settings
+    local rules = s and s.chatMutedThreadRules
+    if type(rules) ~= "table" or next(rules) == nil then
+        return false
+    end
+    self._checkingThreadMutes = true
+    local muted = s.chatMutedThreads
+    if type(muted) ~= "table" then
+        muted = {}
+        s.chatMutedThreads = muted
+    end
+    local now = time()
+    local inDungRaid = self:_IsInDungeonOrRaid()
+    local minRemaining = nil
+    local expiredKeys = {}
+    for k, rule in pairs(rules) do
+        if muted[k] ~= true or type(rule) ~= "table" then
+            rules[k] = nil
+        elseif type(rule.untilTs) == "number" and rule.untilTs > 0 then
+            if now >= rule.untilTs then
+                muted[k] = nil
+                rules[k] = nil
+                expiredKeys[#expiredKeys + 1] = k
+            else
+                local rem = rule.untilTs - now
+                if not minRemaining or rem < minRemaining then
+                    minRemaining = rem
+                end
+            end
+        elseif rule.untilLeaveInstance == true then
+            if inDungRaid then
+                rule.instanceEntered = true
+            elseif rule.instanceEntered == true then
+                muted[k] = nil
+                rules[k] = nil
+                expiredKeys[#expiredKeys + 1] = k
+            end
+        else
+            rules[k] = nil
+        end
+    end
+    self._checkingThreadMutes = nil
+
+    if #expiredKeys > 0 then
+        self:InvalidateUnreadCache()
+        self:BumpPeerStateGen()
+        for _, ek in ipairs(expiredKeys) do
+            if ns.Print then
+                ns:Print(L["Notifications re-enabled for %s."]:format(self:_ResolveMuteTitle(ek)))
+            end
+        end
+        ns:Emit("CHAT_UPDATED")
+        ns:Emit("SETTINGS_UPDATED")
+        if ns.Settings and ns.Settings.Refresh then
+            ns.Settings:Refresh()
+        end
+    end
+    if minRemaining and scheduleTimerIfPending then
+        self:_ScheduleMuteCheck(minRemaining + 0.5)
+    end
+    return #expiredKeys > 0
 end
 
 function Chat:IsThreadMuted(threadKey)
-    local muted = ns.db and ns.db.settings and ns.db.settings.chatMutedThreads
+    local s = ns.db and ns.db.settings
+    local rules = s and s.chatMutedThreadRules
+    if type(rules) == "table" and next(rules) ~= nil then
+        self:CheckExpiredThreadMutes(false)
+    end
+    local muted = s and s.chatMutedThreads
     return type(muted) == "table" and threadKey and muted[threadKey] == true or false
 end
 
-function Chat:SetThreadMuted(threadKey, state)
+function Chat:GetThreadMuteInfo(threadKey)
+    if not self:IsThreadMuted(threadKey) then
+        return false, nil, nil
+    end
+    local s = ns.db and ns.db.settings
+    local rules = s and s.chatMutedThreadRules
+    local rule = type(rules) == "table" and rules[threadKey] or nil
+    if type(rule) == "table" then
+        if type(rule.untilTs) == "number" and rule.untilTs > 0 then
+            return true, "timed", math.max(1, math.ceil(rule.untilTs - time()))
+        elseif rule.untilLeaveInstance == true then
+            return true, "instance", nil
+        end
+    end
+    return true, "forever", nil
+end
+
+function Chat:FormatThreadMuteStatus(threadKey)
+    local isMuted, mode, remSec = self:GetThreadMuteInfo(threadKey)
+    if not isMuted then
+        return nil
+    end
+    if mode == "timed" and remSec then
+        local mins = math.max(1, math.ceil(remSec / 60))
+        return L["Silenced (%dm left)"]:format(mins)
+    elseif mode == "instance" then
+        return L["Silenced until leaving dungeon or raid"]
+    end
+    return L["Silenced until re-enabled"]
+end
+
+function Chat:SetThreadMuted(threadKey, state, opts)
     if not threadKey or not (ns.db and ns.db.settings) then
         return false
     end
     if type(ns.db.settings.chatMutedThreads) ~= "table" then
         ns.db.settings.chatMutedThreads = {}
     end
+    if type(ns.db.settings.chatMutedThreadRules) ~= "table" then
+        ns.db.settings.chatMutedThreadRules = {}
+    end
+    local muted = ns.db.settings.chatMutedThreads
+    local rules = ns.db.settings.chatMutedThreadRules
+    local t = self.threads[threadKey]
     if state then
-        ns.db.settings.chatMutedThreads[threadKey] = true
-        local t = self.threads[threadKey]
+        muted[threadKey] = true
+        if type(opts) == "table" and type(opts.durationSec) == "number" and opts.durationSec > 0 then
+            rules[threadKey] = { untilTs = time() + math.floor(opts.durationSec + 0.5) }
+            self:CheckExpiredThreadMutes(true)
+        elseif type(opts) == "table" and opts.untilLeaveInstance == true then
+            rules[threadKey] = {
+                untilLeaveInstance = true,
+                instanceEntered = self:_IsInDungeonOrRaid() and true or false,
+            }
+        else
+            rules[threadKey] = nil
+        end
         if t then
             t.unread = 0
             t.hasMention = nil
+            t.firstUnreadTs = nil
+            t.firstUnreadEntry = nil
+            if type(threadKey) == "string" and (threadKey:sub(1, 2) == "w:" or self:IsGuildHistoryKey(threadKey)) then
+                local hist = GetHistoryScopeTable()
+                if hist and type(hist[threadKey]) == "table" then
+                    hist[threadKey].unread = 0
+                end
+            end
         end
+        ns:Emit("CHAT_THREAD_READ", {
+            threadKey = threadKey,
+            channelKey = threadKey,
+            kind = t and t.kind or nil,
+            bnetAccountID = t and t.bnetAccountID or nil,
+        })
     else
-        ns.db.settings.chatMutedThreads[threadKey] = nil
+        muted[threadKey] = nil
+        rules[threadKey] = nil
     end
     self:InvalidateUnreadCache()
     self:BumpPeerStateGen()
     ns:Emit("CHAT_UPDATED")
+    ns:Emit("SETTINGS_UPDATED")
     return true
 end
 
@@ -565,12 +744,70 @@ function Chat:ToggleThreadMuted(threadKey)
     return nextState
 end
 
+Chat._THREAD_MUTE_PRESETS = {
+    { durationSec = 300, labelKey = "For 5 minutes" },
+    { durationSec = 600, labelKey = "For 10 minutes" },
+    { durationSec = 1800, labelKey = "For 30 minutes" },
+    { untilLeaveInstance = true, labelKey = "Until leaving dungeon or raid" },
+    { permanent = true, labelKey = "Until I turn it off" },
+}
+
+function Chat:PopulateThreadMuteMenu(menuRoot, threadKey, displayTitle, onAfterChange)
+    if not (menuRoot and threadKey) then return end
+    local isMuted = self:GetThreadMuteInfo(threadKey)
+    local titleLbl = displayTitle or self:_ResolveMuteTitle(threadKey)
+    if isMuted then
+        local statusTxt = self:FormatThreadMuteStatus(threadKey)
+        if statusTxt then
+            menuRoot:CreateTitle("|cffff9b3d" .. statusTxt .. "|r")
+        end
+        menuRoot:CreateButton("|cff3fb950" .. L["Re-enable Notifications"] .. "|r", function()
+            self:SetThreadMuted(threadKey, false)
+            if type(onAfterChange) == "function" then
+                onAfterChange(false, nil)
+            end
+        end)
+        menuRoot:CreateDivider()
+    end
+    local addRadio = menuRoot.CreateRadio or menuRoot.CreateCheckbox
+    for _, preset in ipairs(self._THREAD_MUTE_PRESETS) do
+        local lbl = L[preset.labelKey]
+        local function applyPreset()
+            local opts = nil
+            if preset.durationSec then
+                opts = { durationSec = preset.durationSec }
+            elseif preset.untilLeaveInstance then
+                opts = { untilLeaveInstance = true }
+            end
+            self:SetThreadMuted(threadKey, true, opts)
+            if type(onAfterChange) == "function" then
+                onAfterChange(true, opts)
+            end
+        end
+        if addRadio then
+            addRadio(menuRoot, lbl, function()
+                local mNow, modeNow = self:GetThreadMuteInfo(threadKey)
+                if not mNow then return false end
+                if preset.untilLeaveInstance then
+                    return modeNow == "instance"
+                elseif preset.permanent then
+                    return modeNow == "forever"
+                end
+                return false
+            end, applyPreset)
+        else
+            menuRoot:CreateButton(lbl, applyPreset)
+        end
+    end
+end
+
 local UNMUTE_CHANNEL_MAP = {
     msgPreviewGroup = { "ch:party", "ch:instance" },
     quickReplyNotifyParty = { "ch:party", "ch:instance" },
     quickReplyNotifyRaid = { "ch:raid" },
     msgPreviewGuild = { "ch:guild", "ch:officer" },
     quickReplyNotifyGuild = { "ch:guild", "ch:officer" },
+    quickReplyNotifySay = { "ch:general" },
 }
 
 function Chat:UnmuteChannelKeysForSetting(settingKey)
@@ -747,23 +984,191 @@ local function BuildDefaultQuickReplies()
     }
 end
 
-function Chat:GetQuickReplies()
-    local cfg = ns.db and ns.db.settings
-    if not cfg then
-        return BuildDefaultQuickReplies()
-    end
-    if type(cfg.chatQuickReplies) ~= "table" or #cfg.chatQuickReplies == 0 then
-        cfg.chatQuickReplies = BuildDefaultQuickReplies()
-    end
-    return cfg.chatQuickReplies
+function Chat:GetQuickReplyContexts()
+    return {
+        { id = "local", label = L["Local & Trade (/1, /2)"] },
+        { id = "defense", label = L["Defense (/3)"] },
+        { id = "party", label = L["Party / Instance"] },
+        { id = "raid", label = L["Raid"] },
+        { id = "guild", label = L["Guild"] },
+        { id = "whisper", label = L["Whispers"] },
+    }
 end
 
-function Chat:AddQuickReply(rawText)
+function Chat:BuildDefaultQuickRepliesForContext(ctxId)
+    if ctxId == "party" then
+        return {
+            L["On my way! ({zone})"],
+            L["1 min, brb!"],
+            L["Ready for pull!"],
+            L["Thanks for the group!"],
+        }
+    elseif ctxId == "raid" then
+        return {
+            L["Ready!"],
+            L["Need summon please!"],
+            L["1 min, buffing up!"],
+            L["Thanks for the raid!"],
+        }
+    elseif ctxId == "guild" then
+        return {
+            L["Up for a dungeon?"],
+            L["On my way from {zone}!"],
+            L["Need a hand with anything?"],
+            L["Count me in!"],
+        }
+    elseif ctxId == "defense" then
+        return {
+            L["Enemy spotted in {zone}!"],
+            L["Need help defending {zone}!"],
+            L["Area is clear in {zone}."],
+            L["Where exactly in {zone}?"],
+        }
+    elseif ctxId == "local" then
+        return {
+            L["Anyone for quests in {zone}?"],
+            L["Looking for group in {zone}!"],
+            L["WTB / Looking for crafter in {zone}"],
+            L["On my way! ({zone})"],
+        }
+    end
+    return BuildDefaultQuickReplies()
+end
+
+function Chat:GetPortalDestinationsForPlayer()
+    local fac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+    local dests = {}
+    if fac == "Horde" then
+        dests = {
+            { id = "uc", name = L["Undercity"], abbr = "UC", match = { "undercity", "cidade baixa", "entranas", "entrañas" } },
+            { id = "org", name = "Orgrimmar", abbr = "Org", match = { "orgrimmar" } },
+            { id = "tb", name = L["Thunder Bluff"], abbr = "TB", match = { "thunder bluff", "penhasco do trovao", "penhasco do trovão", "cima del trueno" } },
+            { id = "smc", name = L["Silvermoon"], abbr = "SMC", match = { "silvermoon", "luaprata", "lunargenta" } },
+            { id = "shatt", name = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
+        }
+    elseif fac == "Alliance" then
+        dests = {
+            { id = "sw", name = L["Stormwind"], abbr = "SW", match = { "stormwind", "ventobravo", "ventormenta" } },
+            { id = "if", name = L["Ironforge"], abbr = "IF", match = { "ironforge", "altaforja", "forjaz" } },
+            { id = "darn", name = "Darnassus", abbr = "Darn", match = { "darnassus" } },
+            { id = "exo", name = "Exodar", abbr = "Exo", match = { "exodar", "el exodar" } },
+            { id = "shatt", name = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
+        }
+    else
+        dests = {
+            { id = "shatt", name = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
+            { id = "org", name = "Orgrimmar", abbr = "Org", match = { "orgrimmar" } },
+            { id = "sw", name = L["Stormwind"], abbr = "SW", match = { "stormwind", "ventobravo", "ventormenta" } },
+        }
+    end
+    local zoneRaw = (GetRealZoneText and Safe.String(Safe.Call(GetRealZoneText)))
+        or (Compat.CurrentZoneName and Compat.CurrentZoneName())
+        or ""
+    local subRaw = (GetSubZoneText and Safe.String(Safe.Call(GetSubZoneText))) or ""
+    local curFold = self:FoldSearchText(zoneRaw .. " " .. subRaw)
+    local out = {}
+    for _, d in ipairs(dests) do
+        local isHere = false
+        if curFold ~= "" then
+            for _, pat in ipairs(d.match) do
+                if curFold:find(pat, 1, true) then
+                    isHere = true
+                    break
+                end
+            end
+        end
+        if not isHere then
+            out[#out + 1] = {
+                id = d.id,
+                name = d.name,
+                abbr = d.abbr,
+                text = string.format(L["LF portal to %s (%s)!"], d.name, d.abbr),
+            }
+        end
+    end
+    return out
+end
+
+function Chat:ResolveQuickReplyContext(threadKey)
+    local t = threadKey and self.threads and self.threads[threadKey] or nil
+    if not t then
+        return "whisper"
+    end
+    if t.kind == "PARTY" or t.kind == "INSTANCE_CHAT" then
+        return "party"
+    elseif t.kind == "RAID" then
+        return "raid"
+    elseif t.kind == "GUILD" or t.kind == "OFFICER" or t.kind == "ALLIANCE" then
+        return "guild"
+    elseif t.kind == "PUB_CHANNEL" then
+        local chNameFold = self:FoldSearchText(t.channelName or t.title or "")
+        if t.channelId == 3 or chNameFold:find("defesa", 1, true) or chNameFold:find("defense", 1, true) or chNameFold:find("defensa", 1, true) then
+            return "defense"
+        end
+        return "local"
+    elseif t.kind == "GENERAL" then
+        local gTarget = self.GetGeneralTargetInfo and self:GetGeneralTargetInfo() or nil
+        if gTarget and gTarget.channelId then
+            local chNameFold = self:FoldSearchText(gTarget.name or gTarget.title or "")
+            if gTarget.channelId == 3 or chNameFold:find("defesa", 1, true) or chNameFold:find("defense", 1, true) or chNameFold:find("defensa", 1, true) then
+                return "defense"
+            end
+        end
+        return "local"
+    elseif t.kind == "LOCAL_SAY" or t.kind == "LOCAL_YELL" then
+        return "local"
+    end
+    return "whisper"
+end
+
+function Chat:GetQuickRepliesForContext(ctxId)
+    local key = ctxId or "whisper"
+    local cfg = ns.db and ns.db.settings
+    if not cfg then
+        return self:BuildDefaultQuickRepliesForContext(key)
+    end
+    if key == "whisper" then
+        if type(cfg.chatQuickReplies) ~= "table" or #cfg.chatQuickReplies == 0 then
+            cfg.chatQuickReplies = self:BuildDefaultQuickRepliesForContext("whisper")
+        end
+        return cfg.chatQuickReplies
+    end
+    if type(cfg.chatQuickRepliesByContext) ~= "table" then
+        cfg.chatQuickRepliesByContext = {}
+    end
+    local list = cfg.chatQuickRepliesByContext[key]
+    if type(list) ~= "table" or #list == 0 then
+        list = self:BuildDefaultQuickRepliesForContext(key)
+        cfg.chatQuickRepliesByContext[key] = list
+    end
+    return list
+end
+
+function Chat:GetQuickReplies(threadKey)
+    local ctx = threadKey and self:ResolveQuickReplyContext(threadKey) or "whisper"
+    local base = self:GetQuickRepliesForContext(ctx)
+    if ctx == "local" then
+        local portals = self:GetPortalDestinationsForPlayer()
+        local combined = {}
+        if portals[1] then combined[#combined + 1] = portals[1].text end
+        if portals[2] then combined[#combined + 1] = portals[2].text end
+        for _, v in ipairs(base) do
+            combined[#combined + 1] = v
+        end
+        for i = 3, #portals do
+            combined[#combined + 1] = portals[i].text
+        end
+        return combined
+    end
+    return base
+end
+
+function Chat:AddQuickReplyForContext(ctxId, rawText)
     local clean = Compat.CleanInput(rawText)
     if not clean or not (ns.db and ns.db.settings) then
         return false
     end
-    local list = self:GetQuickReplies()
+    local list = self:GetQuickRepliesForContext(ctxId or "whisper")
     for _, existing in ipairs(list) do
         if existing == clean then
             return true
@@ -777,26 +1182,50 @@ function Chat:AddQuickReply(rawText)
     return true
 end
 
-function Chat:RemoveQuickReply(index)
-    local cfg = ns.db and ns.db.settings
-    if not cfg or type(cfg.chatQuickReplies) ~= "table" then
-        return false
-    end
-    if index and index >= 1 and index <= #cfg.chatQuickReplies then
-        table.remove(cfg.chatQuickReplies, index)
+function Chat:RemoveQuickReplyForContext(ctxId, index)
+    local key = ctxId or "whisper"
+    local list = self:GetQuickRepliesForContext(key)
+    if type(list) == "table" and index and index >= 1 and index <= #list then
+        table.remove(list, index)
+        if #list == 0 then
+            local defaults = self:BuildDefaultQuickRepliesForContext(key)
+            for i = 1, #defaults do
+                list[i] = defaults[i]
+            end
+        end
         ns:Emit("CHAT_UPDATED")
         return true
     end
     return false
 end
 
-function Chat:ResetQuickReplies()
-    if ns.db and ns.db.settings then
-        ns.db.settings.chatQuickReplies = BuildDefaultQuickReplies()
-        ns:Emit("CHAT_UPDATED")
-        return true
+function Chat:ResetQuickRepliesForContext(ctxId)
+    local key = ctxId or "whisper"
+    local cfg = ns.db and ns.db.settings
+    if not cfg then return false end
+    if key == "whisper" then
+        cfg.chatQuickReplies = self:BuildDefaultQuickRepliesForContext("whisper")
+    else
+        if type(cfg.chatQuickRepliesByContext) ~= "table" then
+            cfg.chatQuickRepliesByContext = {}
+        end
+        cfg.chatQuickRepliesByContext[key] = self:BuildDefaultQuickRepliesForContext(key)
     end
-    return false
+    ns:Emit("CHAT_UPDATED")
+    return true
+end
+
+function Chat:AddQuickReply(rawText, threadKey)
+    local ctx = threadKey and self:ResolveQuickReplyContext(threadKey) or "whisper"
+    return self:AddQuickReplyForContext(ctx, rawText)
+end
+
+function Chat:RemoveQuickReply(index)
+    return self:RemoveQuickReplyForContext("whisper", index)
+end
+
+function Chat:ResetQuickReplies()
+    return self:ResetQuickRepliesForContext("whisper")
 end
 
 local UTF8_FOLD_MAP = {
@@ -1276,33 +1705,56 @@ local function PersistWhisperLine(threadKey, entry, unreadCount, threadObj)
     saved.unread = isChannelLike and 0 or math.max(0, math.floor(tonumber(unreadCount) or 0))
     if type(saved.lines) ~= "table" then saved.lines = {} end
 
-    -- Store strictly character names, level, and plain text (never BattleTag, Real ID, or bnetAccountID).
-    table.insert(saved.lines, {
-        sender = entry.sender,
-        targetChar = entry.targetChar,
-        text = entry.text,
-        ts = entry.ts,
-        incoming = entry.incoming and true or false,
-        classFile = entry.classFile,
-        targetClass = entry.targetClass,
-        senderFaction = entry.senderFaction,
-        targetFaction = entry.targetFaction,
-        senderLevel = (tonumber(entry.senderLevel) and tonumber(entry.senderLevel) > 0) and math.floor(tonumber(entry.senderLevel)) or nil,
-        viaAddon = entry.viaAddon and true or nil,
-        noteId = entry.noteId,
-        isMention = entry.isMention and true or nil,
-        mentionTerm = entry.mentionTerm,
-        mentionChannel = entry.mentionChannel,
-        mentionType = entry.mentionType,
-        rawText = entry.rawText,
-        senderCharName = entry.senderCharName,
-        senderLookupKey = entry.senderLookupKey,
-        senderGuid = entry.senderGuid,
-        sourceThreadKey = entry.sourceThreadKey,
-    })
+        local targetLines = saved.lines
+        local newEntry = {
+            sender = entry.sender,
+            targetChar = entry.targetChar,
+            text = entry.text,
+            ts = entry.ts,
+            incoming = entry.incoming and true or false,
+            classFile = entry.classFile,
+            targetClass = entry.targetClass,
+            senderFaction = entry.senderFaction,
+            targetFaction = entry.targetFaction,
+            senderLevel = (tonumber(entry.senderLevel) and tonumber(entry.senderLevel) > 0) and math.floor(tonumber(entry.senderLevel)) or nil,
+            viaAddon = entry.viaAddon and true or nil,
+            noteId = entry.noteId,
+            isMention = entry.isMention and true or nil,
+            mentionTerm = entry.mentionTerm,
+            mentionChannel = entry.mentionChannel,
+            mentionType = entry.mentionType,
+            rawText = entry.rawText,
+            senderCharName = entry.senderCharName,
+            senderLookupKey = entry.senderLookupKey,
+            senderGuid = entry.senderGuid,
+            sourceThreadKey = entry.sourceThreadKey,
+            groupRosterId = entry.groupRosterId,
+        }
+        table.insert(targetLines, newEntry)
+        if entry.groupRosterId and threadObj and type(threadObj.groupRosters) == "table" and threadObj.groupRosters[entry.groupRosterId] then
+            if type(saved.groupRosters) ~= "table" then saved.groupRosters = {} end
+            saved.groupRosters[entry.groupRosterId] = threadObj.groupRosters[entry.groupRosterId]
+        end
     if not isNotes then
+        local trimmedRoster = false
         while #saved.lines > limit do
-            table.remove(saved.lines, 1)
+            local rem = table.remove(saved.lines, 1)
+            if rem and rem.groupRosterId then
+                trimmedRoster = true
+            end
+        end
+        if trimmedRoster and type(saved.groupRosters) == "table" then
+            local keep = {}
+            for _, ln in ipairs(saved.lines) do
+                if type(ln) == "table" and ln.groupRosterId then
+                    keep[ln.groupRosterId] = true
+                end
+            end
+            for rk in pairs(saved.groupRosters) do
+                if not keep[rk] then
+                    saved.groupRosters[rk] = nil
+                end
+            end
         end
         if isNewThread and not IsProtectedThreadRecord(storageKey) and CountHashKeys(hist) > MAX_SAVED_THREADS then
             PruneSavedScopeTable(hist, HISTORY_TTL_SECONDS, MAX_SAVED_THREADS, GetHistoryStamp, IsProtectedThreadRecord)
@@ -1349,7 +1801,17 @@ local function RewriteThreadHistory(thread)
                 senderLookupKey = m.senderLookupKey,
                 senderGuid = m.senderGuid,
                 sourceThreadKey = m.sourceThreadKey,
+                groupRosterId = m.groupRosterId,
             }
+        end
+    end
+    local savedRosters = nil
+    if type(thread.groupRosters) == "table" then
+        for _, ol in ipairs(outLines) do
+            if ol.groupRosterId and thread.groupRosters[ol.groupRosterId] then
+                if not savedRosters then savedRosters = {} end
+                savedRosters[ol.groupRosterId] = thread.groupRosters[ol.groupRosterId]
+            end
         end
     end
     local guildName = nil
@@ -1370,6 +1832,7 @@ local function RewriteThreadHistory(thread)
         updatedAt = thread.lastAt or time(),
         unread = isChannelLike and 0 or math.max(0, math.floor(tonumber(thread.unread) or 0)),
         lines = outLines,
+        groupRosters = savedRosters,
     }
 end
 
@@ -1775,9 +2238,781 @@ local function ResolvePreviewChannelKind(threadKind, extraFields)
     return threadKind
 end
 
+Chat._GENERAL_TAG_HEX = {
+    WHISPER = "|cffff7fff",
+    DIRECT = "|cffff7fff",
+    BN_WHISPER = "|cff1ad1ff",
+    PARTY = "|cff7aaeff",
+    INSTANCE_CHAT = "|cff7aaeff",
+    RAID = "|cffff8a2e",
+    GUILD = "|cff47ef66",
+    OFFICER = "|cff47ef66",
+    ALLIANCE = "|cffbd80ff",
+    ROOM = "|cffc084fc",
+    LOCAL_SAY = "|cffffffff",
+    LOCAL_YELL = "|cffff4d4d",
+    PUB_CHANNEL = "|cffffc0c0",
+    SYSTEM = "|cffffff00",
+    LOOT = "|cff47ef66",
+    XP = "|cff8899ff",
+    ACHIEVEMENT = "|cffffd24d",
+    MONSTER = "|cffffa040",
+}
+
+Chat._recentGeneralDedup = Chat._recentGeneralDedup or {}
+
+function Chat:_NormalizeGeneralDedupText(rawText)
+    if Safe.IsSecret(rawText) or type(rawText) ~= "string" then
+        return nil
+    end
+    local s = rawText
+    if s:find("|K", 1, true) then
+        s = s:gsub("|K[^|]*|k", "")
+    end
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    s = s:gsub("|T.-|t", " ")
+    s = s:gsub("{rt[1-8]}", " ")
+    s = s:gsub("|A.-|a", " ")
+    s = s:gsub("|H(item:%d+)[^|]*|h[^|]*|h", "<%1>")
+    s = s:gsub("|H(spell:%d+)[^|]*|h[^|]*|h", "<%1>")
+    s = s:gsub("|H(quest:%d+)[^|]*|h[^|]*|h", "<%1>")
+    s = s:gsub("|H(achievement:%d+)[^|]*|h[^|]*|h", "<%1>")
+    s = s:gsub("|H(enchant:%d+)[^|]*|h[^|]*|h", "<%1>")
+    for _ = 1, 6 do
+        local nextS = s:gsub("|H[^|]-|h(.-)|h", "%1")
+        if nextS == s then break end
+        s = nextS
+    end
+    s = s:gsub("[%c]+", " "):gsub("%s+", " "):gsub("^%s*(.-)%s*$", "%1")
+    if s == "" then
+        return nil
+    end
+    return (Compat.LowerUtf8 and Compat.LowerUtf8(s)) or s:lower()
+end
+
+function Chat:_ExtractGeneralSenderKey(rawSenderOrLink, isMeHint)
+    if isMeHint == true then
+        return "__me__"
+    end
+    local rawStr = Safe.String(rawSenderOrLink)
+    if not rawStr or rawStr == "" then
+        return nil
+    end
+    local linkName = rawStr:match("|Hplayer[^|]*|h%[([^%]]+)%]|h")
+        or rawStr:match("|HBNplayer[^|]*|h%[([^%]]+)%]|h")
+        or rawStr:match("|Hplayer[^:]*:([^:|]+)")
+        or rawStr:match("^%[[^%]]+%]%s*%[([^%]]+)%]%s*:")
+        or rawStr
+    local clean = linkName:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("^%[", ""):gsub("%]$", "")
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(clean)
+    local disp = (parsed and parsed.displayName) or clean
+    if disp and Compat.IsMe and Compat.IsMe(disp) then
+        return "__me__"
+    end
+    local lk = (parsed and parsed.lookupKey) or ((Compat.LowerUtf8 and Compat.LowerUtf8(disp)) or disp:lower())
+    return (lk and lk ~= "") and lk or nil
+end
+
+function Chat:_RememberWorldOnlyNotice(rawText)
+    local sig = self:_NormalizeGeneralDedupText(rawText)
+    if not sig then return end
+    self._recentWorldOnlyDedup = self._recentWorldOnlyDedup or {}
+    local nowMono = (GetTime and GetTime()) or 0
+    self._recentWorldOnlyDedup[sig] = nowMono
+    self._worldOnlyDedupCount = (self._worldOnlyDedupCount or 0) + 1
+    if self._worldOnlyDedupCount > 80 then
+        for k, at in pairs(self._recentWorldOnlyDedup) do
+            if (nowMono - (tonumber(at) or 0)) > 6.0 then
+                self._recentWorldOnlyDedup[k] = nil
+            end
+        end
+        self._worldOnlyDedupCount = 0
+    end
+end
+
+function Chat:_WasRecentlyWorldOnlyNotice(rawText)
+    local sig = self:_NormalizeGeneralDedupText(rawText)
+    if not (sig and self._recentWorldOnlyDedup) then return false end
+    local at = self._recentWorldOnlyDedup[sig]
+    if not at then return false end
+    local nowMono = (GetTime and GetTime()) or 0
+    return (nowMono - at) <= 4.0
+end
+
+function Chat:_RememberGeneralDedup(rawText, senderKey)
+    local sig = self:_NormalizeGeneralDedupText(rawText)
+    if not sig then return end
+    local list = self._recentGeneralDedup
+    if not list then
+        list = {}
+        self._recentGeneralDedup = list
+    end
+    local nowMono = (GetTime and GetTime()) or 0
+    local w = 1
+    for i = 1, #list do
+        if list[i] and (nowMono - (list[i].at or 0)) <= 18.0 then
+            list[w] = list[i]
+            w = w + 1
+        end
+    end
+    for i = #list, w, -1 do
+        list[i] = nil
+    end
+    list[#list + 1] = { sig = sig, sender = senderKey, at = nowMono }
+    while #list > 80 do
+        table.remove(list, 1)
+    end
+end
+
+function Chat:_WasRecentlyRecordedInGeneral(rawText, senderKey)
+    local norm = self:_NormalizeGeneralDedupText(rawText)
+    if not norm then return true end
+    local bodyPart = norm:match(":%s*(.+)$") or norm
+    local list = self._recentGeneralDedup
+    local nowMono = (GetTime and GetTime()) or 0
+    if type(list) == "table" and #list > 0 then
+        for i = #list, 1, -1 do
+            local item = list[i]
+            if item and (nowMono - (item.at or 0)) <= 18.0 and item.sig and item.sig ~= "" then
+                local senderMatch = (not senderKey) or (not item.sender) or (senderKey == item.sender)
+                if senderMatch then
+                    local sig = item.sig
+                    local sigBody = sig:match(":%s*(.+)$") or sig
+                    if norm == sig or bodyPart == sig or bodyPart == sigBody or norm == sigBody then
+                        return true
+                    end
+                    if #norm > #sigBody and norm:sub(-#sigBody) == sigBody then
+                        return true
+                    end
+                    if #sigBody >= 6 and norm:find(sigBody, 1, true) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    if senderKey == "__me__" then
+        local genThread = self.threads and self.threads["ch:general"]
+        local msgs = genThread and genThread.messages
+        if type(msgs) == "table" and #msgs > 0 then
+            local nowEpoch = time()
+            local scanStart = math.max(1, #msgs - 14)
+            for i = #msgs, scanStart, -1 do
+                local m = msgs[i]
+                if m and (m.incoming == false) and (nowEpoch - (tonumber(m.ts) or 0)) <= 25 then
+                    local mNorm = self:_NormalizeGeneralDedupText(m.text)
+                    if mNorm and (mNorm == bodyPart or mNorm == norm) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+function Chat:RecordGeneralMessage(kind, senderDisp, text, isMe, resolvedClass, customTag, extraFields)
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return nil
+    end
+    local cleanText = Safe.String(text)
+    if not cleanText or cleanText == "" then
+        return nil
+    end
+    local genMeta = STATIC_CHANNEL_ORDER["ch:general"]
+    local genTitle = (genMeta and L[genMeta.titleKey]) or L["General"]
+    local genThread = EnsureThread("ch:general", "GENERAL", genTitle, { slash = "/s " })
+    if not genThread then
+        return nil
+    end
+    local tagMarkup = nil
+    if not (extraFields and extraFields.noTag == true) then
+        local rawTag = Safe.String(customTag)
+        if (not rawTag or rawTag == "") then
+            if kind == "WHISPER" or kind == "DIRECT" then rawTag = L["Whisper"]
+            elseif kind == "BN_WHISPER" then rawTag = L["Battle.net"]
+            elseif kind == "PARTY" then rawTag = L["Party"]
+            elseif kind == "INSTANCE_CHAT" then rawTag = L["Instance"]
+            elseif kind == "RAID" then rawTag = L["Raid"]
+            elseif kind == "GUILD" then rawTag = L["Guild"]
+            elseif kind == "OFFICER" then rawTag = L["Officer"]
+            elseif kind == "ALLIANCE" then rawTag = L["Alliance"]
+            elseif kind == "ROOM" then rawTag = L["Private Room"]
+            elseif kind == "LOCAL_SAY" then rawTag = L["Say"]
+            elseif kind == "LOCAL_YELL" then rawTag = L["Yell"]
+            elseif kind == "SYSTEM" then rawTag = L["System"]
+            elseif kind == "LOOT" then rawTag = L["Loot"]
+            elseif kind == "XP" then rawTag = L["Progress"]
+            elseif kind == "ACHIEVEMENT" then rawTag = L["Achievement"]
+            elseif kind == "MONSTER" then rawTag = L["World"]
+            else rawTag = L["Channel"]
+            end
+        end
+        local hex = (Chat._GENERAL_TAG_HEX and Chat._GENERAL_TAG_HEX[kind or "PUB_CHANNEL"]) or "|cffc8dcfa"
+        tagMarkup = hex .. "[" .. rawTag .. "]|r"
+    end
+    local ts = (extraFields and tonumber(extraFields.customTs)) or time()
+    local isNotice = (extraFields and extraFields.isStatusNotice == true)
+    local noColon = (extraFields and extraFields.noSenderColon == true)
+    local senderKey = self:_ExtractGeneralSenderKey((extraFields and extraFields.senderCharName) or senderDisp, isMe == true)
+    local dedupNorm = self:_NormalizeGeneralDedupText(cleanText)
+    if not (extraFields and extraFields.allowDuplicate == true) and dedupNorm and #genThread.messages > 0 then
+        local scanFloor = math.max(1, #genThread.messages - 9)
+        for i = #genThread.messages, scanFloor, -1 do
+            local prev = genThread.messages[i]
+            if prev and math.abs(ts - (tonumber(prev.ts) or 0)) <= 3 then
+                local prevNorm = prev._dedupSig or self:_NormalizeGeneralDedupText(prev.text)
+                if prevNorm and prevNorm == dedupNorm then
+                    local prevSenderKey = prev._dedupSenderKey or self:_ExtractGeneralSenderKey(prev.senderCharName or prev.sender, prev.incoming == false)
+                    local sameSide = ((isNotice == true) and (prev.isStatusNotice == true))
+                        or (senderKey and prevSenderKey and senderKey == prevSenderKey)
+                        or (not senderKey and not prevSenderKey)
+                    if sameSide then
+                        return prev
+                    end
+                end
+            end
+        end
+    end
+    if not (extraFields and extraFields.skipDedup == true) then
+        self:_RememberGeneralDedup(cleanText, senderKey)
+        if kind == "PUB_CHANNEL" and senderKey then
+            self._recentGeneralPubSenders = self._recentGeneralPubSenders or {}
+            local nowMono = (GetTime and GetTime()) or 0
+            self._recentGeneralPubSenders[senderKey] = nowMono
+        end
+    end
+    local gEntry = {
+        ts = ts,
+        sender = senderDisp or L["System"],
+        senderCharName = extraFields and extraFields.senderCharName or nil,
+        senderGuid = extraFields and extraFields.senderGuid or nil,
+        senderLevel = extraFields and extraFields.senderLevel or nil,
+        text = cleanText,
+        incoming = (isMe ~= true),
+        classFile = resolvedClass,
+        isStatusNotice = isNotice,
+        noSenderColon = noColon,
+        generalTag = tagMarkup,
+        channelId = extraFields and extraFields.channelId or nil,
+        mentionTerm = extraFields and extraFields.mentionTerm or nil,
+        _dedupSig = dedupNorm,
+        _dedupSenderKey = senderKey,
+    }
+    if extraFields and tonumber(extraFields.customTs) and #genThread.messages > 0 then
+        local insAt = #genThread.messages + 1
+        while insAt > 1 and (tonumber(genThread.messages[insAt - 1].ts) or 0) > ts do
+            insAt = insAt - 1
+        end
+        table.insert(genThread.messages, insAt, gEntry)
+    else
+        table.insert(genThread.messages, gEntry)
+    end
+    while #genThread.messages > 200 do
+        table.remove(genThread.messages, 1)
+    end
+    genThread.lastAt = math.max(tonumber(genThread.lastAt) or 0, ts)
+    genThread.unread = 0
+    if not (extraFields and extraFields.skipImmediateEmit == true) then
+        local viewingGeneral = (ns.QuickReply and ns.QuickReply.IsViewingThread and ns.QuickReply:IsViewingThread("ch:general")) == true
+            or (ns.UI and ns.UI.IsMainVisible and ns.UI:IsMainVisible() and self.activeThreadKey == "ch:general") == true
+        if viewingGeneral then
+            ns:Emit("CHAT_UPDATED")
+        else
+            QueueChatEmit(0.30)
+        end
+    end
+    return gEntry
+end
+
+function Chat:_StripLeadingChatTimestamp(msg)
+    if type(msg) ~= "string" then return "" end
+    local out = msg:gsub("[\r\n]+", " "):gsub("^%s*(.-)%s*$", "%1")
+    out = out:gsub("^|cff%x%x%x%x%x%x%[%d%d?:%d%d:?%d*%s*[APap]?[Mm]?%]|r%s*", "")
+    out = out:gsub("^|cff%x%x%x%x%x%x%d%d?:%d%d:?%d*%s*[APap]?[Mm]?%s*|r%s*", "")
+    out = out:gsub("^%[%d%d?:%d%d:?%d*%s*[APap]?[Mm]?%]%s*", "")
+    out = out:gsub("^%d%d?:%d%d%s*[APap][Mm]%s+", "")
+    out = out:gsub("^%d%d?:%d%d:%d%d%s+", "")
+    return out:gsub("^%s*(.-)%s*$", "%1")
+end
+
+function Chat:QueueGeneralOfficialFrameLine(rawMsg, r, g, b)
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return
+    end
+    if Safe.IsSecret(rawMsg) or type(rawMsg) ~= "string" then
+        return
+    end
+    local q = self._pendingOfficialGeneralLines
+    if not q then
+        q = {}
+        self._pendingOfficialGeneralLines = q
+    end
+    q[#q + 1] = { msg = rawMsg, r = r, g = g, b = b }
+    if #q > 60 then
+        table.remove(q, 1)
+    end
+    if self._pendingOfficialGeneralTimer then
+        return
+    end
+    self._pendingOfficialGeneralTimer = true
+    local function FlushQueue()
+        self._pendingOfficialGeneralTimer = nil
+        local batch = self._pendingOfficialGeneralLines
+        if type(batch) ~= "table" or #batch == 0 then
+            return
+        end
+        self._pendingOfficialGeneralLines = {}
+        local anyAdded = false
+        for i = 1, #batch do
+            local it = batch[i]
+            if it and self:RecordGeneralOfficialFrameLine(it.msg, it.r, it.g, it.b, true) then
+                anyAdded = true
+            end
+        end
+        if anyAdded then
+            ns:Emit("COMBAT_LOG_UPDATED")
+            ns:Emit("CHAT_UPDATED")
+        end
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0, FlushQueue)
+    else
+        FlushQueue()
+    end
+end
+
+function Chat:RegisterSilentNotFoundTarget(targetName, durationSec)
+    if type(targetName) ~= "string" or targetName == "" then return end
+    local now = (GetTime and GetTime()) or 0
+    self.silentNotFoundLedger = self.silentNotFoundLedger or {}
+    local count = 0
+    for k, rec in pairs(self.silentNotFoundLedger) do
+        if type(rec) ~= "table" or now > (rec.expiresAt or 0) then
+            self.silentNotFoundLedger[k] = nil
+        else
+            count = count + 1
+        end
+    end
+    if count > 80 then
+        wipe(self.silentNotFoundLedger)
+    end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(targetName)
+    local lk = parsed and parsed.lookupKey or nil
+    local lowCand = (Compat.LowerUtf8 and Compat.LowerUtf8(targetName)) or targetName:lower()
+    local spaced = (lowCand:gsub("%-", " "))
+    local hyphened = (lowCand:gsub("%s+", "-"))
+    local exp = now + (tonumber(durationSec) or 8.0)
+    for _, variant in ipairs({ lowCand, spaced, hyphened, lk }) do
+        if type(variant) == "string" and variant ~= "" then
+            local prev = self.silentNotFoundLedger[variant]
+            self.silentNotFoundLedger[variant] = {
+                expiresAt = math.max(exp, (prev and prev.expiresAt) or 0),
+                lookupKey = lk or (prev and prev.lookupKey) or nil,
+                displayName = (parsed and parsed.displayName) or targetName,
+                isWatchProbe = (prev and prev.isWatchProbe == true) or false,
+                notifiedOffline = (prev and prev.notifiedOffline == true) or false,
+            }
+        end
+    end
+end
+
+function Chat:IsSilentNotFoundSuppressed(msgRaw)
+    if Safe.IsSecret(msgRaw) then return false end
+    local msg = Safe.String(msgRaw)
+    if not msg or msg == "" then return false end
+    local lowerMsg = (Compat.LowerUtf8 and Compat.LowerUtf8(msg)) or msg:lower()
+    local isNotFound = (ERR_NOT_FOUND_PATTERN and msg:find(ERR_NOT_FOUND_PATTERN) ~= nil)
+        or lowerMsg:find("not currently playing", 1, true) ~= nil
+        or lowerMsg:find("no player named", 1, true) ~= nil
+        or lowerMsg:find("nenhum jogador", 1, true) ~= nil
+        or lowerMsg:find("ningún jugador", 1, true) ~= nil
+        or lowerMsg:find("ningun jugador", 1, true) ~= nil
+    if not isNotFound then return false end
+    local monoNow = (GetTime and GetTime()) or 0
+    local manualRec = self.lastManualWhisperSend
+    if type(manualRec) == "table" and manualRec.delivered ~= true and (monoNow - (manualRec.sentAt or 0)) <= 4.0 then
+        local mLow = manualRec.targetStr and ((Compat.LowerUtf8 and Compat.LowerUtf8(manualRec.targetStr)) or manualRec.targetStr:lower()) or ""
+        if mLow ~= "" and (lowerMsg:find(mLow, 1, true) or lowerMsg:find((mLow:gsub("%-", " ")), 1, true)) then
+            return false
+        end
+    end
+    if ns.Clan and ns.Clan.IsSilentWhisperNotFound and ns.Clan:IsSilentWhisperNotFound(msg) then
+        return true
+    end
+    if type(self.pendingPresenceProbes) == "table" then
+        for lk, pRec in pairs(self.pendingPresenceProbes) do
+            if type(pRec) == "table" and (monoNow - (pRec.sentAt or 0)) <= 8.0 and pRec.displayName then
+                local cLow = (Compat.LowerUtf8 and Compat.LowerUtf8(pRec.displayName)) or pRec.displayName:lower()
+                if cLow ~= "" and (lowerMsg:find(cLow, 1, true) or lowerMsg:find((cLow:gsub("%-", " ")), 1, true)) then
+                    return true
+                end
+            end
+        end
+    end
+    if type(self.silentNotFoundLedger) == "table" then
+        for k, lRec in pairs(self.silentNotFoundLedger) do
+            if type(lRec) == "table" and monoNow <= (lRec.expiresAt or 0) then
+                local cStr = lRec.displayName or k
+                local cLow = (Compat.LowerUtf8 and Compat.LowerUtf8(cStr)) or tostring(cStr):lower()
+                if cLow ~= "" and (lowerMsg:find(cLow, 1, true) or lowerMsg:find((cLow:gsub("%-", " ")), 1, true)) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+function Chat:RecordGeneralOfficialFrameLine(rawMsg, r, g, b, skipEmit, allowChannelBackfill)
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return false
+    end
+    if Safe.IsSecret(rawMsg) or type(rawMsg) ~= "string" then
+        return false
+    end
+    local msg = Safe.String(rawMsg)
+    if not msg then
+        return false
+    end
+    msg = self:_StripLeadingChatTimestamp(msg)
+    if msg == "" then
+        return false
+    end
+    if self:IsSilentNotFoundSuppressed(msg) then
+        return false
+    end
+    local normPlain = self:_NormalizeGeneralDedupText(msg)
+    if not normPlain or normPlain == "" then
+        return false
+    end
+    if normPlain:find("^%[?socialcentral%]?:") then
+        if Compat and Compat.HasChosenChatUiMode and Compat.HasChosenChatUiMode() and Compat.IsAddonChatMode and Compat.IsAddonChatMode() then
+            local scBody = msg:gsub("^|c%x%x%x%x%x%x%x%x%[?SocialCentral%]?|r:?%s*", ""):gsub("^%[?SocialCentral%]?:?%s*", "")
+            local isBootBanner = (scBody:find("^v%d+%.%d+") ~= nil) or (scBody:find("carregad", 1, true) ~= nil) or (scBody:find("loaded", 1, true) ~= nil)
+            if scBody ~= "" and not isBootBanner then
+                self:RecordGeneralMessage("SYSTEM", "SocialCentral", scBody, false, nil, "SC", {
+                    noSenderColon = false,
+                    isStatusNotice = true,
+                })
+                if not skipEmit then
+                    ns:Emit("CHAT_UPDATED")
+                end
+                return true
+            end
+        end
+        return false
+    end
+    local senderKey = self:_ExtractGeneralSenderKey(rawMsg, false) or self:_ExtractGeneralSenderKey(msg, false)
+    if self:_WasRecentlyRecordedInGeneral(msg, senderKey) then
+        return false
+    end
+    local cleanMsgBody = normPlain:match(":%s*(.+)$")
+    local outText = msg
+    if not outText:match("^|c%x%x%x%x%x%x%x%x") then
+        local nr = math.max(0, math.min(255, math.floor(((tonumber(r) or 1.0) * 255) + 0.5)))
+        local ng = math.max(0, math.min(255, math.floor(((tonumber(g) or 1.0) * 255) + 0.5)))
+        local nb = math.max(0, math.min(255, math.floor(((tonumber(b) or 0.0) * 255) + 0.5)))
+        outText = string.format("|cff%02x%02x%02x%s|r", nr, ng, nb, outText)
+    end
+    local rawLow = rawMsg:lower()
+    local isChanOrCommLink = rawLow:find("|hchannel:", 1, true) ~= nil
+    local isDedicatedChan = rawLow:find("|hchannel:guild", 1, true) or rawLow:find("|hchannel:officer", 1, true)
+        or rawLow:find("|hchannel:party", 1, true) or rawLow:find("|hchannel:raid", 1, true)
+        or rawLow:find("|hchannel:instance", 1, true) or rawLow:find("|hchannel:whisper", 1, true)
+        or rawLow:find("|hchannel:say", 1, true) or rawLow:find("|hchannel:yell", 1, true)
+    local hasPlayerChatPrefix = (rawLow:find("|hplayer:", 1, true) ~= nil) and (isChanOrCommLink or msg:find(":%s") ~= nil)
+    local looksLikeNumberedChanChat = msg:match("^%[%d+%.%s*[^%]]+%]%s*%[[^%]]+%]%s*:") ~= nil
+    if isDedicatedChan or isChanOrCommLink or looksLikeNumberedChanChat then
+        if not allowChannelBackfill then
+            return false
+        end
+        if not isDedicatedChan then
+            self:_RememberGeneralDedup(cleanMsgBody or msg, senderKey)
+            self:RecordGeneralMessage("PUB_CHANNEL", L["Channel"], outText, false, nil, nil, {
+                noTag = true,
+                noSenderColon = true,
+                skipDedup = true,
+                skipImmediateEmit = skipEmit == true,
+            })
+            if not skipEmit then
+                ns:Emit("CHAT_UPDATED")
+            end
+            return true
+        end
+        return false
+    end
+    if not allowChannelBackfill and hasPlayerChatPrefix and not rawLow:find("|hbnplayer:", 1, true) then
+        -- Avoid mirroring live Say/Yell/Player chat printed into ChatFrame1 when OnChatEvent handles it directly.
+        if not normPlain:find("entrou no jogo", 1, true) and not normPlain:find("saiu do jogo", 1, true)
+            and not normPlain:find("ficou online", 1, true) and not normPlain:find("ficou offline", 1, true)
+            and not normPlain:find("está online", 1, true) and not normPlain:find("está offline", 1, true)
+            and not normPlain:find("come online", 1, true) and not normPlain:find("gone offline", 1, true)
+            and not normPlain:find("conectado", 1, true) and not normPlain:find("desconectado", 1, true)
+            and not normPlain:find("conectou", 1, true) and not normPlain:find("desconectou", 1, true)
+        then
+            return false
+        end
+    end
+    self:_RememberGeneralDedup(cleanMsgBody or msg, senderKey)
+    self:RecordWorldLogLine("system", L["System"], outText, r, g, b, nil, skipEmit == true)
+    if (not allowChannelBackfill) and Compat and Compat.HasChosenChatUiMode and Compat.HasChosenChatUiMode()
+        and Compat.IsAddonChatMode and Compat.IsAddonChatMode()
+        and not self:_WasRecentlyWorldOnlyNotice(msg)
+    then
+        self:RecordGeneralMessage("SYSTEM", L["System"], outText, false, nil, nil, {
+            noTag = true,
+            noSenderColon = true,
+            isStatusNotice = true,
+            skipImmediateEmit = skipEmit == true,
+        })
+        if not skipEmit then
+            ns:Emit("CHAT_UPDATED")
+        end
+    end
+    return true
+end
+
+function Chat:BackfillGeneralFromChatFrame1()
+    local genMeta = STATIC_CHANNEL_ORDER["ch:general"]
+    EnsureThread("ch:general", "GENERAL", (genMeta and L[genMeta.titleKey]) or L["General"], { slash = "/s " })
+    if self._worldBackfilledFromCf1 then
+        return
+    end
+    self._worldBackfilledFromCf1 = true
+    local cf1 = _G.ChatFrame1
+    if not (cf1 and cf1.GetNumMessages and cf1.GetMessageInfo) then
+        return
+    end
+    local okN, total = pcall(cf1.GetNumMessages, cf1)
+    local totalNum = okN and Safe.Number(total) or 0
+    if totalNum <= 0 then
+        return
+    end
+    local added = false
+    local startIdx = math.max(1, totalNum - 40 + 1)
+    for i = startIdx, totalNum do
+        local okM, lineRaw, mr, mg, mb = pcall(cf1.GetMessageInfo, cf1, i)
+        if okM and lineRaw and self:RecordGeneralOfficialFrameLine(lineRaw, mr, mg, mb, true, true) then
+            added = true
+        end
+    end
+    if added then
+        ns:Emit("COMBAT_LOG_UPDATED")
+        ns:Emit("CHAT_UPDATED")
+    end
+end
+
+function Chat:OnWorldNoticeEvent(eventName, msgRaw, authorRaw)
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return
+    end
+    local cleanMsg = Safe.String(msgRaw)
+    if not cleanMsg or cleanMsg == "" then
+        return
+    end
+    if eventName == "CHAT_MSG_SYSTEM" and self.suppressSystemFilter == true then
+        return
+    end
+    local author = Safe.String(authorRaw)
+    local inAddonMode = Compat and Compat.HasChosenChatUiMode and Compat.HasChosenChatUiMode()
+        and Compat.IsAddonChatMode and Compat.IsAddonChatMode()
+    if eventName == "CHAT_MSG_LOOT" or eventName == "CHAT_MSG_MONEY" or eventName == "CHAT_MSG_CURRENCY" then
+        self:_RememberWorldOnlyNotice(cleanMsg)
+        self:RecordWorldLogLine("loot", L["Loot"], "|cff47ef66" .. cleanMsg .. "|r", 0.28, 0.94, 0.40)
+    elseif eventName == "CHAT_MSG_TRADESKILLS" or eventName == "CHAT_MSG_OPENING" then
+        self:_RememberWorldOnlyNotice(cleanMsg)
+        self:RecordWorldLogLine("craft", L["Crafting"], "|cff6ec1e4" .. cleanMsg .. "|r", 0.43, 0.76, 0.89)
+    elseif eventName == "CHAT_MSG_COMBAT_XP_GAIN" or eventName == "CHAT_MSG_COMBAT_FACTION_CHANGE" or eventName == "CHAT_MSG_COMBAT_HONOR_GAIN" or eventName == "CHAT_MSG_SKILL" then
+        self:_RememberWorldOnlyNotice(cleanMsg)
+        self:RecordWorldLogLine("progress", L["Progress"], "|cff9aaeff" .. cleanMsg .. "|r", 0.60, 0.68, 1.0)
+    elseif eventName == "CHAT_MSG_ACHIEVEMENT" or eventName == "CHAT_MSG_GUILD_ACHIEVEMENT" then
+        local body = (author and author ~= "") and (author .. ": " .. cleanMsg) or cleanMsg
+        self:RecordWorldLogLine("progress", L["Achievement"], "|cffffd24d" .. body .. "|r", 1.0, 0.82, 0.30)
+        if inAddonMode then
+            self:RecordGeneralMessage("ACHIEVEMENT", L["Achievement"], "|cffffd24d" .. body .. "|r", false, nil, L["Achievement"], {
+                noSenderColon = true,
+                isStatusNotice = true,
+            })
+        end
+    elseif eventName == "CHAT_MSG_RAID_BOSS_EMOTE" or eventName == "CHAT_MSG_MONSTER_SAY" or eventName == "CHAT_MSG_MONSTER_YELL" or eventName == "CHAT_MSG_MONSTER_EMOTE" then
+        local npc = (author and author ~= "") and author or L["World"]
+        if eventName == "CHAT_MSG_MONSTER_EMOTE" or eventName == "CHAT_MSG_RAID_BOSS_EMOTE" then
+            local safeNpc = npc:gsub("%%", "%%%%")
+            local formatted, replaced = cleanMsg:gsub("%%s", safeNpc)
+            if replaced and replaced > 0 then
+                self:RecordGeneralMessage("MONSTER", npc, formatted, false, nil, L["World"], { noSenderColon = true })
+            else
+                self:RecordGeneralMessage("MONSTER", npc, npc .. " " .. cleanMsg, false, nil, L["World"], { noSenderColon = true })
+            end
+        else
+            self:RecordGeneralMessage("MONSTER", npc, cleanMsg, false, nil, L["World"], { noSenderColon = false })
+        end
+    elseif eventName == "CHAT_MSG_EMOTE" or eventName == "CHAT_MSG_TEXT_EMOTE" then
+        local parsed = author and Compat.ParseCharacterName and Compat.ParseCharacterName(author)
+        local who = (parsed and parsed.displayName) or author or L["World"]
+        local isMe = parsed and Compat.IsMe and Compat.IsMe(parsed.displayName) or false
+        local lineTxt = (eventName == "CHAT_MSG_TEXT_EMOTE") and cleanMsg or (who .. " " .. cleanMsg)
+        self:RecordGeneralMessage("LOCAL_SAY", who, lineTxt, isMe, nil, L["Emote"], { noSenderColon = true })
+    else
+        self:RecordWorldLogLine("system", L["System"], "|cffffff66" .. cleanMsg .. "|r", 1.0, 1.0, 0.40)
+    end
+end
+
+function Chat:SyncGroupRosterSessionState()
+    local inGrp = (Compat and Compat.IsInGroup and Compat.IsInGroup())
+        or (Compat and Compat.IsInRaid and Compat.IsInRaid())
+        or (_G.GetNumGroupMembers and (_G.GetNumGroupMembers() or 0) > 0)
+    if not inGrp then
+        self._activeGroupSessionId = nil
+        return nil
+    end
+    if not self._activeGroupSessionId then
+        self._activeGroupSessionSeq = (self._activeGroupSessionSeq or 0) + 1
+        self._activeGroupSessionId = tostring(time()) .. ":" .. tostring(self._activeGroupSessionSeq)
+    end
+    return self._activeGroupSessionId
+end
+
+function Chat:CaptureCurrentGroupSnapshot(thread, ts, extraFields)
+    if not thread or (thread.kind ~= "PARTY" and thread.kind ~= "RAID" and thread.kind ~= "INSTANCE_CHAT") then
+        return nil
+    end
+    if extraFields and extraFields.groupRosterId then
+        return extraFields.groupRosterId
+    end
+    local inRaid = (Compat and Compat.IsInRaid and Compat.IsInRaid()) == true
+    local numMembers = (_G.GetNumGroupMembers and tonumber(_G.GetNumGroupMembers())) or 0
+    local inGrp = inRaid or (Compat and Compat.IsInGroup and Compat.IsInGroup() == true) or (numMembers > 0)
+    if not inGrp then
+        return nil
+    end
+    local sessId = self:SyncGroupRosterSessionState() or tostring(ts or time())
+    local units = {}
+    if inRaid or thread.kind == "RAID" then
+        local lim = math.min(40, math.max(5, numMembers))
+        for ri = 1, lim do
+            units[#units + 1] = "raid" .. tostring(ri)
+        end
+    else
+        units[#units + 1] = "player"
+        for pi = 1, 4 do
+            units[#units + 1] = "party" .. tostring(pi)
+        end
+    end
+    local members = {}
+    local seen = {}
+    for _, uTok in ipairs(units) do
+        if _G.UnitExists and _G.UnitExists(uTok) then
+            local rawName = (Compat and Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName(uTok))
+                or (_G.UnitName and Safe.String(_G.UnitName(uTok)))
+            if rawName and rawName ~= "" then
+                local lk = (Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(rawName)) or rawName:lower()
+                if lk and lk ~= "" and not seen[lk] then
+                    seen[lk] = true
+                    local _, cls = Safe.Call(_G.UnitClass, uTok)
+                    local roleStr = nil
+                    if _G.UnitGroupRolesAssigned then
+                        local okR, rVal = pcall(_G.UnitGroupRolesAssigned, uTok)
+                        if okR and type(rVal) == "string" and (rVal == "TANK" or rVal == "HEALER" or rVal == "DAMAGER") then
+                            roleStr = rVal
+                        end
+                    end
+                    members[#members + 1] = {
+                        n = rawName,
+                        lk = lk,
+                        c = Safe.String(cls),
+                        r = roleStr,
+                    }
+                end
+            end
+        end
+    end
+    if #members == 0 then
+        return nil
+    end
+    table.sort(members, function(a, b)
+        return (a.lk or "") < (b.lk or "")
+    end)
+    local keys = {}
+    for i = 1, #members do
+        keys[i] = members[i].lk
+    end
+    local rosterId = tostring(sessId) .. "|" .. table.concat(keys, ",")
+    local curZone = (Compat and Compat.CurrentZoneName and Compat.CurrentZoneName()) or ""
+    thread.groupRosters = thread.groupRosters or {}
+    local existing = thread.groupRosters[rosterId]
+    if not existing then
+        thread.groupRosters[rosterId] = {
+            members = members,
+            size = #members,
+            zone = (curZone ~= "") and curZone or nil,
+            ts = ts or time(),
+        }
+    else
+        existing.members = members
+        existing.size = #members
+        if curZone ~= "" and (not existing.zone or existing.zone == "") then
+            existing.zone = curZone
+        end
+    end
+    return rosterId
+end
+
+function Chat:GetThreadGroupRenderMap(thread)
+    if not (thread and type(thread.messages) == "table" and type(thread.groupRosters) == "table") then
+        return nil
+    end
+    local colors = {
+        "|cff7aaeff",
+        "|cffe8b84d",
+        "|cff7ee787",
+        "|cffd2a8ff",
+        "|cffffa657",
+        "|cff79c0ff",
+    }
+    local map = {}
+    local seq = 0
+    for _, m in ipairs(thread.messages) do
+        local gid = type(m) == "table" and m.groupRosterId or nil
+        if gid and not map[gid] and thread.groupRosters[gid] then
+            seq = seq + 1
+            map[gid] = {
+                seq = seq,
+                hex = colors[((seq - 1) % #colors) + 1],
+                roster = thread.groupRosters[gid],
+            }
+        end
+    end
+    return (seq > 0) and map or nil
+end
+
+function Chat:GetThreadGroupSnapshot(threadKey, msgIdx)
+    local t = threadKey and self.threads and self.threads[threadKey]
+    if not (t and type(t.messages) == "table") then
+        return nil
+    end
+    local m = msgIdx and t.messages[tonumber(msgIdx) or -1]
+    if not (type(m) == "table" and m.groupRosterId and type(t.groupRosters) == "table") then
+        return nil
+    end
+    local roster = t.groupRosters[m.groupRosterId]
+    if not roster then
+        return nil
+    end
+    local rMap = self:GetThreadGroupRenderMap(t)
+    local meta = rMap and rMap[m.groupRosterId]
+    return {
+        seq = (meta and meta.seq) or 1,
+        hex = (meta and meta.hex) or "|cff7aaeff",
+        roster = roster,
+        msgTs = m.ts,
+    }
+end
+
 local function AppendMessage(thread, senderName, text, incoming, classFile, skipPersist, silent, extraFields)
     if not thread or not text or text == "" then return end
-    local ts = time()
+    local ts = (extraFields and tonumber(extraFields.customTs)) or time()
     local isMention = false
     if incoming and (thread.kind == "ROOM" or thread.kind == "ALLIANCE" or IsPublicChannelKind(thread.kind)) then
         local myDisp = GetMyInfo()
@@ -1795,6 +3030,29 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     local isStatus = extraFields and extraFields.isStatusNotice and true or false
     local isDirectThread = (thread.kind == "WHISPER" or thread.kind == "BN_WHISPER")
     local senderDisp = senderName or "?"
+    local dedupNorm = Chat:_NormalizeGeneralDedupText(text)
+    local dedupSenderKey = (not isStatus) and Chat:_ExtractGeneralSenderKey((extraFields and extraFields.senderCharName) or senderDisp, incoming ~= true) or nil
+    if not (extraFields and extraFields.allowDuplicate == true) and type(thread.messages) == "table" and #thread.messages > 0 then
+        local msgId = extraFields and extraFields.deliveryMsgId
+        local scanFloor = math.max(1, #thread.messages - 7)
+        for i = #thread.messages, scanFloor, -1 do
+            local prev = thread.messages[i]
+            if prev then
+                if msgId and prev.deliveryMsgId == msgId then
+                    return prev
+                end
+                if (not isStatus) and (prev.isStatusNotice ~= true) and dedupNorm and math.abs(ts - (tonumber(prev.ts) or 0)) <= 3 then
+                    local prevNorm = prev._dedupSig or Chat:_NormalizeGeneralDedupText(prev.text)
+                    if prevNorm and prevNorm == dedupNorm and ((prev.incoming == true) == (incoming == true)) then
+                        local prevSenderKey = prev._dedupSenderKey or Chat:_ExtractGeneralSenderKey(prev.senderCharName or prev.sender, prev.incoming == false)
+                        if (dedupSenderKey and prevSenderKey and dedupSenderKey == prevSenderKey) or (not dedupSenderKey and not prevSenderKey) then
+                            return prev
+                        end
+                    end
+                end
+            end
+        end
+    end
     local targetDisp = extraFields and extraFields.targetChar or nil
     if (not isStatus) and isDirectThread then
         if incoming then
@@ -1834,6 +3092,8 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
         resolvedSenderLvl = nil
     end
 
+    local groupRosterId = (not isStatus) and Chat:CaptureCurrentGroupSnapshot(thread, ts, extraFields) or nil
+
     local entry = {
         sender = senderDisp,
         targetChar = targetDisp,
@@ -1856,18 +3116,46 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
         deliveryState = extraFields and extraFields.deliveryState or nil,
         noteId = extraFields and extraFields.noteId or nil,
         isMention = isMention or nil,
+        groupRosterId = groupRosterId,
+        _dedupSig = dedupNorm,
+        _dedupSenderKey = dedupSenderKey,
     }
     if isDirectThread and incoming and resolvedSenderLvl then
         thread.level = resolvedSenderLvl
     end
-    table.insert(thread.messages, entry)
+    if extraFields and tonumber(extraFields.customTs) and #thread.messages > 0 then
+        local insAt = #thread.messages + 1
+        while insAt > 1 and (tonumber(thread.messages[insAt - 1].ts) or 0) > ts do
+            insAt = insAt - 1
+        end
+        table.insert(thread.messages, insAt, entry)
+    else
+        table.insert(thread.messages, entry)
+    end
     if thread.kind ~= "NOTES" then
         local maxMem = math.max(MAX_THREAD_LINES, Chat:GetHistoryLimitForKey(thread.key))
+        local trimmedGrp = false
         while #thread.messages > maxMem do
-            table.remove(thread.messages, 1)
+            local rem = table.remove(thread.messages, 1)
+            if rem and rem.groupRosterId then
+                trimmedGrp = true
+            end
+        end
+        if trimmedGrp and type(thread.groupRosters) == "table" then
+            local keep = {}
+            for _, mm in ipairs(thread.messages) do
+                if type(mm) == "table" and mm.groupRosterId then
+                    keep[mm.groupRosterId] = true
+                end
+            end
+            for rk in pairs(thread.groupRosters) do
+                if not keep[rk] then
+                    thread.groupRosters[rk] = nil
+                end
+            end
         end
     end
-    thread.lastAt = ts
+    thread.lastAt = math.max(tonumber(thread.lastAt) or 0, ts)
 
     local mainVisible = ns.UI and ns.UI.IsMainVisible and ns.UI:IsMainVisible()
     local isViewing = false
@@ -1880,6 +3168,7 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     end
     local isMuted = Chat:IsThreadMuted(thread.key)
     local isPublic = IsPublicChannelKind(thread.kind)
+    local isSayYell = (thread.kind == "LOCAL_SAY" or thread.kind == "LOCAL_YELL" or thread.kind == "PUB_CHANNEL")
     local sCfg = ns.db and ns.db.settings
     local allowChannelUnread = sCfg and sCfg.chatChannelUnread == true
     local allowQuickChan = sCfg and sCfg.quickReplyEnabled ~= false and Chat.IsQuickReplyKindEnabled and Chat:IsQuickReplyKindEnabled(thread.kind)
@@ -1889,7 +3178,7 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     end
 
     if incoming and not isViewing and not isMuted then
-        if (not isPublic) or allowChannelUnread or allowQuickChan or isMention then
+        if (not isPublic) or (not isSayYell and allowChannelUnread) or allowQuickChan then
             if (thread.unread or 0) == 0 then
                 thread.firstUnreadTs = ts
                 thread.firstUnreadEntry = entry
@@ -1946,7 +3235,8 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
                 })
             end
         end
-        if not silent and not isStatus and thread.kind ~= "NOTES" then
+        local emittedAddonToast = (extraFields and extraFields.viaAddon and not silent and sCfg and sCfg.addonMsgToast == true) == true
+        if not silent and not isStatus and thread.kind ~= "NOTES" and not emittedAddonToast then
             local pCat = ResolvePreviewCategory(thread.kind, extraFields)
             if pCat then
                 local pChanKind = ResolvePreviewChannelKind(thread.kind, extraFields)
@@ -2003,9 +3293,12 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
 
     local shouldPersist = Chat:ShouldPersistThreadKey(thread.key)
     if not skipPersist and shouldPersist then
-        PersistWhisperLine(thread.key, entry, thread.unread, thread)
+        if extraFields and extraFields.rewritePersist then
+            RewriteThreadHistory(thread)
+        else
+            PersistWhisperLine(thread.key, entry, thread.unread, thread)
+        end
     end
-
     local qrVisible = ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown()
     if isPublic and not mainVisible and not qrVisible then
         QueueChatEmit(0.30)
@@ -2312,6 +3605,14 @@ function Chat:LoadSavedHistory()
                 t.messages = {}
                 t.unread = 0
                 t.hasMention = nil
+                t.groupRosters = {}
+                if type(saved.groupRosters) == "table" then
+                    for rk, rv in pairs(saved.groupRosters) do
+                        if type(rk) == "string" and type(rv) == "table" and type(rv.members) == "table" then
+                            t.groupRosters[rk] = rv
+                        end
+                    end
+                end
                 local startIdx = math.max(1, #saved.lines - genLimit + 1)
                 for i = startIdx, #saved.lines do
                     local line = saved.lines[i]
@@ -2329,6 +3630,7 @@ function Chat:LoadSavedHistory()
                             targetFaction = line.targetFaction,
                             senderLevel = ValidLevel(line.senderLevel),
                             viaAddon = line.viaAddon and true or false,
+                            groupRosterId = line.groupRosterId,
                         })
                         t.lastAt = math.max(t.lastAt or 0, tonumber(line.ts) or 0)
                     end
@@ -2450,6 +3752,8 @@ function Chat:IsQuickReplyKindEnabled(kind)
         return s.quickReplyNotifyRaid ~= false
     elseif kind == "GUILD" or kind == "OFFICER" then
         return s.quickReplyNotifyGuild == true
+    elseif kind == "LOCAL_SAY" or kind == "LOCAL_YELL" then
+        return s.quickReplyNotifySay == true
     end
     return false
 end
@@ -2505,7 +3809,7 @@ function Chat:IsQuickReplyPinned(threadKey)
 end
 
 function Chat:SetQuickReplyPinned(threadKey, state)
-    if not threadKey or threadKey == "notes:self" or threadKey == "mentions:radar" then
+    if not threadKey or threadKey == "notes:self" or threadKey == "mentions:radar" or threadKey == "ch:general" then
         return false
     end
     local on = state and true or false
@@ -2523,6 +3827,11 @@ function Chat:SetQuickReplyPinned(threadKey, state)
     if on and STATIC_CHANNEL_ORDER[threadKey] then
         local meta = STATIC_CHANNEL_ORDER[threadKey]
         EnsureThread(threadKey, meta.kind, L[meta.titleKey], { slash = meta.slash })
+    elseif on and type(threadKey) == "string" and threadKey:sub(1, 7) == "ch:pub:" then
+        local pubId = tonumber(threadKey:sub(8))
+        if pubId then
+            self:EnsureOfficialNumberedChannelThread(pubId)
+        end
     end
     self:BumpPeerStateGen()
     ns:Emit("CHAT_UPDATED")
@@ -2533,6 +3842,31 @@ function Chat:ToggleQuickReplyPinned(threadKey)
     local nextState = not self:IsQuickReplyPinned(threadKey)
     self:SetQuickReplyPinned(threadKey, nextState)
     return nextState
+end
+
+function Chat:CloseQuickReplyTab(threadKey)
+    if not threadKey or threadKey == "notes:self" or threadKey == "mentions:radar" or threadKey == "ch:general" then
+        return false
+    end
+    local t = self.threads and self.threads[threadKey]
+    if t and (t.unread or 0) > 0 and self.MarkThreadRead then
+        self:MarkThreadRead(threadKey)
+    end
+    if self.SetQuickReplyDraft then
+        self:SetQuickReplyDraft(threadKey, "")
+    end
+    if self.IsQuickReplyPinned and self:IsQuickReplyPinned(threadKey) and self.SetQuickReplyPinned then
+        self:SetQuickReplyPinned(threadKey, false)
+    end
+    if self._dungeonAutoChannelKey == threadKey then
+        self._dungeonAutoChannelKey = nil
+    end
+    if threadKey == "ch:say" or threadKey == "ch:yell" then
+        self._quickReplyClosedMsgCounts = self._quickReplyClosedMsgCounts or {}
+        self._quickReplyClosedMsgCounts[threadKey] = #(t and t.messages or {})
+    end
+    ns:Emit("CHAT_UPDATED")
+    return true
 end
 
 function Chat:HasQuickReplyPinnedTabs()
@@ -2546,11 +3880,291 @@ function Chat:HasQuickReplyPinnedTabs()
     return false
 end
 
+function Chat:GetRecommendedInstanceThreadKey()
+    if IsInInstance then
+        local ok, inInst, instType = pcall(IsInInstance)
+        if ok and Safe and Safe.Value(inInst) == true then
+            local it = Safe.String(instType)
+            if it == "raid" then
+                return "ch:raid"
+            end
+        end
+    end
+    if Compat and Compat.IsInRaid and Compat.IsInRaid() then
+        return "ch:raid"
+    end
+    if IsInGroup and _G.LE_PARTY_CATEGORY_INSTANCE then
+        local ok, inInstGrp = pcall(IsInGroup, _G.LE_PARTY_CATEGORY_INSTANCE)
+        if ok and inInstGrp == true then
+            return "ch:instance"
+        end
+    end
+    return "ch:party"
+end
+
+function Chat:EnsureStaticChannelThread(threadKey)
+    local meta = threadKey and STATIC_CHANNEL_ORDER[threadKey]
+    if not meta then return nil end
+    return EnsureThread(threadKey, meta.kind, L[meta.titleKey], { slash = meta.slash })
+end
+
+function Chat:ParseCommunityChannelName(rawChannelName)
+    local raw = Safe.String(rawChannelName)
+    if not raw or raw == "" then
+        return nil, nil, nil
+    end
+    local numPrefix, cidStr, sidStr = raw:match("^(%d*%.?%s*)Community:(%d+):(%d+)$")
+    if not cidStr then
+        cidStr, sidStr = raw:match("Community:(%d+):(%d+)")
+        numPrefix = ""
+    end
+    local clubId = tonumber(cidStr)
+    local streamId = tonumber(sidStr)
+    if not clubId then
+        return nil, nil, nil
+    end
+    local friendly = nil
+    if _G.C_Club then
+        local cInfo = _G.C_Club.GetClubInfo and Safe.Call(_G.C_Club.GetClubInfo, clubId) or nil
+        if type(cInfo) == "table" then
+            local cName = Safe.String(cInfo.shortName) or Safe.String(cInfo.name)
+            if cName and cName ~= "" then
+                friendly = cName
+            end
+        end
+        if streamId and _G.C_Club.GetStreamInfo then
+            local sInfo = Safe.Call(_G.C_Club.GetStreamInfo, clubId, streamId)
+            if type(sInfo) == "table" then
+                local sName = Safe.String(sInfo.name)
+                local genType = _G.Enum and _G.Enum.ClubStreamType and _G.Enum.ClubStreamType.General
+                if sName and sName ~= "" and (genType == nil or sInfo.streamType ~= genType) then
+                    friendly = friendly and (friendly .. " - " .. sName) or sName
+                end
+            end
+        end
+    end
+    if not friendly or friendly == "" then
+        friendly = L["Community"] or "Community"
+    end
+    return ((numPrefix or "") .. friendly), clubId, streamId
+end
+
+function Chat:GetJoinedOfficialChannels()
+    local list = {}
+    local seen = {}
+    if _G.GetChannelList then
+        local packed = { Safe.Call(_G.GetChannelList) }
+        local n = #packed
+        local stride = 3
+        if n >= 3 and type(packed[3]) == "number" then
+            stride = 2
+        end
+        for i = 1, n, stride do
+            local cid = Safe.Number(packed[i])
+            local cname = Safe.String(packed[i + 1])
+            local disabled = (stride == 3) and (Safe.Value(packed[i + 2]) == true) or false
+            if cid and cid >= 1 and cid <= 20 and cname and cname ~= "" and not disabled and not seen[cid] then
+                seen[cid] = true
+                local dispName, clubId, streamId = self:ParseCommunityChannelName(cname)
+                local showName = dispName or cname
+                list[#list + 1] = {
+                    id = cid,
+                    name = showName,
+                    rawName = cname,
+                    clubId = clubId,
+                    streamId = streamId,
+                    threadKey = "ch:pub:" .. tostring(cid),
+                    slash = "/" .. tostring(cid) .. " ",
+                    title = tostring(cid) .. ". " .. showName,
+                }
+            end
+        end
+    end
+    if #list == 0 and _G.GetChannelName then
+        for cid = 1, 10 do
+            local ok, rId, rName = pcall(_G.GetChannelName, cid)
+            local nId = ok and Safe.Number(rId) or nil
+            local nName = ok and Safe.String(rName) or nil
+            if nId and nId >= 1 and nName and nName ~= "" and not seen[nId] then
+                seen[nId] = true
+                local dispName, clubId, streamId = self:ParseCommunityChannelName(nName)
+                local showName = dispName or nName
+                list[#list + 1] = {
+                    id = nId,
+                    name = showName,
+                    rawName = nName,
+                    clubId = clubId,
+                    streamId = streamId,
+                    threadKey = "ch:pub:" .. tostring(nId),
+                    slash = "/" .. tostring(nId) .. " ",
+                    title = tostring(nId) .. ". " .. showName,
+                }
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        return (a.id or 99) < (b.id or 99)
+    end)
+    return list
+end
+
+function Chat:GetOfficialChannelInfo(channelId)
+    local cid = tonumber(channelId)
+    if not cid or cid < 1 or cid > 20 then return nil end
+    if _G.GetChannelName then
+        local ok, rId, rName = pcall(_G.GetChannelName, cid)
+        local nId = ok and Safe.Number(rId) or nil
+        local nName = ok and Safe.String(rName) or nil
+        if nId and nId == cid and nName and nName ~= "" then
+            local dispName, clubId, streamId = self:ParseCommunityChannelName(nName)
+            local showName = dispName or nName
+            return {
+                id = cid,
+                name = showName,
+                rawName = nName,
+                clubId = clubId,
+                streamId = streamId,
+                threadKey = "ch:pub:" .. tostring(cid),
+                slash = "/" .. tostring(cid) .. " ",
+                title = tostring(cid) .. ". " .. showName,
+            }
+        end
+    end
+    for _, ch in ipairs(self:GetJoinedOfficialChannels()) do
+        if ch.id == cid then
+            return ch
+        end
+    end
+    return nil
+end
+
+function Chat:SetGeneralTargetChannel(channelIdOrNil)
+    if channelIdOrNil == "yell" or channelIdOrNil == "LOCAL_YELL" then
+        self._generalChannelId = nil
+        self._generalChannelName = nil
+        self._generalLocalMode = "yell"
+        return "yell"
+    end
+    local cid = tonumber(channelIdOrNil)
+    if cid and cid >= 1 and cid <= 20 then
+        self._generalChannelId = cid
+        local info = self:GetOfficialChannelInfo(cid)
+        self._generalChannelName = info and info.name or nil
+        self._generalLocalMode = nil
+        return cid
+    end
+    self._generalChannelId = nil
+    self._generalChannelName = nil
+    self._generalLocalMode = nil
+    return nil
+end
+
+function Chat:GetGeneralTargetInfo()
+    local cid = tonumber(self._generalChannelId)
+    if cid and cid >= 1 and cid <= 20 then
+        local info = self:GetOfficialChannelInfo(cid)
+        if info then
+            return {
+                channelId = info.id,
+                name = info.name,
+                title = info.title,
+                slash = info.slash,
+                clubId = info.clubId,
+                streamId = info.streamId,
+                isSay = false,
+                isYell = false,
+            }
+        end
+        self._generalChannelId = nil
+        self._generalChannelName = nil
+    end
+    if self._generalLocalMode == "yell" then
+        return {
+            channelId = nil,
+            name = L["Yell"],
+            title = L["Yell"],
+            slash = "/y ",
+            isSay = false,
+            isYell = true,
+        }
+    end
+    return {
+        channelId = nil,
+        name = L["Say"],
+        title = L["General"],
+        slash = "/s ",
+        isSay = true,
+        isYell = false,
+    }
+end
+
+function Chat:EnsureOfficialNumberedChannelThread(channelId, nameHint)
+    local cid = tonumber(channelId)
+    if not cid or cid < 1 or cid > 20 then return nil end
+    local info = self:GetOfficialChannelInfo(cid)
+    local cleanHint = (type(nameHint) == "string" and nameHint ~= "") and nameHint:gsub("^%d+%.%s*", "") or nil
+    local liveName = (info and info.name) or cleanHint
+    if not liveName or liveName == "" then
+        return nil
+    end
+    self:SetGeneralTargetChannel(cid)
+    local genMeta = STATIC_CHANNEL_ORDER["ch:general"]
+    return EnsureThread("ch:general", "GENERAL", (genMeta and L[genMeta.titleKey]) or L["General"], { slash = "/s " })
+end
+
+function Chat:RefreshOfficialChannelThreads()
+    local changed = false
+    local byId = {}
+    for _, info in ipairs(self:GetJoinedOfficialChannels()) do
+        byId[info.id] = info
+    end
+    -- Unify Say, Yell, World & all numbered public channels into General: prune any legacy split tabs/pins.
+    local pinned = ns.charDb and ns.charDb.quickReplyPinnedThreads
+    if type(pinned) == "table" then
+        for pKey in pairs(pinned) do
+            if type(pKey) == "string" and (pKey:sub(1, 7) == "ch:pub:" or pKey == "ch:say" or pKey == "ch:yell") then
+                pinned[pKey] = nil
+                changed = true
+            end
+        end
+    end
+    if self.sessionQuickReplyPinned then
+        self.sessionQuickReplyPinned["ch:say"] = nil
+        self.sessionQuickReplyPinned["ch:yell"] = nil
+    end
+    for key, t in pairs(self.threads or {}) do
+        if type(key) == "string" and (key:sub(1, 7) == "ch:pub:" or key == "ch:say" or key == "ch:yell") then
+            self.threads[key] = nil
+            changed = true
+        elseif type(t) == "table" and (t.kind == "PUB_CHANNEL" or t.kind == "LOCAL_SAY" or t.kind == "LOCAL_YELL") then
+            self.threads[key] = nil
+            changed = true
+        end
+    end
+    if self._generalChannelId then
+        local info = byId[self._generalChannelId]
+        if not info then
+            self._generalChannelId = nil
+            self._generalChannelName = nil
+            changed = true
+        elseif self._generalChannelName ~= info.name then
+            self._generalChannelName = info.name
+            changed = true
+        end
+    end
+    if changed then
+        ns:Emit("CHAT_UPDATED")
+    end
+    return changed
+end
+
 function Chat:GetQuickReplyThreads()
     local list = {}
     local s = ns.db and ns.db.settings
     local qrOn = (not s) or s.quickReplyEnabled ~= false
     if qrOn then
+        local genMeta = STATIC_CHANNEL_ORDER["ch:general"]
+        EnsureThread("ch:general", "GENERAL", (genMeta and L[genMeta.titleKey]) or L["General"], { slash = "/s " })
         local inGuild = false
         if Compat.ShouldShowGuildFeatures then
             inGuild = Compat.ShouldShowGuildFeatures() == true
@@ -2559,12 +4173,15 @@ function Chat:GetQuickReplyThreads()
         end
         local isAllianceAuth = inGuild and ns.Clan and ns.Clan.IsMemberAllianceAuthorized and ns.Clan:IsMemberAllianceAuthorized()
         for key, t in pairs(self.threads) do
-            if type(t) == "table" and key ~= "notes:self" and key ~= "mentions:radar" then
-                local u = t.unread or 0
+            if type(t) == "table" and key ~= "notes:self" and key ~= "mentions:radar" and key ~= "ch:say" and key ~= "ch:yell" and key:sub(1, 7) ~= "ch:pub:" then
+                local isGeneral = (key == "ch:general")
+                local u = isGeneral and 0 or (t.unread or 0)
                 local draft = self.quickReplyDrafts and self.quickReplyDrafts[key] or nil
-                local hasUnread = (u > 0) and (not self:IsThreadMuted(key)) and self:IsQuickReplyKindEnabled(t.kind)
-                local isPinned = self:IsQuickReplyPinned(key)
-                if isPinned then
+                local isMuted = (not isGeneral) and self:IsThreadMuted(key)
+                local hasUnread = (u > 0) and (not isMuted) and self:IsQuickReplyKindEnabled(t.kind)
+                local isPinned = isGeneral or self:IsQuickReplyPinned(key)
+                local isAutoDungeon = (self._dungeonAutoChannelKey ~= nil and self._dungeonAutoChannelKey == key)
+                if isPinned and not isGeneral then
                     if key == "ch:guild" or key == "ch:officer" then
                         if not inGuild and #(t.messages or {}) == 0 then
                             isPinned = false
@@ -2575,10 +4192,11 @@ function Chat:GetQuickReplyThreads()
                         end
                     end
                 end
-                if hasUnread or draft or isPinned then
+                if isGeneral or hasUnread or draft or isPinned or isAutoDungeon then
                     local sortAt = math.max(t.lastAt or 0, draft and draft.updatedAt or 0)
                     local meta = STATIC_CHANNEL_ORDER[key]
                     local titleStr = (meta and L[meta.titleKey]) or t.title or t.targetName or key
+                    local pubOrder = (t.kind == "PUB_CHANNEL" and tonumber(t.channelId)) and (100 + tonumber(t.channelId)) or nil
                     list[#list + 1] = {
                         key = key,
                         thread = t,
@@ -2587,8 +4205,10 @@ function Chat:GetQuickReplyThreads()
                         unread = hasUnread and u or 0,
                         hasDraft = draft ~= nil,
                         draftText = draft and draft.text or nil,
-                        pinned = isPinned == true,
-                        staticOrder = meta and meta.order or nil,
+                        pinned = (isPinned == true) or isAutoDungeon,
+                        isAlwaysFirst = isGeneral,
+                        muted = isMuted == true,
+                        staticOrder = (meta and meta.order) or pubOrder or nil,
                         lastAt = sortAt,
                     }
                 end
@@ -2596,6 +4216,9 @@ function Chat:GetQuickReplyThreads()
         end
     end
     table.sort(list, function(a, b)
+        if (a.isAlwaysFirst == true) ~= (b.isAlwaysFirst == true) then
+            return a.isAlwaysFirst == true
+        end
         local aUn = (a.unread or 0) > 0
         local bUn = (b.unread or 0) > 0
         if aUn ~= bUn then
@@ -2621,6 +4244,18 @@ function Chat:GetQuickReplyThreads()
     return list
 end
 
+function Chat:MarkAllQuickReplyRead()
+    local list = self:GetQuickReplyThreads()
+    local cleared = 0
+    for _, item in ipairs(list) do
+        if item and item.key and (item.unread or 0) > 0 then
+            self:MarkThreadRead(item.key)
+            cleared = cleared + 1
+        end
+    end
+    return cleared
+end
+
 function Chat:HasQuickReplyPending()
     local s = ns.db and ns.db.settings
     if s and s.quickReplyEnabled == false then
@@ -2644,13 +4279,32 @@ function Chat:HasQuickReplyPending()
 end
 
 function Chat:GetUnreadSummary()
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return {
+            total = 0,
+            totalDirect = 0,
+            channels = 0,
+            invites = 0,
+            rooms = 0,
+            senders = {},
+            byCategory = {
+                whisper = 0,
+                bnet = 0,
+                group = 0,
+                raid = 0,
+                guild = 0,
+                room = 0,
+            },
+        }
+    end
     local s = ns.db and ns.db.settings
     local mirrorOn = s and s.chatMirrorChannels == true
     local allowChanUnread = s and s.chatChannelUnread == true
     local qrOn = s and s.quickReplyEnabled ~= false
     local qrSig = qrOn and ((s.quickReplyNotifyParty ~= false and "P" or "")
         .. (s.quickReplyNotifyRaid ~= false and "R" or "")
-        .. (s.quickReplyNotifyGuild == true and "G" or "")) or "0"
+        .. (s.quickReplyNotifyGuild == true and "G" or "")
+        .. (s.quickReplyNotifySay == true and "S" or "")) or "0"
     local chanFlag = ((mirrorOn and allowChanUnread) and "1" or "0") .. ":" .. qrSig
     if not self._unreadSummaryDirty and self._unreadSummaryCache and self._unreadSummaryChanFlag == chanFlag then
         return self._unreadSummaryCache
@@ -2669,9 +4323,10 @@ function Chat:GetUnreadSummary()
 
     for key, t in pairs(self.threads) do
         local u = t.unread or 0
-        if u > 0 and not self:IsThreadMuted(key) then
+        if u > 0 and key ~= "mentions:radar" and key ~= "notes:self" and key ~= "ch:general" and t.kind ~= "MENTIONS" and t.kind ~= "NOTES" and t.kind ~= "GENERAL" and not self:IsThreadMuted(key) then
             if IsPublicChannelKind(t.kind) then
-                if (mirrorOn and allowChanUnread) or (qrOn and self:IsQuickReplyKindEnabled(t.kind)) then
+                local isSayYell = (t.kind == "LOCAL_SAY" or t.kind == "LOCAL_YELL")
+                if (mirrorOn and allowChanUnread and not isSayYell) or (qrOn and self:IsQuickReplyKindEnabled(t.kind)) then
                     channels = channels + u
                     if t.kind == "GUILD" or t.kind == "OFFICER" then
                         byCategory.guild = byCategory.guild + u
@@ -2765,7 +4420,7 @@ local function CountUnreadThreadsAndInvites(self, includeChannels)
     local total = 0
     for key, t in pairs(self.threads) do
         local u = t.unread or 0
-        if u > 0 and not self:IsThreadMuted(key) then
+        if u > 0 and key ~= "mentions:radar" and key ~= "notes:self" and key ~= "ch:general" and t.kind ~= "MENTIONS" and t.kind ~= "NOTES" and t.kind ~= "GENERAL" and not self:IsThreadMuted(key) then
             if IsPublicChannelKind(t.kind) then
                 if allowChannels then
                     total = total + u
@@ -2799,6 +4454,9 @@ function Chat:GetUnreadDirectCount()
 end
 
 function Chat:GetTotalUnread(includeChannels)
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return 0
+    end
     if includeChannels ~= true then
         return self:GetUnreadDirectCount()
     end
@@ -2925,7 +4583,7 @@ function Chat:GetThreadsList(kindFilter)
 
     for key, t in pairs(self.threads) do
         local isRoom = key:sub(1, 5) == "room:"
-        local include = true
+        local include = (key ~= "ch:say" and key ~= "ch:yell" and key:sub(1, 7) ~= "ch:pub:")
         if isRoom then
             local room = rooms[t.roomId]
             include = room and room.joined == true
@@ -2935,6 +4593,9 @@ function Chat:GetThreadsList(kindFilter)
             local isGuildChan = (t.kind == "GUILD" or t.kind == "OFFICER")
             local isGroupChan = (t.kind == "PARTY" or t.kind == "RAID" or t.kind == "INSTANCE_CHAT")
             local isAllianceChan = (t.kind == "ALLIANCE")
+            local isSayYellChan = (t.kind == "LOCAL_SAY" or t.kind == "LOCAL_YELL")
+            local isPubChan = (t.kind == "PUB_CHANNEL")
+            local isGeneralChan = (t.kind == "GENERAL")
             local inGuild = false
             if Compat.ShouldShowGuildFeatures then
                 inGuild = Compat.ShouldShowGuildFeatures() == true
@@ -2946,12 +4607,18 @@ function Chat:GetThreadsList(kindFilter)
             local forceShow = (isGuildChan and inGuild and kindFilter == "guild")
                 or (isGroupChan and inGroup and kindFilter == "group")
                 or (isAllianceChan and isAllianceAuth and (kindFilter == "alliance" or kindFilter == "channels" or not kindFilter or kindFilter == "all"))
+                or ((isSayYellChan or isPubChan) and kindFilter == "channels")
+                or (isGeneralChan and (not kindFilter or kindFilter == "all" or kindFilter == "channels") and #(t.messages or {}) > 0)
             local showGuildHist = isGuildChan and inGuild and Chat:ShouldSaveGuildHistory() and #(t.messages or {}) > 0
             local showGroupHist = isGroupChan and Chat:ShouldSaveGroupHistory() and #(t.messages or {}) > 0
+            local showSayYellHist = isSayYellChan and ((not ns.db or not ns.db.settings or ns.db.settings.quickReplyRecordSay ~= false)) and #(t.messages or {}) > 0
+            local showPubHist = isPubChan and #(t.messages or {}) > 0
             include = (isAllianceChan and isAllianceAuth)
                 or (((not isGuildChan and not isAllianceChan) or (isGuildChan and inGuild)) and mirrorChannels and #(t.messages or {}) > 0)
                 or showGuildHist
                 or showGroupHist
+                or showSayYellHist
+                or showPubHist
                 or forceShow
         end
 
@@ -2969,7 +4636,7 @@ function Chat:GetThreadsList(kindFilter)
             elseif kindFilter == "rooms" then
                 include = (t.kind == "ROOM")
             elseif kindFilter == "channels" then
-                include = IsPublicChannelKind(t.kind) or (t.kind == "ALLIANCE")
+                include = IsPublicChannelKind(t.kind) or (t.kind == "ALLIANCE") or (t.kind == "GENERAL")
             elseif kindFilter == "mentions" then
                 include = (t.kind == "MENTIONS") or (t.hasMention == true)
             end
@@ -4342,15 +6009,51 @@ local function BuildOrderedWhisperCandidates(targetChar, candidateOffset, extraC
     return ordered
 end
 
-local function TrackSentWhisperCandidates(trackKey, lookupKey, sentList, monoNow)
+local function TrackSentWhisperCandidates(trackKey, lookupKey, sentList, monoNow, isSilentAddonPacket)
     if not trackKey or not sentList or #sentList == 0 then return end
-    Chat._lastCandidateTrackAt = monoNow
+    local now = monoNow or (GetTime and GetTime()) or 0
+    Chat._lastCandidateTrackAt = now
     Chat.lastWhisperCandidates = Chat.lastWhisperCandidates or {}
     Chat.lastWhisperCandidates[trackKey] = {
         candidates = sentList,
         lookupKey = lookupKey,
-        at = monoNow,
+        at = now,
     }
+    if isSilentAddonPacket == true then
+        Chat.silentNotFoundLedger = Chat.silentNotFoundLedger or {}
+        local count = 0
+        for k, rec in pairs(Chat.silentNotFoundLedger) do
+            if type(rec) ~= "table" or now > (rec.expiresAt or 0) then
+                Chat.silentNotFoundLedger[k] = nil
+            else
+                count = count + 1
+            end
+        end
+        if count > 80 then
+            wipe(Chat.silentNotFoundLedger)
+        end
+        local isWatchProbe = (type(trackKey) == "string" and trackKey:sub(1, 7) == "wprobe:")
+        local exp = now + 8.0
+        for _, cand in ipairs(sentList) do
+            if type(cand) == "string" and cand ~= "" then
+                local lowCand = (Compat.LowerUtf8 and Compat.LowerUtf8(cand)) or cand:lower()
+                local spaced = (lowCand:gsub("%-", " "))
+                local hyphened = (lowCand:gsub("%s+", "-"))
+                for _, variant in ipairs({ lowCand, spaced, hyphened, lookupKey }) do
+                    if type(variant) == "string" and variant ~= "" then
+                        local prev = Chat.silentNotFoundLedger[variant]
+                        Chat.silentNotFoundLedger[variant] = {
+                            expiresAt = exp,
+                            lookupKey = lookupKey,
+                            displayName = cand,
+                            isWatchProbe = isWatchProbe or (prev and prev.isWatchProbe == true),
+                            notifiedOffline = false,
+                        }
+                    end
+                end
+            end
+        end
+    end
 end
 
 -- Helper to send a bounded SCentral1 addon payload over WHISPER / BNet GameData.
@@ -4416,6 +6119,7 @@ local function SendRoomPacket(targetChar, bnetGameAccId, payload, candidateOffse
         local restrictedCount = 0
 
         for idx, candidate in ipairs(candidates) do
+            TrackSentWhisperCandidates(opts.trackCandidateKey or "room:whisper", parsed and parsed.lookupKey, { candidate }, monoNow, true)
             local ok, res = pcall(sendFn, PREFIX, payload, "WHISPER", candidate)
             if ok then
                 if Enum and Enum.SendAddonMessageResult and type(res) == "number" then
@@ -4971,7 +6675,7 @@ local function IsCharacterOnlineOrReachable(parsed, bnetAccountID)
     return true, "unknown"
 end
 
-function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
+function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag, peerClass, peerLevel, peerZone)
     local now = time()
     local monoNow = GetTime and GetTime() or now
     local ver = Compat.CleanPayloadField(versionStr or "", 24)
@@ -5023,6 +6727,7 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
                 source = sourceTag or "SCentral1",
             }
             self.seenOnlineChars[lk] = now
+            if self.pendingPresenceProbes then self.pendingPresenceProbes[lk] = nil end
             if self.sessionOfflineChars then self.sessionOfflineChars[lk] = nil end
             if self.sessionUnverifiedPeers then self.sessionUnverifiedPeers[lk] = nil end
             if self.pendingProbes then self.pendingProbes["w:" .. lk] = nil end
@@ -5032,6 +6737,17 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
             end
             if self.probeFailures then self.probeFailures["w:" .. lk] = nil end
             if self.probeAttemptIndex then self.probeAttemptIndex["w:" .. lk] = nil end
+
+            if Store and Store.SyncWatchlistObservation then
+                local syncDisp = reconciledDisplay[lk] or (lk == parsed.lookupKey and parsed.displayName) or parsed.displayName
+                Store:SyncWatchlistObservation(syncDisp, {
+                    online = true,
+                    classFile = (type(peerClass) == "string" and peerClass ~= "") and peerClass or nil,
+                    level = (type(peerLevel) == "number" and peerLevel > 0) and peerLevel or nil,
+                    area = (type(peerZone) == "string" and peerZone ~= "") and peerZone or nil,
+                    source = "addon",
+                })
+            end
 
             -- Also clear pending/failed probe state on any matching BN_WHISPER or WHISPER thread for this character.
             for tKey, t in pairs(self.threads) do
@@ -5068,6 +6784,9 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag)
         end
         if ver and ns.Clan and ns.Clan.NoteRemoteVersion then
             ns.Clan:NoteRemoteVersion(parsed.displayName, parsed.lookupKey, ver, sourceTag or "WHISPER")
+        end
+        if ns.Social and ns.Social.QueueScan then
+            ns.Social:QueueScan(0.25)
         end
     end
 
@@ -5646,6 +7365,27 @@ function Chat:GetOfficialDestinationInfo(threadKey)
     local t = threadKey and self.threads[threadKey]
     if not t then return nil end
 
+    if threadKey == "ch:general" then
+        local gTarget = self.GetGeneralTargetInfo and self:GetGeneralTargetInfo() or nil
+        if gTarget and gTarget.channelId then
+            return {
+                kind = "PUB_CHANNEL",
+                slash = gTarget.slash,
+                label = gTarget.title,
+                buttonText = string.format(L["Open %s Chat (%s)"], gTarget.title, "/" .. tostring(gTarget.channelId)),
+                compactButtonText = string.format("%s (%s)", gTarget.title, "/" .. tostring(gTarget.channelId)),
+            }
+        elseif gTarget and gTarget.isYell then
+            return {
+                kind = "LOCAL_YELL",
+                slash = "/y ",
+                label = L["Yell"],
+                buttonText = string.format(L["Open %s Chat (%s)"], L["Yell"], "/y"),
+                compactButtonText = string.format("%s (%s)", L["Yell"], "/y"),
+            }
+        end
+    end
+
     if STATIC_CHANNEL_ORDER[threadKey] then
         local meta = STATIC_CHANNEL_ORDER[threadKey]
         local chanLabel = L[meta.titleKey]
@@ -5655,6 +7395,19 @@ function Chat:GetOfficialDestinationInfo(threadKey)
             label = chanLabel,
             buttonText = string.format(L["Open %s Chat (%s)"], chanLabel, meta.slash:gsub("%s+$", "")),
             compactButtonText = string.format("%s (%s)", chanLabel, meta.slash:gsub("%s+$", "")),
+        }
+    end
+
+    if t.kind == "PUB_CHANNEL" and t.channelId then
+        local liveInfo = self:GetOfficialChannelInfo(t.channelId)
+        local chanLabel = (liveInfo and liveInfo.title) or t.title or ("/" .. tostring(t.channelId))
+        local slashStr = "/" .. tostring(t.channelId) .. " "
+        return {
+            kind = "PUB_CHANNEL",
+            slash = slashStr,
+            label = chanLabel,
+            buttonText = string.format(L["Open %s Chat (%s)"], chanLabel, "/" .. tostring(t.channelId)),
+            compactButtonText = string.format("%s (%s)", chanLabel, "/" .. tostring(t.channelId)),
         }
     end
 
@@ -5866,7 +7619,17 @@ local function TryDirectOfficialSend(self, t, threadKey, cleanText, isHardwareEv
             local candidates = BuildOrderedWhisperCandidates(sendTargetName, 0)
             local targetStr = (candidates and candidates[1]) or Compat.FormatForeverTarget(sendTargetName) or sendTargetName
             if targetStr and targetStr ~= "" then
-                TrackSentWhisperCandidates("send:" .. threadKey, sendParsed and sendParsed.lookupKey, { targetStr }, monoNow)
+                if self.silentNotFoundLedger then
+                    local lowT = (Compat.LowerUtf8 and Compat.LowerUtf8(targetStr)) or targetStr:lower()
+                    self.silentNotFoundLedger[lowT] = nil
+                    self.silentNotFoundLedger[(lowT:gsub("%-", " "))] = nil
+                    self.silentNotFoundLedger[(lowT:gsub("%s+", "-"))] = nil
+                    if sendParsed and sendParsed.lookupKey then
+                        self.silentNotFoundLedger[sendParsed.lookupKey] = nil
+                    end
+                end
+                TrackSentWhisperCandidates("send:" .. threadKey, sendParsed and sendParsed.lookupKey, { targetStr }, monoNow, false)
+                self:RecordOutboundOrigin("CHAT", "WHISPER", targetStr, L["Manual Chat (SocialCentral)"])
                 local ok, res = pcall(sendChat, sendPayloadText, "WHISPER", nil, targetStr)
                 if ok and res ~= false then
                     self._lastOfficialSendAt = monoNow
@@ -5891,6 +7654,24 @@ local function TryDirectOfficialSend(self, t, threadKey, cleanText, isHardwareEv
                     }
                     return true
                 end
+            end
+        end
+        return false
+    end
+
+    if threadKey == "ch:general" then
+        local gTarget = self.GetGeneralTargetInfo and self:GetGeneralTargetInfo() or nil
+        if gTarget and gTarget.clubId and gTarget.streamId and _G.C_Club and _G.C_Club.SendMessage then
+            local ok = pcall(_G.C_Club.SendMessage, gTarget.clubId, gTarget.streamId, cleanText)
+            if ok then
+                self._lastOfficialSendAt = monoNow
+                local meDisplay = GetMyInfo()
+                local _, myClass = Safe.Call(UnitClass, "player")
+                self:RecordGeneralMessage("PUB_CHANNEL", meDisplay, cleanText, true, Safe.String(myClass), gTarget.title or gTarget.name, {
+                    senderCharName = meDisplay,
+                    channelId = gTarget.channelId,
+                })
+                return true
             end
         end
         return false
@@ -5923,12 +7704,12 @@ function Chat:OpenOfficialChatForThread(threadKey, optionalDraft, isHardwareEven
 
     local clean = (Compat.CleanChatMessage and Compat.CleanChatMessage(optionalDraft)) or Compat.CleanInput(optionalDraft) or ""
     if clean ~= "" and TryDirectOfficialSend(self, t, threadKey, clean, isHardwareEvent) then
-        return true
+        return true, "sent"
     end
 
     if t.kind == "BN_WHISPER" then
         Compat.BNetWhisper(t.bnetName, t.targetName or t.title, clean)
-        return true
+        return true, "prefilled"
     end
 
     local prefix
@@ -5937,32 +7718,82 @@ function Chat:OpenOfficialChatForThread(threadKey, optionalDraft, isHardwareEven
         if redir and redir.bnetName then
             local prefill = (clean ~= "") and (redir.isAltSwitch and FormatBNetRedirectMessage(redir.targetDisplay, clean) or clean) or ""
             Compat.BNetWhisper(redir.bnetName, redir.targetDisplay or t.title, prefill)
-            return true
+            return true, "prefilled"
         end
         local altRedir = ResolveAltWhisperRedirect(t)
         if altRedir then
             local prefill = (clean ~= "") and FormatBNetRedirectMessage(altRedir.targetDisplay, clean) or ""
             Compat.Whisper(altRedir.altDisplay, prefill)
-            return true
+            return true, "prefilled"
         end
         Compat.Whisper(t.targetName, clean)
-        return true
+        return true, "prefilled"
+    elseif threadKey == "ch:general" then
+        local gTarget = self.GetGeneralTargetInfo and self:GetGeneralTargetInfo() or nil
+        if gTarget and gTarget.slash then
+            prefix = gTarget.slash .. clean
+        else
+            prefix = STATIC_CHANNEL_ORDER[threadKey].slash .. clean
+        end
     elseif STATIC_CHANNEL_ORDER[threadKey] then
         if clean ~= "" and not IsInAllowedOfficialChannel(t.kind) and (t.kind == "GUILD" or t.kind == "OFFICER" or t.kind == "PARTY" or t.kind == "RAID" or t.kind == "INSTANCE_CHAT") then
             ns:Print(L["You are not currently in that channel."])
             return false
         end
         prefix = STATIC_CHANNEL_ORDER[threadKey].slash .. clean
+    elseif t.kind == "PUB_CHANNEL" and t.channelId then
+        local liveInfo = self:GetOfficialChannelInfo(t.channelId)
+        if not liveInfo then
+            ns:Print(L["You are not currently in that channel."])
+            return false
+        end
+        prefix = liveInfo.slash .. clean
     else
         return false
     end
 
+    if ns.QuickReply then
+        ns.QuickReply._suppressBlizzSlashRedirectUntil = (GetTime and GetTime() or 0) + 0.6
+        if ns.QuickReply.PrepareTemporaryOfficialEditBox then
+            ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
+        end
+    end
+    local ok = false
     if ChatFrameUtil and ChatFrameUtil.OpenChat then
-        local ok = pcall(ChatFrameUtil.OpenChat, prefix)
-        return ok
+        ok = pcall(ChatFrameUtil.OpenChat, prefix)
     elseif ChatFrame_OpenChat then
-        local ok = pcall(ChatFrame_OpenChat, prefix)
-        return ok
+        ok = pcall(ChatFrame_OpenChat, prefix)
+    end
+    if ok then
+        local activeEb = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
+            or (_G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow())
+            or nil
+        if activeEb and _G.ChatEdit_ParseText then
+            pcall(_G.ChatEdit_ParseText, activeEb, 0)
+        end
+        if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+            ns.QuickReply:ShowActiveOfficialEditBox(activeEb)
+        end
+        if ns.QuickReply and ns.QuickReply.SyncEnterBinding then
+            ns.QuickReply:SyncEnterBinding()
+        end
+    end
+    return ok, ok and "prefilled" or nil
+end
+
+function Chat:SendDirectLfgWhisper(targetName, message, isHardwareEvent, suppressFallbackChatBox)
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(targetName)
+    local disp = (parsed and parsed.displayName) or targetName
+    local lk = (parsed and parsed.lookupKey) or (type(disp) == "string" and disp:lower() or nil)
+    local clean = (Compat.CleanChatMessage and Compat.CleanChatMessage(message)) or Compat.CleanInput(message) or ""
+    if disp and disp ~= "" and lk and lk ~= "" and clean ~= "" then
+        local t = EnsureThread("w:" .. lk, "WHISPER", disp, { targetName = disp })
+        if t and TryDirectOfficialSend(self, t, t.key, clean, isHardwareEvent) then
+            return true
+        end
+    end
+    if not suppressFallbackChatBox and Compat.Whisper and targetName then
+        Compat.Whisper(targetName, clean ~= "" and clean or message)
     end
     return false
 end
@@ -6245,6 +8076,257 @@ function Chat:QueueLoginBNetDiscovery()
     return queued
 end
 
+function Chat:AbortPendingPresenceProbes()
+    if self.pendingPresenceProbes then
+        wipe(self.pendingPresenceProbes)
+    end
+end
+
+function Chat:QueuePresenceProbe(lookupKey, displayName, urgent)
+    if ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false then
+        return false
+    end
+    local raw = (type(displayName) == "string" and displayName ~= "") and displayName or lookupKey
+    if type(raw) ~= "string" or raw == "" then
+        return false
+    end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(raw)
+    if not parsed or not parsed.surname or parsed.surname == "" then
+        return false
+    end
+    if Compat.IsMe and Compat.IsMe(parsed.displayName) then
+        return false
+    end
+    self.lastPresenceProbedAt = self.lastPresenceProbedAt or {}
+    if urgent then
+        self.lastPresenceProbedAt[parsed.lookupKey] = nil
+        self.urgentPresenceQueue = self.urgentPresenceQueue or {}
+        for _, q in ipairs(self.urgentPresenceQueue) do
+            if q.lookupKey == parsed.lookupKey then
+                return true
+            end
+        end
+        if #self.urgentPresenceQueue < 30 then
+            table.insert(self.urgentPresenceQueue, {
+                lookupKey = parsed.lookupKey,
+                displayName = parsed.displayName,
+            })
+        end
+    end
+    return true
+end
+
+function Chat:StepPresenceProbes()
+    if ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false then
+        self:AbortPendingPresenceProbes()
+        return false
+    end
+    local monoNow = (GetTime and GetTime()) or 0
+    if self._presenceReadyMono and monoNow < self._presenceReadyMono then
+        return false
+    end
+    if not GuardAddonMessaging(false) then
+        self:AbortPendingPresenceProbes()
+        return false
+    end
+    if (IsInInstance and Safe.Value(Safe.Call(IsInInstance)) == true)
+        or (IsTrialAccount and Safe.Value(Safe.Call(IsTrialAccount)) == true)
+    then
+        self:AbortPendingPresenceProbes()
+        return false
+    end
+    if ns.Clan and (ns.Clan.isStoppedThisSession or (ns.Clan.backoffUntil and monoNow < ns.Clan.backoffUntil)) then
+        self:AbortPendingPresenceProbes()
+        return false
+    end
+
+    self.pendingPresenceProbes = self.pendingPresenceProbes or {}
+    self.lastPresenceProbedAt = self.lastPresenceProbedAt or {}
+
+    for lk, pRec in pairs(self.pendingPresenceProbes) do
+        if type(pRec) == "table" and (monoNow - (pRec.sentAt or 0)) >= 3.8 then
+            self.pendingPresenceProbes[lk] = nil
+            self.seenOnlineChars[lk] = time()
+            if self.sessionOfflineChars then self.sessionOfflineChars[lk] = nil end
+            if Store and Store.SyncWatchlistObservation then
+                Store:SyncWatchlistObservation(pRec.displayName, {
+                    online = true,
+                    source = "probe",
+                })
+            end
+            if ns.Social and ns.Social.QueueScan then
+                ns.Social:QueueScan(0.25)
+            end
+        end
+    end
+
+    local lastOut = math.max(self.lastDiscoveryPingAt or 0, self.lastPresenceProbeSentAt or 0)
+    if (monoNow - lastOut) < 5.2 then
+        return false
+    end
+
+    local list = Store and Store.GetWatchlistTable and Store:GetWatchlistTable()
+    if type(list) ~= "table" or next(list) == nil then
+        return false
+    end
+
+    local function IsKnownCrossFaction(lk)
+        local dirRow = Store and Store.socialDirectoryByLookup and Store.socialDirectoryByLookup[lk]
+        if dirRow and dirRow.sameFaction == false then return true end
+        local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and ns.Social:GetBNetLinkInfo(lk)
+        if bInfo and bInfo.sameFaction == false then return true end
+        return false
+    end
+
+    local function IsRosterConfirmed(lk, disp, guid)
+        local socRow = Store and Store.socialByLookup and Store.socialByLookup[lk]
+        if socRow and socRow.online == true then
+            if socRow.friendOnline == true or socRow.guildOnline == true or (socRow.bnetOnline == true and socRow.bnetState == "wow_forever") then
+                return true
+            end
+        end
+        if Compat.IsInMyGroup and Compat.IsInMyGroup(disp, guid) then
+            return true
+        end
+        return false
+    end
+
+    local chosenLk, chosenDisp = nil, nil
+    if self.urgentPresenceQueue and #self.urgentPresenceQueue > 0 then
+        while #self.urgentPresenceQueue > 0 do
+            local item = table.remove(self.urgentPresenceQueue, 1)
+            if item and item.lookupKey and item.displayName
+                and not self.pendingPresenceProbes[item.lookupKey]
+                and not IsKnownCrossFaction(item.lookupKey)
+                and not IsRosterConfirmed(item.lookupKey, item.displayName)
+            then
+                chosenLk = item.lookupKey
+                chosenDisp = item.displayName
+                break
+            end
+        end
+    end
+
+    if not chosenLk then
+        local bestTier, bestFav, bestAt = 99, -1, nil
+        local function considerCand(cLk, cDisp, isFav, statusStr)
+            if not cLk or not cDisp or self.pendingPresenceProbes[cLk] then return end
+            if not cDisp:find(" ", 1, true) then return end
+            if Compat.IsMe and Compat.IsMe(cDisp) then return end
+            if IsKnownCrossFaction(cLk) then return end
+            if IsRosterConfirmed(cLk, cDisp) then return end
+            local lastAt = self.lastPresenceProbedAt[cLk]
+            local tier = nil
+            if not lastAt or statusStr == "unknown" then
+                if not lastAt or (monoNow - lastAt) >= 15 then
+                    tier = 1
+                end
+            elseif statusStr == "online" then
+                if (monoNow - lastAt) >= 35 then
+                    tier = 2
+                end
+            else
+                if (monoNow - lastAt) >= 45 then
+                    tier = 3
+                end
+            end
+            if not tier then return end
+            local favRank = isFav and 1 or 0
+            local atVal = lastAt or 0
+            if tier < bestTier
+                or (tier == bestTier and favRank > bestFav)
+                or (tier == bestTier and favRank == bestFav and (not bestAt or atVal < bestAt))
+            then
+                bestTier = tier
+                bestFav = favRank
+                bestAt = atVal
+                chosenLk = cLk
+                chosenDisp = cDisp
+            end
+        end
+
+        for wlKey, entry in pairs(list) do
+            if type(entry) == "table" and not entry.isSessionBNet then
+                local eKey = entry.id or wlKey
+                local actKey = (entry.watchAllAlts == true and entry.activeAltLookup) or eKey
+                local actDisp = (entry.watchAllAlts == true and entry.activeAltName) or entry.displayName
+                if not IsRosterConfirmed(eKey, entry.displayName, entry.guid)
+                    and not (actKey ~= eKey and IsRosterConfirmed(actKey, actDisp))
+                then
+                    local isFav = (entry.favorite == true) or (Store.IsSocialFavorite and Store:IsSocialFavorite(eKey) == true)
+                    local primDisp = (entry.surname and entry.surname ~= "" and entry.displayName)
+                        or (type(entry.observedCandidate) == "string" and entry.observedCandidate:find(" ", 1, true) and entry.observedCandidate)
+                        or nil
+                    if primDisp then
+                        local pParsed = Compat.ParseCharacterName(primDisp)
+                        if pParsed and pParsed.lookupKey then
+                            considerCand(pParsed.lookupKey, pParsed.displayName, isFav, entry.status)
+                        end
+                    end
+                    if entry.watchAllAlts == true and Store.GetAllLinkedCharacters then
+                        for _, altRec in ipairs(Store:GetAllLinkedCharacters(eKey)) do
+                            if altRec and altRec.lookupKey and altRec.displayName and altRec.displayName:find(" ", 1, true) then
+                                local altStatus = (entry.status == "online" and entry.activeAltLookup == altRec.lookupKey) and "online"
+                                    or ((entry.status == "unknown") and "unknown" or "offline")
+                                considerCand(altRec.lookupKey, altRec.displayName, isFav, altStatus)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if not chosenLk or not chosenDisp then
+        return false
+    end
+
+    local probeRec = {
+        lookupKey = chosenLk,
+        displayName = chosenDisp,
+        sentAt = monoNow,
+    }
+    self.lastPresenceProbeSentAt = monoNow
+    self.lastPresenceProbedAt[chosenLk] = monoNow
+    self.pendingPresenceProbes[chosenLk] = probeRec
+
+    local payload = "DPING|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+    local sentOk = SendRoomPacket(chosenDisp, nil, payload, 0, {
+        allowBNet = false,
+        sendAllCandidates = false,
+        forceAllCandidates = false,
+        trackCandidateKey = "wprobe:" .. chosenLk,
+    })
+    if not sentOk then
+        self.pendingPresenceProbes[chosenLk] = nil
+        return false
+    end
+
+    if C_Timer and C_Timer.After then
+        C_Timer.After(3.8, function()
+            if Chat.pendingPresenceProbes and Chat.pendingPresenceProbes[chosenLk] == probeRec then
+                Chat.pendingPresenceProbes[chosenLk] = nil
+                if GuardAddonMessaging(false)
+                    and not (IsInInstance and Safe.Value(Safe.Call(IsInInstance)) == true)
+                then
+                    Chat.seenOnlineChars[chosenLk] = time()
+                    if Chat.sessionOfflineChars then Chat.sessionOfflineChars[chosenLk] = nil end
+                    if Store and Store.SyncWatchlistObservation then
+                        Store:SyncWatchlistObservation(chosenDisp, {
+                            online = true,
+                            source = "probe",
+                        })
+                    end
+                    if ns.Social and ns.Social.QueueScan then
+                        ns.Social:QueueScan(0.25)
+                    end
+                end
+            end
+        end)
+    end
+    return true
+end
+
 function Chat:VerifyBeforeOfficialSend(threadKey)
     local t = threadKey and self.threads[threadKey]
     if not t then return false end
@@ -6522,43 +8604,272 @@ function Chat:ResolveBNetGameSender(bnGameAccId)
     return accId, accName, fullChar
 end
 
-function Chat:SendOrOpenReply(threadKey, rawText, isHardwareEvent)
-    if not threadKey or threadKey == "mentions:radar" then return false end
-    if type(rawText) == "string" and rawText:find("{", 1, true) and self.ExpandQuickReplyText then
-        rawText = self:ExpandQuickReplyText(rawText)
+function Chat:IsSlashCommandText(rawText)
+    if type(rawText) ~= "string" then
+        return false
     end
-    if threadKey == "notes:self" then
-        return self:SavePersonalNote(rawText)
+    local trimmed = Compat.Trim and Compat.Trim(rawText) or rawText:match("^%s*(.-)%s*$") or ""
+    if trimmed == "" or trimmed:sub(1, 2) == "//" then
+        return false
     end
-    if threadKey == "ch:alliance" then
-        return self:SendAllianceMessage(rawText)
+    return trimmed:match("^/([^%s]+)") ~= nil
+end
+
+function Chat:ExecuteSlashCommand(rawText, isHardwareEvent)
+    if not self:IsSlashCommandText(rawText) then
+        return false, "not_slash"
     end
-    if threadKey:sub(1, 5) == "room:" then
-        return self:SendRoomMessage(threadKey:sub(6), rawText)
+    local trimmed = Compat.Trim and Compat.Trim(rawText) or rawText:match("^%s*(.-)%s*$") or ""
+    local leadSlash, cmdToken, rest = trimmed:match("^(/([^%s]+))%s*(.-)$")
+    if not (leadSlash and cmdToken) then
+        return false, "not_slash"
+    end
+    rest = rest or ""
+    if isHardwareEvent ~= true then
+        return false, "slash_hardware_only"
     end
 
-    local t = self.threads[threadKey]
-    if not t then return false end
+    local slashKey = leadSlash:upper()
 
-    local hasOfficialLink = type(rawText) == "string" and rawText:find("|H", 1, true) and not rawText:find("|Haddon:", 1, true)
-    local st = self:GetPeerAddonState(threadKey)
-    if (not hasOfficialLink) and (t.kind == "WHISPER" or t.kind == "BN_WHISPER") and st then
-        if st.verified == true then
-            if st.bnetGameAccId and self.sessionBNetPeers and self.sessionBNetPeers[st.bnetGameAccId] then
-                return self:SendDirectMessage(threadKey, rawText)
+    if slashKey == "/RELOAD" or slashKey == "/RL" then
+        if _G.ReloadUI then
+            _G.ReloadUI()
+        elseif _G.C_UI and _G.C_UI.Reload then
+            _G.C_UI.Reload()
+        end
+        return true, "slash_executed"
+    end
+
+    if slashKey == "/WHO" and ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) then
+        ns:Print(L["/who paused during combat to prevent UI taint."])
+        return false, "slash_blocked"
+    end
+
+    local function OpenBlizzardChatPrefill(line)
+        if type(line) ~= "string" or line == "" then
+            return false
+        end
+        if ns.QuickReply then
+            ns.QuickReply._suppressBlizzSlashRedirectUntil = (GetTime and GetTime() or 0) + 0.6
+            if ns.QuickReply.PrepareTemporaryOfficialEditBox then
+                ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
             end
-            if not (t.kind == "WHISPER" and (ResolveBNetRedirectForWhisper(t) or ResolveAltWhisperRedirect(t))) then
-                return self:SendDirectMessage(threadKey, rawText)
+        end
+        local ok = false
+        if ChatFrameUtil and ChatFrameUtil.OpenChat then
+            ok = pcall(ChatFrameUtil.OpenChat, line)
+        elseif ChatFrame_OpenChat then
+            ok = pcall(ChatFrame_OpenChat, line)
+        end
+        if ok and ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+            ns.QuickReply:ShowActiveOfficialEditBox()
+            local activeEb = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
+                or (_G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow())
+                or nil
+            if activeEb and _G.ChatEdit_ParseText then
+                pcall(_G.ChatEdit_ParseText, activeEb, 0)
             end
-        elseif (st.state == "registered" or st.state == "unprobed") and st.state ~= "offline" and st.state ~= "disabled" then
-            -- Probe silently in the background so future replies upgrade to [SC] without dropping this message.
-            if self:ShouldAutoProbe(threadKey) then
-                self:ProbePeerAddon(threadKey, false)
+        end
+        return ok
+    end
+
+    if _G.hash_SecureCmdList and _G.hash_SecureCmdList[slashKey] ~= nil then
+        OpenBlizzardChatPrefill(trimmed)
+        ns:Print(L["Protected command opened in Blizzard chat bar — press Enter to run."])
+        return true, "slash_prefilled"
+    end
+
+    local slashFn = (_G.hash_SlashCmdList and type(_G.hash_SlashCmdList[slashKey]) == "function") and _G.hash_SlashCmdList[slashKey] or nil
+    if not slashFn and type(_G.SlashCmdList) == "table" then
+        for name, fn in pairs(_G.SlashCmdList) do
+            if type(fn) == "function" and type(name) == "string" then
+                for i = 1, 16 do
+                    local alias = _G["SLASH_" .. name .. tostring(i)]
+                    if type(alias) ~= "string" then
+                        break
+                    end
+                    if alias:upper() == slashKey then
+                        slashFn = fn
+                        break
+                    end
+                end
+                if slashFn then break end
+            end
+        end
+    end
+    if slashFn then
+        local eb = (_G.ChatEdit_GetLastActiveWindow and _G.ChatEdit_GetLastActiveWindow())
+            or (_G.DEFAULT_CHAT_FRAME and _G.DEFAULT_CHAT_FRAME.editBox)
+            or nil
+        local ok = pcall(slashFn, rest, eb)
+        if ok then
+            return true, "slash_executed"
+        end
+        OpenBlizzardChatPrefill(trimmed)
+        return true, "slash_prefilled"
+    end
+
+    local emoteTok = _G.hash_EmoteTokenList and _G.hash_EmoteTokenList[slashKey]
+    if emoteTok and _G.DoEmote then
+        local ok = pcall(_G.DoEmote, emoteTok, rest ~= "" and rest or nil)
+        if ok then
+            return true, "slash_executed"
+        end
+    end
+
+    local safeChanKey = ({
+        ["/G"] = "ch:guild",
+        ["/GUILD"] = "ch:guild",
+        ["/GUILDA"] = "ch:guild",
+        ["/H"] = "ch:guild",
+        ["/HERMANDAD"] = "ch:guild",
+        ["/O"] = "ch:officer",
+        ["/OFFICER"] = "ch:officer",
+        ["/OFICIAL"] = "ch:officer",
+        ["/P"] = "ch:party",
+        ["/PARTY"] = "ch:party",
+        ["/GRUPO"] = "ch:party",
+        ["/RA"] = "ch:raid",
+        ["/RAID"] = "ch:raid",
+        ["/RAIDE"] = "ch:raid",
+        ["/BANDA"] = "ch:raid",
+        ["/I"] = "ch:instance",
+        ["/INSTANCE"] = "ch:instance",
+        ["/INSTANCIA"] = "ch:instance",
+        ["/BG"] = "ch:instance",
+    })[slashKey]
+    if safeChanKey then
+        if rest ~= "" then
+            local okSent, openMode = self:OpenOfficialChatForThread(safeChanKey, rest, true)
+            if okSent then
+                return true, (openMode == "sent") and "slash_executed" or "slash_prefilled"
+            end
+            return false, "slash_blocked"
+        elseif ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.OpenThread then
+            ns.QuickReply:OpenThread(safeChanKey, true)
+            return true, "slash_executed"
+        else
+            OpenBlizzardChatPrefill(slashKey:lower() .. " ")
+            return true, "slash_prefilled"
+        end
+    end
+
+    if slashKey:match("^/%d+$") then
+        local cid = tonumber(slashKey:sub(2))
+        local info = cid and self:GetOfficialChannelInfo(cid) or nil
+        if info then
+            self:SetGeneralTargetChannel(cid)
+            if rest ~= "" then
+                local okSent, openMode = self:OpenOfficialChatForThread("ch:general", rest, true)
+                if okSent then
+                    return true, (openMode == "sent") and "slash_executed" or "slash_prefilled"
+                end
+                return false, "slash_blocked"
+            elseif ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.OpenThread then
+                ns.QuickReply:OpenThread("ch:general", true)
+                return true, "slash_executed"
+            end
+        end
+        if OpenBlizzardChatPrefill(trimmed) then
+            return true, "slash_prefilled"
+        end
+    end
+
+    if slashKey == "/S" or slashKey == "/SAY" or slashKey == "/DIZER" or slashKey == "/DECIR" then
+        if rest == "" and ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.OpenThread then
+            self:SetGeneralTargetChannel(nil)
+            ns.QuickReply:OpenThread("ch:general", true)
+            return true, "slash_executed"
+        end
+        if OpenBlizzardChatPrefill(trimmed) then
+            return true, "slash_prefilled"
+        end
+    end
+
+    if slashKey == "/Y" or slashKey == "/YELL" or slashKey == "/GRITAR" then
+        if rest == "" and ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.OpenThread then
+            self:SetGeneralTargetChannel("yell")
+            ns.QuickReply:OpenThread("ch:general", true)
+            return true, "slash_executed"
+        end
+        if OpenBlizzardChatPrefill(trimmed) then
+            return true, "slash_prefilled"
+        end
+    end
+
+    if (slashKey == "/W" or slashKey == "/WHISPER" or slashKey == "/T" or slashKey == "/TELL"
+        or slashKey == "/R" or slashKey == "/REPLY")
+        and rest ~= "" and ns.QuickReply and ns.QuickReply.ResolveLiveSlashThread
+    then
+        local wKey, wRest = ns.QuickReply:ResolveLiveSlashThread(trimmed, nil, nil, true)
+        if wKey and wRest and wRest ~= "" then
+            local okSent, openMode = self:SendOrOpenReply(wKey, wRest, true)
+            if okSent ~= false then
+                if ns.QuickReply and ns.QuickReply.OpenThread then
+                    ns.QuickReply:OpenThread(wKey, openMode ~= "prefilled")
+                end
+                return true, (openMode == "prefilled") and "slash_prefilled" or "slash_executed"
             end
         end
     end
 
-    return self:OpenOfficialChatForThread(threadKey, rawText, isHardwareEvent == true)
+    if OpenBlizzardChatPrefill(trimmed) then
+        return true, "slash_prefilled"
+    end
+
+    ns:Print(L["Unknown command '%s' — nothing was sent to chat."]:format(leadSlash))
+    return false, "slash_unknown"
+end
+
+function Chat:SendOrOpenReply(threadKey, rawText, isHardwareEvent)
+    if self:IsSlashCommandText(rawText) then
+        return self:ExecuteSlashCommand(rawText, isHardwareEvent)
+    end
+    if not threadKey or threadKey == "mentions:radar" then return false end
+    if type(rawText) == "string" and rawText:find("{", 1, true) and self.ExpandQuickReplyText then
+        rawText = self:ExpandQuickReplyText(rawText)
+    end
+    local hasPayload = type(rawText) == "string" and (Compat.CleanInput and Compat.CleanInput(rawText) or rawText) ~= ""
+    local sent = false
+    local sendMode = nil
+    if threadKey == "notes:self" then
+        sent = self:SavePersonalNote(rawText)
+    elseif threadKey == "ch:alliance" then
+        sent = self:SendAllianceMessage(rawText)
+    elseif threadKey:sub(1, 5) == "room:" then
+        sent = self:SendRoomMessage(threadKey:sub(6), rawText)
+    else
+        local t = self.threads[threadKey]
+        if not t then return false end
+
+        local hasOfficialLink = type(rawText) == "string" and rawText:find("|H", 1, true) and not rawText:find("|Haddon:", 1, true)
+        local addonLocked = (ns.Clan and ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked()) == true
+        local st = self:GetPeerAddonState(threadKey)
+        local handledDirect = false
+        if (not addonLocked) and (not hasOfficialLink) and (t.kind == "WHISPER" or t.kind == "BN_WHISPER") and st then
+            if st.verified == true then
+                if st.bnetGameAccId and self.sessionBNetPeers and self.sessionBNetPeers[st.bnetGameAccId] then
+                    sent = self:SendDirectMessage(threadKey, rawText)
+                    handledDirect = true
+                elseif not (t.kind == "WHISPER" and (ResolveBNetRedirectForWhisper(t) or ResolveAltWhisperRedirect(t))) then
+                    sent = self:SendDirectMessage(threadKey, rawText)
+                    handledDirect = true
+                end
+            elseif (st.state == "registered" or st.state == "unprobed") and st.state ~= "offline" and st.state ~= "disabled" then
+                -- Probe silently in the background so future replies upgrade to [SC] without dropping this message.
+                if self:ShouldAutoProbe(threadKey) then
+                    self:ProbePeerAddon(threadKey, false)
+                end
+            end
+        end
+        if not handledDirect then
+            sent, sendMode = self:OpenOfficialChatForThread(threadKey, rawText, isHardwareEvent == true)
+        end
+    end
+    if sent ~= false and hasPayload and ns.QuickReply and ns.QuickReply.RecordRecentSentThread then
+        ns.QuickReply:RecordRecentSentThread(threadKey)
+    end
+    return sent, sendMode
 end
 
 function Chat:JoinTempWoWChannel(rawName)
@@ -6577,6 +8888,9 @@ function Chat:JoinTempWoWChannel(rawName)
         local id = GetChannelName and Safe.Number(Safe.Call(GetChannelName, clean)) or 0
         if id and id > 0 then
             ns:Print(string.format(L["Joined WoW temp channel /%d (%s)."], id, clean))
+            if ns.QuickReply then
+                ns.QuickReply._suppressBlizzSlashRedirectUntil = (GetTime and GetTime() or 0) + 0.6
+            end
             if ChatFrameUtil and ChatFrameUtil.OpenChat then
                 pcall(ChatFrameUtil.OpenChat, "/" .. id .. " ")
             elseif ChatFrame_OpenChat then
@@ -6733,8 +9047,16 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
     end
 
     if op == "DPING" or op == "DPONG" then
-        local _, peerVer = strsplit("|", payload, 2)
-        Chat:MarkPeerVerified(cleanSenderStr or (parsedSender and parsedSender.displayName) or senderRaw, bnGameAccId, peerVer, op)
+        local _, peerVer, peerClass, peerLvl, peerZone = strsplit("|", payload, 5)
+        Chat:MarkPeerVerified(
+            cleanSenderStr or (parsedSender and parsedSender.displayName) or senderRaw,
+            bnGameAccId,
+            peerVer,
+            op,
+            peerClass,
+            tonumber(peerLvl),
+            peerZone
+        )
         if op == "DPING" and Chat:IsDirectChatEnabled() then
             if ns.Clan and ns.Clan.IsMessagingLocked and ns.Clan:IsMessagingLocked() then
                 return
@@ -6756,7 +9078,16 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
                     end
                     Chat._pongCount = kept
                 end
-                local replyPayload = "DPONG|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+                local _, myClass = Safe.Call(UnitClass, "player")
+                myClass = Compat.CleanPayloadField(Safe.String(myClass) or "", 16)
+                local myLvl = tostring(Safe.Number(Safe.Call(UnitLevel, "player")) or 0)
+                local shareLoc = not (ns.db and ns.db.settings and ns.db.settings.chatShareLocation == false)
+                local myZone = shareLoc and Compat.CleanPayloadField((Compat.CurrentZoneName and Compat.CurrentZoneName()) or "", 42) or ""
+                local replyPayload = "DPONG|"
+                    .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+                    .. "|" .. myClass
+                    .. "|" .. myLvl
+                    .. "|" .. myZone
                 local targetForPong = (parsedSender and parsedSender.displayName) or cleanSenderStr
                 local extraPong = (cleanSenderStr and cleanSenderStr ~= targetForPong) and { cleanSenderStr } or nil
                 SendRoomPacket(targetForPong, bnGameAccId, replyPayload, nil, {
@@ -7158,6 +9489,10 @@ local SHORT_CHANNEL_MAP = {
 local function ShortenOfficialChannelLabel(channelLabel)
     local raw = Safe.String(channelLabel)
     if not raw or raw == "" then return nil end
+    local commFriendly = Chat.ParseCommunityChannelName and Chat:ParseCommunityChannelName(raw) or nil
+    if commFriendly and commFriendly ~= "" then
+        return commFriendly
+    end
     local numPrefix, body = raw:match("^(%d+%.%s*)(.+)$")
     numPrefix = numPrefix or ""
     body = body or raw
@@ -7242,7 +9577,261 @@ local function CleanRenderedChatLine(rawMsg)
     return s
 end
 
-local function CaptureOfficialChatLine(chatId, rawMsg)
+Chat._combatLogBuffer = Chat._combatLogBuffer or {}
+Chat._combatLogEmitPending = false
+
+function Chat:_ClassifyCombatLogKind(plainStr, r, g, b)
+    local low = (type(plainStr) == "string") and plainStr:lower() or ""
+    if low:find("died", 1, true) or low:find("slain", 1, true) or low:find("killed", 1, true)
+        or low:find("morreu", 1, true) or low:find("morto", 1, true) or low:find("muri", 1, true)
+        or low:find("matou", 1, true) or low:find("abat", 1, true)
+    then
+        return "kills"
+    end
+    if low:find("heal", 1, true) or low:find("cura", 1, true) or low:find("curad", 1, true)
+        or low:find("sana", 1, true) or low:find("absor", 1, true)
+        or (tonumber(g) and tonumber(r) and tonumber(b) and g >= 0.65 and r <= 0.45 and b <= 0.55)
+    then
+        return "healing"
+    end
+    if low:find("hit", 1, true) or low:find("crit", 1, true) or low:find("damage", 1, true)
+        or low:find("dano", 1, true) or low:find("acerto", 1, true) or low:find("golpe", 1, true)
+        or low:find("daño", 1, true) or low:find("impact", 1, true) or low:find("suffers", 1, true)
+        or low:find("sofre", 1, true) or low:find("sufre", 1, true)
+        or (tonumber(r) and tonumber(g) and r >= 0.72 and g <= 0.48)
+    then
+        return "damage"
+    end
+    return "misc"
+end
+
+function Chat:RecordCombatLogLine(rawMsg, r, g, b, customTs)
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return
+    end
+    if Safe.IsSecret(rawMsg) or type(rawMsg) ~= "string" then
+        return
+    end
+    local safeLine = Safe.String(rawMsg)
+    if not safeLine then
+        return
+    end
+    if safeLine:find("|K", 1, true) then
+        safeLine = safeLine:gsub("|K[^|]*|k", "")
+    end
+    local parsedTs = tonumber(customTs)
+    if not parsedTs then
+        local hh, mm, ss = safeLine:match("(%d%d?):(%d%d):(%d%d)")
+        if not hh then
+            hh, mm = safeLine:match("^%s*%[?(%d%d?):(%d%d)")
+        end
+        if hh and mm and date and time then
+            local dt = date("*t")
+            if type(dt) == "table" then
+                dt.hour = tonumber(hh) or dt.hour
+                dt.min = tonumber(mm) or dt.min
+                dt.sec = tonumber(ss) or 0
+                local candidate = time(dt)
+                if candidate and candidate <= (time() + 120) then
+                    parsedTs = candidate
+                end
+            end
+        end
+    end
+    safeLine = self:_StripLeadingChatTimestamp(safeLine)
+    safeLine = Compat.Trim and Compat.Trim(safeLine) or safeLine:match("^%s*(.-)%s*$")
+    if not safeLine or safeLine == "" then
+        return
+    end
+    local plain = CleanRenderedChatLine(safeLine) or safeLine
+    local nr = tonumber(r)
+    local ng = tonumber(g)
+    local nb = tonumber(b)
+    local buf = self._combatLogBuffer
+    if not buf then
+        buf = {}
+        self._combatLogBuffer = buf
+    end
+    buf[#buf + 1] = {
+        ts = parsedTs or time(),
+        text = safeLine,
+        plain = plain,
+        r = nr or 0.92,
+        g = ng or 0.88,
+        b = nb or 0.78,
+        kind = self:_ClassifyCombatLogKind(plain, nr, ng, nb),
+    }
+    while #buf > 200 do
+        table.remove(buf, 1)
+    end
+    if not self._combatLogEmitPending then
+        self._combatLogEmitPending = true
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.15, function()
+                self._combatLogEmitPending = false
+                ns:Emit("COMBAT_LOG_UPDATED")
+            end)
+        else
+            self._combatLogEmitPending = false
+            ns:Emit("COMBAT_LOG_UPDATED")
+        end
+    end
+end
+
+function Chat:GetCombatLogEntries(filterKind)
+    local buf = self._combatLogBuffer
+    if not buf then
+        buf = {}
+        self._combatLogBuffer = buf
+    end
+    if #buf == 0 then
+        local cf2 = _G.ChatFrame2
+        if cf2 and cf2.GetNumMessages and cf2.GetMessageInfo then
+            local okN, total = pcall(cf2.GetNumMessages, cf2)
+            local totalNum = okN and Safe.Number(total) or 0
+            if totalNum > 0 then
+                local startIdx = math.max(1, totalNum - 60 + 1)
+                for i = startIdx, totalNum do
+                    local okM, lineRaw, mr, mg, mb = pcall(cf2.GetMessageInfo, cf2, i)
+                    if okM and lineRaw then
+                        self:RecordCombatLogLine(lineRaw, mr, mg, mb)
+                    end
+                end
+            end
+        end
+    end
+    if not filterKind or filterKind == "all" then
+        return buf
+    end
+    local out = {}
+    for _, item in ipairs(buf) do
+        if item and (item.kind == filterKind or (filterKind == "kills" and item.kind == "misc")) then
+            out[#out + 1] = item
+        end
+    end
+    return out
+end
+
+function Chat:ClearCombatLogEntries()
+    if self._combatLogBuffer then
+        wipe(self._combatLogBuffer)
+    end
+    ns:Emit("COMBAT_LOG_UPDATED")
+end
+
+Chat._worldLogBuffer = Chat._worldLogBuffer or {}
+Chat._worldLogDedup = Chat._worldLogDedup or {}
+
+function Chat:RecordWorldLogLine(kind, tagLabel, rawMsg, r, g, b, customTs, skipEmit)
+    if Safe.IsSecret(rawMsg) or type(rawMsg) ~= "string" then
+        return false
+    end
+    local safeLine = Safe.String(rawMsg)
+    if not safeLine then
+        return false
+    end
+    if safeLine:find("|K", 1, true) then
+        safeLine = safeLine:gsub("|K[^|]*|k", "")
+    end
+    safeLine = self:_StripLeadingChatTimestamp(safeLine)
+    safeLine = Compat.Trim and Compat.Trim(safeLine) or safeLine:match("^%s*(.-)%s*$")
+    if not safeLine or safeLine == "" then
+        return false
+    end
+    local plain = CleanRenderedChatLine(safeLine) or safeLine
+    local normKey = self:_NormalizeGeneralDedupText(plain)
+    if normKey and normKey ~= "" then
+        local nowWall = time()
+        local prevAt = self._worldLogDedup and self._worldLogDedup[normKey]
+        if prevAt and (nowWall - prevAt) <= 2 then
+            return false
+        end
+        self._worldLogDedup = self._worldLogDedup or {}
+        self._worldLogDedup[normKey] = nowWall
+        self._worldLogDedupCount = (self._worldLogDedupCount or 0) + 1
+        if self._worldLogDedupCount > 60 then
+            for k, tAt in pairs(self._worldLogDedup) do
+                if (nowWall - (tonumber(tAt) or 0)) > 4 then
+                    self._worldLogDedup[k] = nil
+                end
+            end
+            self._worldLogDedupCount = 0
+        end
+    end
+    local normKind = (kind == "loot" or kind == "craft" or kind == "progress" or kind == "system") and kind or "system"
+    local hexByKind = {
+        loot = "|cff47ef66",
+        craft = "|cff6ec1e4",
+        progress = "|cff9aaeff",
+        system = "|cffffff66",
+    }
+    local prefixTag = (tagLabel and tagLabel ~= "") and ((hexByKind[normKind] or "|cffffff66") .. "[" .. tagLabel .. "]|r ") or ""
+    local displayTxt = prefixTag .. safeLine
+    local buf = self._worldLogBuffer
+    if not buf then
+        buf = {}
+        self._worldLogBuffer = buf
+    end
+    buf[#buf + 1] = {
+        ts = tonumber(customTs) or time(),
+        text = displayTxt,
+        plain = plain,
+        r = tonumber(r) or 0.94,
+        g = tonumber(g) or 0.92,
+        b = tonumber(b) or 0.78,
+        kind = normKind,
+    }
+    while #buf > 200 do
+        table.remove(buf, 1)
+    end
+    if not skipEmit and not self._combatLogEmitPending then
+        self._combatLogEmitPending = true
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.15, function()
+                self._combatLogEmitPending = false
+                ns:Emit("COMBAT_LOG_UPDATED")
+            end)
+        else
+            self._combatLogEmitPending = false
+            ns:Emit("COMBAT_LOG_UPDATED")
+        end
+    end
+    return true
+end
+
+function Chat:GetWorldLogEntries(filterKind)
+    local buf = self._worldLogBuffer
+    if not buf then
+        buf = {}
+        self._worldLogBuffer = buf
+    end
+    if not filterKind or filterKind == "all" then
+        return buf
+    end
+    local out = {}
+    for _, item in ipairs(buf) do
+        if item and item.kind == filterKind then
+            out[#out + 1] = item
+        end
+    end
+    return out
+end
+
+function Chat:ClearWorldLogEntries()
+    if self._worldLogBuffer then
+        wipe(self._worldLogBuffer)
+    end
+    ns:Emit("COMBAT_LOG_UPDATED")
+end
+
+local function CaptureOfficialChatLine(chatId, rawMsg, r, g, b)
+    if chatId == 2 and Chat.RecordCombatLogLine then
+        Chat:RecordCombatLogLine(rawMsg, r, g, b)
+    elseif chatId == 1 and Chat.QueueGeneralOfficialFrameLine then
+        Chat:QueueGeneralOfficialFrameLine(rawMsg, r, g, b)
+    elseif chatId == 1 and Chat.RecordGeneralOfficialFrameLine then
+        Chat:RecordGeneralOfficialFrameLine(rawMsg, r, g, b)
+    end
     local st = ns.db and ns.db.settings
     if st and st.embedOfficialChat == false then
         return
@@ -7316,8 +9905,8 @@ local function InstallOfficialChatCaptureHooks()
         if cf then
             if hooksecurefunc and type(cf.AddMessage) == "function" then
                 local cid = chatId
-                hooksecurefunc(cf, "AddMessage", function(_, msg)
-                    CaptureOfficialChatLine(cid, msg)
+                hooksecurefunc(cf, "AddMessage", function(_, msg, r, g, b)
+                    CaptureOfficialChatLine(cid, msg, r, g, b)
                 end)
             end
             if cf.HookScript then
@@ -7610,25 +10199,52 @@ Chat._lineTrack = {
         CHAT_MSG_INSTANCE_CHAT_LEADER = true,
         CHAT_MSG_GUILD = true,
         CHAT_MSG_OFFICER = true,
+        CHAT_MSG_SAY = true,
+        CHAT_MSG_YELL = true,
+        CHAT_MSG_CHANNEL = true,
+        CHAT_MSG_COMMUNITIES_CHANNEL = true,
     },
 }
 
+local function LineTrackCategoryKey(eventName, lineID)
+    if eventName == "CHAT_MSG_PARTY" or eventName == "CHAT_MSG_PARTY_LEADER"
+        or eventName == "CHAT_MSG_RAID" or eventName == "CHAT_MSG_RAID_LEADER"
+        or eventName == "CHAT_MSG_INSTANCE_CHAT" or eventName == "CHAT_MSG_INSTANCE_CHAT_LEADER"
+    then
+        return "GRP:" .. tostring(lineID)
+    elseif eventName == "CHAT_MSG_CHANNEL" or eventName == "CHAT_MSG_COMMUNITIES_CHANNEL" then
+        return "CH:" .. tostring(lineID)
+    elseif eventName == "CHAT_MSG_SAY" or eventName == "CHAT_MSG_YELL" then
+        return "LOC:" .. tostring(lineID)
+    end
+    return tostring(eventName) .. ":" .. tostring(lineID)
+end
+
 function Chat:IsChatLineRecorded(eventName, lineID)
     if not (eventName and lineID and lineID ~= 0) then return false end
-    return self._lineTrack.ids[tostring(eventName) .. ":" .. tostring(lineID)] == true
+    local ids = self._lineTrack.ids
+    return ids[tostring(eventName) .. ":" .. tostring(lineID)] == true
+        or ids[LineTrackCategoryKey(eventName, lineID)] == true
 end
 
 function Chat:MarkChatLineRecorded(eventName, lineID)
     if not (eventName and lineID and lineID ~= 0) then return end
     local lt = self._lineTrack
-    local k = tostring(eventName) .. ":" .. tostring(lineID)
-    if not lt.ids[k] then
+    local k1 = tostring(eventName) .. ":" .. tostring(lineID)
+    local k2 = LineTrackCategoryKey(eventName, lineID)
+    if not lt.ids[k1] or not lt.ids[k2] then
         if lt.count >= lt.max then
             wipe(lt.ids)
             lt.count = 0
         end
-        lt.ids[k] = true
-        lt.count = lt.count + 1
+        if not lt.ids[k1] then
+            lt.ids[k1] = true
+            lt.count = lt.count + 1
+        end
+        if k2 ~= k1 and not lt.ids[k2] then
+            lt.ids[k2] = true
+            lt.count = lt.count + 1
+        end
     end
 end
 
@@ -7714,11 +10330,20 @@ local function OfficialChatShieldFilter(_, eventName, msgRaw, authorRaw, ...)
     if Chat:ShouldHideInOfficialChat(eventName) then
         return true
     end
-    if dec.modifiedChannel and eventName == "CHAT_MSG_CHANNEL" then
-        return ReplaceFilterChannelArg(dec.modifiedText or msgRaw, authorRaw, dec.modifiedChannel, ...)
+    local outText = dec.modifiedText or msg
+    local isMeSender = (eventName == "CHAT_MSG_WHISPER_INFORM" or eventName == "CHAT_MSG_BN_WHISPER_INFORM")
+        or (author and Compat.IsMe and Compat.IsMe(author, guid) == true)
+    if (not isMeSender) and Chat.HighlightMentionsInline then
+        local hl = Chat:HighlightMentionsInline(outText, eventName)
+        if hl and hl ~= outText then
+            outText = hl
+        end
     end
-    if dec.modifiedText and dec.modifiedText ~= msg then
-        return false, dec.modifiedText, authorRaw, ...
+    if dec.modifiedChannel and eventName == "CHAT_MSG_CHANNEL" then
+        return ReplaceFilterChannelArg(outText, authorRaw, dec.modifiedChannel, ...)
+    end
+    if outText ~= msg then
+        return false, outText, authorRaw, ...
     end
     return false
 end
@@ -7738,6 +10363,7 @@ local function InstallChatShieldFilters()
         "CHAT_MSG_BN_WHISPER",
         "CHAT_MSG_BN_WHISPER_INFORM",
         "CHAT_MSG_CHANNEL",
+        "CHAT_MSG_COMMUNITIES_CHANNEL",
         "CHAT_MSG_GUILD",
         "CHAT_MSG_OFFICER",
         "CHAT_MSG_PARTY",
@@ -7756,16 +10382,13 @@ function Chat:EnsureMentionsThread()
     local t = EnsureThread("mentions:radar", "MENTIONS", L["Mentions Radar"], {})
     if t then
         t.title = L["Mentions Radar"]
+        t.unread = 0
     end
     return t
 end
 
 function Chat:GetMentionsUnreadCount()
-    local t = self.threads and self.threads["mentions:radar"]
-    if not t or self:IsThreadMuted("mentions:radar") then
-        return 0
-    end
-    return t.unread or 0
+    return 0
 end
 
 local function HasWholeTermInText(text, term)
@@ -7954,12 +10577,8 @@ function Chat:EvaluateIncomingMention(eventName, text, senderDisp, senderLookupK
         if self:ShouldSaveGeneralHistory() then
             PersistWhisperLine("mentions:radar", entry, 0, mThread)
         end
-        local isViewingMentions = (ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible("mentions:radar")) == true
-        if (not isViewingMentions) and not self:IsThreadMuted("mentions:radar") then
-            mThread.unread = (mThread.unread or 0) + 1
-            mThread.hasMention = true
-            self:InvalidateUnreadCache()
-        end
+        mThread.unread = 0
+        mThread.hasMention = true
         QueueChatEmit(0.08)
     end
 
@@ -8018,7 +10637,7 @@ function Chat:TriggerTestMention()
             table.remove(mThread.messages, 1)
         end
         mThread.lastAt = entry.ts
-        mThread.unread = (mThread.unread or 0) + 1
+        mThread.unread = 0
         mThread.hasMention = true
         self:InvalidateUnreadCache()
         ns:Emit("CHAT_UPDATED")
@@ -8039,7 +10658,165 @@ function Chat:TriggerTestMention()
     })
 end
 
+function Chat:HighlightMentionsInline(rawText, channelOrEvent, explicitTerm)
+    if type(rawText) ~= "string" or rawText == "" then
+        return rawText
+    end
+    local s = ns.db and ns.db.settings
+    if s and s.mentionAlertsEnabled == false then
+        return rawText
+    end
+    if Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return rawText
+    end
+    if type(channelOrEvent) == "string" and channelOrEvent ~= "" then
+        local chUp = channelOrEvent:upper()
+        if chUp == "GUILD" or chUp == "OFFICER" or chUp == "ALLIANCE" or chUp == "CHAT_MSG_GUILD" or chUp == "CHAT_MSG_OFFICER" then
+            if s and s.mentionWatchGuild == false then return rawText end
+        elseif chUp == "PARTY" or chUp == "RAID" or chUp == "INSTANCE_CHAT" or chUp == "ROOM"
+            or chUp == "CHAT_MSG_PARTY" or chUp == "CHAT_MSG_PARTY_LEADER"
+            or chUp == "CHAT_MSG_RAID" or chUp == "CHAT_MSG_RAID_LEADER" or chUp == "CHAT_MSG_RAID_WARNING"
+            or chUp == "CHAT_MSG_INSTANCE_CHAT" or chUp == "CHAT_MSG_INSTANCE_CHAT_LEADER"
+        then
+            if s and s.mentionWatchGroup == false then return rawText end
+        elseif chUp == "LOCAL_SAY" or chUp == "LOCAL_YELL" or chUp == "CHAT_MSG_SAY" or chUp == "CHAT_MSG_YELL" then
+            if s and s.mentionWatchSayYell == false then return rawText end
+        elseif chUp == "CHAT_MSG_CHANNEL" then
+            if s and s.mentionWatchPublic == false then return rawText end
+        end
+    end
+
+    local myDisp = GetMyInfo()
+    local myParsed = myDisp and Compat.ParseCharacterName and Compat.ParseCharacterName(myDisp)
+    local myFirst = myParsed and myParsed.firstName and self:FoldSearchText(myParsed.firstName) or ""
+    local nickRaw = (s and type(s.mentionNicknames) == "string") and s.mentionNicknames or ""
+    local kwRaw = (s and type(s.mentionKeywords) == "string") and s.mentionKeywords or ""
+    local sig = myFirst .. "|" .. nickRaw .. "|" .. kwRaw
+    local cache = self._mentionHlCache
+    if not cache or cache.sig ~= sig then
+        local tSet = {}
+        if #myFirst >= 3 then
+            tSet[myFirst] = true
+        end
+        local nicks = ParseCommaListCached(nickRaw, "nickRaw", "nickList", 2)
+        for i = 1, #nicks do
+            if not nicks[i]:find("[%s]") then
+                tSet[nicks[i]] = true
+            end
+        end
+        local kws = ParseCommaListCached(kwRaw, "kwRaw", "kwList", 2)
+        for i = 1, #kws do
+            local kw = kws[i]
+            if kw:sub(1, 1) ~= "-" and not kw:find("[%s]") then
+                local tok = (kw:sub(1, 1) == "+") and kw:sub(2) or kw
+                if #tok >= 2 then
+                    tSet[tok] = true
+                end
+            end
+        end
+        cache = { sig = sig, terms = tSet }
+        self._mentionHlCache = cache
+    end
+
+    local termSet = cache.terms
+    local expFold = (type(explicitTerm) == "string" and explicitTerm ~= "") and self:FoldSearchText(explicitTerm) or nil
+    if expFold and expFold:sub(1, 1) == "+" then expFold = expFold:sub(2) end
+    local hasExp = (expFold ~= nil and #expFold >= 2 and not expFold:find("[%s]"))
+    if (not hasExp) and next(termSet) == nil then
+        return rawText
+    end
+
+    local foldedAll = self:FoldSearchText(rawText)
+    if foldedAll == "" then
+        return rawText
+    end
+    local anyHit = hasExp and (foldedAll:find(expFold, 1, true) ~= nil) or false
+    if not anyHit then
+        for term in pairs(termSet) do
+            if foldedAll:find(term, 1, true) then
+                anyHit = true
+                break
+            end
+        end
+    end
+    if not anyHit then
+        return rawText
+    end
+
+    local function HighlightPlainChunk(seg)
+        if not seg or seg == "" then return seg end
+        local outParts = {}
+        local p = 1
+        local slen = #seg
+        local changed = false
+        while p <= slen do
+            local wStart, wEnd = seg:find("[^%s%p]+", p)
+            if not wStart then
+                outParts[#outParts + 1] = seg:sub(p)
+                break
+            end
+            local word = seg:sub(wStart, wEnd)
+            local fWord = self:FoldSearchText(word)
+            local matched = (fWord ~= "") and ((termSet[fWord] == true) or (hasExp and fWord == expFold))
+            if wStart > p then
+                local gap = seg:sub(p, wStart - 1)
+                if matched and gap:sub(-1) == "@" then
+                    if #gap > 1 then
+                        outParts[#outParts + 1] = gap:sub(1, -2)
+                    end
+                    outParts[#outParts + 1] = "|cffffd026@" .. word .. "|r"
+                    changed = true
+                else
+                    outParts[#outParts + 1] = gap
+                    if matched then
+                        outParts[#outParts + 1] = "|cffffd026" .. word .. "|r"
+                        changed = true
+                    else
+                        outParts[#outParts + 1] = word
+                    end
+                end
+            else
+                if matched then
+                    outParts[#outParts + 1] = "|cffffd026" .. word .. "|r"
+                    changed = true
+                else
+                    outParts[#outParts + 1] = word
+                end
+            end
+            p = wEnd + 1
+        end
+        return changed and table.concat(outParts) or seg
+    end
+
+    local out = {}
+    local pos = 1
+    local len = #rawText
+    while pos <= len do
+        local hStart, hEnd = rawText:find("|H.-|h.-|h", pos)
+        local tStart, tEnd = rawText:find("|T.-|t", pos)
+        local cStart, cEnd = rawText:find("|c%x%x%x%x%x%x%x%x.-|r", pos)
+        local nextStart, nextEnd = nil, nil
+        if hStart then nextStart, nextEnd = hStart, hEnd end
+        if tStart and (not nextStart or tStart < nextStart) then nextStart, nextEnd = tStart, tEnd end
+        if cStart and (not nextStart or cStart < nextStart) then nextStart, nextEnd = cStart, cEnd end
+        local segEnd = nextStart and (nextStart - 1) or len
+        if segEnd >= pos then
+            out[#out + 1] = HighlightPlainChunk(rawText:sub(pos, segEnd))
+        end
+        if nextStart and nextEnd then
+            out[#out + 1] = rawText:sub(nextStart, nextEnd)
+            pos = nextEnd + 1
+        else
+            break
+        end
+    end
+    return table.concat(out)
+end
+
 local function OnChatEvent(event, textRaw, authorRaw, ...)
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return
+    end
     if Safe.IsSecret(textRaw) or Safe.IsSecret(authorRaw) then
         return
     end
@@ -8366,12 +11143,21 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
                 Chat.lastManualChannelSend = nil
             end
         end
+        local meta = STATIC_CHANNEL_ORDER[chKey]
+        local cls = parsed and LookupClassFromCache(parsed.lookupKey, guid)
+        local senderLabel = ResolveChatSenderDisplay((parsed and parsed.displayName) or author, guid, nil)
         if isMe and not mirrorOn and not qrNeedsChan and not previewNeedsChan and not viewingChan and not saveChanHist then
             if manualChanRec and manualChanRec.optimisticEntry then
                 ns:Emit("CHAT_UPDATED")
                 Chat:MarkChatLineRecorded(event, evLineId)
                 return
             end
+            local tOwn = EnsureThread(chKey, chKind, L[meta.titleKey], { slash = meta.slash })
+            AppendMessage(tOwn, senderLabel, text, false, cls, true, true, {
+                senderGuid = guid,
+                senderCharName = senderLabel,
+                replySlash = meta.slash,
+            })
             local existing = Chat.threads[chKey]
             if existing and ((existing.unread or 0) > 0 or existing.hasMention) then
                 existing.unread = 0
@@ -8387,9 +11173,6 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             Chat:MarkChatLineRecorded(event, evLineId)
             return
         end
-        local meta = STATIC_CHANNEL_ORDER[chKey]
-        local cls = parsed and LookupClassFromCache(parsed.lookupKey, guid)
-        local senderLabel = ResolveChatSenderDisplay((parsed and parsed.displayName) or author, guid, nil)
         local lineID = evLineId or Safe.Number(select(9, ...))
         if not isMe then
             local okBlk, isBlk = pcall(Chat.IsMessageBlockedByShield, Chat, event, text, author, guid, lineID, L[meta.titleKey])
@@ -8400,9 +11183,14 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             pcall(Chat.EvaluateIncomingMention, Chat, event, text, senderLabel, parsed and parsed.lookupKey, guid, cls, L[meta.titleKey], chKey)
         end
         if not mirrorOn and not qrNeedsChan and not previewNeedsChan and not viewingChan and not saveChanHist then
-            if not isMe and event ~= "CHAT_MSG_RAID_WARNING" and not Chat:IsThreadMuted(chKey) then
-                PlayIncomingChime(chKind, chKey, false, (parsed and parsed.lookupKey) or chKey)
-            end
+            local tOwn = EnsureThread(chKey, chKind, L[meta.titleKey], { slash = meta.slash })
+            AppendMessage(tOwn, senderLabel, text, not isMe, cls, true, (isMe == true) or Chat:IsThreadMuted(chKey), {
+                senderGuid = guid,
+                senderCharName = senderLabel,
+                previewCategory = pCat,
+                previewChannelKind = chKind,
+                replySlash = meta.slash,
+            })
             Chat:MarkChatLineRecorded(event, lineID)
             return
         end
@@ -8419,6 +11207,16 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
                     replySlash = meta.slash,
                 })
             end
+        elseif event == "CHAT_MSG_RAID_WARNING" then
+            local raidMeta = STATIC_CHANNEL_ORDER["ch:raid"]
+            local tRaid = EnsureThread("ch:raid", "RAID", (raidMeta and L[raidMeta.titleKey]) or L["Raid"], { slash = "/ra " })
+            AppendMessage(tRaid, senderLabel, "[" .. L["Raid Warning"] .. "] " .. text, not isMe, cls, not saveChanHist, isMe == true, {
+                senderGuid = guid,
+                senderCharName = senderLabel,
+                previewCategory = "raid",
+                previewChannelKind = "RAID",
+                replySlash = "/ra ",
+            })
         elseif isMe then
             local existing = Chat.threads[chKey]
             if existing and ((existing.unread or 0) > 0 or existing.hasMention) then
@@ -8434,23 +11232,1066 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             ns:Emit("CHAT_UPDATED")
         end
         Chat:MarkChatLineRecorded(event, lineID)
-    elseif event == "CHAT_MSG_SAY" or event == "CHAT_MSG_YELL" or event == "CHAT_MSG_CHANNEL" then
+    elseif event == "CHAT_MSG_SAY" or event == "CHAT_MSG_YELL" or event == "CHAT_MSG_CHANNEL" or event == "CHAT_MSG_COMMUNITIES_CHANNEL" then
         local author = Safe.String(authorRaw)
         local parsed = author and Compat.ParseCharacterName(author)
         local guid = Safe.String(select(10, ...))
         local isMe = (parsed and Compat.IsMe(parsed.displayName, guid)) or (author and Compat.IsMe(author, guid))
+        local isSayOrYell = (event == "CHAT_MSG_SAY" or event == "CHAT_MSG_YELL")
+        local chLabel = Safe.String(select(2, ...)) or Safe.String(select(7, ...))
+        local lineID = evLineId or Safe.Number(select(9, ...))
+        local cls = (isMe and Safe.String(select(2, Safe.Call(UnitClass, "player")))) or (parsed and LookupClassFromCache(parsed.lookupKey, guid))
+        local senderLabel = isMe and GetMyInfo() or ResolveChatSenderDisplay((parsed and parsed.displayName) or author, guid, nil)
         if not isMe then
-            local chLabel = Safe.String(select(2, ...)) or Safe.String(select(7, ...))
-            local lineID = Safe.Number(select(9, ...))
-            if not Chat:IsMessageBlockedByShield(event, text, author, guid, lineID, chLabel) then
-                local cls = parsed and LookupClassFromCache(parsed.lookupKey, guid)
-                local senderLabel = ResolveChatSenderDisplay((parsed and parsed.displayName) or author, guid, nil)
-                Chat:EvaluateIncomingMention(event, text, senderLabel, parsed and parsed.lookupKey, guid, cls, GetShortChannelLabel(event, chLabel), nil)
+            if Chat:IsMessageBlockedByShield(event, text, author, guid, lineID, chLabel) then
+                if isSayOrYell then
+                    Chat:MarkChatLineRecorded(event, lineID)
+                end
+                return
             end
+            Chat:EvaluateIncomingMention(event, text, senderLabel, parsed and parsed.lookupKey, guid, cls, GetShortChannelLabel(event, chLabel), isSayOrYell and "ch:general" or nil)
+        end
+        if isSayOrYell then
+            local s = ns.db and ns.db.settings
+            local chatModOn = (not Compat or not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat")
+            if chatModOn and ((not s) or s.quickReplyRecordSay ~= false) then
+                local sayKind = (event == "CHAT_MSG_YELL") and "LOCAL_YELL" or "LOCAL_SAY"
+                Chat:RecordGeneralMessage(sayKind, senderLabel, text, isMe, cls, nil, {
+                    senderGuid = guid,
+                    senderCharName = senderLabel,
+                })
+                if (not isMe) and s and s.quickReplyNotifySay == true and not Chat:IsThreadMuted("ch:general") then
+                    PlayIncomingChime(sayKind, "ch:general", false, (parsed and parsed.lookupKey) or "ch:general")
+                end
+            end
+            Chat:MarkChatLineRecorded(event, lineID)
+        else
+            local chId = Safe.Number(select(6, ...)) or tonumber((chLabel or ""):match("^(%d+)%."))
+            local commClubId = Safe.Number(select(16, ...))
+            local commStreamId = Safe.Number(select(17, ...))
+            local pubTag = ShortenOfficialChannelLabel(chLabel) or chLabel
+            if (not pubTag or pubTag == "" or pubTag:find("Community:", 1, true)) and (commClubId or chId) then
+                if chId then
+                    local liveInfo = Chat:GetOfficialChannelInfo(chId)
+                    if liveInfo and liveInfo.title then
+                        pubTag = liveInfo.title
+                    end
+                elseif commClubId and Chat.GetJoinedOfficialChannels then
+                    for _, ch in ipairs(Chat:GetJoinedOfficialChannels()) do
+                        if ch.clubId == commClubId and (not commStreamId or ch.streamId == commStreamId) then
+                            chId = ch.id
+                            pubTag = ch.title
+                            break
+                        end
+                    end
+                    if (not pubTag or pubTag == "") and Chat.ParseCommunityChannelName then
+                        pubTag = Chat:ParseCommunityChannelName("Community:" .. tostring(commClubId) .. ":" .. tostring(commStreamId or 1))
+                    end
+                end
+            end
+            local genSenderKey = Chat:_ExtractGeneralSenderKey((parsed and parsed.displayName) or author, isMe == true)
+            if not Chat:_WasRecentlyRecordedInGeneral(text, genSenderKey) then
+                Chat:RecordGeneralMessage("PUB_CHANNEL", senderLabel, text, isMe, cls, pubTag or L["Channel"], {
+                    senderGuid = guid,
+                    senderCharName = senderLabel,
+                    channelId = chId,
+                })
+            end
+            Chat:MarkChatLineRecorded(event, lineID)
         end
     end
 end
 Chat._dispatchOfficialFallback = OnChatEvent
+
+function Chat:IsErrorOriginTaggingEnabled()
+    return not ns.db or not ns.db.settings or ns.db.settings.chatErrorOriginTags ~= false
+end
+
+function Chat:RecordOutboundOrigin(kind, chatType, target, origin, prefix)
+    if not self:IsErrorOriginTaggingEnabled() then return end
+    if not origin or origin == "" then return end
+    local monoNow = (GetTime and GetTime()) or 0
+    local cleanTarget = Safe.String(target) or ""
+    local fullLow = ""
+    local baseLow = ""
+    local lookupKey = ""
+    if cleanTarget ~= "" then
+        local trimmed = (Compat.Trim and Compat.Trim(cleanTarget)) or cleanTarget:match("^%s*(.-)%s*$") or ""
+        if trimmed ~= "" then
+            fullLow = (Compat.LowerUtf8 and Compat.LowerUtf8(trimmed)) or trimmed:lower()
+            local stripped = trimmed:gsub("%-[^%-]+$", "")
+            baseLow = (Compat.LowerUtf8 and Compat.LowerUtf8(stripped)) or stripped:lower()
+            local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(trimmed)
+            lookupKey = (parsed and parsed.lookupKey) or ""
+        end
+    end
+    self._outboundOriginRing = self._outboundOriginRing or {}
+    local ring = self._outboundOriginRing
+    local writeIdx = 1
+    for i = 1, #ring do
+        local item = ring[i]
+        if item and (monoNow - (item.at or 0)) <= 12.0 then
+            ring[writeIdx] = item
+            writeIdx = writeIdx + 1
+        end
+    end
+    for i = #ring, writeIdx, -1 do
+        ring[i] = nil
+    end
+    if #ring >= 64 then
+        table.remove(ring, 1)
+    end
+    ring[#ring + 1] = {
+        at = monoNow,
+        kind = kind or "ADDON_MSG",
+        chatType = Safe.String(chatType) or "",
+        target = cleanTarget,
+        fullLow = fullLow,
+        baseLow = baseLow,
+        lookupKey = lookupKey,
+        origin = origin,
+        prefix = Safe.String(prefix) or "",
+    }
+end
+
+function Chat:InstallErrorOriginTracker()
+    if self._errorOriginTrackerInstalled then return end
+    self._errorOriginTrackerInstalled = true
+    self._addonPrefixOwners = self._addonPrefixOwners or {}
+
+    local sharedLibMarkers = {
+        "chatthrottlelib", "acecomm", "acetimer", "acehook",
+        "aceevent", "aceaddon", "callbackhandler", "libstub",
+    }
+
+    local function IsSharedCommPath(relLow)
+        if not relLow or relLow == "" then return false end
+        for _, marker in ipairs(sharedLibMarkers) do
+            if relLow:find(marker, 1, true) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function ResolveStackOrigin(prefix, allowLibFallback)
+        if type(debugstack) ~= "function" then
+            return (prefix and Chat._addonPrefixOwners[prefix]) or nil
+        end
+        local ok, stack = pcall(debugstack, 2, 12, 0)
+        if not ok or type(stack) ~= "string" or stack == "" then
+            return (prefix and Chat._addonPrefixOwners[prefix]) or nil
+        end
+        local sawBlizzChat = false
+        local firstLibAddon = nil
+        for line in stack:gmatch("[^\r\n]+") do
+            local folder, relPath = line:match('[Aa][Dd][Dd][Oo][Nn][Ss][\\/]([^\\/:"]+)[\\/]([^:"]*)')
+            if folder and folder ~= "" then
+                local folderLow = folder:lower()
+                if folderLow:sub(1, 9) == "blizzard_" then
+                    if folderLow:find("chatframe", 1, true) or folderLow:find("friends", 1, true) then
+                        sawBlizzChat = true
+                    end
+                else
+                    local relLow = (relPath or ""):lower()
+                    if IsSharedCommPath(relLow) then
+                        if not firstLibAddon then
+                            firstLibAddon = folder
+                        end
+                    else
+                        if prefix and prefix ~= "" and folder ~= "SocialCentral" then
+                            Chat._addonPrefixOwners[prefix] = folder
+                        elseif prefix and prefix ~= "" and not Chat._addonPrefixOwners[prefix] then
+                            Chat._addonPrefixOwners[prefix] = folder
+                        end
+                        return folder
+                    end
+                end
+            end
+        end
+        if prefix and prefix ~= "" and Chat._addonPrefixOwners[prefix] then
+            return Chat._addonPrefixOwners[prefix]
+        end
+        if sawBlizzChat then
+            return L["Manual Chat"]
+        end
+        if allowLibFallback and prefix and prefix ~= "" then
+            return L["Shared Library"] .. " (" .. prefix .. ")"
+        end
+        return firstLibAddon
+    end
+
+    if type(hooksecurefunc) ~= "function" then return end
+
+    if C_ChatInfo and type(C_ChatInfo.RegisterAddonMessagePrefix) == "function" then
+        hooksecurefunc(C_ChatInfo, "RegisterAddonMessagePrefix", function(prefixRaw)
+            local p = Safe.String(prefixRaw)
+            if p and p ~= "" and not Chat._addonPrefixOwners[p] then
+                local owner = ResolveStackOrigin(p, false)
+                if owner and owner ~= "" then
+                    Chat._addonPrefixOwners[p] = owner
+                end
+            end
+        end)
+    end
+
+    local function OnAddonMsgHook(prefixRaw, _, chatTypeRaw, targetRaw)
+        if not Chat:IsErrorOriginTaggingEnabled() then return end
+        local p = Safe.String(prefixRaw) or ""
+        local ct = Safe.String(chatTypeRaw) or ""
+        local tgt = Safe.String(targetRaw) or ""
+        local origin = ResolveStackOrigin(p, true)
+        if origin and origin ~= "" then
+            Chat:RecordOutboundOrigin("ADDON_MSG", ct, tgt, origin, p)
+        end
+    end
+
+    if C_ChatInfo and type(C_ChatInfo.SendAddonMessage) == "function" then
+        hooksecurefunc(C_ChatInfo, "SendAddonMessage", OnAddonMsgHook)
+    end
+    if type(_G.SendAddonMessage) == "function" and (not C_ChatInfo or _G.SendAddonMessage ~= C_ChatInfo.SendAddonMessage) then
+        hooksecurefunc("SendAddonMessage", OnAddonMsgHook)
+    end
+    if C_ChatInfo and type(C_ChatInfo.SendAddonMessageLogged) == "function" then
+        hooksecurefunc(C_ChatInfo, "SendAddonMessageLogged", OnAddonMsgHook)
+    end
+
+    if type(_G.ChatEdit_SendText) == "function" then
+        hooksecurefunc("ChatEdit_SendText", function(eb)
+            if not eb then return end
+            local txt = Safe.String(eb.GetText and eb:GetText() or nil) or ""
+            if txt ~= "" and eb._scDockedToQr and ns.QuickReply then
+                if ns.QuickReply.PushHistoryLine then
+                    ns.QuickReply:PushHistoryLine(txt)
+                end
+                if ns.QuickReply.RecordRecentSentThread and ns.QuickReply.activeKey then
+                    ns.QuickReply:RecordRecentSentThread(ns.QuickReply.activeKey)
+                end
+                local nowT = (GetTime and GetTime()) or 0
+                ns.QuickReply.hasTyped = true
+                ns.QuickReply.hasSentInSession = true
+                ns.QuickReply.interactedOutside = false
+                ns.QuickReply.lastInputAt = nowT
+                ns.QuickReply._lastOpaqueActivityAt = nowT
+                ns.QuickReply.idleCountdown = nil
+            end
+            if not Chat:IsErrorOriginTaggingEnabled() then return end
+            local ct = Safe.String(eb.GetAttribute and eb:GetAttribute("chatType") or nil) or ""
+            local tgt = Safe.String(eb.GetAttribute and eb:GetAttribute("tellTarget") or nil) or ""
+            if txt:match("^/[wW][hH][oO]%s*(.*)$") then
+                local q = txt:match("^/[wW][hH][oO]%s*(.*)$") or ""
+                Chat:RecordOutboundOrigin("WHO", "WHO", q, L["Manual Chat"])
+                return
+            end
+            local slashW = txt:match("^/[wW]%s+([^%s]+)") or txt:match("^/[wW][hH][iI][sS][pP][eE][rR]%s+([^%s]+)")
+            if slashW and slashW ~= "" then
+                Chat:RecordOutboundOrigin("CHAT", "WHISPER", slashW, L["Manual Chat"])
+                return
+            end
+            if ct ~= "" then
+                Chat:RecordOutboundOrigin("CHAT", ct, tgt, L["Manual Chat"])
+            end
+        end)
+    end
+end
+
+function Chat:DecorateSystemErrorOrigin(msgRaw, lineID)
+    if not self:IsErrorOriginTaggingEnabled() or Safe.IsSecret(msgRaw) then
+        return nil
+    end
+    local msg = Safe.String(msgRaw)
+    if not msg or msg == "" then
+        return nil
+    end
+    local tagPrefixCheck = string.format(L["Origin: %s"], ""):match("^([^%%]+)") or "Origin:"
+    if msg:find("[" .. tagPrefixCheck, 1, true) then
+        return nil
+    end
+
+    local monoNow = (GetTime and GetTime()) or 0
+    local cacheKey = (lineID and lineID ~= 0) and ("id:" .. tostring(lineID)) or ("txt:" .. msg)
+    self._errorOriginLineCache = self._errorOriginLineCache or {}
+    local cached = self._errorOriginLineCache[cacheKey]
+    if type(cached) == "table" and (monoNow - (cached.at or 0)) <= 1.5 then
+        return cached.tagged
+    end
+    local cacheCount = 0
+    for k, v in pairs(self._errorOriginLineCache) do
+        if type(v) ~= "table" or (monoNow - (v.at or 0)) > 2.0 then
+            self._errorOriginLineCache[k] = nil
+        else
+            cacheCount = cacheCount + 1
+        end
+    end
+    if cacheCount > 60 then
+        wipe(self._errorOriginLineCache)
+    end
+
+    if not self._sysErrPatterns then
+        local function BuildErrPat(globalStr, captureArg)
+            if type(globalStr) ~= "string" or globalStr == "" then return nil end
+            local p = globalStr:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+            if captureArg then
+                p = p:gsub("%%%%s", "(.+)")
+            end
+            return "^" .. p .. "$"
+        end
+        self._sysErrPatterns = {
+            notFound = BuildErrPat(_G.ERR_CHAT_PLAYER_NOT_FOUND_S, true),
+            ignoring = BuildErrPat(_G.ERR_CHAT_PLAYER_IGNORING_YOU_S, true),
+            wrongFaction = BuildErrPat(_G.ERR_CHAT_WRONG_FACTION, false),
+            notInGuild = BuildErrPat(_G.ERR_GUILD_PLAYER_NOT_IN_GUILD, false),
+            notInGroup = BuildErrPat(_G.ERR_NOT_IN_GROUP, false),
+            notInParty = BuildErrPat(_G.ERR_NOT_IN_PARTY_S or _G.ERR_NOT_IN_GROUP, false),
+            notInRaid = BuildErrPat(_G.ERR_NOT_IN_RAID, false),
+            throttled = BuildErrPat(_G.ERR_CHAT_THROTTLED, false),
+            genThrottle = BuildErrPat(_G.ERR_GENERIC_THROTTLE, false),
+        }
+    end
+
+    local pats = self._sysErrPatterns
+    local lowerMsg = (Compat.LowerUtf8 and Compat.LowerUtf8(msg)) or msg:lower()
+    local matchCategory = nil
+    local extractedTarget = nil
+
+    local nfMatch = pats.notFound and msg:match(pats.notFound)
+    if nfMatch and nfMatch ~= "" then
+        matchCategory = "WHISPER_TARGET"
+        extractedTarget = nfMatch
+    elseif lowerMsg:find("no player named", 1, true)
+        or lowerMsg:find("nenhum jogador", 1, true)
+        or lowerMsg:find("ningún jugador", 1, true)
+        or lowerMsg:find("ningun jugador", 1, true)
+    then
+        matchCategory = "WHISPER_TARGET"
+        extractedTarget = msg:match("'([^']+)'")
+    end
+
+    if not matchCategory then
+        local igMatch = pats.ignoring and msg:match(pats.ignoring)
+        if igMatch and igMatch ~= "" then
+            matchCategory = "WHISPER_TARGET"
+            extractedTarget = igMatch
+        elseif lowerMsg:find("is ignoring you", 1, true)
+            or lowerMsg:find("está ignorando", 1, true)
+            or lowerMsg:find("te está ignorando", 1, true)
+        then
+            matchCategory = "WHISPER_TARGET"
+            extractedTarget = msg:match("'([^']+)'") or msg:match("^([^%s]+)")
+        end
+    end
+
+    if not matchCategory then
+        if (pats.wrongFaction and msg:find(pats.wrongFaction))
+            or lowerMsg:find("opposite faction", 1, true)
+            or lowerMsg:find("facção oposta", 1, true)
+            or lowerMsg:find("facción opuesta", 1, true)
+        then
+            matchCategory = "WHISPER_ANY"
+        elseif (pats.notInGuild and msg:find(pats.notInGuild))
+            or lowerMsg:find("not in a guild", 1, true)
+            or lowerMsg:find("não está em uma guilda", 1, true)
+            or lowerMsg:find("no estás en una hermandad", 1, true)
+        then
+            matchCategory = "GUILD"
+        elseif (pats.notInGroup and msg:find(pats.notInGroup))
+            or (pats.notInParty and msg:find(pats.notInParty))
+            or (pats.notInRaid and msg:find(pats.notInRaid))
+            or lowerMsg:find("not in a party", 1, true)
+            or lowerMsg:find("not in a raid", 1, true)
+            or lowerMsg:find("não faz parte de um grupo", 1, true)
+            or lowerMsg:find("no estás en un grupo", 1, true)
+        then
+            matchCategory = "GROUP"
+        elseif (pats.throttled and msg:find(pats.throttled))
+            or (pats.genThrottle and msg:find(pats.genThrottle))
+            or lowerMsg:find("sending messages too quickly", 1, true)
+            or lowerMsg:find("enviando mensagens", 1, true)
+            or lowerMsg:find("enviando mensajes", 1, true)
+        then
+            matchCategory = "THROTTLE"
+        end
+    end
+
+    if not matchCategory then
+        self._errorOriginLineCache[cacheKey] = { at = monoNow, tagged = false }
+        return nil
+    end
+
+    local origins = {}
+    local seenOrigin = {}
+    local function PushOrigin(name)
+        if not name or name == "" or seenOrigin[name] then return end
+        seenOrigin[name] = true
+        origins[#origins + 1] = name
+    end
+
+    local ring = self._outboundOriginRing or {}
+    if matchCategory == "WHISPER_TARGET" and extractedTarget and extractedTarget ~= "" then
+        local trimmedTgt = (Compat.Trim and Compat.Trim(extractedTarget)) or extractedTarget:match("^%s*(.-)%s*$") or ""
+        local tgtFullLow = (Compat.LowerUtf8 and Compat.LowerUtf8(trimmedTgt)) or trimmedTgt:lower()
+        local tgtStripped = trimmedTgt:gsub("%-[^%-]+$", "")
+        local tgtBaseLow = (Compat.LowerUtf8 and Compat.LowerUtf8(tgtStripped)) or tgtStripped:lower()
+        local tgtParsed = Compat.ParseCharacterName and Compat.ParseCharacterName(trimmedTgt)
+        local tgtLk = (tgtParsed and tgtParsed.lookupKey) or ""
+
+        for i = #ring, 1, -1 do
+            local item = ring[i]
+            if item and (monoNow - (item.at or 0)) <= 10.0 and item.chatType == "WHISPER" then
+                local matched = (tgtFullLow ~= "" and (item.fullLow == tgtFullLow or item.baseLow == tgtFullLow))
+                    or (tgtBaseLow ~= "" and (item.fullLow == tgtBaseLow or item.baseLow == tgtBaseLow))
+                    or (tgtLk ~= "" and item.lookupKey == tgtLk)
+                if matched then
+                    PushOrigin(item.origin)
+                    if #origins >= 2 then break end
+                end
+            end
+        end
+
+        local manualRec = self.lastManualWhisperSend
+        if type(manualRec) == "table" and (monoNow - (manualRec.sentAt or 0)) <= 4.5 and manualRec.targetStr then
+            local mLow = (Compat.LowerUtf8 and Compat.LowerUtf8(manualRec.targetStr)) or manualRec.targetStr:lower()
+            if (tgtFullLow ~= "" and mLow:find(tgtFullLow, 1, true))
+                or (tgtBaseLow ~= "" and mLow:find(tgtBaseLow, 1, true))
+                or (tgtLk ~= "" and manualRec.lookupKey == tgtLk)
+            then
+                PushOrigin(L["Manual Chat (SocialCentral)"])
+            end
+        end
+    else
+        local maxAge = (matchCategory == "WHISPER_ANY") and 8.0 or 3.5
+        for i = #ring, 1, -1 do
+            local item = ring[i]
+            if item and (monoNow - (item.at or 0)) <= maxAge then
+                local okMatch = false
+                if matchCategory == "WHISPER_ANY" then
+                    okMatch = (item.chatType == "WHISPER")
+                elseif matchCategory == "GUILD" then
+                    okMatch = (item.chatType == "GUILD" or item.chatType == "OFFICER")
+                elseif matchCategory == "GROUP" then
+                    okMatch = (item.chatType == "PARTY" or item.chatType == "RAID" or item.chatType == "INSTANCE_CHAT")
+                elseif matchCategory == "THROTTLE" then
+                    okMatch = true
+                end
+                if okMatch then
+                    PushOrigin(item.origin)
+                    if #origins >= 2 then break end
+                end
+            end
+        end
+    end
+
+    if #origins == 0 then
+        self._errorOriginLineCache[cacheKey] = { at = monoNow, tagged = false }
+        return nil
+    end
+
+    local tagged = msg .. " |cff8fa4c4[" .. string.format(L["Origin: %s"], table.concat(origins, " / ")) .. "]|r"
+    self._errorOriginLineCache[cacheKey] = { at = monoNow, tagged = tagged }
+    return tagged
+end
+
+function Chat:InstallErrorOriginChatFilter()
+    if self._errorOriginFilterRegistered then return end
+    self._errorOriginFilterRegistered = true
+    local function ErrorOriginSystemFilter(_, _, msgRaw, ...)
+        if not Chat:IsErrorOriginTaggingEnabled() then
+            return false
+        end
+        local lineID = select(10, ...)
+        local tagged = Chat:DecorateSystemErrorOrigin(msgRaw, lineID)
+        if tagged then
+            return false, tagged, ...
+        end
+        return false
+    end
+    if ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter then
+        pcall(ChatFrameUtil.AddMessageEventFilter, "CHAT_MSG_SYSTEM", ErrorOriginSystemFilter)
+    elseif ChatFrame_AddMessageEventFilter then
+        pcall(ChatFrame_AddMessageEventFilter, "CHAT_MSG_SYSTEM", ErrorOriginSystemFilter)
+    end
+end
+
+function Chat:GetQuickReplyHotkeys()
+    local cfg = ns.db and ns.db.settings
+    if not cfg then return {} end
+    if type(cfg.quickReplyHotkeys) ~= "table" then
+        cfg.quickReplyHotkeys = {}
+    end
+    return cfg.quickReplyHotkeys
+end
+
+function Chat:SaveQuickReplyHotkey(rec)
+    if not (ns.db and ns.db.settings and type(rec) == "table") then return false end
+    local keyStr = Compat.Trim and Compat.Trim(tostring(rec.key or "")) or ""
+    local msgStr = Compat.CleanInput and Compat.CleanInput(tostring(rec.text or "")) or ""
+    if keyStr == "" or msgStr == "" then return false end
+    local list = self:GetQuickReplyHotkeys()
+    local idx = tonumber(rec.index)
+    local item = {
+        key = keyStr:upper(),
+        target = tostring(rec.target or "active"),
+        text = msgStr,
+        enabled = (rec.enabled ~= false),
+    }
+    if idx and idx >= 1 and idx <= #list then
+        list[idx] = item
+    else
+        if #list >= 12 then
+            table.remove(list, 1)
+        end
+        list[#list + 1] = item
+    end
+    ns:Emit("CHAT_HOTKEYS_UPDATED")
+    return true
+end
+
+function Chat:RemoveQuickReplyHotkey(index)
+    local list = self:GetQuickReplyHotkeys()
+    local idx = tonumber(index)
+    if idx and idx >= 1 and idx <= #list then
+        table.remove(list, idx)
+        ns:Emit("CHAT_HOTKEYS_UPDATED")
+        return true
+    end
+    return false
+end
+
+function Chat:GetAbilityChatMacros()
+    local cfg = ns.db and ns.db.settings
+    if not cfg then return {} end
+    if type(cfg.abilityChatMacros) ~= "table" then
+        cfg.abilityChatMacros = {}
+    end
+    return cfg.abilityChatMacros
+end
+
+function Chat:BuildAbilityMacroBody(spellName, chanSlash, msgText)
+    local cleanSpell = Compat.Trim and Compat.Trim(tostring(spellName or "")) or ""
+    local cleanMsg = Compat.CleanInput and Compat.CleanInput(tostring(msgText or "")) or ""
+    local slash = tostring(chanSlash or "/p")
+    if slash:sub(1, 1) ~= "/" then slash = "/" .. slash end
+    local lines = {}
+    if cleanSpell ~= "" then
+        lines[#lines + 1] = "#showtooltip " .. cleanSpell
+        lines[#lines + 1] = "/cast " .. cleanSpell
+    end
+    if cleanMsg ~= "" then
+        local expanded = cleanMsg:gsub("{[Hh]abilidade}", cleanSpell):gsub("{[Ss]pell}", cleanSpell)
+        lines[#lines + 1] = slash .. " " .. expanded
+    end
+    return table.concat(lines, "\n")
+end
+
+function Chat:SaveAndSyncAbilityChatMacro(rec)
+    if not (ns.db and ns.db.settings and type(rec) == "table") then return false, "invalid" end
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        return false, "combat"
+    end
+    local spellName = Compat.Trim and Compat.Trim(tostring(rec.spellName or "")) or ""
+    local msgText = Compat.CleanInput and Compat.CleanInput(tostring(rec.message or "")) or ""
+    local chanSlash = tostring(rec.channelSlash or "/p")
+    local keyStr = Compat.Trim and Compat.Trim(tostring(rec.key or "")) or ""
+    if spellName == "" or msgText == "" then
+        return false, "missing_fields"
+    end
+    local list = self:GetAbilityChatMacros()
+    local idx = tonumber(rec.index)
+    local slotId = (idx and list[idx] and tonumber(list[idx].id)) or nil
+    if not slotId then
+        local maxId = 0
+        for _, m in ipairs(list) do
+            if tonumber(m.id) and tonumber(m.id) > maxId then
+                maxId = tonumber(m.id)
+            end
+        end
+        slotId = maxId + 1
+    end
+    local entry = {
+        id = slotId,
+        key = (keyStr ~= "") and keyStr:upper() or nil,
+        spellName = spellName,
+        channelSlash = chanSlash,
+        message = msgText,
+        enabled = (rec.enabled ~= false),
+    }
+    if idx and idx >= 1 and idx <= #list then
+        list[idx] = entry
+    else
+        if #list >= 12 then
+            table.remove(list, 1)
+        end
+        list[#list + 1] = entry
+    end
+    ns:Emit("CHAT_HOTKEYS_UPDATED")
+    return true, entry
+end
+
+function Chat:RemoveAbilityChatMacro(index)
+    local list = self:GetAbilityChatMacros()
+    local idx = tonumber(index)
+    if not (idx and idx >= 1 and idx <= #list) then
+        return false
+    end
+    table.remove(list, idx)
+    ns:Emit("CHAT_HOTKEYS_UPDATED")
+    return true
+end
+
+function Chat:SplitPayloadTilde(text, maxParts)
+    if type(text) ~= "string" then return {} end
+    local out = {}
+    local start = 1
+    while true do
+        if maxParts and #out + 1 >= maxParts then
+            out[#out + 1] = text:sub(start)
+            break
+        end
+        local pos = text:find("~", start, true)
+        if not pos then
+            out[#out + 1] = text:sub(start)
+            break
+        end
+        out[#out + 1] = text:sub(start, pos - 1)
+        start = pos + 1
+    end
+    return out
+end
+
+function Chat:CleanTildeField(text, maxLen)
+    local cleaned = Compat and Compat.CleanPayloadField and Compat.CleanPayloadField(text or "", maxLen or 180) or Safe.String(text) or ""
+    if cleaned == "" then return "" end
+    cleaned = cleaned:gsub("~", "-")
+    if maxLen and #cleaned > maxLen then
+        cleaned = Compat and Compat.TruncateUtf8 and Compat.TruncateUtf8(cleaned, maxLen) or cleaned:sub(1, maxLen)
+    end
+    return cleaned
+end
+
+function Chat:GetActiveGroupSyncInfo()
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+        return nil, nil
+    end
+    local s = ns.db and ns.db.settings
+    if s and s.chatGroupReconnectSync == false then
+        return nil, nil
+    end
+    if not (Compat and Compat.IsInGroup and Compat.IsInGroup()) then
+        return nil, nil
+    end
+    if IsInGroup and LE_PARTY_CATEGORY_INSTANCE and IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
+        return "INSTANCE_CHAT", "ch:instance"
+    end
+    if Compat.IsInRaid and Compat.IsInRaid() then
+        return "RAID", "ch:raid"
+    end
+    return "PARTY", "ch:party"
+end
+
+function Chat:SendGroupAddonPacket(addonChan, payload)
+    local okGuard, guardErr = GuardAddonMessaging(false)
+    if not okGuard then
+        return false, guardErr
+    end
+    local monoNow = GetTime and GetTime() or 0
+    if ns.Clan and ns.Clan.backoffUntil and monoNow < ns.Clan.backoffUntil then
+        return false, "throttled"
+    end
+    if addonChan == "PARTY" and Compat and Compat.IsInRaid and Compat.IsInRaid() then
+        return false, "in_raid"
+    end
+    if addonChan ~= "PARTY" and addonChan ~= "RAID" and addonChan ~= "INSTANCE_CHAT" then
+        return false, "bad_chan"
+    end
+    if type(payload) ~= "string" or payload == "" or #payload > MAX_PAYLOAD_BYTES then
+        return false, "too_long"
+    end
+    local sendFn = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
+    if not sendFn then
+        return false, "unsupported"
+    end
+    local ok, res = pcall(sendFn, PREFIX, payload, addonChan)
+    if not ok then
+        return false, "failed"
+    end
+    if Enum and Enum.SendAddonMessageResult and type(res) == "number" then
+        if res == Enum.SendAddonMessageResult.Success then
+            return true, nil
+        elseif res == Enum.SendAddonMessageResult.AddonMessageThrottle then
+            RecordThrottleStrike()
+            return false, "throttled"
+        elseif Enum.SendAddonMessageResult.AddonsRestricted and res == Enum.SendAddonMessageResult.AddonsRestricted then
+            return false, "restricted"
+        end
+        return false, "failed"
+    end
+    return res ~= false, res == false and "failed" or nil
+end
+
+function Chat:PruneGroupCatchupState(now)
+    local tsNow = now or time()
+    for _, tblName in ipairs({ "_groupCatchupAnswered", "_groupCatchupSeenPeerReq", "_groupOfflineSince" }) do
+        local tbl = self[tblName]
+        if type(tbl) == "table" then
+            local count = 0
+            for k, v in pairs(tbl) do
+                if (tsNow - (tonumber(v) or 0)) > 180 then
+                    tbl[k] = nil
+                else
+                    count = count + 1
+                end
+            end
+            if count > 40 then
+                self[tblName] = {}
+            end
+        end
+    end
+    if type(self._myPendingCatchupReqIds) == "table" then
+        local c = 0
+        for k, exp in pairs(self._myPendingCatchupReqIds) do
+            if tsNow > (tonumber(exp) or 0) then
+                self._myPendingCatchupReqIds[k] = nil
+            else
+                c = c + 1
+            end
+        end
+        if c > 12 then
+            self._myPendingCatchupReqIds = {}
+        end
+    end
+end
+
+function Chat:GetLatestGroupTimestamp(threadKey)
+    local t = threadKey and self.threads and self.threads[threadKey]
+    if not t or type(t.messages) ~= "table" then return 0 end
+    local maxTs = 0
+    for i = #t.messages, math.max(1, #t.messages - 30), -1 do
+        local m = t.messages[i]
+        if type(m) == "table" and not m.isStatusNotice then
+            local mts = tonumber(m.ts) or 0
+            if mts > maxTs then
+                maxTs = mts
+            end
+        end
+    end
+    return maxTs
+end
+
+function Chat:ScheduleGroupCatchupRequest(delaySec, forceNow)
+    local addonChan, threadKey = self:GetActiveGroupSyncInfo()
+    if not addonChan or not threadKey then return end
+    local monoNow = GetTime and GetTime() or 0
+    if not forceNow and (monoNow - (self._lastGroupCatchupReqMono or -999)) < 20 then
+        return
+    end
+    if self._groupCatchupReqQueued then return end
+    self._groupCatchupReqQueued = true
+    local waitSec = tonumber(delaySec) or 2.5
+    local sendFn = function()
+        self._groupCatchupReqQueued = nil
+        local chanNow, tKey = self:GetActiveGroupSyncInfo()
+        if not chanNow or not tKey then return end
+        local nowMono = GetTime and GetTime() or 0
+        if not forceNow and (nowMono - (self._lastGroupCatchupReqMono or -999)) < 20 then
+            return
+        end
+        local nowWall = time()
+        local latestTs = self:GetLatestGroupTimestamp(tKey)
+        local sinceTs = latestTs > 0 and math.max(latestTs, nowWall - 900) or math.max(0, nowWall - 600)
+        self._groupCatchupReqSeq = (self._groupCatchupReqSeq or 0) + 1
+        local reqId = "r" .. tostring(nowWall % 100000) .. "x" .. tostring(self._groupCatchupReqSeq)
+        self._myPendingCatchupReqIds = self._myPendingCatchupReqIds or {}
+        self._myPendingCatchupReqIds[reqId] = nowWall + 45
+        self._awaitingGroupCatchupUntil = nowMono + 45
+        local payload = string.format("GCR~%s~%d~%s", tKey, math.floor(sinceTs), reqId)
+        local sent = self:SendGroupAddonPacket(chanNow, payload)
+        if sent then
+            self._lastGroupCatchupReqMono = nowMono
+        end
+    end
+    if C_Timer and C_Timer.After and waitSec > 0 then
+        C_Timer.After(waitSec, sendFn)
+    else
+        sendFn()
+    end
+end
+
+function Chat:OnGroupCatchupEnteringWorld()
+    local addonChan = self:GetActiveGroupSyncInfo()
+    if not addonChan then
+        self._groupOfflineSince = nil
+        self._groupOnlineSeen = nil
+        return
+    end
+    self:ScheduleGroupCatchupRequest(2.5, false)
+end
+
+function Chat:CollectMissedGroupMessages(threadKey, sinceTs, maxItems)
+    local t = threadKey and self.threads and self.threads[threadKey]
+    if not t or type(t.messages) ~= "table" then return {} end
+    local nowWall = time()
+    local floorTs = math.max(tonumber(sinceTs) or 0, nowWall - 900)
+    local limit = math.min(maxItems or 10, 10)
+    local out = {}
+    for i = math.max(1, #t.messages - 50), #t.messages do
+        local m = t.messages[i]
+        if type(m) == "table" and not m.isStatusNotice and not m.isCatchupNotice then
+            local mts = tonumber(m.ts) or 0
+            if mts > floorTs and mts <= (nowWall + 5) and type(m.text) == "string" and m.text ~= "" then
+                out[#out + 1] = m
+            end
+        end
+    end
+    if #out > limit then
+        local trimmed = {}
+        for i = (#out - limit + 1), #out do
+            trimmed[#trimmed + 1] = out[i]
+        end
+        return trimmed
+    end
+    return out
+end
+
+function Chat:LaunchCooperativeCatchupSend(addonChan, threadKey, reqId, sinceTs)
+    if not addonChan or not threadKey or not reqId or reqId == "" then return end
+    self:PruneGroupCatchupState()
+    if self._groupCatchupAnswered and self._groupCatchupAnswered[reqId] then return end
+    local missed = self:CollectMissedGroupMessages(threadKey, sinceTs, 10)
+    if #missed == 0 then return end
+    local isLeader = Compat and Compat.IsGroupLeader and Compat.IsGroupLeader("player")
+    local delay = isLeader and (0.15 + math.random() * 0.25) or (0.65 + math.random() * 1.15)
+    local snapshot = {}
+    for i, m in ipairs(missed) do
+        local plain = tostring(m.text):gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+        snapshot[i] = {
+            ts = math.floor(tonumber(m.ts) or time()),
+            cls = self:CleanTildeField(m.classFile or "", 16),
+            sender = self:CleanTildeField(m.sender or "?", 30),
+            text = self:CleanTildeField(plain, 175),
+        }
+    end
+    local function RunSend()
+        if self._groupCatchupAnswered and self._groupCatchupAnswered[reqId] then return end
+        local curChan, curKey = self:GetActiveGroupSyncInfo()
+        if curChan ~= addonChan or curKey ~= threadKey then return end
+        local claimPayload = string.format("GCA~%s~%s~%d", threadKey, reqId, #snapshot)
+        local okClaim = self:SendGroupAddonPacket(curChan, claimPayload)
+        if not okClaim then return end
+        self._groupCatchupAnswered = self._groupCatchupAnswered or {}
+        self._groupCatchupAnswered[reqId] = time()
+        for idx, item in ipairs(snapshot) do
+            if item.text ~= "" then
+                local waitLine = (idx - 1) * 0.35
+                local function SendOneLine()
+                    local liveChan, liveKey = self:GetActiveGroupSyncInfo()
+                    if liveChan ~= addonChan or liveKey ~= threadKey then return end
+                    local prefixStr = string.format("GCM~%s~%s~%d~%s~%s~", threadKey, reqId, item.ts, item.cls, item.sender)
+                    local room = MAX_PAYLOAD_BYTES - #prefixStr
+                    if room < 8 then return end
+                    local body = (#item.text > room) and ((Compat and Compat.TruncateUtf8 and Compat.TruncateUtf8(item.text, room)) or item.text:sub(1, room)) or item.text
+                    self:SendGroupAddonPacket(liveChan, prefixStr .. body)
+                end
+                if C_Timer and C_Timer.After and waitLine > 0 then
+                    C_Timer.After(waitLine, SendOneLine)
+                else
+                    SendOneLine()
+                end
+            end
+        end
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(delay, RunSend)
+    else
+        RunSend()
+    end
+end
+
+function Chat:SyncGroupConnectionSnapshot(isUnitConnEvent, unitToken, isConnectedArg)
+    local addonChan, threadKey = self:GetActiveGroupSyncInfo()
+    if not addonChan or not threadKey then
+        self._groupOfflineSince = nil
+        self._groupOnlineSeen = nil
+        return
+    end
+    if not isUnitConnEvent or not unitToken then
+        return
+    end
+    if unitToken == "player" then
+        local selfConn = (type(isConnectedArg) == "boolean") and isConnectedArg or (UnitIsConnected and UnitIsConnected("player"))
+        if selfConn == true then
+            self:ScheduleGroupCatchupRequest(2.5, false)
+        end
+        return
+    end
+    local unitName = (Compat and Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName(unitToken)) or (UnitName and Safe.String(UnitName(unitToken)))
+    if not unitName or unitName == "" then return end
+    if Compat and Compat.IsMe and Compat.IsMe(unitName) then return end
+    local lk = Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(unitName)
+    if not lk or lk == "" then return end
+    local conn = (type(isConnectedArg) == "boolean") and isConnectedArg or (UnitIsConnected and UnitIsConnected(unitToken))
+    self._groupOfflineSince = self._groupOfflineSince or {}
+    if conn == false then
+        self._groupOfflineSince[lk] = self._groupOfflineSince[lk] or time()
+        return
+    end
+    local offlineAt = self._groupOfflineSince[lk]
+    if conn == true and offlineAt then
+        self._groupOfflineSince[lk] = nil
+        local peerKey = lk
+        local sinceTs = math.max(0, offlineAt - 3)
+        local targetChan, targetKey = addonChan, threadKey
+        if C_Timer and C_Timer.After then
+            C_Timer.After(4.0, function()
+                local curChan, curKey = self:GetActiveGroupSyncInfo()
+                if curChan ~= targetChan or curKey ~= targetKey then return end
+                local lastPeerReq = self._groupCatchupSeenPeerReq and self._groupCatchupSeenPeerReq[peerKey] or 0
+                if (time() - lastPeerReq) < 20 then return end
+                local autoReq = "auto:" .. peerKey .. ":" .. tostring(offlineAt)
+                if #autoReq > 44 then
+                    autoReq = "auto:" .. tostring(offlineAt)
+                end
+                self:LaunchCooperativeCatchupSend(curChan, curKey, autoReq, sinceTs)
+            end)
+        end
+    end
+end
+
+function Chat:ShouldAcceptCatchupReq(reqId)
+    if type(reqId) ~= "string" or reqId == "" then return false end
+    local nowWall = time()
+    if self._myPendingCatchupReqIds and self._myPendingCatchupReqIds[reqId] and nowWall <= self._myPendingCatchupReqIds[reqId] then
+        return true
+    end
+    local monoNow = GetTime and GetTime() or 0
+    if reqId:sub(1, 5) == "auto:" and monoNow <= (self._awaitingGroupCatchupUntil or 0) then
+        local peerPart = reqId:match("^auto:([^:]+):")
+        if not peerPart or peerPart == "" then return true end
+        local myDisp = GetMyInfo()
+        local myLk = myDisp and Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(myDisp)
+        return (myLk == peerPart)
+    end
+    return false
+end
+
+function Chat:HasSimilarGroupMessage(thread, msgTs, senderDisp, msgText)
+    if not thread or type(thread.messages) ~= "table" then return false end
+    local wantSender = Compat and Compat.LowerUtf8 and Compat.LowerUtf8(tostring(senderDisp or "")) or tostring(senderDisp or ""):lower()
+    local wantText = Compat and Compat.LowerUtf8 and Compat.LowerUtf8(tostring(msgText or "")) or tostring(msgText or ""):lower()
+    for i = #thread.messages, math.max(1, #thread.messages - 75), -1 do
+        local m = thread.messages[i]
+        if type(m) == "table" and not m.isStatusNotice then
+            local mts = tonumber(m.ts) or 0
+            if math.abs(mts - msgTs) <= 6 then
+                local existingText = tostring(m.text or ""):gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+                local normText = Compat and Compat.LowerUtf8 and Compat.LowerUtf8(existingText) or existingText:lower()
+                local normSender = Compat and Compat.LowerUtf8 and Compat.LowerUtf8(tostring(m.sender or "")) or tostring(m.sender or ""):lower()
+                if normText == wantText and (normSender == wantSender or wantSender == "" or normSender == "") then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+function Chat:FlushGroupCatchupNotice(reqId, threadKey)
+    local counts = self._groupCatchupRecoveredCounts
+    local count = counts and counts[reqId] or 0
+    if not counts or count <= 0 then return end
+    counts[reqId] = nil
+    local t = self.threads and self.threads[threadKey]
+    if not t then return end
+    AppendMessage(t, L["System"], string.format(L["Recovered %d missed group message(s) while you were offline."], count), false, nil, true, true, {
+        isStatusNotice = true,
+        isCatchupNotice = true,
+        skipGeneral = true,
+    })
+end
+
+function Chat:OnGroupCatchupPacket(payloadRaw, addonChan, senderRaw)
+    local activeChan, activeKey = self:GetActiveGroupSyncInfo()
+    if not activeChan or addonChan ~= activeChan then return false end
+    local cleanPayload = Safe.String(payloadRaw)
+    local cleanSender = Safe.String(senderRaw)
+    if not cleanPayload or cleanPayload == "" or cleanPayload:find("%c") or cleanPayload:find("|", 1, true) then
+        return false
+    end
+    local parts = self:SplitPayloadTilde(cleanPayload, 7)
+    local op = parts[1]
+    if op ~= "GCR" and op ~= "GCA" and op ~= "GCM" then
+        return false
+    end
+    if not cleanSender or (Compat and Compat.IsMe and Compat.IsMe(cleanSender)) then
+        return true
+    end
+    local threadKey = parts[2]
+    local reqId = parts[3]
+    if threadKey ~= activeKey or type(reqId) ~= "string" or reqId == "" then
+        return true
+    end
+    local nowWall = time()
+    self:PruneGroupCatchupState(nowWall)
+
+    if op == "GCA" then
+        self._groupCatchupAnswered = self._groupCatchupAnswered or {}
+        self._groupCatchupAnswered[reqId] = nowWall
+        return true
+    elseif op == "GCR" then
+        local senderLk = Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(cleanSender)
+        if senderLk and senderLk ~= "" and reqId:sub(1, 5) ~= "auto:" then
+            self._groupCatchupSeenPeerReq = self._groupCatchupSeenPeerReq or {}
+            self._groupCatchupSeenPeerReq[senderLk] = nowWall
+        end
+        local sinceTs = tonumber(parts[3])
+        local realReqId = parts[4]
+        if sinceTs and type(realReqId) == "string" and realReqId ~= "" then
+            self:LaunchCooperativeCatchupSend(activeChan, activeKey, realReqId, sinceTs)
+        end
+        return true
+    elseif op == "GCM" then
+        self._groupCatchupAnswered = self._groupCatchupAnswered or {}
+        self._groupCatchupAnswered[reqId] = nowWall
+        if not self:ShouldAcceptCatchupReq(reqId) then
+            return true
+        end
+        local msgTs = tonumber(parts[4]) or nowWall
+        if msgTs < (nowWall - 1200) or msgTs > (nowWall + 10) then
+            return true
+        end
+        local cls = Safe.String(parts[5])
+        local senderDisp = Safe.String(parts[6]) or "?"
+        local bodyText = Safe.String(parts[7])
+        if not bodyText or bodyText == "" then return true end
+        local meta = STATIC_CHANNEL_ORDER and STATIC_CHANNEL_ORDER[threadKey]
+        local t = EnsureThread(threadKey, (meta and meta.kind) or "PARTY", (meta and L[meta.titleKey]) or L["Party"], { slash = (meta and meta.slash) or "/p " })
+        if not t then return true end
+        if self:HasSimilarGroupMessage(t, msgTs, senderDisp, bodyText) then
+            return true
+        end
+        local incoming = not (Compat and Compat.IsMe and Compat.IsMe(senderDisp))
+        AppendMessage(t, senderDisp, bodyText, incoming, (cls and cls ~= "") and cls or nil, false, true, {
+            customTs = msgTs,
+            isCatchup = true,
+            rewritePersist = true,
+        })
+        self._groupCatchupRecoveredCounts = self._groupCatchupRecoveredCounts or {}
+        self._groupCatchupRecoveredCounts[reqId] = (self._groupCatchupRecoveredCounts[reqId] or 0) + 1
+        if C_Timer and C_Timer.After and not (self._groupCatchupNoticeQueued and self._groupCatchupNoticeQueued[reqId]) then
+            self._groupCatchupNoticeQueued = self._groupCatchupNoticeQueued or {}
+            self._groupCatchupNoticeQueued[reqId] = true
+            local targetReq = reqId
+            local targetKey = threadKey
+            C_Timer.After(1.1, function()
+                if self._groupCatchupNoticeQueued then
+                    self._groupCatchupNoticeQueued[targetReq] = nil
+                end
+                self:FlushGroupCatchupNotice(targetReq, targetKey)
+            end)
+        end
+        return true
+    end
+    return true
+end
 
 function Chat:Init()
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
@@ -8458,6 +12299,7 @@ function Chat:Init()
     elseif RegisterAddonMessagePrefix then
         pcall(RegisterAddonMessagePrefix, PREFIX)
     end
+    self:InstallErrorOriginTracker()
     self:LoadSavedHistory()
     self:EnsurePersonalNotesThread()
     self:EnsureMentionsThread()
@@ -8495,17 +12337,128 @@ function Chat:Init()
         "CHAT_MSG_SAY",
         "CHAT_MSG_YELL",
         "CHAT_MSG_CHANNEL",
+        "CHAT_MSG_COMMUNITIES_CHANNEL",
     }) do
         ns.RegisterEvent(self, ev, function(_, eventName, ...)
             OnChatEvent(eventName, ...)
         end)
     end
 
+    for _, wEv in ipairs({
+        "CHAT_MSG_LOOT",
+        "CHAT_MSG_MONEY",
+        "CHAT_MSG_COMBAT_XP_GAIN",
+        "CHAT_MSG_COMBAT_FACTION_CHANGE",
+        "CHAT_MSG_COMBAT_HONOR_GAIN",
+        "CHAT_MSG_SKILL",
+        "CHAT_MSG_ACHIEVEMENT",
+        "CHAT_MSG_GUILD_ACHIEVEMENT",
+        "CHAT_MSG_RAID_BOSS_EMOTE",
+        "CHAT_MSG_MONSTER_SAY",
+        "CHAT_MSG_MONSTER_YELL",
+        "CHAT_MSG_MONSTER_EMOTE",
+        "CHAT_MSG_EMOTE",
+        "CHAT_MSG_TEXT_EMOTE",
+        "CHAT_MSG_CURRENCY",
+        "CHAT_MSG_TRADESKILLS",
+        "CHAT_MSG_OPENING",
+        "CHAT_MSG_BG_SYSTEM_NEUTRAL",
+        "CHAT_MSG_BG_SYSTEM_ALLIANCE",
+        "CHAT_MSG_BG_SYSTEM_HORDE",
+    }) do
+        ns.RegisterEvent(self, wEv, function(_, eventName, ...)
+            self:OnWorldNoticeEvent(eventName, ...)
+        end)
+    end
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.4, function()
+            self:BackfillGeneralFromChatFrame1()
+            self:RefreshOfficialChannelThreads()
+        end)
+    end
+    for _, chEv in ipairs({ "CHANNEL_UI_UPDATE", "CHAT_MSG_CHANNEL_NOTICE", "ZONE_CHANGED_NEW_AREA" }) do
+        ns.RegisterEvent(self, chEv, function()
+            self:RefreshOfficialChannelThreads()
+        end)
+    end
+
     ns.RegisterEvent(self, "CHAT_MSG_ADDON", function(_, _, prefix, text, channel, sender)
         local chan = Safe.String(channel)
-        if Safe.String(prefix) == PREFIX and (not chan or chan == "WHISPER") then
-            HandleIncomingAddonPacket(text, sender, nil)
+        if Safe.String(prefix) == PREFIX then
+            if not chan or chan == "WHISPER" then
+                HandleIncomingAddonPacket(text, sender, nil)
+            elseif chan == "PARTY" or chan == "RAID" or chan == "INSTANCE_CHAT" then
+                self:OnGroupCatchupPacket(text, chan, sender)
+            end
         end
+    end)
+
+    ns.RegisterEvent(self, "UNIT_CONNECTION", function(_, _, unitToken, isConn)
+        self:SyncGroupConnectionSnapshot(true, unitToken, isConn)
+    end)
+
+    ns.RegisterEvent(self, "GROUP_ROSTER_UPDATE", function()
+        self:SyncGroupRosterSessionState()
+        self:SyncGroupConnectionSnapshot(false)
+    end)
+
+    ns.RegisterEvent(self, "CLUB_MESSAGE_ADDED", function(_, _, clubIdRaw, streamIdRaw, messageIdRaw)
+        if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("chat") then
+            return
+        end
+        local cId = Safe.Number(clubIdRaw)
+        local sId = Safe.Number(streamIdRaw)
+        if not (cId and sId and messageIdRaw and _G.C_Club and _G.C_Club.GetMessageInfo) then
+            return
+        end
+        local cInfo = _G.C_Club.GetClubInfo and Safe.Call(_G.C_Club.GetClubInfo, cId) or nil
+        local clubType = type(cInfo) == "table" and cInfo.clubType or nil
+        if _G.Enum and _G.Enum.ClubType and clubType == _G.Enum.ClubType.Guild then
+            return -- Guild chat has its own dedicated Guild tab; never mix into General
+        end
+        local mInfo = Safe.Call(_G.C_Club.GetMessageInfo, cId, sId, messageIdRaw)
+        if type(mInfo) ~= "table" or mInfo.destroyed then
+            return
+        end
+        local cleanTxt = Safe.String(mInfo.content)
+        if not cleanTxt or cleanTxt == "" then
+            return
+        end
+        local authorObj = type(mInfo.author) == "table" and mInfo.author or nil
+        local rawSender = authorObj and Safe.String(authorObj.name) or nil
+        local parsed = rawSender and Compat.ParseCharacterName and Compat.ParseCharacterName(rawSender) or nil
+        local isMe = (authorObj and authorObj.isSelf == true)
+            or (parsed and Compat.IsMe and Compat.IsMe(parsed.displayName))
+            or false
+        local senderKey = self:_ExtractGeneralSenderKey(rawSender, isMe == true)
+        if self:_WasRecentlyRecordedInGeneral(cleanTxt, senderKey) then
+            return
+        end
+        local cls = nil
+        if authorObj and Safe.Number(authorObj.classID) and _G.GetClassInfo then
+            local okC, _, cFile = pcall(_G.GetClassInfo, Safe.Number(authorObj.classID))
+            if okC then cls = Safe.String(cFile) end
+        end
+        if not cls and parsed then
+            cls = LookupClassFromCache(parsed.lookupKey, authorObj and Safe.String(authorObj.guid))
+        end
+        local senderDisp = isMe and GetMyInfo() or ResolveChatSenderDisplay((parsed and parsed.displayName) or rawSender or "?", authorObj and Safe.String(authorObj.guid), nil)
+        local chId, pubTag = nil, nil
+        for _, ch in ipairs(self:GetJoinedOfficialChannels()) do
+            if ch.clubId == cId and ch.streamId == sId then
+                chId = ch.id
+                pubTag = ch.title
+                break
+            end
+        end
+        if not pubTag or pubTag == "" then
+            pubTag = self:ParseCommunityChannelName("Community:" .. tostring(cId) .. ":" .. tostring(sId)) or L["Community"]
+        end
+        self:RecordGeneralMessage("PUB_CHANNEL", senderDisp, cleanTxt, isMe, cls, pubTag, {
+            senderGuid = authorObj and Safe.String(authorObj.guid) or nil,
+            senderCharName = senderDisp,
+            channelId = chId,
+        })
     end)
 
     ns.RegisterEvent(self, "BN_CHAT_MSG_ADDON", function(_, _, prefix, text, _, bnSenderID)
@@ -8747,21 +12700,165 @@ function Chat:Init()
 
     local function SystemMsgMatchesTarget(lowerMsg, cand)
         if not cand or cand == "" then return false end
-        local candLow = cand:lower()
-        if lowerMsg:find(candLow, 1, true) then
+        local candLow = (Compat.LowerUtf8 and Compat.LowerUtf8(cand)) or cand:lower()
+        local msgFold = (Compat.LowerUtf8 and Compat.LowerUtf8(lowerMsg)) or lowerMsg
+        if msgFold:find(candLow, 1, true) then
             return true
         end
-        if candLow:find("-", 1, true) and lowerMsg:find((candLow:gsub("%-", " ")), 1, true) then
+        if candLow:find("-", 1, true) and msgFold:find((candLow:gsub("%-", " ")), 1, true) then
             return true
         end
-        if candLow:find(" ", 1, true) and lowerMsg:find((candLow:gsub("%s+", "-")), 1, true) then
+        if candLow:find(" ", 1, true) and msgFold:find((candLow:gsub("%s+", "-")), 1, true) then
             return true
         end
         return false
     end
 
-    -- Disqualify Forever WHISPER candidate strings that the server explicitly reports as not playing, and recover lost manual whisper drafts.
-    ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, msgRaw)
+    local function IsSystemNotFoundMessage(msg, lowerMsg)
+        if lowerMsg:find("inappropriat", 1, true)
+            or lowerMsg:find("inapropriad", 1, true)
+            or lowerMsg:find("inapropiad", 1, true)
+            or lowerMsg:find("profan", 1, true)
+            or lowerMsg:find("censur", 1, true)
+        then
+            return false
+        end
+        return (ERR_NOT_FOUND_PATTERN and msg:find(ERR_NOT_FOUND_PATTERN) ~= nil)
+            or lowerMsg:find("not currently playing", 1, true) ~= nil
+            or lowerMsg:find("no player named", 1, true) ~= nil
+            or lowerMsg:find("nenhum jogador", 1, true) ~= nil
+            or lowerMsg:find("ningún jugador", 1, true) ~= nil
+            or lowerMsg:find("ningun jugador", 1, true) ~= nil
+    end
+
+    local function HandlePresenceProbeNotFound(msgRaw, lineID)
+        if Safe.IsSecret(msgRaw) then return false end
+        local msg = Safe.String(msgRaw)
+        if not msg or msg == "" then return false end
+        local monoNow = (GetTime and GetTime()) or 0
+        local lowerMsg = (Compat.LowerUtf8 and Compat.LowerUtf8(msg)) or msg:lower()
+        if not IsSystemNotFoundMessage(msg, lowerMsg) then
+            return false
+        end
+        local hasPending = Chat.pendingPresenceProbes and next(Chat.pendingPresenceProbes) ~= nil
+        local hasLedger = Chat.silentNotFoundLedger and next(Chat.silentNotFoundLedger) ~= nil
+        if not hasPending and not hasLedger then
+            return false
+        end
+        local manualRec = Chat.lastManualWhisperSend
+        local hasManualNow = type(manualRec) == "table"
+            and manualRec.delivered ~= true
+            and (monoNow - (manualRec.sentAt or 0)) <= 4.0
+        if hasManualNow and SystemMsgMatchesTarget(lowerMsg, manualRec.targetStr) then
+            return false
+        end
+
+        local matchedLk, matchedDisp, matchedIsProbe, matchedRec = nil, nil, false, nil
+        if hasPending then
+            for lk, pRec in pairs(Chat.pendingPresenceProbes) do
+                if type(pRec) == "table" and (monoNow - (pRec.sentAt or 0)) <= 8.0 then
+                    if SystemMsgMatchesTarget(lowerMsg, pRec.displayName) then
+                        matchedLk = lk
+                        matchedDisp = pRec.displayName
+                        matchedIsProbe = true
+                        matchedRec = pRec
+                        break
+                    end
+                else
+                    Chat.pendingPresenceProbes[lk] = nil
+                end
+            end
+        end
+        if not matchedRec and hasLedger then
+            for k, lRec in pairs(Chat.silentNotFoundLedger) do
+                if type(lRec) ~= "table" or monoNow > (lRec.expiresAt or 0) then
+                    Chat.silentNotFoundLedger[k] = nil
+                elseif SystemMsgMatchesTarget(lowerMsg, lRec.displayName or k) then
+                    matchedLk = lRec.lookupKey
+                    matchedDisp = lRec.displayName or k
+                    matchedIsProbe = lRec.isWatchProbe == true
+                    matchedRec = lRec
+                    break
+                end
+            end
+        end
+        if not matchedRec then
+            return false
+        end
+
+        if matchedLk and Chat.pendingPresenceProbes then
+            Chat.pendingPresenceProbes[matchedLk] = nil
+        end
+        -- Keep ledger entry alive briefly (~2s) so every ChatFrame tab & filter pass suppresses the exact same system line.
+        if Chat.silentNotFoundLedger then
+            local shortExp = monoNow + 2.0
+            local matchedKey = (Compat.LowerUtf8 and Compat.LowerUtf8(matchedDisp or "")) or tostring(matchedDisp or ""):lower()
+            for _, variant in ipairs({ matchedKey, (matchedKey:gsub("%-", " ")), (matchedKey:gsub("%s+", "-")), matchedLk or "" }) do
+                if variant ~= "" then
+                    local existing = Chat.silentNotFoundLedger[variant]
+                    if type(existing) == "table" then
+                        existing.expiresAt = math.min(existing.expiresAt or shortExp, shortExp)
+                    else
+                        Chat.silentNotFoundLedger[variant] = {
+                            expiresAt = shortExp,
+                            lookupKey = matchedLk,
+                            displayName = matchedDisp,
+                            isWatchProbe = matchedIsProbe,
+                            notifiedOffline = true,
+                        }
+                    end
+                end
+            end
+        end
+
+        if matchedLk and matchedIsProbe and not matchedRec.notifiedOffline then
+            matchedRec.notifiedOffline = true
+            Chat.sessionOfflineChars = Chat.sessionOfflineChars or {}
+            Chat.sessionOfflineChars[matchedLk] = monoNow + 45
+            Chat.seenOnlineChars[matchedLk] = nil
+            Chat:BumpPeerStateGen()
+            if Store and Store.SyncWatchlistObservation then
+                local socRow = Store.socialByLookup and Store.socialByLookup[matchedLk]
+                local isRosterOn = socRow and (socRow.friendOnline == true or socRow.guildOnline == true or (socRow.bnetOnline == true and socRow.bnetState == "wow_forever"))
+                if not isRosterOn then
+                    Store:SyncWatchlistObservation(matchedDisp or matchedLk, {
+                        online = false,
+                        source = "probe",
+                    })
+                end
+            end
+            if ns.Social and ns.Social.QueueScan then
+                ns.Social:QueueScan(0.3)
+            end
+        end
+        return true
+    end
+
+    if not self._presenceFilterRegistered then
+        self._presenceFilterRegistered = true
+        local function PresenceSystemFilter(_, _, msgRaw, ...)
+            local lineID = select(10, ...)
+            if HandlePresenceProbeNotFound(msgRaw, lineID) then
+                return true
+            end
+            return false
+        end
+        if ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter then
+            pcall(ChatFrameUtil.AddMessageEventFilter, "CHAT_MSG_SYSTEM", PresenceSystemFilter)
+        elseif ChatFrame_AddMessageEventFilter then
+            pcall(ChatFrame_AddMessageEventFilter, "CHAT_MSG_SYSTEM", PresenceSystemFilter)
+        end
+    end
+
+    -- Disqualify Forever WHISPER candidate strings that the server explicitly reports as not playing and recover lost manual whisper drafts.
+    -- Genuine Blizzard system & friend online/offline notices flow through ChatFrame1:AddMessage strictly AFTER all ChatFrame event filters suppress background probes.
+    ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, msgRaw, _, _, _, _, _, _, _, _, _, lineID)
+        if HandlePresenceProbeNotFound(msgRaw, lineID) then
+            return
+        end
+        if ns.Clan and ns.Clan.IsSilentWhisperNotFound and ns.Clan:IsSilentWhisperNotFound(msgRaw) then
+            return
+        end
         if Safe.IsSecret(msgRaw) then return end
         local monoNow = GetTime and GetTime() or 0
         local hasManual = type(Chat.lastManualWhisperSend) == "table"
@@ -8866,7 +12963,26 @@ function Chat:Init()
         end
     end)
 
+    ns.RegisterEvent(self, "ZONE_CHANGED_NEW_AREA", function()
+        Chat:CheckExpiredThreadMutes(true)
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_REGEN_DISABLED", function()
+        Chat:AbortPendingPresenceProbes()
+    end)
+
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        Chat._presenceReadyMono = ((GetTime and GetTime()) or 0) + 3.5
+        Chat:AbortPendingPresenceProbes()
+        Chat:CheckExpiredThreadMutes(true)
+        Chat:OnGroupCatchupEnteringWorld()
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.1, function()
+                Chat:InstallErrorOriginChatFilter()
+            end)
+        else
+            Chat:InstallErrorOriginChatFilter()
+        end
         if not Chat._editHistRestored then
             Chat._editHistRestored = true
             if C_Timer and C_Timer.After then
@@ -8874,6 +12990,12 @@ function Chat:Init()
             else
                 RestoreSavedEditHistory()
             end
+        end
+        if not Chat._presenceTickerStarted and C_Timer and C_Timer.NewTicker then
+            Chat._presenceTickerStarted = true
+            C_Timer.NewTicker(2.0, function()
+                Chat:StepPresenceProbes()
+            end)
         end
         if Chat._loginBNetScanScheduled then return end
         Chat._loginBNetScanScheduled = true

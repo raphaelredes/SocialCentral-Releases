@@ -482,11 +482,12 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
     if not btn or not btn.label then
         return
     end
+    local w = btn._scAutoFitW or (btn:GetWidth() or 0)
+    local isCenterBtn = (btn._scCenterLabel == true) or (w > 0 and w <= 28)
     if btn.SetClipsChildren and not btn._scClipsInit then
         btn._scClipsInit = true
-        btn:SetClipsChildren(true)
+        btn:SetClipsChildren(not isCenterBtn)
     end
-    local w = btn._scAutoFitW or (btn:GetWidth() or 0)
     local variant = btn._scVariant or "default"
     local padX
     if w < 26 then
@@ -501,20 +502,27 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
     local parent = btn._textLayer or btn
     if parent.SetClipsChildren and not parent._scClipsInit then
         parent._scClipsInit = true
-        parent:SetClipsChildren(true)
+        parent:SetClipsChildren(not isCenterBtn)
     end
-    local sig = padX .. ":" .. (xOff or 0) .. ":" .. (yOff or 0)
+    local sig = (isCenterBtn and "C:" or "L:") .. padX .. ":" .. (xOff or 0) .. ":" .. (yOff or 0)
     if btn._scTextOffsetSig == sig and btn._scTextOffsetParent == parent then
         return
     end
     btn._scTextOffsetSig = sig
     btn._scTextOffsetParent = parent
     btn.label:ClearAllPoints()
-    btn.label:SetPoint("LEFT", parent, "LEFT", padX + xOff, yOff)
-    btn.label:SetPoint("RIGHT", parent, "RIGHT", -padX + xOff, yOff)
+    if isCenterBtn then
+        btn.label:SetPoint("CENTER", parent, "CENTER", xOff or 0, yOff or 0)
+    else
+        btn.label:SetPoint("LEFT", parent, "LEFT", padX + (xOff or 0), yOff or 0)
+        btn.label:SetPoint("RIGHT", parent, "RIGHT", -padX + (xOff or 0), yOff or 0)
+    end
     if not btn._scLabelFmtInit then
         btn._scLabelFmtInit = true
         btn.label:SetJustifyH("CENTER")
+        if btn.label.SetJustifyV then
+            btn.label:SetJustifyV("MIDDLE")
+        end
         btn.label:SetWordWrap(false)
         if btn.label.SetMaxLines then
             btn.label:SetMaxLines(1)
@@ -1015,9 +1023,13 @@ function Theme:ConfigureIconButton(btn, width, height, tex, opts)
     local layer = btn._textLayer or btn
     if not btn.ico then
         btn.ico = layer:CreateTexture(nil, "OVERLAY", nil, 2)
-        btn.ico:SetPoint("CENTER", 0, 0)
+    else
+        btn.ico:SetParent(layer)
     end
-    local sz = opts.size or 14
+    btn.ico:ClearAllPoints()
+    btn.ico:SetPoint("CENTER", layer, "CENTER", opts.offX or 0, opts.offY or 0)
+    local minSide = math.min(width or (btn.GetWidth and btn:GetWidth()) or 20, height or (btn.GetHeight and btn:GetHeight()) or 20)
+    local sz = opts.size or math.max(15, math.floor(minSide - 3))
     btn.ico:SetSize(sz, sz)
     if opts.atlas and self.HasAtlas and self:HasAtlas(opts.atlas) and btn.ico.SetAtlas then
         btn.ico:SetAtlas(opts.atlas, false)
@@ -1364,7 +1376,9 @@ function Theme:StyleEditBox(box)
     if not box then
         return
     end
-    ApplyInputBackdrop(box, box._scFocused, box._scHovered, box)
+    if not box._scNoBackdrop then
+        ApplyInputBackdrop(box, box._scFocused, box._scHovered, box)
+    end
     if box.placeholder then
         local p = self:GetPalette()
         box.placeholder:SetTextColor(p.textDim[1], p.textDim[2], p.textDim[3])
@@ -1375,94 +1389,126 @@ end
 function Theme:InstallEditBoxLinkHook()
     if self._editBoxLinkHooked then return end
     self._editBoxLinkHooked = true
-    if type(_G.ChatEdit_InsertLink) == "function" then
-        hooksecurefunc("ChatEdit_InsertLink", function(text)
-            if ns.Safe and ns.Safe.IsSecret and ns.Safe.IsSecret(text) then
-                return
+    local function HandleChatEditInsertLink(text)
+        if ns.Safe and ns.Safe.IsSecret and ns.Safe.IsSecret(text) then
+            return
+        end
+        if type(text) ~= "string" or text == "" then
+            return
+        end
+        local monoNow = (GetTime and GetTime()) or 0
+        if Theme._lastInsertLinkText == text and Theme._lastInsertLinkAt and (monoNow - Theme._lastInsertLinkAt) < 0.03 then
+            return
+        end
+        Theme._lastInsertLinkText = text
+        Theme._lastInsertLinkAt = monoNow
+
+        local blizzBox = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
+            or (_G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow())
+            or nil
+        if blizzBox and blizzBox.IsVisible and blizzBox:IsVisible()
+            and ((not blizzBox.HasFocus) or blizzBox:HasFocus())
+            and ((not blizzBox.GetEffectiveAlpha) or (blizzBox:GetEffectiveAlpha() or 0) > 0.05)
+        then
+            if ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() then
+                ns.QuickReply.lastInputAt = monoNow
+                ns.QuickReply._lastOpaqueActivityAt = monoNow
+                ns.QuickReply.idleCountdown = nil
             end
-            if type(text) ~= "string" or text == "" then
-                return
+            if _G.StackSplitFrame and _G.StackSplitFrame.IsShown and _G.StackSplitFrame:IsShown() and not (InCombatLockdown and InCombatLockdown()) then
+                pcall(_G.StackSplitFrame.Hide, _G.StackSplitFrame)
             end
-            local blizzBox = _G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow() or nil
-            if blizzBox and blizzBox.IsVisible and blizzBox:IsVisible() then
-                return
-            end
-            local box = Theme._focusedEditBox
-            if not (box and box.HasFocus and box:HasFocus() and box:IsVisible() and (not box.IsEnabled or box:IsEnabled())) then
-                box = nil
-                local qr = ns.QuickReply and ns.QuickReply.frame
-                if qr and qr.IsVisible and qr:IsVisible() and qr.inputBox and qr.inputBox.IsVisible and qr.inputBox:IsVisible() and (not qr.inputBox.IsEnabled or qr.inputBox:IsEnabled()) then
+            return
+        end
+        local box = Theme._focusedEditBox
+        local useQrOfficial = false
+        local focusQrInput = false
+        if not (box and box.HasFocus and box:HasFocus() and box:IsVisible() and (not box.IsEnabled or box:IsEnabled())) then
+            box = nil
+            local qr = ns.QuickReply and ns.QuickReply.frame
+            if qr and qr.IsVisible and qr:IsVisible() and (not qr.GetAlpha or qr:GetAlpha() > 0.1) then
+                if ns.QuickReply.IsOfficialOnlyThread and ns.QuickReply:IsOfficialOnlyThread() then
+                    useQrOfficial = true
+                elseif qr.inputBox and qr.inputBox.IsVisible and qr.inputBox:IsVisible()
+                    and (not qr.inputBox.IsEnabled or qr.inputBox:IsEnabled())
+                then
                     box = qr.inputBox
-                elseif Theme._activeChatReplyBox and Theme._activeChatReplyBox.IsVisible and Theme._activeChatReplyBox:IsVisible() and (not Theme._activeChatReplyBox.IsEnabled or Theme._activeChatReplyBox:IsEnabled()) then
-                    box = Theme._activeChatReplyBox
+                    focusQrInput = true
                 end
+            elseif Theme._activeChatReplyBox and Theme._activeChatReplyBox.IsVisible and Theme._activeChatReplyBox:IsVisible() and (not Theme._activeChatReplyBox.IsEnabled or Theme._activeChatReplyBox:IsEnabled()) then
+                box = Theme._activeChatReplyBox
             end
-            if not box then
-                return
-            end
-            local inserted = text
-            if box._scInsertLinkMode ~= "full" then
-                inserted = text:gsub("|c%x%x%x%x%x%x%x%x", "")
-                    :gsub("|r", "")
-                    :gsub("|H[^|]+|h%[?([^%]]*)%]?|h", "%1")
-                    :gsub("^%s+", "")
-                    :gsub("%s+$", "")
-            elseif box.GetText and box.GetCursorPosition then
-                local cur = box:GetText() or ""
-                local pos = box:GetCursorPosition() or #cur
-                if pos > 0 and cur:sub(pos, pos) ~= " " then
-                    inserted = " " .. inserted
+        end
+        if useQrOfficial and ns.QuickReply and ns.QuickReply.ActivateDockedOfficialInput then
+            ns.QuickReply.interactedOutside = false
+            ns.QuickReply.lastInputAt = monoNow
+            ns.QuickReply._lastOpaqueActivityAt = monoNow
+            ns.QuickReply.idleCountdown = nil
+            if ns.QuickReply:ActivateDockedOfficialInput("") then
+                local activeEb = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
+                    or (_G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow())
+                    or _G.ChatFrame1EditBox
+                if activeEb and activeEb.Insert then
+                    local ins = text
+                    if activeEb.GetText and activeEb.GetCursorPosition then
+                        local cur = activeEb:GetText() or ""
+                        local pos = activeEb:GetCursorPosition() or #cur
+                        if pos > 0 and cur:sub(pos, pos) ~= " " then
+                            ins = " " .. ins
+                        end
+                    end
+                    if ins:sub(-1) ~= " " then
+                        ins = ins .. " "
+                    end
+                    pcall(activeEb.Insert, activeEb, ins)
                 end
-                if inserted:sub(-1) ~= " " then
-                    inserted = inserted .. " "
-                end
-            end
-            if inserted ~= "" and box.Insert then
-                box:Insert(inserted)
-                if box.SetFocus and not (box.HasFocus and box:HasFocus()) and not (InCombatLockdown and InCombatLockdown()) then
-                    pcall(box.SetFocus, box)
-                end
-                if box._scInsertLinkMode == "full" and _G.StackSplitFrame and _G.StackSplitFrame.IsShown and _G.StackSplitFrame:IsShown() and not (InCombatLockdown and InCombatLockdown()) then
+                if _G.StackSplitFrame and _G.StackSplitFrame.IsShown and _G.StackSplitFrame:IsShown() and not (InCombatLockdown and InCombatLockdown()) then
                     pcall(_G.StackSplitFrame.Hide, _G.StackSplitFrame)
                 end
             end
-        end)
-    end
-end
-
-local RAID_MARK_MENU_DEFS = {
-    { tag = "{rt1}", labelKey = "Star" },
-    { tag = "{rt2}", labelKey = "Circle" },
-    { tag = "{rt3}", labelKey = "Diamond" },
-    { tag = "{rt4}", labelKey = "Triangle" },
-    { tag = "{rt5}", labelKey = "Moon" },
-    { tag = "{rt6}", labelKey = "Square" },
-    { tag = "{rt7}", labelKey = "Cross" },
-    { tag = "{rt8}", labelKey = "Skull" },
-}
-
-function Theme:OpenRaidMarkPickerMenu(anchorBtn, inputBox)
-    if not (MenuUtil and MenuUtil.CreateContextMenu and inputBox) then return end
-    MenuUtil.CreateContextMenu(anchorBtn, function(_, root)
-        root:CreateTitle(L["Raid Target Icons ({rt1}..{rt8})"])
-        for idx, def in ipairs(RAID_MARK_MENU_DEFS) do
-            local ico = "|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_" .. tostring(idx) .. ":14|t "
-            root:CreateButton(ico .. L[def.labelKey] .. "  |cff9da7b5" .. def.tag .. "|r", function()
-                local cur = inputBox.GetText and inputBox:GetText() or ""
-                local pos = inputBox.GetCursorPosition and inputBox:GetCursorPosition() or #cur
-                local needsPre = (pos > 0 and cur:sub(pos, pos) ~= " ")
-                local ins = (needsPre and " " or "") .. def.tag .. " "
-                if inputBox.Insert then
-                    inputBox:Insert(ins)
-                else
-                    inputBox:SetText(cur .. ins)
-                end
-                if inputBox.SetFocus and not (InCombatLockdown and InCombatLockdown()) then
-                    pcall(inputBox.SetFocus, inputBox)
-                end
-            end)
+            return
         end
-    end)
+        if not box then
+            return
+        end
+        local inserted = text
+        if box._scInsertLinkMode ~= "full" then
+            inserted = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+                :gsub("|r", "")
+                :gsub("|H[^|]+|h%[?([^%]]*)%]?|h", "%1")
+                :gsub("^%s+", "")
+                :gsub("%s+$", "")
+        elseif box.GetText and box.GetCursorPosition then
+            local cur = box:GetText() or ""
+            local pos = box:GetCursorPosition() or #cur
+            if pos > 0 and cur:sub(pos, pos) ~= " " then
+                inserted = " " .. inserted
+            end
+            if inserted:sub(-1) ~= " " then
+                inserted = inserted .. " "
+            end
+        end
+        if inserted ~= "" and box.Insert then
+            box:Insert(inserted)
+            if focusQrInput and ns.QuickReply and ns.QuickReply.FocusInputBox then
+                ns.QuickReply:FocusInputBox()
+                if box.SetCursorPosition then
+                    box:SetCursorPosition(#(box:GetText() or ""))
+                end
+            elseif box.SetFocus and not (box.HasFocus and box:HasFocus()) and not (InCombatLockdown and InCombatLockdown()) then
+                pcall(box.SetFocus, box)
+            end
+            if box._scInsertLinkMode == "full" and _G.StackSplitFrame and _G.StackSplitFrame.IsShown and _G.StackSplitFrame:IsShown() and not (InCombatLockdown and InCombatLockdown()) then
+                pcall(_G.StackSplitFrame.Hide, _G.StackSplitFrame)
+            end
+        end
+    end
+    if type(_G.ChatEdit_InsertLink) == "function" then
+        hooksecurefunc("ChatEdit_InsertLink", HandleChatEditInsertLink)
+    end
+    if _G.ChatFrameUtil and type(_G.ChatFrameUtil.InsertLink) == "function" then
+        hooksecurefunc(_G.ChatFrameUtil, "InsertLink", HandleChatEditInsertLink)
+    end
 end
 
 function Theme:ShowHyperlinkTooltip(owner, link)
@@ -1476,9 +1522,45 @@ function Theme:ShowHyperlinkTooltip(owner, link)
         GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
         GameTooltip:ClearLines()
         GameTooltip:AddLine(who, 1.0, 0.88, 0.35, true)
-        GameTooltip:AddLine(L["Click to whisper · Right-click for options"], 0.82, 0.88, 0.94, true)
+        GameTooltip:AddLine(L["Click: Whisper · Alt+Click: Invite · Ctrl+Click: Social Card · Right-click: Options"], 0.82, 0.88, 0.94, true)
         GameTooltip:Show()
         return true
+    elseif link:find("addon:SCentral:grp:", 1, true) then
+        local idxStr, tKey = link:match("addon:SCentral:grp:(%d+):([^|]+)")
+        local snap = (ns.Chat and ns.Chat.GetThreadGroupSnapshot) and ns.Chat:GetThreadGroupSnapshot(tKey, tonumber(idxStr)) or nil
+        if snap and snap.roster and type(snap.roster.members) == "table" then
+            GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+            GameTooltip:ClearLines()
+            local count = snap.roster.size or #snap.roster.members
+            local hdr = string.format(L["Group #%d (%d members)"], snap.seq or 1, count)
+            if snap.roster.zone and snap.roster.zone ~= "" then
+                hdr = hdr .. " · " .. snap.roster.zone
+            end
+            if snap.msgTs and snap.msgTs > 0 then
+                hdr = hdr .. " · " .. date("%H:%M", snap.msgTs)
+            end
+            GameTooltip:AddLine(hdr, 0.48, 0.72, 1.0, true)
+            for _, mem in ipairs(snap.roster.members) do
+                local cHex = (mem.c and ns.Compat and ns.Compat.ClassHex and ns.Compat.ClassHex(mem.c)) or "|cffe6edf3"
+                local roleLbl = nil
+                if mem.r == "TANK" then roleLbl = L["Tank"]
+                elseif mem.r == "HEALER" then roleLbl = L["Healer"]
+                elseif mem.r == "DAMAGER" then roleLbl = L["DPS"]
+                end
+                local isSelf = ns.Compat and ns.Compat.IsMe and ns.Compat.IsMe(mem.n)
+                local leftTxt = cHex .. tostring(mem.n or "?") .. "|r" .. (isSelf and (" |cff8cc2ff(" .. L["You"] .. ")|r") or "")
+                if roleLbl then
+                    GameTooltip:AddDoubleLine(leftTxt, roleLbl, 1, 1, 1, 0.72, 0.78, 0.86)
+                else
+                    GameTooltip:AddLine(leftTxt, 1, 1, 1, true)
+                end
+            end
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine(L["Click to whisper or invite members from this group"], 0.65, 0.78, 0.92, true)
+            GameTooltip:Show()
+            return true
+        end
+        return false
     elseif link:find("addon:SCentral:msgact:", 1, true) then
         GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
         GameTooltip:ClearLines()
@@ -1531,34 +1613,156 @@ function Theme:HideHyperlinkTooltip(owner)
     if _G.ShoppingTooltip2 and _G.ShoppingTooltip2.Hide then _G.ShoppingTooltip2:Hide() end
 end
 
+function Theme:OpenGroupSnapshotMenu(owner, threadKey, msgIdx)
+    if not (owner and MenuUtil and MenuUtil.CreateContextMenu and ns.Chat and ns.Chat.GetThreadGroupSnapshot) then
+        return false
+    end
+    local snap = ns.Chat:GetThreadGroupSnapshot(threadKey, tonumber(msgIdx))
+    if not (snap and snap.roster and type(snap.roster.members) == "table") then
+        return false
+    end
+    MenuUtil.CreateContextMenu(owner, function(_, root)
+        local count = snap.roster.size or #snap.roster.members
+        local hdr = string.format(L["Group #%d (%d members)"], snap.seq or 1, count)
+        if snap.roster.zone and snap.roster.zone ~= "" then
+            hdr = hdr .. " · " .. snap.roster.zone
+        end
+        root:CreateTitle(hdr)
+        for _, mem in ipairs(snap.roster.members) do
+            if mem.n and mem.n ~= "" then
+                local isSelf = ns.Compat and ns.Compat.IsMe and ns.Compat.IsMe(mem.n)
+                local roleSuffix = ""
+                if mem.r == "TANK" then roleSuffix = " (" .. L["Tank"] .. ")"
+                elseif mem.r == "HEALER" then roleSuffix = " (" .. L["Healer"] .. ")"
+                elseif mem.r == "DAMAGER" then roleSuffix = " (" .. L["DPS"] .. ")"
+                end
+                if isSelf then
+                    root:CreateTitle(mem.n .. " (" .. L["You"] .. ")" .. roleSuffix)
+                else
+                    local sub = root:CreateButton(mem.n .. roleSuffix)
+                    sub:CreateButton(L["Whisper"], function()
+                        if ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.Chat and ns.Chat.EnsureWhisperThread then
+                            local wt = ns.Chat:EnsureWhisperThread(mem.n)
+                            if wt and wt.key then
+                                ns.QuickReply:SaveCurrentDraft()
+                                ns.QuickReply:SelectThread(wt.key, true)
+                                return
+                            end
+                        end
+                        if ns.Compat and ns.Compat.Whisper then
+                            ns.Compat.Whisper(mem.n)
+                        end
+                    end)
+                    sub:CreateButton(L["Invite to Group"], function()
+                        if InCombatLockdown and InCombatLockdown() then
+                            ns:Print("%s", L["Unavailable during combat."])
+                        elseif ns.Compat and ns.Compat.Invite then
+                            ns.Compat.Invite(mem.n)
+                        end
+                    end)
+                end
+            end
+        end
+    end)
+    return true
+end
+
 function Theme:HandleGameHyperlinkClick(link, text, button, ownerFrame, insertBox)
     if type(link) ~= "string" or link == "" or link:find("^addon:") then
         return false
     end
     local isLinkMod = (IsModifiedClick and IsModifiedClick("CHATLINK")) or (IsShiftKeyDown and IsShiftKeyDown())
     if isLinkMod and type(text) == "string" and text ~= "" then
-        local blizzBox = _G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow() or nil
-        if blizzBox and blizzBox.IsVisible and blizzBox:IsVisible() and _G.ChatEdit_InsertLink then
-            pcall(_G.ChatEdit_InsertLink, text)
-            return true
+        local blizzBox = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
+            or (_G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow())
+            or nil
+        if blizzBox and blizzBox.IsVisible and blizzBox:IsVisible() and ((not blizzBox.HasFocus) or blizzBox:HasFocus()) then
+            if _G.ChatFrameUtil and _G.ChatFrameUtil.InsertLink then
+                pcall(_G.ChatFrameUtil.InsertLink, text)
+                return true
+            elseif _G.ChatEdit_InsertLink then
+                pcall(_G.ChatEdit_InsertLink, text)
+                return true
+            end
+        end
+        if ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown()
+            and ns.QuickReply.IsOfficialOnlyThread and ns.QuickReply:IsOfficialOnlyThread()
+            and ns.QuickReply.ActivateDockedOfficialInput
+        then
+            if ns.QuickReply:ActivateDockedOfficialInput("") then
+                local activeEb = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
+                    or (_G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow())
+                    or _G.ChatFrame1EditBox
+                if activeEb and activeEb.Insert then
+                    local ins = text
+                    if activeEb.GetText and activeEb.GetCursorPosition then
+                        local cur = activeEb:GetText() or ""
+                        local pos = activeEb:GetCursorPosition() or #cur
+                        if pos > 0 and cur:sub(pos, pos) ~= " " then
+                            ins = " " .. ins
+                        end
+                    end
+                    if ins:sub(-1) ~= " " then
+                        ins = ins .. " "
+                    end
+                    pcall(activeEb.Insert, activeEb, ins)
+                end
+                return true
+            end
         end
         if insertBox and insertBox.IsVisible and insertBox:IsVisible() and (not insertBox.IsEnabled or insertBox:IsEnabled()) and insertBox.Insert then
             local cur = insertBox.GetText and insertBox:GetText() or ""
             local pos = insertBox.GetCursorPosition and insertBox:GetCursorPosition() or #cur
             local ins = ((pos > 0 and cur:sub(pos, pos) ~= " ") and " " or "") .. text .. " "
             insertBox:Insert(ins)
-            if insertBox.SetFocus and not (InCombatLockdown and InCombatLockdown()) then
+            if ns.QuickReply and ns.QuickReply.frame and insertBox == ns.QuickReply.frame.inputBox and ns.QuickReply.FocusInputBox then
+                ns.QuickReply:FocusInputBox()
+                if insertBox.SetCursorPosition then
+                    insertBox:SetCursorPosition(#(insertBox:GetText() or ""))
+                end
+            elseif insertBox.SetFocus and not (InCombatLockdown and InCombatLockdown()) then
                 pcall(insertBox.SetFocus, insertBox)
             end
             return true
         end
-        if _G.ChatEdit_InsertLink then
+        if _G.ChatFrameUtil and _G.ChatFrameUtil.InsertLink then
+            pcall(_G.ChatFrameUtil.InsertLink, text)
+            return true
+        elseif _G.ChatEdit_InsertLink then
             pcall(_G.ChatEdit_InsertLink, text)
             return true
         end
     end
-    if IsModifiedClick and IsModifiedClick("DRESSUP") and link:find("^item:") and _G.DressUpItemLink then
-        pcall(_G.DressUpItemLink, text or link)
+    local isDressMod = (IsModifiedClick and IsModifiedClick("DRESSUP"))
+        or ((IsControlKeyDown and IsControlKeyDown()) and not (IsShiftKeyDown and IsShiftKeyDown()) and not (IsAltKeyDown and IsAltKeyDown()))
+    if isDressMod and (link:find("^item:") or link:find("^transmog")) then
+        local fullLink = link
+        if type(text) == "string" and text:find("|H", 1, true) then
+            fullLink = text
+        else
+            local nameTxt = (type(text) == "string" and text ~= "") and text or ""
+            if not nameTxt:find("^%[") then
+                nameTxt = "[" .. nameTxt .. "]"
+            end
+            fullLink = "|H" .. link .. "|h" .. nameTxt .. "|h"
+        end
+        local done = false
+        if _G.DressUpItemLink then
+            local ok, res = pcall(_G.DressUpItemLink, fullLink)
+            done = ok and res ~= false
+            if not done then
+                ok, res = pcall(_G.DressUpItemLink, link)
+                done = ok and res ~= false
+            end
+        end
+        if not done and _G.DressUpLink then
+            local ok = pcall(_G.DressUpLink, fullLink)
+            done = ok
+        end
+        if not done and _G.HandleModifiedItemClick then
+            local ok = pcall(_G.HandleModifiedItemClick, fullLink)
+            done = ok
+        end
         return true
     end
     if _G.ChatFrame_OnHyperlinkShow then
@@ -1741,6 +1945,7 @@ function Theme:StyleSearchBox(searchBox)
 end
 
 local helpPopup
+local guideSpotlight
 local updatePopup
 local movableRegistry = {}
 
@@ -2013,7 +2218,7 @@ local function SaveWindowCenterOffset(win, posKey, opts)
 end
 
 function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
-    if not win or win._scLocked then
+    if not win or (win._scLocked and not (opts and opts.allowLockedRestore)) then
         return false
     end
     if UIParent and win.GetParent and win:GetParent() ~= UIParent then
@@ -2096,7 +2301,10 @@ local function ShouldStartInstantDragOnMouseDown(obj)
 end
 
 function Theme:AttachDragHandle(handle, win)
-    if not (handle and win and win._scBeginDrag and win._scEndDrag) then
+    if not (handle and handle.EnableMouse and handle.RegisterForDrag and win and win._scBeginDrag and win._scEndDrag) then
+        return
+    end
+    if handle == win and win._scMovableHooked then
         return
     end
     if not win._scLocked then
@@ -2107,17 +2315,23 @@ function Theme:AttachDragHandle(handle, win)
         handle._scHandleHooked = true
         handle:HookScript("OnMouseDown", function(selfHandle, btn)
             if btn == "LeftButton" and IsHandleAttachedToWindow(selfHandle, win) and ShouldStartInstantDragOnMouseDown(selfHandle) then
-                win._scBeginDrag()
+                if win._scPrepareDrag then
+                    win._scPrepareDrag()
+                end
             end
         end)
         handle:HookScript("OnMouseUp", function(_, btn)
-            if btn == "LeftButton" and win._scDragging then
-                win._scEndDrag()
+            if btn == "LeftButton" then
+                if win._scDragging then
+                    win._scEndDrag()
+                elseif win._scDisarmDragWatch then
+                    win._scDisarmDragWatch()
+                end
             end
         end)
         handle:HookScript("OnDragStart", function(selfHandle)
             if selfHandle._scHoveredHyperlink == nil and IsHandleAttachedToWindow(selfHandle, win) then
-                win._scBeginDrag()
+                win._scBeginDrag(true)
             end
         end)
         handle:HookScript("OnDragStop", function() win._scEndDrag() end)
@@ -2148,6 +2362,7 @@ function Theme:MakeMovable(win, opts)
             win._scDragWatch:SetScript("OnUpdate", nil)
             win._scDragWatch:Hide()
         end
+        win._scDragState = nil
         if not win._scDragging then
             if win._scSizing then
                 win._scSizing = false
@@ -2156,7 +2371,13 @@ function Theme:MakeMovable(win, opts)
             return
         end
         win._scDragging = false
-        pcall(win.StopMovingOrSizing, win)
+        win._scJustDraggedAt = (GetTime and GetTime()) or 0
+        if win.StopMovingOrSizing then
+            pcall(win.StopMovingOrSizing, win)
+        end
+        if win.SetUserPlaced then
+            pcall(win.SetUserPlaced, win, false)
+        end
         SaveWindowCenterOffset(win, opts.key, opts)
         if opts.key and UIParent and win.GetParent and win:GetParent() == UIParent then
             Theme:RestoreWindowPosition(win, opts.key, opts.combatLock, opts)
@@ -2166,51 +2387,165 @@ function Theme:MakeMovable(win, opts)
         end
     end
 
-    local function BeginDrag()
-        if not CanDragWindow(win, opts) then
-            return
-        end
-        if win._scDragging then
-            pcall(win.StopMovingOrSizing, win)
-            win._scDragging = false
-        end
-        win:SetMovable(true)
-        win:SetClampedToScreen(true)
-        local nPts = win.GetNumPoints and win:GetNumPoints() or 0
-        if win:GetParent() == UIParent and (nPts == 0 or nPts > 1) then
-            local cx, cy = win:GetCenter()
-            local ux, uy = UIParent and UIParent:GetCenter()
-            if cx and cy and ux and uy then
-                local scale = GetRelativeScaleToUIParent(win)
-                win:ClearAllPoints()
-                win:SetPoint("CENTER", UIParent, "CENTER", (cx * scale - ux) / scale, (cy * scale - uy) / scale)
-            elseif nPts == 0 then
-                win:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-            end
-        end
-        win._scDragging = true
-        if not (opts.combatLock and InCombatLockdown and InCombatLockdown()) and win.Raise then
-            pcall(win.Raise, win)
-        end
-        local ok = pcall(win.StartMoving, win)
-        if not ok then
-            win._scDragging = false
-            return
-        end
+    local function EnsureDragWatch()
         if not win._scDragWatch then
-            local dw = CreateFrame("Frame", nil, win)
+            -- Anchor a 1x1 watchdog directly to UIParent so win:ClearAllPoints() or 0x0 culling never stops OnUpdate in 16001.
+            local dw = CreateFrame("Frame", nil, UIParent or win)
+            dw:SetSize(1, 1)
+            dw:SetPoint("TOPLEFT", UIParent or win, "TOPLEFT", 0, 0)
+            if dw.SetFrameStrata then
+                dw:SetFrameStrata("LOW")
+            end
             dw:Hide()
             win._scDragWatch = dw
         end
-        win._scDragWatch:Show()
-        win._scDragWatch:SetScript("OnUpdate", function()
-            if not win._scDragging then
-                win._scDragWatch:SetScript("OnUpdate", nil)
-                win._scDragWatch:Hide()
+        return win._scDragWatch
+    end
+
+    local function DisarmDragWatch()
+        if not win._scDragging and win._scDragWatch then
+            win._scDragWatch:SetScript("OnUpdate", nil)
+            win._scDragWatch:Hide()
+        end
+    end
+
+    local function PrepareDragOnMouseDown()
+        if not CanDragWindow(win, opts) then
+            return
+        end
+        win:SetMovable(true)
+        win:SetClampedToScreen(true)
+    end
+
+    local function BeginDrag(fromDragStart)
+        if fromDragStart == nil then
+            fromDragStart = true
+        end
+        if win._scDragging then
+            return
+        end
+        if not CanDragWindow(win, opts) then
+            return
+        end
+        win:SetMovable(true)
+        win:SetClampedToScreen(true)
+        local nPts = (win.GetNumPoints and win:GetNumPoints()) or 0
+        local winScale = (win.GetEffectiveScale and win:GetEffectiveScale()) or 1
+        if not (winScale and winScale > 0) then
+            winScale = 1
+        end
+        local uiScale = (UIParent and UIParent.GetEffectiveScale and UIParent:GetEffectiveScale()) or 1
+        if not (uiScale and uiScale > 0) then
+            uiScale = 1
+        end
+        local relScale = winScale / uiScale
+        local anchor = (opts and opts.anchor == "TOP") and "TOP" or "CENTER"
+        local cx, cy = win:GetCenter()
+        local ux, uy = UIParent and UIParent:GetCenter()
+        local startOffX, startOffY = 0, 0
+        if anchor == "TOP" then
+            local top = win:GetTop()
+            local utop = UIParent and UIParent:GetTop()
+            if cx and top and ux and utop and cx == cx and top == top then
+                startOffX = cx - (ux / relScale)
+                startOffY = top - (utop / relScale)
+            end
+        else
+            if cx and cy and ux and uy and cx == cx and cy == cy then
+                startOffX = cx - (ux / relScale)
+                startOffY = cy - (uy / relScale)
+            end
+        end
+        -- Only normalize multi-point/unanchored frames; leave single-anchor windows untouched for native StartMoving() (like chatButton).
+        if (nPts == 0 or nPts > 1) and UIParent and win.GetParent and win:GetParent() == UIParent then
+            win:ClearAllPoints()
+            win:SetPoint(anchor, UIParent, anchor, startOffX, startOffY)
+        end
+        if not (opts.combatLock and InCombatLockdown and InCombatLockdown()) and win.Raise then
+            pcall(win.Raise, win)
+        end
+        if type(opts.onStart) == "function" then
+            pcall(opts.onStart, win)
+        end
+        -- Use WoW's native StartMoving() directly from OnDragStart (identical to SocialCentralChatShortcutButton),
+        -- never interrupting it with StopMovingOrSizing() in OnUpdate while dragging.
+        local usedNativeMove = false
+        if win.StartMoving then
+            usedNativeMove = (pcall(win.StartMoving, win) == true)
+        end
+        local rawX, rawY = GetCursorPosition and GetCursorPosition()
+        local uw, uh = UIParent and UIParent:GetSize()
+        local ww, wh = win:GetSize()
+        local minOffX, maxOffX, minOffY, maxOffY
+        if uw and ww and ww > 0 then
+            local limX = math.max(0, (uw - ww * relScale) * 0.5 / relScale)
+            minOffX, maxOffX = -limX, limX
+        end
+        if anchor == "TOP" then
+            if uh and uh > 0 then
+                minOffY = (-uh + 40) / relScale
+                maxOffY = 0
+            end
+        elseif uh and wh and wh > 0 then
+            local limY = math.max(0, (uh - wh * relScale) * 0.5 / relScale)
+            minOffY, maxOffY = -limY, limY
+        end
+        win._scDragState = {
+            anchor = anchor,
+            startedAt = (GetTime and GetTime()) or 0,
+            startRawX = rawX or 0,
+            startRawY = rawY or 0,
+            lastRawX = rawX or 0,
+            lastRawY = rawY or 0,
+            startOffX = startOffX,
+            startOffY = startOffY,
+            winScale = winScale,
+            minOffX = minOffX,
+            maxOffX = maxOffX,
+            minOffY = minOffY,
+            maxOffY = maxOffY,
+            usedNativeMove = usedNativeMove,
+        }
+        win._scDragging = true
+        local dw = EnsureDragWatch()
+        dw:Show()
+        dw:SetScript("OnUpdate", function()
+            if not win._scDragging or not win:IsVisible() then
+                EndDrag()
                 return
             end
-            if IsMouseButtonDown and not IsMouseButtonDown("LeftButton") then
+            local ds = win._scDragState
+            if not ds then
                 EndDrag()
+                return
+            end
+            if IsMouseButtonDown and not IsMouseButtonDown("LeftButton") and ((GetTime and GetTime() or 0) - (ds.startedAt or 0)) > 0.08 then
+                EndDrag()
+                return
+            end
+            if ds.usedNativeMove then
+                return
+            end
+            local curX, curY = GetCursorPosition and GetCursorPosition()
+            if not (curX and curY and curX == curX and curY == curY) then
+                return
+            end
+            if curX == ds.lastRawX and curY == ds.lastRawY then
+                return
+            end
+            ds.lastRawX = curX
+            ds.lastRawY = curY
+            local newX = ds.startOffX + ((curX - ds.startRawX) / ds.winScale)
+            local newY = ds.startOffY + ((curY - ds.startRawY) / ds.winScale)
+            if ds.minOffX and ds.maxOffX then
+                newX = math.max(ds.minOffX, math.min(ds.maxOffX, newX))
+            end
+            if ds.minOffY and ds.maxOffY then
+                newY = math.max(ds.minOffY, math.min(ds.maxOffY, newY))
+            end
+            if UIParent and win.GetParent and win:GetParent() == UIParent then
+                win:ClearAllPoints()
+                win:SetPoint(ds.anchor, UIParent, ds.anchor, newX, newY)
             end
         end)
     end
@@ -2218,6 +2553,8 @@ function Theme:MakeMovable(win, opts)
     win._scCombatLock = opts.combatLock and true or false
     win._scBeginDrag = BeginDrag
     win._scEndDrag = EndDrag
+    win._scPrepareDrag = PrepareDragOnMouseDown
+    win._scDisarmDragWatch = DisarmDragWatch
     win._scSavePosition = function()
         SaveWindowCenterOffset(win, opts.key, opts)
     end
@@ -2227,20 +2564,27 @@ function Theme:MakeMovable(win, opts)
     if not win._scMovableHooked then
         win._scMovableHooked = true
         win:HookScript("OnMouseDown", function(f, btn)
-            if btn == "LeftButton" and ShouldStartInstantDragOnMouseDown(f) then
-                BeginDrag()
+            if btn ~= "LeftButton" then return end
+            if ShouldStartInstantDragOnMouseDown(f) then
+                PrepareDragOnMouseDown()
             end
         end)
         win:HookScript("OnMouseUp", function(_, btn)
-            if btn == "LeftButton" and win._scDragging then
-                EndDrag()
+            if btn == "LeftButton" then
+                if win._scDragging then
+                    EndDrag()
+                else
+                    DisarmDragWatch()
+                end
             end
         end)
-        win:HookScript("OnDragStart", BeginDrag)
+        win:HookScript("OnDragStart", function()
+            BeginDrag(true)
+        end)
         win:HookScript("OnDragStop", EndDrag)
         win:HookScript("OnHide", EndDrag)
         win:HookScript("OnShow", function(f)
-            if opts.key then
+            if opts.key and not opts.skipAutoRestore then
                 Theme:RestoreWindowPosition(f, opts.key, opts.combatLock, opts)
             end
         end)
@@ -2309,6 +2653,12 @@ function Theme:ResetAllWindowPositions()
             ns.db.windowPositionsByRes[curKey] = {}
         end
         ns.db.windowPositions = {}
+        if type(ns.db.settings) == "table" then
+            ns.db.settings.chatButtonCustomPos = nil
+            if type(ns.db.settings.chatButtonPositionsByRes) == "table" then
+                ns.db.settings.chatButtonPositionsByRes[curKey] = nil
+            end
+        end
         if type(ns.db.window) == "table" then
             ns.db.window.point = nil
             ns.db.window.relativePoint = nil
@@ -2329,8 +2679,8 @@ function Theme:ResetAllWindowPositions()
     for key in pairs(movableRegistry) do
         self:ResetWindowPosition(key, true)
     end
-    if ns.MsgPreview and ns.MsgPreview.ResetPosition then
-        pcall(ns.MsgPreview.ResetPosition, ns.MsgPreview, true)
+    if ns.MinimapPreview and ns.MinimapPreview.ResetPosition then
+        pcall(ns.MinimapPreview.ResetPosition, ns.MinimapPreview, true)
     end
     if ns.Minimap and ns.Minimap.Update then
         pcall(ns.Minimap.Update, ns.Minimap)
@@ -2417,121 +2767,1280 @@ function Theme:PrepareTopOverlayModal(m, minLevel)
     if m.Raise then m:Raise() end
 end
 
---- Display a modal help card explaining what an option does and how to use it.
-function Theme:ShowHelpPopup(title, whatText, howText)
-    if not helpPopup then
-        local m = CreateFrame("Frame", "SocialCentralHelpPopup", UIParent, "BackdropTemplate")
-        m:SetSize(430, 230)
-        m:SetPoint("CENTER")
-        self:PrepareTopOverlayModal(m, 860)
-        self:MakeMovable(m, { key = "helpPopup" })
-        table.insert(UISpecialFrames, "SocialCentralHelpPopup")
+local CHROMIE_NPC_ID = 10667
+local CHROMIE_DISPLAY_ID = 10008
+local CHROMIE_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_PocketWatch_02"
 
-        m.title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        m.title:SetPoint("TOPLEFT", 16, -14)
-        m.title:SetPoint("TOPRIGHT", -36, -14)
-        m.title:SetJustifyH("LEFT")
-
-        local topCloseBtn = self:CreateButton(m, 22, 20, "X", "default")
-        topCloseBtn:SetPoint("TOPRIGHT", -10, -10)
-        topCloseBtn:SetScript("OnClick", function() m:Hide() end)
-        m.topCloseBtn = topCloseBtn
-
-        m.body = m:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        m.body:SetPoint("TOPLEFT", 16, -44)
-        m.body:SetPoint("BOTTOMRIGHT", -16, 48)
-        m.body:SetJustifyH("LEFT")
-        m.body:SetJustifyV("TOP")
-        m.body:SetWordWrap(true)
-
-        m.closeBtn = self:CreateButton(m, 96, 24, L["Close"], "primary")
-        m.closeBtn:SetPoint("BOTTOMRIGHT", -16, 14)
-        m.closeBtn:SetScript("OnClick", function() m:Hide() end)
-
-        self:RegisterListener(function()
-            if m:IsShown() then
-                self:ApplyBackdrop(m, "window")
-                self:StyleButton(m.topCloseBtn, "default")
-                self:StyleButton(m.closeBtn, "primary")
-            end
-        end)
-
-        helpPopup = m
+local function CollectGuideTargetObjs(rawTarget, outList, seen)
+    if not rawTarget then return end
+    local rType = type(rawTarget)
+    if rType == "function" then
+        local ok, res = pcall(rawTarget)
+        if ok and res then
+            CollectGuideTargetObjs(res, outList, seen)
+        end
+        return
     end
-
-    self:PrepareTopOverlayModal(helpPopup, 860)
-    self:ApplyBackdrop(helpPopup, "window")
-    self:StyleButton(helpPopup.topCloseBtn, "default")
-    self:StyleButton(helpPopup.closeBtn, "primary")
-    helpPopup.title:SetText(title or L["Help"])
-    helpPopup.body:SetText(
-        "|cff58a6ff" .. L["What it does:"] .. "|r\n" .. (whatText or "") ..
-        "\n\n|cff4ade80" .. L["How to use:"] .. "|r\n" .. (howText or "")
-    )
-    helpPopup:Show()
-    if helpPopup.Raise then helpPopup:Raise() end
+    if rType ~= "table" then return end
+    if rawTarget.GetLeft then
+        if not seen[rawTarget] then
+            seen[rawTarget] = true
+            outList[#outList + 1] = rawTarget
+        end
+        return
+    end
+    for _, sub in ipairs(rawTarget) do
+        CollectGuideTargetObjs(sub, outList, seen)
+    end
 end
 
---- Create a standardized '?' help micro-button beside an option or feature bar.
-function Theme:CreateHelpButton(parent, title, whatText, howText, size)
+local function ComputeGuideTargetsRect(rawTarget)
+    local objs = {}
+    local seen = {}
+    CollectGuideTargetObjs(rawTarget, objs, seen)
+    if #objs == 0 then return nil end
+
+    local uiScale = (_G.UIParent and _G.UIParent.GetEffectiveScale and _G.UIParent:GetEffectiveScale()) or 1
+    if not uiScale or uiScale <= 0 then uiScale = 1 end
+
+    local minL, minB, maxR, maxT = nil, nil, nil, nil
+    for _, obj in ipairs(objs) do
+        local vis = (not obj.IsVisible) or obj:IsVisible()
+        if vis and obj.GetLeft and obj.GetRight and obj.GetBottom and obj.GetTop then
+            local l = obj:GetLeft()
+            local r = obj:GetRight()
+            local b = obj:GetBottom()
+            local t = obj:GetTop()
+            if l and r and b and t and r > l and t > b then
+                local oScale = (obj.GetEffectiveScale and obj:GetEffectiveScale()) or uiScale
+                local ratio = oScale / uiScale
+                l, r, b, t = l * ratio, r * ratio, b * ratio, t * ratio
+                if not minL or l < minL then minL = l end
+                if not minB or b < minB then minB = b end
+                if not maxR or r > maxR then maxR = r end
+                if not maxT or t > maxT then maxT = t end
+            end
+        end
+    end
+    if not minL then return nil end
+    return minL, minB, maxR, maxT
+end
+
+local function EnsureGuideSpotlight()
+    if guideSpotlight then
+        return guideSpotlight
+    end
+    local spot = CreateFrame("Frame", "SocialCentralNpcGuideSpotlight", UIParent)
+    spot:Hide()
+    spot:SetFrameStrata("FULLSCREEN_DIALOG")
+    spot:SetFrameLevel(862)
+    spot:EnableMouse(false)
+
+    local fill = spot:CreateTexture(nil, "BACKGROUND")
+    fill:SetAllPoints()
+    fill:SetTexture(WHITE8X8)
+    fill:SetVertexColor(1.0, 0.82, 0.24, 0.11)
+    spot.fill = fill
+
+    local eTop = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    eTop:SetPoint("TOPLEFT", 0, 0)
+    eTop:SetPoint("TOPRIGHT", 0, 0)
+    eTop:SetHeight(2)
+    local eBot = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    eBot:SetPoint("BOTTOMLEFT", 0, 0)
+    eBot:SetPoint("BOTTOMRIGHT", 0, 0)
+    eBot:SetHeight(2)
+    local eLeft = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    eLeft:SetPoint("TOPLEFT", 0, 0)
+    eLeft:SetPoint("BOTTOMLEFT", 0, 0)
+    eLeft:SetWidth(2)
+    local eRight = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    eRight:SetPoint("TOPRIGHT", 0, 0)
+    eRight:SetPoint("BOTTOMRIGHT", 0, 0)
+    eRight:SetWidth(2)
+    spot.edges = { eTop, eBot, eLeft, eRight }
+
+    local arrow = CreateFrame("Frame", nil, spot)
+    arrow:SetSize(36, 36)
+    arrow:EnableMouse(false)
+
+    local clipBox = CreateFrame("Frame", nil, arrow)
+    clipBox:SetSize(34, 18)
+    if clipBox.SetClipsChildren then
+        clipBox:SetClipsChildren(true)
+    end
+    clipBox:EnableMouse(false)
+
+    local headBorder = clipBox:CreateTexture(nil, "ARTWORK", nil, 1)
+    headBorder:SetSize(22, 22)
+    headBorder:SetTexture(WHITE8X8)
+    headBorder:SetRotation(math.pi * 0.25)
+    headBorder:SetVertexColor(0.14, 0.12, 0.10, 1.0)
+
+    local headShoulder = clipBox:CreateTexture(nil, "ARTWORK", nil, 2)
+    headShoulder:SetTexture(WHITE8X8)
+    headShoulder:SetVertexColor(0.14, 0.12, 0.10, 1.0)
+
+    local headFill = clipBox:CreateTexture(nil, "ARTWORK", nil, 3)
+    headFill:SetSize(18, 18)
+    headFill:SetTexture(WHITE8X8)
+    headFill:SetRotation(math.pi * 0.25)
+    headFill:SetVertexColor(0.995, 0.99, 0.975, 1.0)
+
+    local shaftBorder = arrow:CreateTexture(nil, "ARTWORK", nil, 1)
+    shaftBorder:SetTexture(WHITE8X8)
+    shaftBorder:SetVertexColor(0.14, 0.12, 0.10, 1.0)
+
+    local shaftFrame = CreateFrame("Frame", nil, arrow)
+    shaftFrame:SetAllPoints(arrow)
+    shaftFrame:SetFrameLevel((clipBox:GetFrameLevel() or 864) + 1)
+    shaftFrame:EnableMouse(false)
+
+    local shaftFill = shaftFrame:CreateTexture(nil, "ARTWORK", nil, 4)
+    shaftFill:SetTexture(WHITE8X8)
+    shaftFill:SetVertexColor(0.995, 0.99, 0.975, 1.0)
+
+    function arrow:SetDirection(dir)
+        if self._dir == dir then return end
+        self._dir = dir
+        clipBox:ClearAllPoints()
+        headBorder:ClearAllPoints()
+        headShoulder:ClearAllPoints()
+        headFill:ClearAllPoints()
+        shaftBorder:ClearAllPoints()
+        shaftFill:ClearAllPoints()
+
+        if dir == "DOWN" then
+            clipBox:SetSize(34, 18)
+            clipBox:SetPoint("BOTTOM", self, "BOTTOM", 0, 1)
+            headBorder:SetPoint("CENTER", clipBox, "TOP", 0, 0)
+            headShoulder:SetSize(31, 2.5)
+            headShoulder:SetPoint("TOP", clipBox, "TOP", 0, 0)
+            headFill:SetPoint("CENTER", clipBox, "TOP", 0, 1)
+            shaftBorder:SetSize(12, 14)
+            shaftBorder:SetPoint("BOTTOM", clipBox, "TOP", 0, -2)
+            shaftFill:SetSize(7, 13)
+            shaftFill:SetPoint("BOTTOM", clipBox, "TOP", 0, -3.5)
+        elseif dir == "UP" then
+            clipBox:SetSize(34, 18)
+            clipBox:SetPoint("TOP", self, "TOP", 0, -1)
+            headBorder:SetPoint("CENTER", clipBox, "BOTTOM", 0, 0)
+            headShoulder:SetSize(31, 2.5)
+            headShoulder:SetPoint("BOTTOM", clipBox, "BOTTOM", 0, 0)
+            headFill:SetPoint("CENTER", clipBox, "BOTTOM", 0, -1)
+            shaftBorder:SetSize(12, 14)
+            shaftBorder:SetPoint("TOP", clipBox, "BOTTOM", 0, 2)
+            shaftFill:SetSize(7, 13)
+            shaftFill:SetPoint("TOP", clipBox, "BOTTOM", 0, 3.5)
+        elseif dir == "LEFT" then
+            clipBox:SetSize(18, 34)
+            clipBox:SetPoint("LEFT", self, "LEFT", 1, 0)
+            headBorder:SetPoint("CENTER", clipBox, "RIGHT", 0, 0)
+            headShoulder:SetSize(2.5, 31)
+            headShoulder:SetPoint("RIGHT", clipBox, "RIGHT", 0, 0)
+            headFill:SetPoint("CENTER", clipBox, "RIGHT", -1, 0)
+            shaftBorder:SetSize(14, 12)
+            shaftBorder:SetPoint("LEFT", clipBox, "RIGHT", -2, 0)
+            shaftFill:SetSize(13, 7)
+            shaftFill:SetPoint("LEFT", clipBox, "RIGHT", -3.5, 0)
+        else -- RIGHT
+            clipBox:SetSize(18, 34)
+            clipBox:SetPoint("RIGHT", self, "RIGHT", -1, 0)
+            headBorder:SetPoint("CENTER", clipBox, "LEFT", 0, 0)
+            headShoulder:SetSize(2.5, 31)
+            headShoulder:SetPoint("LEFT", clipBox, "LEFT", 0, 0)
+            headFill:SetPoint("CENTER", clipBox, "LEFT", 1, 0)
+            shaftBorder:SetSize(14, 12)
+            shaftBorder:SetPoint("RIGHT", clipBox, "LEFT", 2, 0)
+            shaftFill:SetSize(13, 7)
+            shaftFill:SetPoint("RIGHT", clipBox, "LEFT", 3.5, 0)
+        end
+    end
+    arrow:SetDirection("DOWN")
+    spot.arrow = arrow
+
+    guideSpotlight = spot
+    return spot
+end
+
+local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
+    local spot = EnsureGuideSpotlight()
+    if not (m and m:IsShown() and stepSpec) then
+        spot:Hide()
+        return
+    end
+    local rawTarget = (stepSpec.target ~= nil) and stepSpec.target or (spec and spec.defaultTarget)
+    local tl, tb, tr, tt = ComputeGuideTargetsRect(rawTarget)
+    local uiW = (_G.UIParent and _G.UIParent.GetWidth and _G.UIParent:GetWidth()) or 1280
+    local uiH = (_G.UIParent and _G.UIParent.GetHeight and _G.UIParent:GetHeight()) or 720
+    local mw = m:GetWidth() or 516
+    local mh = m:GetHeight() or 190
+
+    if not tl then
+        spot:Hide()
+        if not m._userDragged then
+            m:ClearAllPoints()
+            m:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 60)
+        end
+        return
+    end
+
+    tl = math.max(4, tl)
+    tb = math.max(4, tb)
+    tr = math.min(uiW - 4, tr)
+    tt = math.min(uiH - 4, tt)
+    if tr <= tl or tt <= tb then
+        spot:Hide()
+        return
+    end
+
+    spot:ClearAllPoints()
+    spot:SetFrameLevel(math.max(862, (m.GetFrameLevel and m:GetFrameLevel() or 865) - 3))
+    spot:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", tl - 4, tb - 4)
+    spot:SetPoint("TOPRIGHT", _G.UIParent, "BOTTOMLEFT", tr + 4, tt + 4)
+
+    local t = nowT or (GetTime and GetTime()) or 0
+    local wave = 0.5 + 0.5 * math.sin(t * 5.8)
+    local edgeA = 0.72 + 0.28 * wave
+    for _, ed in ipairs(spot.edges) do
+        ed:SetColorTexture(1.0, 0.84, 0.26, edgeA)
+    end
+    spot.fill:SetVertexColor(1.0, 0.84, 0.26, 0.07 + 0.09 * wave)
+    spot:Show()
+
+    local canAbove = (tt + 26 + mh) <= (uiH - 12)
+    local canBelow = (tb - 26 - mh) >= 12
+    local canRight = (tr + 26 + mw) <= (uiW - 12)
+    local canLeft = (tl - 26 - mw) >= 12
+
+    local bob = math.sin(t * 6.0) * 4
+    local arrow = spot.arrow
+    arrow:ClearAllPoints()
+    local dx, dy = nil, nil
+    local cx = (tl + tr) * 0.5
+    local cy = (tb + tt) * 0.5
+
+    if canAbove then
+        arrow:SetDirection("DOWN")
+        arrow:SetPoint("BOTTOM", spot, "TOP", 0, 2 + bob)
+        dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
+        dy = math.max(12, math.min(uiH - mh - 12, tt + 40))
+    elseif canRight then
+        arrow:SetDirection("LEFT")
+        arrow:SetPoint("LEFT", spot, "RIGHT", 2 + bob, 0)
+        dx = math.max(12, math.min(uiW - mw - 12, tr + 40))
+        dy = math.max(12, math.min(uiH - mh - 12, cy - mh * 0.5))
+    elseif canLeft then
+        arrow:SetDirection("RIGHT")
+        arrow:SetPoint("RIGHT", spot, "LEFT", -2 - bob, 0)
+        dx = math.max(12, math.min(uiW - mw - 12, tl - mw - 40))
+        dy = math.max(12, math.min(uiH - mh - 12, cy - mh * 0.5))
+    elseif canBelow then
+        arrow:SetDirection("UP")
+        arrow:SetPoint("TOP", spot, "BOTTOM", 0, -2 - bob)
+        dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
+        dy = math.max(12, math.min(uiH - mh - 12, tb - mh - 40))
+    else
+        arrow:SetDirection("DOWN")
+        arrow:SetPoint("BOTTOM", spot, "TOP", 0, 2 + bob)
+        dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
+        dy = math.max(12, math.min(uiH - mh - 12, uiH - mh - 16))
+    end
+    arrow:Show()
+
+    if not m._userDragged and dx and dy then
+        m:ClearAllPoints()
+        m:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", dx, dy)
+    end
+end
+
+local function TriggerNpcPortraitSpeech(m, animId)
+    if not m then return end
+    local now = (GetTime and GetTime()) or 0
+    m._talkUntil = now + 4.2
+    m._lastTalkAnimAt = now
+    local mod = m.model
+    if mod then
+        if not mod._loadedOk and mod.SetDisplayInfo then
+            pcall(mod.SetDisplayInfo, mod, CHROMIE_DISPLAY_ID)
+        end
+        if mod.SetAnimation then
+            pcall(mod.SetAnimation, mod, animId or 60)
+        end
+    end
+end
+
+local function ResolveHelpTargetFrame(helpBtn, opts)
+    if opts and opts.target ~= nil then
+        return opts.target
+    end
+    if helpBtn then
+        if helpBtn._scGuideTarget ~= nil then
+            return helpBtn._scGuideTarget
+        end
+        if helpBtn.GetPoint then
+            local _, relTo = helpBtn:GetPoint(1)
+            local parent = helpBtn:GetParent()
+            if relTo and relTo ~= UIParent and relTo ~= parent then
+                if relTo._scGuideGroup then
+                    return relTo._scGuideGroup
+                end
+                return relTo
+            end
+        end
+    end
+    return nil
+end
+
+local function IsNpcGuideInCombat()
+    return (InCombatLockdown and InCombatLockdown() == true)
+        or (UnitAffectingCombat and UnitAffectingCombat("player") == true)
+        or false
+end
+
+local function AdaptBubbleTextForWhiteBg(text)
+    if type(text) ~= "string" or text == "" then
+        return text
+    end
+    return (text:gsub("|cff(%x%x%x%x%x%x)", function(hex)
+        local r = tonumber(hex:sub(1, 2), 16) or 0
+        local g = tonumber(hex:sub(3, 4), 16) or 0
+        local b = tonumber(hex:sub(5, 6), 16) or 0
+        local lum = (0.299 * r) + (0.587 * g) + (0.114 * b)
+        if lum > 125 then
+            local factor = 0.42
+            return string.format("|cff%02x%02x%02x", math.floor(r * factor), math.floor(g * factor), math.floor(b * factor))
+        end
+        return "|cff" .. hex
+    end))
+end
+
+local function ApplyCircleMaskToTexture(parent, tex)
+    if not (parent and parent.CreateMaskTexture and tex and tex.AddMaskTexture) then
+        return
+    end
+    local mask = parent:CreateMaskTexture()
+    mask:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    mask:SetAllPoints(tex)
+    tex:AddMaskTexture(mask)
+end
+
+local function CreateRoundedBubbleLayer(parent, layerName, subLevel, radius, inset, r, g, b, a)
+    local effR = math.max(4, radius - inset)
+    local diam = effR * 2
+    local corners = {
+        { "TOPLEFT", "TOPLEFT", inset, -inset },
+        { "TOPRIGHT", "TOPRIGHT", -inset, -inset },
+        { "BOTTOMLEFT", "BOTTOMLEFT", inset, inset },
+        { "BOTTOMRIGHT", "BOTTOMRIGHT", -inset, inset },
+    }
+    for _, c in ipairs(corners) do
+        local tex = parent:CreateTexture(nil, layerName, nil, subLevel)
+        tex:SetSize(diam, diam)
+        tex:SetPoint(c[1], parent, c[2], c[3], c[4])
+        tex:SetTexture(WHITE8X8)
+        tex:SetVertexColor(r, g, b, a)
+        ApplyCircleMaskToTexture(parent, tex)
+    end
+    local hBar = parent:CreateTexture(nil, layerName, nil, subLevel)
+    hBar:SetPoint("TOPLEFT", parent, "TOPLEFT", inset + effR, -inset)
+    hBar:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -(inset + effR), inset)
+    hBar:SetTexture(WHITE8X8)
+    hBar:SetVertexColor(r, g, b, a)
+
+    local vBar = parent:CreateTexture(nil, layerName, nil, subLevel)
+    vBar:SetPoint("TOPLEFT", parent, "TOPLEFT", inset, -(inset + effR))
+    vBar:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -inset, inset + effR)
+    vBar:SetTexture(WHITE8X8)
+    vBar:SetVertexColor(r, g, b, a)
+end
+
+local function EnsureNpcGuidePopup()
+    if helpPopup then
+        return helpPopup
+    end
+
+    local m = CreateFrame("Frame", "SocialCentralHelpPopup", UIParent)
+    m:Hide()
+    m:SetSize(520, 174)
+    m:SetPoint("CENTER")
+    Theme:PrepareTopOverlayModal(m, 865)
+    m:EnableMouse(false)
+    if m._solidOpaqueBg then m._solidOpaqueBg:Hide() end
+    table.insert(UISpecialFrames, "SocialCentralHelpPopup")
+
+    -- Floating circular medallion portrait for Chromie (no outer dark backdrop box)
+    local portBox = CreateFrame("Button", nil, m)
+    portBox:SetSize(96, 96)
+    portBox:SetPoint("TOPLEFT", m, "TOPLEFT", 4, -8)
+    portBox:EnableMouse(true)
+    portBox:RegisterForClicks("LeftButtonUp")
+    m.portBox = portBox
+
+    local portGoldRing = portBox:CreateTexture(nil, "BACKGROUND", nil, 1)
+    portGoldRing:SetSize(94, 94)
+    portGoldRing:SetPoint("CENTER", portBox, "CENTER", 0, 0)
+    portGoldRing:SetTexture(WHITE8X8)
+    portGoldRing:SetVertexColor(0.88, 0.70, 0.24, 1.0)
+    ApplyCircleMaskToTexture(portBox, portGoldRing)
+
+    local portDarkRing = portBox:CreateTexture(nil, "BACKGROUND", nil, 2)
+    portDarkRing:SetSize(88, 88)
+    portDarkRing:SetPoint("CENTER", portBox, "CENTER", 0, 0)
+    portDarkRing:SetTexture(WHITE8X8)
+    portDarkRing:SetVertexColor(0.15, 0.13, 0.11, 1.0)
+    ApplyCircleMaskToTexture(portBox, portDarkRing)
+
+    local portInnerBg = portBox:CreateTexture(nil, "ARTWORK", nil, 1)
+    portInnerBg:SetSize(84, 84)
+    portInnerBg:SetPoint("CENTER", portBox, "CENTER", 0, 0)
+    portInnerBg:SetTexture(WHITE8X8)
+    portInnerBg:SetVertexColor(0.11, 0.10, 0.09, 1.0)
+    ApplyCircleMaskToTexture(portBox, portInnerBg)
+
+    local portRing = portBox:CreateTexture(nil, "OVERLAY", nil, 6)
+    portRing:SetPoint("CENTER", portBox, "CENTER", 0, 0)
+    if Theme:HasAtlas("Artifacts-PerkRing-Final") then
+        portRing:SetSize(108, 108)
+        portRing:SetAtlas("Artifacts-PerkRing-Final", false)
+        portRing:SetVertexColor(0.95, 0.84, 0.52, 0.95)
+    elseif Theme:HasAtlas("common-ring-gold") then
+        portRing:SetSize(102, 102)
+        portRing:SetAtlas("common-ring-gold", false)
+        portRing:SetVertexColor(0.98, 0.88, 0.56, 0.95)
+    else
+        portRing:SetAlpha(0)
+    end
+    m.portRing = portRing
+
+    local fallbackIco = portBox:CreateTexture(nil, "ARTWORK", nil, 2)
+    fallbackIco:SetSize(74, 74)
+    fallbackIco:SetPoint("CENTER", portBox, "CENTER", 0, 0)
+    fallbackIco:SetTexture(CHROMIE_FALLBACK_ICON)
+    fallbackIco:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    ApplyCircleMaskToTexture(portBox, fallbackIco)
+    m.fallbackIco = fallbackIco
+
+    local model = CreateFrame("PlayerModel", nil, portBox)
+    model:SetSize(82, 82)
+    model:SetPoint("CENTER", portBox, "CENTER", 0, 0)
+    model._scSkipLayerSync = true
+    model._loadedOk = false
+    if model.EnableMouse then model:EnableMouse(false) end
+    local function ApplyChromieCamera(selfMod)
+        if selfMod.SetPortraitZoom then pcall(selfMod.SetPortraitZoom, selfMod, 0.66) end
+        if selfMod.SetCamDistanceScale then pcall(selfMod.SetCamDistanceScale, selfMod, 1.06) end
+        if selfMod.SetPosition then pcall(selfMod.SetPosition, selfMod, 0, 0, -0.04) end
+        if selfMod.SetFacing then pcall(selfMod.SetFacing, selfMod, 0.28) end
+        if selfMod.RefreshCamera then pcall(selfMod.RefreshCamera, selfMod) end
+    end
+    model:SetScript("OnModelLoaded", function(selfMod)
+        selfMod._loadedOk = true
+        fallbackIco:Hide()
+        ApplyChromieCamera(selfMod)
+        if selfMod.SetAnimation then pcall(selfMod.SetAnimation, selfMod, 60) end
+    end)
+    m.model = model
+
+    portBox:SetScript("OnClick", function()
+        TriggerNpcPortraitSpeech(m, 67)
+    end)
+    portBox:SetScript("OnEnter", function(selfPort)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(selfPort, "ANCHOR_TOP")
+        GameTooltip:SetText(L["Chromie"], 1.0, 0.85, 0.28)
+        GameTooltip:AddLine(L["SocialCentral Interactive Guide"], 0.85, 0.90, 0.96, true)
+        GameTooltip:AddLine(L["Click portrait to replay greeting."], 0.58, 0.72, 0.88, true)
+        GameTooltip:Show()
+    end)
+    portBox:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+
+    local npcName = m:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    npcName:SetText("|cffffd24d" .. L["Chromie"] .. "|r")
+    npcName:Hide()
+    m.npcName = npcName
+
+    local npcRole = m:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    npcRole:SetText(L["WoW Guide"])
+    npcRole:Hide()
+    m.npcRole = npcRole
+
+    -- Super-rounded warm aged-parchment Speech Bubble with seamless parchment grain & sepia tail toward Chromie
+    local bubble = CreateFrame("Frame", nil, m)
+    bubble:SetPoint("TOPLEFT", portBox, "TOPRIGHT", 22, 4)
+    bubble:SetPoint("BOTTOMRIGHT", m, "BOTTOMRIGHT", -4, 4)
+    bubble:EnableMouse(true)
+    CreateRoundedBubbleLayer(bubble, "BACKGROUND", 0, 20, 0, 0.25, 0.17, 0.08, 1.0)
+    CreateRoundedBubbleLayer(bubble, "BACKGROUND", 2, 20, 2.5, 0.905, 0.835, 0.690, 1.0)
+    local paperGrain = bubble:CreateTexture(nil, "BACKGROUND", nil, 3)
+    paperGrain:SetPoint("TOPLEFT", bubble, "TOPLEFT", 14, -12)
+    paperGrain:SetPoint("BOTTOMRIGHT", bubble, "BOTTOMRIGHT", -14, 12)
+    paperGrain:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\parchment.tga")
+    paperGrain:SetVertexColor(0.96, 0.91, 0.82, 0.72)
+    CreateRoundedBubbleLayer(bubble, "BACKGROUND", 4, 17, 5.5, 0.930, 0.865, 0.730, 0.28)
+    for lineIdx = 1, 7 do
+        local ruled = bubble:CreateTexture(nil, "BACKGROUND", nil, 5)
+        ruled:SetHeight(1)
+        ruled:SetPoint("TOPLEFT", bubble, "TOPLEFT", 20, -(26 + lineIdx * 24))
+        ruled:SetPoint("TOPRIGHT", bubble, "TOPRIGHT", -20, -(26 + lineIdx * 24))
+        ruled:SetTexture(WHITE8X8)
+        ruled:SetVertexColor(0.68, 0.57, 0.40, 0.14)
+    end
+    m.bubble = bubble
+
+    local tailBorder = bubble:CreateTexture(nil, "ARTWORK", nil, 1)
+    tailBorder:SetSize(20, 20)
+    tailBorder:SetPoint("CENTER", bubble, "TOPLEFT", 0, -52)
+    tailBorder:SetTexture(WHITE8X8)
+    tailBorder:SetRotation(math.pi * 0.25)
+    m.tailBorder = tailBorder
+
+    local tailFill = bubble:CreateTexture(nil, "ARTWORK", nil, 2)
+    tailFill:SetSize(16, 16)
+    tailFill:SetPoint("CENTER", bubble, "TOPLEFT", 2, -52)
+    tailFill:SetTexture(WHITE8X8)
+    tailFill:SetRotation(math.pi * 0.25)
+    m.tailFill = tailFill
+
+    local tailPatch = bubble:CreateTexture(nil, "ARTWORK", nil, 3)
+    tailPatch:SetSize(14, 24)
+    tailPatch:SetPoint("LEFT", bubble, "TOPLEFT", 2.5, -52)
+    tailPatch:SetTexture(WHITE8X8)
+    m.tailPatch = tailPatch
+
+    local topCloseBtn = Theme:CreateButton(bubble, 20, 18, "X", "default")
+    topCloseBtn:SetPoint("TOPRIGHT", -12, -10)
+    topCloseBtn:SetScript("OnClick", function() m:Hide() end)
+    m.topCloseBtn = topCloseBtn
+
+    local stepPill = bubble:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    stepPill:SetPoint("RIGHT", topCloseBtn, "LEFT", -8, 0)
+    stepPill:SetJustifyH("RIGHT")
+    stepPill:SetShadowColor(0, 0, 0, 0)
+    stepPill:SetTextColor(0.36, 0.42, 0.50)
+    m.stepPill = stepPill
+
+    m.title = bubble:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    m.title:SetPoint("TOPLEFT", 18, -12)
+    m.title:SetPoint("RIGHT", stepPill, "LEFT", -6, 0)
+    m.title:SetJustifyH("LEFT")
+    m.title:SetWordWrap(false)
+    m.title:SetShadowColor(0, 0, 0, 0)
+
+    local tagFs = bubble:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    tagFs:SetPoint("TOPLEFT", 18, -32)
+    tagFs:SetPoint("TOPRIGHT", -18, -32)
+    tagFs:SetJustifyH("LEFT")
+    tagFs:SetWordWrap(false)
+    tagFs:SetShadowColor(0, 0, 0, 0)
+    m.tagFs = tagFs
+
+    m.body = bubble:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    m.body:SetPoint("TOPLEFT", tagFs, "BOTTOMLEFT", 0, -5)
+    m.body:SetPoint("RIGHT", bubble, "RIGHT", -18, 0)
+    m.body:SetWidth(356)
+    m.body:SetJustifyH("LEFT")
+    m.body:SetJustifyV("TOP")
+    m.body:SetWordWrap(true)
+    m.body:SetSpacing(3)
+    m.body:SetShadowColor(0, 0, 0, 0)
+
+    local bubbleDivider = bubble:CreateTexture(nil, "ARTWORK", nil, 1)
+    bubbleDivider:SetHeight(1)
+    bubbleDivider:SetPoint("BOTTOMLEFT", 16, 40)
+    bubbleDivider:SetPoint("BOTTOMRIGHT", -16, 40)
+    bubbleDivider:SetTexture(WHITE8X8)
+    bubbleDivider:SetVertexColor(0.86, 0.85, 0.81, 1.0)
+    m.bubbleDivider = bubbleDivider
+
+    m.skipBtn = Theme:CreateButton(bubble, 74, 22, L["Close"], "default")
+    m.skipBtn:SetPoint("BOTTOMLEFT", 16, 12)
+    m.skipBtn:SetScript("OnClick", function()
+        local spec = m._guideSpec
+        if spec and type(spec.onSkip) == "function" then
+            pcall(spec.onSkip)
+        end
+        m:Hide()
+    end)
+
+    m.skipAllBtn = Theme:CreateButton(bubble, 152, 22, L["Not now (all areas)"], "default")
+    m.skipAllBtn:SetPoint("LEFT", m.skipBtn, "RIGHT", 6, 0)
+    m.skipAllBtn:Hide()
+    m.skipAllBtn:SetScript("OnClick", function()
+        local spec = m._guideSpec
+        if spec and type(spec.onSkipAll) == "function" then
+            pcall(spec.onSkipAll)
+        end
+        m:Hide()
+    end)
+
+    m.nextBtn = Theme:CreateButton(bubble, 114, 22, L["Next"], "primary")
+    m.nextBtn:SetPoint("BOTTOMRIGHT", -16, 12)
+
+    m.backBtn = Theme:CreateButton(bubble, 78, 22, L["Back"], "default")
+    m.backBtn:SetPoint("RIGHT", m.nextBtn, "LEFT", -6, 0)
+    m.closeBtn = m.nextBtn
+
+    Theme:MakeMovable(m, {
+        key = "helpPopup",
+        skipAutoRestore = true,
+        handles = { portBox, bubble },
+        onStop = function() m._userDragged = true end,
+    })
+
+    local function RenderCurrentStep()
+        local spec = m._guideSpec
+        local steps = spec and spec.steps
+        if not (steps and #steps > 0) then return end
+        local total = #steps
+        local idx = math.max(1, math.min(total, tonumber(m._guideStep) or 1))
+        m._guideStep = idx
+        local st = steps[idx]
+
+        m.title:SetText(st.title or spec.title or L["Help"])
+        m.title:ClearAllPoints()
+        m.title:SetPoint("TOPLEFT", 18, -12)
+        if total > 1 then
+            m.stepPill:SetText(L["Step %d/%d"]:format(idx, total))
+            m.stepPill:Show()
+            m.title:SetPoint("RIGHT", m.stepPill, "LEFT", -6, 0)
+        else
+            m.stepPill:SetText("")
+            m.stepPill:Hide()
+            m.title:SetPoint("RIGHT", m.topCloseBtn, "LEFT", -6, 0)
+        end
+
+        if st.tag and st.tag ~= "" then
+            m.tagFs:SetText(AdaptBubbleTextForWhiteBg(st.tag))
+            m.tagFs:Show()
+            m.body:ClearAllPoints()
+            m.body:SetPoint("TOPLEFT", m.tagFs, "BOTTOMLEFT", 0, -5)
+            m.body:SetPoint("RIGHT", m.bubble, "RIGHT", -18, 0)
+        else
+            m.tagFs:SetText("")
+            m.tagFs:Hide()
+            m.body:ClearAllPoints()
+            m.body:SetPoint("TOPLEFT", m.bubble, "TOPLEFT", 18, -34)
+            m.body:SetPoint("RIGHT", m.bubble, "RIGHT", -18, 0)
+        end
+        local hasSkip = (idx < total) or (spec.showSkipOnLast == true) or (type(st.skipLabel or spec.skipLabel) == "string")
+        local hasSkipAll = (type(spec.skipAllLabel) == "string" and spec.skipAllLabel ~= "")
+        m.backBtn:SetShown(idx > 1)
+        m.skipBtn:SetShown(hasSkip)
+        m.skipAllBtn:SetShown(hasSkipAll and hasSkip)
+        Theme:SetButtonText(m.skipBtn, st.skipLabel or spec.skipLabel or L["Close"])
+        if hasSkipAll then
+            Theme:SetButtonText(m.skipAllBtn, spec.skipAllLabel)
+            Theme:AutoFitButton(m.skipAllBtn, 110, 16, 260)
+        end
+        if idx >= total then
+            Theme:SetButtonText(m.nextBtn, spec.doneLabel or L["Got it!"])
+        else
+            Theme:SetButtonText(m.nextBtn, st.nextLabel or L["Next"])
+        end
+        local skipW = hasSkip and Theme:AutoFitButton(m.skipBtn, 64, 14, 150) or 0
+        local skipAllW = (hasSkip and hasSkipAll) and (m.skipAllBtn:GetWidth() or 160) or 0
+        local backW = (idx > 1) and Theme:AutoFitButton(m.backBtn, 64, 14, 130) or 0
+        local nextW = Theme:AutoFitButton(m.nextBtn, 86, 16, 220)
+        local leftGroupW = skipW + ((skipW > 0 and skipAllW > 0) and (6 + skipAllW) or 0)
+        local rightGroupW = nextW + ((backW > 0) and (6 + backW) or 0)
+        local neededBubbleW = math.max(396, leftGroupW + rightGroupW + 50)
+        local popupW = math.max(520, math.min(720, neededBubbleW + 122))
+        local bodyW = popupW - 164
+        m.body:SetWidth(bodyW)
+
+        local bodyStr = AdaptBubbleTextForWhiteBg(st.text or "")
+        if type(m._combatResumeQuip) == "string" and m._combatResumeQuip ~= "" then
+            bodyStr = "|cff7c2d12" .. m._combatResumeQuip .. "|r\n\n" .. bodyStr
+        end
+        m.body:SetText(bodyStr)
+        local bodyH = math.ceil((m.body.GetStringHeight and m.body:GetStringHeight()) or 60)
+        local extraTop = (st.tag and st.tag ~= "") and 52 or 38
+        local bubbleNeedH = math.max(146, math.min(360, extraTop + bodyH + 50))
+        local totalH = math.max(154, bubbleNeedH + 8)
+        m:SetSize(popupW, totalH)
+
+        TriggerNpcPortraitSpeech(m, (idx == 1 and 67) or 60)
+        SyncNpcGuideSpotlightAndDock(m, spec, st, (GetTime and GetTime()) or 0)
+    end
+    m.RenderCurrentStep = RenderCurrentStep
+
+    m.backBtn:SetScript("OnClick", function()
+        m._combatResumeQuip = nil
+        m._guideStep = math.max(1, (m._guideStep or 1) - 1)
+        RenderCurrentStep()
+    end)
+    m.nextBtn:SetScript("OnClick", function()
+        m._combatResumeQuip = nil
+        local spec = m._guideSpec
+        local total = (spec and spec.steps and #spec.steps) or 1
+        local cur = m._guideStep or 1
+        if cur >= total then
+            if spec and type(spec.onComplete) == "function" then
+                pcall(spec.onComplete)
+            end
+            m:Hide()
+        else
+            m._guideStep = cur + 1
+            RenderCurrentStep()
+        end
+    end)
+
+    local function NpcGuideOnUpdate(selfFrame, _)
+        local spec = selfFrame._guideSpec
+        local st = spec and spec.steps and spec.steps[selfFrame._guideStep or 1]
+        local nowT = (GetTime and GetTime()) or 0
+        SyncNpcGuideSpotlightAndDock(selfFrame, spec, st, nowT)
+        if selfFrame._talkUntil and nowT < selfFrame._talkUntil then
+            if (nowT - (selfFrame._lastTalkAnimAt or 0)) >= 1.65 then
+                selfFrame._lastTalkAnimAt = nowT
+                if selfFrame.model and selfFrame.model.SetAnimation then
+                    pcall(selfFrame.model.SetAnimation, selfFrame.model, 60)
+                end
+            end
+        elseif selfFrame._talkUntil then
+            selfFrame._talkUntil = nil
+            if selfFrame.model and selfFrame.model.SetAnimation then
+                pcall(selfFrame.model.SetAnimation, selfFrame.model, 0)
+            end
+        end
+    end
+
+    local function ApplyNpcGuideTheme()
+        local bubbleBorder = { 0.25, 0.17, 0.08, 1.0 }
+        local bubbleParchment = { 0.905, 0.835, 0.690, 1.0 }
+        if m.SetBackdrop then m:SetBackdrop(nil) end
+        if m._solidOpaqueBg then m._solidOpaqueBg:Hide() end
+        m:EnableMouse(false)
+        if m.model and m.portBox then
+            m.model:SetFrameLevel((m.portBox:GetFrameLevel() or 866) + 2)
+        end
+        if m.title then
+            m.title:SetTextColor(0.28, 0.14, 0.03)
+            if m.title.SetShadowColor then m.title:SetShadowColor(0, 0, 0, 0) end
+        end
+        if m.tagFs then
+            m.tagFs:SetTextColor(0.45, 0.23, 0.04)
+            if m.tagFs.SetShadowColor then m.tagFs:SetShadowColor(0, 0, 0, 0) end
+        end
+        if m.body then
+            m.body:SetTextColor(0.16, 0.11, 0.06)
+            if m.body.SetShadowColor then m.body:SetShadowColor(0, 0, 0, 0) end
+        end
+        if m.stepPill then
+            m.stepPill:SetTextColor(0.44, 0.34, 0.22)
+            if m.stepPill.SetShadowColor then m.stepPill:SetShadowColor(0, 0, 0, 0) end
+        end
+        m.tailBorder:SetVertexColor(bubbleBorder[1], bubbleBorder[2], bubbleBorder[3], 1.0)
+        m.tailFill:SetVertexColor(bubbleParchment[1], bubbleParchment[2], bubbleParchment[3], 1.0)
+        if m.tailPatch then
+            m.tailPatch:SetVertexColor(bubbleParchment[1], bubbleParchment[2], bubbleParchment[3], 1.0)
+        end
+        if m.bubbleDivider then
+            m.bubbleDivider:SetVertexColor(0.70, 0.59, 0.42, 1.0)
+        end
+        Theme:StyleButton(m.topCloseBtn, "default")
+        Theme:StyleButton(m.skipBtn, "default")
+        if m.skipAllBtn then Theme:StyleButton(m.skipAllBtn, "default") end
+        Theme:StyleButton(m.backBtn, "default")
+        Theme:StyleButton(m.nextBtn, "primary")
+    end
+    m.ApplyNpcGuideTheme = ApplyNpcGuideTheme
+
+    m:HookScript("OnShow", function(selfFrame)
+        selfFrame:SetScript("OnUpdate", NpcGuideOnUpdate)
+    end)
+    m:HookScript("OnHide", function(selfFrame)
+        selfFrame:SetScript("OnUpdate", nil)
+        if guideSpotlight then guideSpotlight:Hide() end
+        if selfFrame._hidingForCombat then
+            return
+        end
+        selfFrame._combatSuspended = false
+        selfFrame._suspendedSpec = nil
+        selfFrame._combatResumeToken = (selfFrame._combatResumeToken or 0) + 1
+        local spec = selfFrame._guideSpec
+        if spec and type(spec.onClose) == "function" then
+            pcall(spec.onClose)
+        end
+    end)
+
+    m:RegisterEvent("PLAYER_REGEN_DISABLED")
+    m:RegisterEvent("PLAYER_REGEN_ENABLED")
+    m:HookScript("OnEvent", function(selfFrame, eventName)
+        if eventName == "PLAYER_REGEN_DISABLED" then
+            selfFrame._combatResumeToken = (selfFrame._combatResumeToken or 0) + 1
+            if selfFrame:IsShown() and selfFrame._guideSpec then
+                selfFrame._combatSuspended = true
+                selfFrame._suspendedSpec = selfFrame._guideSpec
+                selfFrame._suspendedStep = selfFrame._guideStep or 1
+                selfFrame._suspendedDragged = selfFrame._userDragged == true
+                selfFrame._hidingForCombat = true
+                selfFrame:Hide()
+                selfFrame._hidingForCombat = false
+            end
+        elseif eventName == "PLAYER_REGEN_ENABLED" then
+            if selfFrame._combatSuspended and selfFrame._suspendedSpec then
+                selfFrame._combatResumeToken = (selfFrame._combatResumeToken or 0) + 1
+                local tok = selfFrame._combatResumeToken
+                local function TryResumeAfterCombat()
+                    if selfFrame._combatResumeToken ~= tok then return end
+                    if not (selfFrame._combatSuspended and selfFrame._suspendedSpec) then return end
+                    if IsNpcGuideInCombat() then return end
+                    local spec = selfFrame._suspendedSpec
+                    if type(spec.isAnchorVisible) == "function" then
+                        local okVis, vis = pcall(spec.isAnchorVisible)
+                        if okVis and vis == false then
+                            return
+                        end
+                    end
+                    local resumeStep = selfFrame._suspendedStep or 1
+                    local keepDragged = selfFrame._suspendedDragged == true
+                    selfFrame._combatSuspended = false
+                    selfFrame._suspendedSpec = nil
+                    Theme:ShowNpcGuide(spec, {
+                        resumeStep = resumeStep,
+                        keepDragged = keepDragged,
+                        fromCombatResume = true,
+                    })
+                end
+                if C_Timer and C_Timer.After then
+                    C_Timer.After(2.5, TryResumeAfterCombat)
+                else
+                    TryResumeAfterCombat()
+                end
+            elseif Theme._pendingTutorialPrompts and next(Theme._pendingTutorialPrompts) ~= nil then
+                selfFrame._combatPromptToken = (selfFrame._combatPromptToken or 0) + 1
+                local pTok = selfFrame._combatPromptToken
+                local function FlushPendingPrompts()
+                    if selfFrame._combatPromptToken ~= pTok or IsNpcGuideInCombat() then return end
+                    if Theme:IsNpcGuideShown() then return end
+                    local pending = Theme._pendingTutorialPrompts
+                    if type(pending) ~= "table" then return end
+                    for k, pSpec in pairs(pending) do
+                        pending[k] = nil
+                        if pSpec and not (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown(pSpec.tutorialKey)) then
+                            local visOk = true
+                            if type(pSpec.isWindowVisible) == "function" then
+                                local okV, v = pcall(pSpec.isWindowVisible)
+                                visOk = (okV and v == true)
+                            end
+                            if visOk then
+                                Theme:PromptWindowTutorial(pSpec)
+                                break
+                            end
+                        end
+                    end
+                end
+                if C_Timer and C_Timer.After then
+                    C_Timer.After(2.2, FlushPendingPrompts)
+                else
+                    FlushPendingPrompts()
+                end
+            end
+        end
+    end)
+
+    Theme:RegisterListener(function()
+        if m:IsShown() then
+            ApplyNpcGuideTheme()
+        end
+    end)
+
+    ApplyNpcGuideTheme()
+    helpPopup = m
+    return m
+end
+
+function Theme:IsNpcGuideShown(key)
+    if not (helpPopup and helpPopup:IsShown()) then return false end
+    if key == nil then return true end
+    return helpPopup._guideSpec and helpPopup._guideSpec.key == key
+end
+
+function Theme:GetActiveNpcGuideStep()
+    if not (helpPopup and helpPopup:IsShown() and helpPopup._guideSpec) then
+        return nil, nil
+    end
+    return helpPopup._guideSpec.key, helpPopup._guideStep
+end
+
+function Theme:HideNpcGuide(key)
+    if not helpPopup then return end
+    if helpPopup._combatSuspended and helpPopup._suspendedSpec and (key == nil or helpPopup._suspendedSpec.key == key) then
+        helpPopup._combatSuspended = false
+        helpPopup._suspendedSpec = nil
+        helpPopup._combatResumeToken = (helpPopup._combatResumeToken or 0) + 1
+    end
+    if not helpPopup:IsShown() then return end
+    if key == nil or (helpPopup._guideSpec and helpPopup._guideSpec.key == key) then
+        helpPopup:Hide()
+    end
+end
+
+--- Display Chromie NPC speech-bubble guide with smart multi-target spotlight pointing (never during combat).
+function Theme:ShowNpcGuide(spec, opts)
+    if IsNpcGuideInCombat() then
+        return nil
+    end
+    if type(spec) ~= "table" or type(spec.steps) ~= "table" or #spec.steps == 0 then
+        return nil
+    end
+    local m = EnsureNpcGuidePopup()
+    if not (opts and opts.fromCombatResume) then
+        m._combatSuspended = false
+        m._suspendedSpec = nil
+        m._combatResumeToken = (m._combatResumeToken or 0) + 1
+        m._combatResumeQuip = nil
+    else
+        local quips = {
+            L["ChromieResume1"],
+            L["ChromieResume2"],
+            L["ChromieResume3"],
+            L["ChromieResume4"],
+        }
+        local pickIdx = math.random(1, #quips)
+        if m._lastQuipIdx and #quips > 1 and pickIdx == m._lastQuipIdx then
+            pickIdx = (pickIdx % #quips) + 1
+        end
+        m._lastQuipIdx = pickIdx
+        m._combatResumeQuip = quips[pickIdx]
+    end
+    m._guideSpec = spec
+    m._guideStep = (opts and opts.resumeStep) and tonumber(opts.resumeStep) or 1
+    m._userDragged = (opts and opts.keepDragged == true) and true or false
+    self:PrepareTopOverlayModal(m, 865)
+    m:EnableMouse(false)
+    if m.SetBackdrop then m:SetBackdrop(nil) end
+    if m._solidOpaqueBg then m._solidOpaqueBg:Hide() end
+    m.ApplyNpcGuideTheme()
+
+    if m.model then
+        m.model._loadedOk = false
+        m.fallbackIco:Show()
+        if m.model.ClearModel then pcall(m.model.ClearModel, m.model) end
+        if m.model.SetDisplayInfo then pcall(m.model.SetDisplayInfo, m.model, CHROMIE_DISPLAY_ID) end
+        if C_Timer and C_Timer.After then
+            local modRef = m.model
+            C_Timer.After(0.08, function()
+                if not m:IsShown() or modRef._loadedOk then return end
+                local fid = modRef.GetModelFileID and tonumber(modRef:GetModelFileID()) or 0
+                if fid <= 0 and modRef.SetCreature then
+                    pcall(modRef.SetCreature, modRef, CHROMIE_NPC_ID, CHROMIE_DISPLAY_ID)
+                end
+            end)
+        end
+    end
+
+    m:Show()
+    m.RenderCurrentStep()
+    if m.Raise then m:Raise() end
+    return m
+end
+
+function Theme:PromptWindowTutorial(spec)
+    if type(spec) ~= "table" or not spec.tutorialKey or not spec.guideSpec then
+        return nil
+    end
+    if (ns.db and ns.db.settings and ns.db.settings.tutorialDismissAll == true)
+        or (SocialCentralDB and SocialCentralDB.settings and SocialCentralDB.settings.tutorialDismissAll == true)
+    then
+        return nil
+    end
+    if ns.IsAccountTutorialShown and ns:IsAccountTutorialShown(spec.tutorialKey) then
+        return nil
+    end
+    if IsNpcGuideInCombat() then
+        self._pendingTutorialPrompts = self._pendingTutorialPrompts or {}
+        self._pendingTutorialPrompts[spec.tutorialKey] = spec
+        EnsureNpcGuidePopup()
+        return nil
+    end
+    if self:IsNpcGuideShown() then
+        return nil
+    end
+    if type(spec.isWindowVisible) == "function" then
+        local okV, vis = pcall(spec.isWindowVisible)
+        if okV and vis == false then
+            return nil
+        end
+    end
+    local accepted = false
+    local winTitle = spec.title or (spec.guideSpec and spec.guideSpec.title) or "SocialCentral"
+    local askBody = spec.askText or string.format(L["First time opening %s! Would you like Chromie's quick tutorial to understand how everything works here?"], winTitle)
+    return self:ShowNpcGuide({
+        key = "prompt_" .. tostring(spec.tutorialKey),
+        title = string.format(L["Chromie — %s"], winTitle),
+        skipLabel = L["Not now"],
+        skipAllLabel = L["Not now (all areas)"],
+        doneLabel = L["Yes, show tutorial"],
+        showSkipOnLast = true,
+        defaultTarget = spec.guideSpec.defaultTarget,
+        isAnchorVisible = spec.isWindowVisible,
+        steps = {
+            {
+                title = string.format(L["Chromie — %s"], winTitle),
+                tag = "|cff6b3b09" .. L["First time in this window?"] .. "|r",
+                text = askBody .. "\n\n|cff5c4a35" .. L["Tip: Click any [?] button on any window or option for Chromie's help anytime, or toggle auto-guides in Settings > General."] .. "|r",
+            },
+        },
+        onSkip = function()
+            if ns.SetAccountTutorialShown then
+                ns:SetAccountTutorialShown(spec.tutorialKey, true)
+            end
+            if type(spec.onSkip) == "function" then
+                pcall(spec.onSkip)
+            end
+        end,
+        onSkipAll = function()
+            if ns.SetAccountTutorialShown then
+                ns:SetAccountTutorialShown(spec.tutorialKey, true)
+            end
+            if ns.db and ns.db.settings then
+                ns.db.settings.tutorialDismissAll = true
+            end
+            if SocialCentralDB and SocialCentralDB.settings then
+                SocialCentralDB.settings.tutorialDismissAll = true
+            end
+            if SocialCentralCharDB and SocialCentralCharDB.settings then
+                SocialCentralCharDB.settings.tutorialDismissAll = true
+            end
+            self._pendingTutorialPrompts = nil
+            ns:Print(L["Chromie auto-tutorials disabled for all areas. Click any [?] button or re-enable auto-tutorials in Settings > General anytime."])
+            if type(spec.onSkip) == "function" then
+                pcall(spec.onSkip)
+            end
+        end,
+        onClose = function()
+            if not accepted then
+                if ns.SetAccountTutorialShown then
+                    ns:SetAccountTutorialShown(spec.tutorialKey, true)
+                end
+                if type(spec.onSkip) == "function" then
+                    pcall(spec.onSkip)
+                end
+            end
+        end,
+        onComplete = function()
+            accepted = true
+            if ns.SetAccountTutorialShown then
+                ns:SetAccountTutorialShown(spec.tutorialKey, true)
+            end
+            if type(spec.onAccept) == "function" then
+                pcall(spec.onAccept)
+            end
+            local launch = function()
+                if not IsNpcGuideInCombat() then
+                    Theme:ShowNpcGuide(spec.guideSpec)
+                end
+            end
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.05, launch)
+            else
+                launch()
+            end
+        end,
+    })
+end
+
+--- Display interactive Chromie speech-bubble help card with smart spotlight pointing.
+function Theme:ShowHelpPopup(title, whatText, howText, opts)
+    local guideSteps = opts and opts.steps
+    if type(guideSteps) ~= "table" or #guideSteps == 0 then
+        guideSteps = {}
+        local wTxt = tostring(whatText or "")
+        local hTxt = tostring(howText or "")
+        local tTarget = opts and opts.target or nil
+        if wTxt ~= "" then
+            guideSteps[#guideSteps + 1] = {
+                title = title or L["Help"],
+                tag = "|cff1d4ed8" .. L["What it does:"] .. "|r",
+                text = wTxt,
+                nextLabel = (hTxt ~= "" and L["How to use >"] or nil),
+                target = tTarget,
+            }
+        end
+        if hTxt ~= "" then
+            guideSteps[#guideSteps + 1] = {
+                title = title or L["Help"],
+                tag = "|cff15803d" .. L["How to use:"] .. "|r",
+                text = hTxt,
+                target = tTarget,
+            }
+        end
+        if #guideSteps == 0 then
+            guideSteps[1] = {
+                title = title or L["Help"],
+                text = title or L["Help"],
+                target = tTarget,
+            }
+        end
+    end
+    return self:ShowNpcGuide({
+        key = (opts and opts.key) or "help_popup",
+        title = title or L["Help"],
+        defaultTarget = opts and opts.target or nil,
+        steps = guideSteps,
+    })
+end
+
+local visibleHelpButtons = setmetatable({}, { __mode = "k" })
+local helpPulseDriver = nil
+local helpPulseAccum = 0
+local helpPulseAttached = false
+
+local function HelpPulseOnUpdate(_, elapsed)
+    helpPulseAccum = helpPulseAccum + (elapsed or 0)
+    if helpPulseAccum < 0.06 then
+        return
+    end
+    helpPulseAccum = 0
+    if next(visibleHelpButtons) == nil then
+        if helpPulseDriver and helpPulseAttached then
+            helpPulseAttached = false
+            helpPulseDriver:SetScript("OnUpdate", nil)
+        end
+        return
+    end
+    local nowT = (GetTime and GetTime()) or 0
+    local inCombat = IsNpcGuideInCombat()
+    for btn in pairs(visibleHelpButtons) do
+        if btn and btn.IsVisible and btn:IsVisible() then
+            if not btn._scHelpHovered then
+                local w = inCombat and 0.15 or (0.5 + 0.5 * math.sin(nowT * 1.65 + (btn._scHelpPhase or 0)))
+                if btn._scHelpAura then
+                    btn._scHelpAura:SetVertexColor(0.96, 0.78, 0.28, 0.02 + 0.12 * w)
+                end
+                if btn.ico then
+                    btn.ico:SetVertexColor(0.88 + 0.12 * w, 0.86 + 0.12 * w, 0.78 + 0.18 * w, 1)
+                end
+            end
+        else
+            visibleHelpButtons[btn] = nil
+        end
+    end
+end
+
+local function SyncHelpButtonPulseDriver(btn, shown)
+    if not btn then return end
+    if shown then
+        visibleHelpButtons[btn] = true
+        if not helpPulseDriver then
+            helpPulseDriver = CreateFrame("Frame", nil, UIParent)
+        end
+        if not helpPulseAttached then
+            helpPulseAttached = true
+            helpPulseAccum = 0.06
+            helpPulseDriver:SetScript("OnUpdate", HelpPulseOnUpdate)
+        end
+    else
+        visibleHelpButtons[btn] = nil
+        if next(visibleHelpButtons) == nil and helpPulseDriver and helpPulseAttached then
+            helpPulseAttached = false
+            helpPulseDriver:SetScript("OnUpdate", nil)
+        end
+    end
+end
+
+--- Create a standardized native-icon '?' help button beside an option or feature bar.
+function Theme:CreateHelpButton(parent, title, whatText, howText, size, opts)
     local sz = size or 16
-    local btn = self:CreateButton(parent, sz, sz, "?", "ghost")
-    btn:SetHitRectInsets(-3, -3, -3, -3)
+    local btn = self:CreateButton(parent, sz, sz, "", "default")
+    btn:SetHitRectInsets(-2, -2, -2, -2)
 
-    local ring = btn:CreateTexture(nil, "BACKGROUND", nil, 1)
-    ring:SetAllPoints()
-    ring:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
-    ring:SetVertexColor(0.28, 0.24, 0.17, 0.65)
-    btn._scHelpRing = ring
+    local aura = btn:CreateTexture(nil, "BACKGROUND", nil, -1)
+    aura:SetSize(sz + 6, sz + 6)
+    aura:SetPoint("CENTER", btn, "CENTER", 0, 0)
+    aura:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\toast-glow")
+    aura:SetVertexColor(0.96, 0.78, 0.28, 0.06)
+    btn._scHelpAura = aura
+    btn._scHelpPhase = ((sz * 0.37) + (#tostring(title or "") * 0.53)) % (math.pi * 2)
 
-    local inner = btn:CreateTexture(nil, "BACKGROUND", nil, 2)
-    inner:SetPoint("TOPLEFT", 1, -1)
-    inner:SetPoint("BOTTOMRIGHT", -1, 1)
-    inner:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\dot")
-    inner:SetVertexColor(0.09, 0.085, 0.075, 0.95)
-    btn._scHelpInner = inner
+    self:ConfigureIconButton(btn, sz, sz, "Interface\\Icons\\INV_Misc_QuestionMark", {
+        size = math.max(12, sz - 3),
+        color = { 0.94, 0.90, 0.80 },
+    })
+    btn._scHelpTitle = title
+    btn._scHelpWhat = whatText
+    btn._scHelpHow = howText
+    btn._scHelpOpts = opts
+    if opts and opts.target ~= nil then
+        btn._scGuideTarget = opts.target
+    end
 
-    if btn.label then
-        btn.label:SetTextColor(0.84, 0.72, 0.38)
+    btn:HookScript("OnShow", function(selfBtn)
+        SyncHelpButtonPulseDriver(selfBtn, true)
+    end)
+    btn:HookScript("OnHide", function(selfBtn)
+        selfBtn._scHelpHovered = false
+        SyncHelpButtonPulseDriver(selfBtn, false)
+    end)
+    if btn:IsVisible() then
+        SyncHelpButtonPulseDriver(btn, true)
     end
 
     btn:HookScript("OnEnter", function(selfBtn)
-        ring:SetVertexColor(0.95, 0.76, 0.26, 0.95)
-        inner:SetVertexColor(0.18, 0.14, 0.08, 0.98)
-        if selfBtn.label then
-            selfBtn.label:SetTextColor(1.0, 0.95, 0.72)
+        selfBtn._scHelpHovered = true
+        aura:SetVertexColor(0.98, 0.80, 0.28, 0.28)
+        if selfBtn.ico then
+            selfBtn.ico:SetVertexColor(1.0, 1.0, 1.0, 1)
         end
         GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
         GameTooltip:ClearLines()
-        GameTooltip:AddLine(title or L["Help"], 0.35, 0.72, 1.0, true)
+        GameTooltip:AddLine(selfBtn._scHelpTitle or L["Help"], 0.35, 0.72, 1.0, true)
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("|cff58a6ff" .. L["What it does:"] .. "|r " .. (whatText or ""), 0.92, 0.94, 0.98, true)
+        GameTooltip:AddLine("|cff58a6ff" .. L["What it does:"] .. "|r " .. (selfBtn._scHelpWhat or ""), 0.92, 0.94, 0.98, true)
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("|cff4ade80" .. L["How to use:"] .. "|r " .. (howText or ""), 0.85, 0.92, 0.88, true)
+        GameTooltip:AddLine("|cff4ade80" .. L["How to use:"] .. "|r " .. (selfBtn._scHelpHow or ""), 0.85, 0.92, 0.88, true)
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine(L["Click ? to keep this help open."], 0.58, 0.65, 0.74, true)
+        if IsNpcGuideInCombat() then
+            GameTooltip:AddLine("|cffff7b72" .. L["In Combat"] .. ":|r " .. L["Chromie's interactive guide pauses during combat."], 1.0, 0.72, 0.68, true)
+        else
+            GameTooltip:AddLine(L["Click ? to ask Chromie and highlight this control."], 0.58, 0.65, 0.74, true)
+        end
         GameTooltip:Show()
     end)
     btn:HookScript("OnLeave", function(selfBtn)
-        ring:SetVertexColor(0.28, 0.24, 0.17, 0.65)
-        inner:SetVertexColor(0.09, 0.085, 0.075, 0.95)
-        if selfBtn.label then
-            selfBtn.label:SetTextColor(0.84, 0.72, 0.38)
+        selfBtn._scHelpHovered = false
+        aura:SetVertexColor(0.96, 0.78, 0.28, 0.06)
+        if selfBtn.ico then
+            selfBtn.ico:SetVertexColor(0.94, 0.90, 0.80, 1)
         end
         GameTooltip:Hide()
     end)
-    btn:SetScript("OnClick", function()
+    btn:SetScript("OnClick", function(selfBtn)
+        if IsNpcGuideInCombat() then
+            return
+        end
         GameTooltip:Hide()
-        Theme:ShowHelpPopup(title, whatText, howText)
+        local curOpts = selfBtn._scHelpOpts
+        local targetRef = ResolveHelpTargetFrame(selfBtn, curOpts)
+        Theme:ShowHelpPopup(selfBtn._scHelpTitle, selfBtn._scHelpWhat, selfBtn._scHelpHow, {
+            target = targetRef,
+            steps = curOpts and curOpts.steps or nil,
+        })
     end)
     self:RegisterListener(function()
         if btn:IsVisible() then
-            self:StyleButton(btn, "ghost")
+            self:StyleButton(btn, "default")
         else
             btn._scThemeKey = nil
         end
     end)
     return btn
+end
+
+function Theme:SetHelpButtonInfo(btn, title, whatText, howText, opts)
+    if not btn then return end
+    btn._scHelpTitle = title
+    btn._scHelpWhat = whatText
+    btn._scHelpHow = howText
+    btn._scHelpOpts = opts
+    if opts and opts.target ~= nil then
+        btn._scGuideTarget = opts.target
+    end
 end
 
 --- Display a copyable GitHub Releases URL & Windows updater popup (Blizzard HTTP-sandbox safe).
@@ -2725,6 +4234,16 @@ function Theme:ShowThemeWelcomePicker()
         closeBtn:SetPoint("TOPRIGHT", -14, -14)
         m.closeBtn = closeBtn
 
+        m.helpBtn = self:CreateHelpButton(
+            m,
+            L["Help: Choose Visual Style"],
+            L["Lets you pick between Native WoW (classic gold-and-brown frames) and Modern Dark (high-contrast obsidian panels) for every SocialCentral window."],
+            L["Click either preview card to apply that design right away, or switch themes anytime later in Settings or the top header button."],
+            20,
+            { target = m }
+        )
+        m.helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -6, 0)
+
         local function FinishChoice(chosenKey)
             if ns.db and ns.db.settings then
                 if chosenKey then
@@ -2747,7 +4266,7 @@ function Theme:ShowThemeWelcomePicker()
 
         m.title = m:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         m.title:SetPoint("TOPLEFT", 20, -16)
-        m.title:SetPoint("TOPRIGHT", closeBtn, "LEFT", -10, 0)
+        m.title:SetPoint("TOPRIGHT", m.helpBtn, "LEFT", -8, 0)
         m.title:SetJustifyH("LEFT")
         m.title:SetWordWrap(false)
         m.title:SetText(L["Choose Your SocialCentral Design"])
@@ -3606,6 +5125,42 @@ local BADGE_TONES = {
         cardBgBot = { 0.15, 0.03, 0.05, 1.0 },
         cardBorder = { 0.92, 0.30, 0.32, 1.0 },
     },
+    say = {
+        rimTop = { 0.92, 0.90, 0.78, 1.0 },
+        rimBot = { 0.68, 0.66, 0.54, 1.0 },
+        coreTop = { 0.88, 0.90, 0.94, 1.0 },
+        coreBot = { 0.58, 0.62, 0.68, 1.0 },
+        lobe = { 0.92, 0.94, 0.98 },
+        halo = { 0.96, 0.98, 1.00 },
+        accent = { 0.94, 0.96, 0.98 },
+        cardBgTop = { 0.20, 0.21, 0.24, 1.0 },
+        cardBgBot = { 0.11, 0.12, 0.14, 1.0 },
+        cardBorder = { 0.78, 0.82, 0.88, 1.0 },
+    },
+    general = {
+        rimTop = { 0.86, 0.78, 0.54, 1.0 },
+        rimBot = { 0.58, 0.52, 0.34, 1.0 },
+        coreTop = { 0.62, 0.78, 0.98, 1.0 },
+        coreBot = { 0.34, 0.48, 0.70, 1.0 },
+        lobe = { 0.74, 0.86, 1.00 },
+        halo = { 0.78, 0.88, 1.00 },
+        accent = { 0.80, 0.90, 1.00 },
+        cardBgTop = { 0.15, 0.20, 0.28, 1.0 },
+        cardBgBot = { 0.08, 0.11, 0.17, 1.0 },
+        cardBorder = { 0.62, 0.78, 0.98, 1.0 },
+    },
+    pub = {
+        rimTop = { 1.00, 0.82, 0.76, 1.0 },
+        rimBot = { 0.78, 0.54, 0.48, 1.0 },
+        coreTop = { 1.00, 0.75, 0.75, 1.0 },
+        coreBot = { 0.72, 0.44, 0.44, 1.0 },
+        lobe = { 1.00, 0.78, 0.78 },
+        halo = { 1.00, 0.82, 0.82 },
+        accent = { 1.00, 0.76, 0.76 },
+        cardBgTop = { 0.24, 0.14, 0.14, 1.0 },
+        cardBgBot = { 0.14, 0.08, 0.08, 1.0 },
+        cardBorder = { 0.96, 0.68, 0.68, 1.0 },
+    },
 }
 
 Theme.CHAT_TONES = BADGE_TONES
@@ -3617,7 +5172,11 @@ end
 
 function Theme:GetChatToneForKind(kind)
     local k = type(kind) == "string" and kind:upper() or ""
-    if k == "BN_WHISPER" or k == "BNET" then
+    if k == "GENERAL" then
+        return "general"
+    elseif k == "PUB_CHANNEL" then
+        return "pub"
+    elseif k == "BN_WHISPER" or k == "BNET" then
         return "bnet"
     elseif k == "GUILD" or k == "OFFICER" then
         return "guild"
@@ -3627,6 +5186,10 @@ function Theme:GetChatToneForKind(kind)
         return "group"
     elseif k == "ROOM" or k == "ALLIANCE" then
         return "room"
+    elseif k == "LOCAL_SAY" then
+        return "say"
+    elseif k == "LOCAL_YELL" then
+        return "alert"
     elseif k == "WHISPER" or k == "DIRECT" then
         return "whisper"
     end

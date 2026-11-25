@@ -73,6 +73,12 @@ local function ResolveSpotterContactState(entry)
     local bnetAccId = bInfo and bInfo.bnetAccountID or nil
     local bnetName = bInfo and bInfo.bnetName or nil
     local isCrossFac = (bInfo and bInfo.sameFaction == false) == true
+    if (not isCrossFac) and entry.faction and entry.faction ~= "" then
+        local ownFac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
+        if ownFac and entry.faction ~= ownFac then
+            isCrossFac = true
+        end
+    end
 
     if (not isCrossFac) and ns.Spotter and ns.Spotter.FindLiveUnitForEntry then
         local liveUnit = ns.Spotter:FindLiveUnitForEntry(entry)
@@ -494,8 +500,8 @@ local function ApplySpotterFrameLayout(f, showNav, actionOpen)
     if f.compassBar then
         f.compassBar:ClearAllPoints()
         f.compassBar:SetPoint("TOPLEFT", f, "TOPLEFT", 5, -(3 + topOffset))
-        -- Reserve space for [X] only when navBar is hidden and compassBar shares the top row.
-        f.compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", isNav and -6 or -28, -(3 + topOffset))
+        -- Reserve space for [?][X] only when navBar is hidden and compassBar shares the top row.
+        f.compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", isNav and -6 or -48, -(3 + topOffset))
         if f.compassBar.nameFs and f.compassBar.arrowBox then
             f.compassBar.nameFs:ClearAllPoints()
             f.compassBar.nameFs:SetPoint("TOPLEFT", f.compassBar.arrowBox, "TOPRIGHT", 8, 1)
@@ -551,7 +557,7 @@ local function BuildSpotterNavBar(f)
     local navBar = CreateFrame("Frame", nil, f)
     navBar:SetHeight(NAV_H)
     navBar:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -3)
-    navBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -28, -3)
+    navBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -46, -3)
     navBar:SetFrameLevel(math.max((f:GetFrameLevel() or 40) + 10, 50))
     if navBar.SetClipsChildren then
         navBar:SetClipsChildren(true)
@@ -830,7 +836,7 @@ function SpotterHUD:BuildFrame()
     local compassBar = CreateFrame("Button", "SocialCentralSpotterCompass", f, "SecureActionButtonTemplate,BackdropTemplate")
     compassBar:SetHeight(PILL_H - 6)
     compassBar:SetPoint("TOPLEFT", f, "TOPLEFT", 5, -3)
-    compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -28, -3)
+    compassBar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -48, -3)
     if compassBar.SetClipsChildren then
         compassBar:SetClipsChildren(true)
     end
@@ -917,6 +923,24 @@ function SpotterHUD:BuildFrame()
         SpotterHUD:Hide()
     end)
     f.closeBtn = closeBtn
+
+    if Theme and Theme.CreateHelpButton then
+        local helpBtn = Theme:CreateHelpButton(
+            f,
+            L["Target Radar & Proximity Tracking"],
+            L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates. When a tracked player is detected, a compact HUD appears with click-to-target and range tracking when selected."],
+            L["Click the Radar HUD outside combat to select the target, use mouse wheel or number tabs to switch targets, or click '?' anytime to open Chromie's Radar Guide."],
+            17,
+            { target = f }
+        )
+        helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
+        helpBtn:SetFrameLevel(closeBtn:GetFrameLevel())
+        helpBtn:SetScript("OnClick", function()
+            if GameTooltip then GameTooltip:Hide() end
+            SpotterHUD:ShowRadarTutorial(true)
+        end)
+        f.helpBtn = helpBtn
+    end
 
     -- Expandable On-Click Interaction Drawer anchored cleanly across FULL frame width (zero right seam/clipping!)
     local actionPanel = CreateFrame("Frame", nil, f, "BackdropTemplate")
@@ -1077,7 +1101,7 @@ end
 
 function SpotterHUD:SyncTickerState(kin)
     local isSelected = (kin ~= nil and kin.isSelected == true)
-    self._tickerInterval = 0.25
+    self._tickerInterval = (kin and kin.stationary) and 0.75 or 0.25
 
     if not self._mainOnUpdateFn then
         self._mainOnUpdateFn = function(_, elapsed)
@@ -1255,23 +1279,6 @@ function SpotterHUD:ShowCombatArrowFallback()
     self:UpdateCompassVisuals(true, 0.04)
 end
 
-local function ApplyTutorialDialogTheme(dlg, p)
-    if not dlg then return end
-    Theme:ApplyBackdrop(dlg, "window", p)
-    dlg.titleFs:SetTextColor(p.accent[1], p.accent[2], p.accent[3])
-    dlg.bodyFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-    if dlg.keysBox then
-        Theme:ApplyBackdrop(dlg.keysBox, "inset", p)
-    end
-    if dlg.keysFs then
-        dlg.keysFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-    end
-    dlg.tipFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-    Theme:StyleButton(dlg.closeBtn, "default")
-    Theme:StyleButton(dlg.okBtn, "primary")
-    dlg._dirtyTheme = nil
-end
-
 local function ApplyActionPanelTheme(actionPanel, p)
     if not actionPanel then return end
     Theme:ApplyBackdrop(actionPanel, "inset", p)
@@ -1329,22 +1336,6 @@ function SpotterHUD:UpdateAppearance()
             self.combatArrowFrame.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
         else
             self.combatArrowFrame._dirtyTheme = true
-        end
-    end
-
-    if self.tutorialDialog then
-        if self.tutorialDialog:IsShown() then
-            ApplyTutorialDialogTheme(self.tutorialDialog, p)
-        else
-            self.tutorialDialog._dirtyTheme = true
-        end
-    end
-
-    if self.radarTutorialDialog then
-        if self.radarTutorialDialog:IsShown() then
-            ApplyTutorialDialogTheme(self.radarTutorialDialog, p)
-        else
-            self.radarTutorialDialog._dirtyTheme = true
         end
     end
 
@@ -1837,53 +1828,82 @@ function SpotterHUD:Refresh()
         local layoutKey = (stanceVal == "ENEMY" and "ENEMY") or (stanceVal == "BLOCKED" and "BLOCKED") or "DEFAULT"
         if f.actionPanel._lastLayoutStance ~= layoutKey then
             f.actionPanel._lastLayoutStance = layoutKey
+            local rowBtns = {}
             if layoutKey == "ENEMY" then
                 if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
                 if f.actionPanel.scoutBtn then
-                    f.actionPanel.scoutBtn:SetWidth(92)
-                    f.actionPanel.scoutBtn:ClearAllPoints()
-                    f.actionPanel.scoutBtn:SetPoint("BOTTOMLEFT", 6, 4)
-                    f.actionPanel.scoutBtn:Show()
                     Theme:SetButtonText(f.actionPanel.scoutBtn, L["Scout Alert"])
+                    f.actionPanel.scoutBtn:Show()
+                    rowBtns[#rowBtns + 1] = f.actionPanel.scoutBtn
                 end
-                Theme:SetButtonText(f.actionPanel.inviteBtn, L["Diplomacy"])
-                f.actionPanel.inviteBtn:SetWidth(92)
-                f.actionPanel.inviteBtn:ClearAllPoints()
-                f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.scoutBtn, "RIGHT", 6, 0)
+                if f.actionPanel.inviteBtn then
+                    Theme:SetButtonText(f.actionPanel.inviteBtn, L["Diplomacy"])
+                    rowBtns[#rowBtns + 1] = f.actionPanel.inviteBtn
+                end
                 if f.actionPanel.watchBtn then
-                    f.actionPanel.watchBtn:SetWidth(94)
-                    f.actionPanel.watchBtn:ClearAllPoints()
-                    f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 6, 0)
+                    Theme:SetButtonText(f.actionPanel.watchBtn, "+ " .. L["Watchlist"])
+                    rowBtns[#rowBtns + 1] = f.actionPanel.watchBtn
                 end
             elseif layoutKey == "BLOCKED" then
                 if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
                 if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
-                Theme:SetButtonText(f.actionPanel.inviteBtn, L["Dismiss Target"])
-                f.actionPanel.inviteBtn:SetWidth(141)
-                f.actionPanel.inviteBtn:ClearAllPoints()
-                f.actionPanel.inviteBtn:SetPoint("BOTTOMLEFT", 6, 4)
+                if f.actionPanel.inviteBtn then
+                    Theme:SetButtonText(f.actionPanel.inviteBtn, L["Dismiss Target"])
+                    rowBtns[#rowBtns + 1] = f.actionPanel.inviteBtn
+                end
                 if f.actionPanel.watchBtn then
-                    f.actionPanel.watchBtn:SetWidth(141)
-                    f.actionPanel.watchBtn:ClearAllPoints()
-                    f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 7, 0)
+                    Theme:SetButtonText(f.actionPanel.watchBtn, "+ " .. L["Watchlist"])
+                    rowBtns[#rowBtns + 1] = f.actionPanel.watchBtn
                 end
             else
                 if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
                 if f.actionPanel.whisperBtn then
-                    f.actionPanel.whisperBtn:SetWidth(92)
-                    f.actionPanel.whisperBtn:Show()
-                    f.actionPanel.whisperBtn:ClearAllPoints()
-                    f.actionPanel.whisperBtn:SetPoint("BOTTOMLEFT", 6, 4)
                     Theme:SetButtonText(f.actionPanel.whisperBtn, L["Whisper"])
+                    f.actionPanel.whisperBtn:Show()
+                    rowBtns[#rowBtns + 1] = f.actionPanel.whisperBtn
                 end
-                Theme:SetButtonText(f.actionPanel.inviteBtn, L["Invite"])
-                f.actionPanel.inviteBtn:SetWidth(92)
-                f.actionPanel.inviteBtn:ClearAllPoints()
-                f.actionPanel.inviteBtn:SetPoint("LEFT", f.actionPanel.whisperBtn, "RIGHT", 6, 0)
+                if f.actionPanel.inviteBtn then
+                    Theme:SetButtonText(f.actionPanel.inviteBtn, L["Invite"])
+                    rowBtns[#rowBtns + 1] = f.actionPanel.inviteBtn
+                end
                 if f.actionPanel.watchBtn then
-                    f.actionPanel.watchBtn:SetWidth(94)
-                    f.actionPanel.watchBtn:ClearAllPoints()
-                    f.actionPanel.watchBtn:SetPoint("LEFT", f.actionPanel.inviteBtn, "RIGHT", 6, 0)
+                    Theme:SetButtonText(f.actionPanel.watchBtn, "+ " .. L["Watchlist"])
+                    rowBtns[#rowBtns + 1] = f.actionPanel.watchBtn
+                end
+            end
+            if #rowBtns > 0 then
+                local gap = 5
+                local panelW = math.max(260, (f.actionPanel:GetWidth() or (f:GetWidth() or 320) - 12))
+                local availW = panelW - 12 - ((#rowBtns - 1) * gap)
+                local widths = {}
+                local sumW = 0
+                for idx, rb in ipairs(rowBtns) do
+                    local fit = Theme:AutoFitButton(rb, 64, 12, 168)
+                    widths[idx] = math.floor((fit or rb:GetWidth() or 80) + 0.5)
+                    sumW = sumW + widths[idx]
+                end
+                local extra = availW - sumW
+                if extra >= 0 then
+                    local each = math.floor(extra / #rowBtns)
+                    for idx = 1, #rowBtns do
+                        widths[idx] = widths[idx] + each
+                    end
+                elseif sumW > 0 then
+                    local scale = availW / sumW
+                    for idx = 1, #rowBtns do
+                        widths[idx] = math.max(58, math.floor(widths[idx] * scale))
+                    end
+                end
+                local prevRb = nil
+                for idx, rb in ipairs(rowBtns) do
+                    rb:SetWidth(widths[idx])
+                    rb:ClearAllPoints()
+                    if prevRb then
+                        rb:SetPoint("LEFT", prevRb, "RIGHT", gap, 0)
+                    else
+                        rb:SetPoint("BOTTOMLEFT", 6, 4)
+                    end
+                    prevRb = rb
                 end
             end
         end
@@ -1904,109 +1924,14 @@ function SpotterHUD:Refresh()
     end
 end
 
-function SpotterHUD:CreateTutorialDialog()
-    if self.tutorialDialog then return self.tutorialDialog end
-
-    local p = Theme:GetPalette()
-    local dlg = CreateFrame("Frame", "SocialCentralSpotterTutorialDialog", UIParent, "BackdropTemplate")
-    dlg:SetSize(400, 232)
-    dlg:SetPoint("CENTER", UIParent, "CENTER", 0, 90)
-    Theme:PrepareTopOverlayModal(dlg, 855)
-    if dlg.SetClipsChildren then
-        dlg:SetClipsChildren(false)
-    end
-    Theme:ApplyBackdrop(dlg, "window", p)
-    Theme:MakeMovable(dlg, { key = "spotterTutorial" })
-    table.insert(UISpecialFrames, "SocialCentralSpotterTutorialDialog")
-
-    local titleFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    titleFs:SetPoint("TOPLEFT", 14, -12)
-    titleFs:SetPoint("TOPRIGHT", -38, -12)
-    titleFs:SetJustifyH("LEFT")
-    titleFs:SetTextColor(p.accent[1], p.accent[2], p.accent[3])
-    titleFs:SetText(L["Nameplate Indicators & Target Arrow"])
-    dlg.titleFs = titleFs
-
-    local closeBtn = Theme:CreateButton(dlg, 20, 20, "X", "default")
-    closeBtn:SetPoint("TOPRIGHT", -10, -10)
-    closeBtn:SetScript("OnClick", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.spotterPlateTutorialShown = true
-        end
-        dlg:Hide()
-    end)
-    dlg.closeBtn = closeBtn
-
-    local bodyFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    bodyFs:SetPoint("TOPLEFT", 14, -36)
-    bodyFs:SetPoint("TOPRIGHT", -14, -36)
-    bodyFs:SetJustifyH("LEFT")
-    bodyFs:SetWordWrap(true)
-    bodyFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-    bodyFs:SetText(L["SocialCentral marks tracked players and highlights your focused Radar target with a pulsing red arrow whenever nameplates are visible on screen."])
-    dlg.bodyFs = bodyFs
-
-    local keysBox = CreateFrame("Frame", nil, dlg, "BackdropTemplate")
-    keysBox:SetPoint("TOPLEFT", bodyFs, "BOTTOMLEFT", 0, -10)
-    keysBox:SetPoint("TOPRIGHT", bodyFs, "BOTTOMRIGHT", 0, -10)
-    keysBox:SetHeight(66)
-    Theme:ApplyBackdrop(keysBox, "inset", p)
-    dlg.keysBox = keysBox
-
-    local keysFs = keysBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    keysFs:SetPoint("TOPLEFT", 10, -8)
-    keysFs:SetPoint("BOTTOMRIGHT", -10, 8)
-    keysFs:SetJustifyH("LEFT")
-    keysFs:SetJustifyV("MIDDLE")
-    keysFs:SetWordWrap(true)
-    keysFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-    keysFs:SetText(
-        "• " .. L["Press |cffffd200Shift + V|r to show/hide Friendly, Guild & Friend nameplates (great for finding allies in cities!)."] .. "\n" ..
-        "• " .. L["Press |cffffd200V|r to show/hide Enemy nameplates around you."]
-    )
-    dlg.keysFs = keysFs
-
-    local tipFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    tipFs:SetPoint("TOPLEFT", keysBox, "BOTTOMLEFT", 0, -10)
-    tipFs:SetPoint("TOPRIGHT", keysBox, "BOTTOMRIGHT", 0, -10)
-    tipFs:SetJustifyH("LEFT")
-    tipFs:SetWordWrap(true)
-    tipFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-    tipFs:SetText(L["Tip: Blizzard keeps nameplate shortcuts manual for account safety. Press Shift+V again anytime to restore your normal view."])
-    dlg.tipFs = tipFs
-
-    local okBtn = Theme:CreateButton(dlg, 220, 24, L["Got it, don't show again"], "primary")
-    okBtn:SetPoint("BOTTOM", 0, 12)
-    Theme:AutoFitButton(okBtn, 190, 24, 340)
-    okBtn:SetScript("OnClick", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.spotterPlateTutorialShown = true
-        end
-        dlg:Hide()
-    end)
-    dlg.okBtn = okBtn
-
-    dlg:SetScript("OnHide", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.spotterPlateTutorialShown = true
-        end
-    end)
-
-    self.tutorialDialog = dlg
-    dlg:Hide()
-    return dlg
-end
-
 function SpotterHUD:ShowNameplateTutorial(forceShow)
-    if InCombatLockdown and InCombatLockdown() then
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        if not forceShow then
+            self._pendingPlateTutorial = true
+        end
         return
     end
+    self._pendingPlateTutorial = false
     local s = ns.db and ns.db.settings
     if not forceShow then
         if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
@@ -2019,124 +1944,66 @@ function SpotterHUD:ShowNameplateTutorial(forceShow)
             return
         end
     end
-    local dlg = self.tutorialDialog or self:CreateTutorialDialog()
-    if dlg then
-        Theme:PrepareTopOverlayModal(dlg, 855)
-        if dlg._dirtyTheme then
-            ApplyTutorialDialogTheme(dlg, Theme:GetPalette())
-        end
-        dlg:Show()
-        if dlg.Raise then dlg:Raise() end
+    local function ResolveRadarHudTarget()
+        return (_G.SocialCentralSpotterFrame and _G.SocialCentralSpotterFrame:IsShown()) and _G.SocialCentralSpotterFrame or nil
     end
+    local plateSpec = {
+        key = "spotter_plate",
+        doneLabel = L["Got it, don't show again"],
+        defaultTarget = ResolveRadarHudTarget,
+        isAnchorVisible = function()
+            return (_G.SocialCentralSpotterFrame and _G.SocialCentralSpotterFrame:IsShown()) == true
+        end,
+        steps = {
+            {
+                title = L["Nameplate Indicators & Target Arrow"],
+                text = L["SocialCentral marks tracked players and highlights your focused Radar target with a pulsing red arrow whenever nameplates are visible on screen."],
+            },
+            {
+                title = L["Nameplate Indicators & Target Arrow"],
+                text = "• " .. L["Press |cffffd200Shift + V|r to show/hide Friendly, Guild & Friend nameplates (great for finding allies in cities!)."] .. "\n\n• " .. L["Press |cffffd200V|r to show/hide Enemy nameplates around you."] .. "\n\n" .. L["Tip: Blizzard keeps nameplate shortcuts manual for account safety. Press Shift+V again anytime to restore your normal view."],
+            },
+        },
+    }
+    if not forceShow and Theme and Theme.PromptWindowTutorial then
+        Theme:PromptWindowTutorial({
+            tutorialKey = "spotterPlateTutorialShown",
+            title = L["Target Radar Nameplates"],
+            guideSpec = plateSpec,
+            isWindowVisible = plateSpec.isAnchorVisible,
+            onSkip = function()
+                if ns.SetAccountTutorialShown then
+                    ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
+                elseif ns.db and ns.db.settings then
+                    ns.db.settings.spotterPlateTutorialShown = true
+                end
+            end,
+        })
+        return
+    end
+    if ns.SetAccountTutorialShown then
+        ns:SetAccountTutorialShown("spotterPlateTutorialShown", true)
+    elseif ns.db and ns.db.settings then
+        ns.db.settings.spotterPlateTutorialShown = true
+    end
+    if not (Theme and Theme.ShowNpcGuide) then
+        return
+    end
+    self.tutorialDialog = Theme:ShowNpcGuide(plateSpec)
 end
 
 function SpotterHUD:ShowNameplateTutorialIfNeeded()
     self:ShowNameplateTutorial(false)
 end
 
-function SpotterHUD:CreateRadarTutorialDialog()
-    if self.radarTutorialDialog then return self.radarTutorialDialog end
-
-    local p = Theme:GetPalette()
-    local dlg = CreateFrame("Frame", "SocialCentralSpotterRadarTutorialDialog", UIParent, "BackdropTemplate")
-    dlg:SetSize(410, 240)
-    dlg:SetPoint("CENTER", UIParent, "CENTER", 0, 85)
-    Theme:PrepareTopOverlayModal(dlg, 856)
-    if dlg.SetClipsChildren then
-        dlg:SetClipsChildren(false)
-    end
-    Theme:ApplyBackdrop(dlg, "window", p)
-    Theme:MakeMovable(dlg, { key = "spotterRadarTutorial" })
-    table.insert(UISpecialFrames, "SocialCentralSpotterRadarTutorialDialog")
-
-    local titleFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    titleFs:SetPoint("TOPLEFT", 14, -12)
-    titleFs:SetPoint("TOPRIGHT", -38, -12)
-    titleFs:SetJustifyH("LEFT")
-    titleFs:SetTextColor(p.accent[1], p.accent[2], p.accent[3])
-    titleFs:SetText(L["Target Radar & Proximity Tracking"])
-    dlg.titleFs = titleFs
-
-    local closeBtn = Theme:CreateButton(dlg, 20, 20, "X", "default")
-    closeBtn:SetPoint("TOPRIGHT", -10, -10)
-    closeBtn:SetScript("OnClick", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.spotterRadarTutorialShown = true
-        end
-        dlg:Hide()
-    end)
-    dlg.closeBtn = closeBtn
-
-    local bodyFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    bodyFs:SetPoint("TOPLEFT", 14, -36)
-    bodyFs:SetPoint("TOPRIGHT", -14, -36)
-    bodyFs:SetJustifyH("LEFT")
-    bodyFs:SetWordWrap(true)
-    bodyFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-    bodyFs:SetText(L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates. When a tracked player is detected, a compact HUD appears with click-to-target and range tracking when selected."])
-    dlg.bodyFs = bodyFs
-
-    local keysBox = CreateFrame("Frame", nil, dlg, "BackdropTemplate")
-    keysBox:SetPoint("TOPLEFT", bodyFs, "BOTTOMLEFT", 0, -10)
-    keysBox:SetPoint("TOPRIGHT", bodyFs, "BOTTOMRIGHT", 0, -10)
-    keysBox:SetHeight(68)
-    Theme:ApplyBackdrop(keysBox, "inset", p)
-    dlg.keysBox = keysBox
-
-    local keysFs = keysBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    keysFs:SetPoint("TOPLEFT", 10, -8)
-    keysFs:SetPoint("BOTTOMRIGHT", -10, 8)
-    keysFs:SetJustifyH("LEFT")
-    keysFs:SetJustifyV("MIDDLE")
-    keysFs:SetWordWrap(true)
-    keysFs:SetTextColor(p.text[1], p.text[2], p.text[3])
-    keysFs:SetText(
-        "• " .. L["Proximity Tracking: Tactical detection via sightlines & nameplates (does not display on the World Map)."] .. "\n" ..
-        "• " .. L["Quick Target: Click the floating Radar HUD anytime outside combat to immediately select the tracked player."]
-    )
-    dlg.keysFs = keysFs
-
-    local tipFs = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    tipFs:SetPoint("TOPLEFT", keysBox, "BOTTOMLEFT", 0, -10)
-    tipFs:SetPoint("TOPRIGHT", keysBox, "BOTTOMRIGHT", 0, -10)
-    tipFs:SetJustifyH("LEFT")
-    tipFs:SetWordWrap(true)
-    tipFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-    tipFs:SetText(L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."])
-    dlg.tipFs = tipFs
-
-    local okBtn = Theme:CreateButton(dlg, 220, 24, L["Got it, don't show again"], "primary")
-    okBtn:SetPoint("BOTTOM", 0, 12)
-    Theme:AutoFitButton(okBtn, 190, 24, 340)
-    okBtn:SetScript("OnClick", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.spotterRadarTutorialShown = true
-        end
-        dlg:Hide()
-    end)
-    dlg.okBtn = okBtn
-
-    dlg:SetScript("OnHide", function()
-        if ns.SetAccountTutorialShown then
-            ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
-        elseif ns.db and ns.db.settings then
-            ns.db.settings.spotterRadarTutorialShown = true
-        end
-    end)
-
-    self.radarTutorialDialog = dlg
-    dlg:Hide()
-    return dlg
-end
-
 function SpotterHUD:ShowRadarTutorial(forceShow)
-    if InCombatLockdown and InCombatLockdown() then
+    if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+        if not forceShow then
+            self._pendingRadarTutorial = true
+        end
         return
     end
+    self._pendingRadarTutorial = false
     local s = ns.db and ns.db.settings
     if not forceShow then
         if not (ns.Spotter and ns.Spotter.IsEnabled and ns.Spotter:IsEnabled()) then
@@ -2146,15 +2013,52 @@ function SpotterHUD:ShowRadarTutorial(forceShow)
             return
         end
     end
-    local dlg = self.radarTutorialDialog or self:CreateRadarTutorialDialog()
-    if dlg then
-        Theme:PrepareTopOverlayModal(dlg, 856)
-        if dlg._dirtyTheme then
-            ApplyTutorialDialogTheme(dlg, Theme:GetPalette())
-        end
-        dlg:Show()
-        if dlg.Raise then dlg:Raise() end
+    local function ResolveRadarHudTarget()
+        return (_G.SocialCentralSpotterFrame and _G.SocialCentralSpotterFrame:IsShown()) and _G.SocialCentralSpotterFrame or nil
     end
+    local radarSpec = {
+        key = "spotter_radar",
+        doneLabel = L["Got it, don't show again"],
+        defaultTarget = ResolveRadarHudTarget,
+        isAnchorVisible = function()
+            return (_G.SocialCentralSpotterFrame and _G.SocialCentralSpotterFrame:IsShown()) == true
+        end,
+        steps = {
+            {
+                title = L["Target Radar & Proximity Tracking"],
+                text = L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates. When a tracked player is detected, a compact HUD appears with click-to-target and range tracking when selected."],
+            },
+            {
+                title = L["Target Radar & Proximity Tracking"],
+                text = "• " .. L["Proximity Tracking: Tactical detection via sightlines & nameplates (does not display on the World Map)."] .. "\n\n• " .. L["Quick Target: Click the floating Radar HUD anytime outside combat to immediately select the tracked player."] .. "\n\n" .. L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."],
+            },
+        },
+    }
+    if not forceShow and Theme and Theme.PromptWindowTutorial then
+        Theme:PromptWindowTutorial({
+            tutorialKey = "spotterRadarTutorialShown",
+            title = L["Target Radar"],
+            guideSpec = radarSpec,
+            isWindowVisible = radarSpec.isAnchorVisible,
+            onSkip = function()
+                if ns.SetAccountTutorialShown then
+                    ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
+                elseif ns.db and ns.db.settings then
+                    ns.db.settings.spotterRadarTutorialShown = true
+                end
+            end,
+        })
+        return
+    end
+    if ns.SetAccountTutorialShown then
+        ns:SetAccountTutorialShown("spotterRadarTutorialShown", true)
+    elseif ns.db and ns.db.settings then
+        ns.db.settings.spotterRadarTutorialShown = true
+    end
+    if not (Theme and Theme.ShowNpcGuide) then
+        return
+    end
+    self.radarTutorialDialog = Theme:ShowNpcGuide(radarSpec)
 end
 
 function SpotterHUD:Show(forceUser)
@@ -2326,6 +2230,11 @@ function SpotterHUD:Init()
                     SpotterHUD:Show(false)
                 elseif doRefresh then
                     SpotterHUD:Refresh()
+                end
+                if SpotterHUD._pendingRadarTutorial and SpotterHUD.frame and SpotterHUD.frame:IsShown() then
+                    SpotterHUD:ShowRadarTutorial(false)
+                elseif SpotterHUD._pendingPlateTutorial and SpotterHUD.frame and SpotterHUD.frame:IsShown() then
+                    SpotterHUD:ShowNameplateTutorial(false)
                 end
             end
         end)

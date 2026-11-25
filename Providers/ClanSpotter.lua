@@ -44,6 +44,7 @@ local posAvoidFirsts = {}
 local posIgnoreKeys = {}
 local posIgnoreFirsts = {}
 local posGuildRawCache = {}
+local posGuildRawPrev = {}
 local posGuildRawCacheCount = 0
 local coldGuildRetryUsed = {}
 local guildPosGuidSet = {}
@@ -56,8 +57,10 @@ local hasAnyPosPeople = false
 local hasAnyPosGuilds = false
 
 local bystanderCooldown = {}
+local bystanderPrev = {}
 local bystanderCooldownCount = 0
 local chatCooldown = {}
+local chatPrev = {}
 local chatCooldownCount = 0
 local activePlatesByUnit = {}
 local activePlateUnitByGuid = {}
@@ -70,7 +73,9 @@ local groupCacheDirty = true
 local onScreenCounts = {}
 local unknownRetryUnits = {}
 local unknownRetryCount = 0
-local inspectQueue = {}
+local inspectQUnit = {}
+local inspectQPlate = {}
+local inspectQTicker = {}
 local inspectQueuedSet = {}
 local inspectQueueHead = 1
 local inspectQueueTail = 0
@@ -79,6 +84,23 @@ local sliceInspectCount = 0
 local sliceWindowStart = 0
 local lastMouseoverGuid = nil
 local lastMouseoverAt = 0
+
+local sortedTargetsCache = {}
+local sortedTargetsDirty = true
+local countsSynced = false
+local cachedCountEnemy = 0
+local cachedCountAlly = 0
+local cachedCountSame = 0
+local cachedCountWatchlist = 0
+local cachedCountFriend = 0
+local cachedCountBlocked = 0
+local cachedCountTotal = 0
+local cachedCountOnScreen = 0
+
+local function MarkTargetsDirty()
+    sortedTargetsDirty = true
+    countsSynced = false
+end
 
 local inInstanceCached = nil
 
@@ -93,11 +115,19 @@ local function EnsureRangeItemRequested(itemId)
     end
 end
 
+local function GetPosGuildRawCache(rawGuild)
+    if not rawGuild then return nil end
+    local v = posGuildRawCache[rawGuild]
+    if v ~= nil then return v end
+    return posGuildRawPrev[rawGuild]
+end
+
 local function RecordPosGuildRawCache(rawGuild, value)
     if not rawGuild then return end
     if posGuildRawCache[rawGuild] == nil then
-        if posGuildRawCacheCount >= 400 then
-            wipe(posGuildRawCache)
+        if posGuildRawCacheCount >= 200 then
+            wipe(posGuildRawPrev)
+            posGuildRawPrev, posGuildRawCache = posGuildRawCache, posGuildRawPrev
             posGuildRawCacheCount = 0
         end
         posGuildRawCacheCount = posGuildRawCacheCount + 1
@@ -107,9 +137,11 @@ end
 
 local function InvalidateBystanderCache()
     wipe(bystanderCooldown)
+    wipe(bystanderPrev)
     bystanderCooldownCount = 0
     wipe(coldGuildRetryUsed)
     wipe(posGuildRawCache)
+    wipe(posGuildRawPrev)
     posGuildRawCacheCount = 0
 end
 
@@ -117,6 +149,7 @@ local function MarkPositiveIndexDirty()
     posIndexDirty = true
     socialCacheDirty = true
     wipe(posGuildRawCache)
+    wipe(posGuildRawPrev)
     posGuildRawCacheCount = 0
 end
 
@@ -125,11 +158,23 @@ local function MarkGuildPositiveDirty()
     MarkPositiveIndexDirty()
 end
 
+local function GetBystanderCooldown(guid)
+    if not guid then return nil end
+    return bystanderCooldown[guid] or bystanderPrev[guid]
+end
+
+local function ClearBystanderCooldown(guid)
+    if not guid then return end
+    bystanderCooldown[guid] = nil
+    bystanderPrev[guid] = nil
+end
+
 local function RecordBystanderCooldown(guid, expiresAt)
     if not guid then return end
     if bystanderCooldown[guid] == nil then
-        if bystanderCooldownCount >= 400 then
-            wipe(bystanderCooldown)
+        if bystanderCooldownCount >= 200 then
+            wipe(bystanderPrev)
+            bystanderPrev, bystanderCooldown = bystanderCooldown, bystanderPrev
             bystanderCooldownCount = 0
             wipe(coldGuildRetryUsed)
         end
@@ -167,11 +212,17 @@ local function RecordGateMissCooldown(guid, confirmedNoMatch, nowClock)
     RecordBystanderCooldown(guid, nowClock + cdSec)
 end
 
+local function GetChatCooldown(cacheKey)
+    if not cacheKey then return nil end
+    return chatCooldown[cacheKey] or chatPrev[cacheKey]
+end
+
 local function RecordChatCooldown(cacheKey, expiresAt)
     if not cacheKey then return end
     if chatCooldown[cacheKey] == nil then
-        if chatCooldownCount >= 300 then
-            wipe(chatCooldown)
+        if chatCooldownCount >= 150 then
+            wipe(chatPrev)
+            chatPrev, chatCooldown = chatCooldown, chatPrev
             chatCooldownCount = 0
         end
         chatCooldownCount = chatCooldownCount + 1
@@ -332,6 +383,7 @@ local function RebuildPositiveIndex()
     wipe(posIgnoreKeys)
     wipe(posIgnoreFirsts)
     wipe(posGuildRawCache)
+    wipe(posGuildRawPrev)
     posGuildRawCacheCount = 0
     socialCacheDirty = false
     posIndexDirty = false
@@ -841,7 +893,37 @@ local function IsStanceAllowed(stance, key)
     return false
 end
 
-local function ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
+local function IsUnitOppositeOrHostile(unit, knownFaction)
+    local myFac = Compat.PlayerFaction and Compat.PlayerFaction()
+    local uFac = knownFaction and Compat.NormalizeFaction and Compat.NormalizeFaction(knownFaction) or nil
+    if unit and Safe.Value(Safe.Call(UnitExists, unit)) == true then
+        if UnitFactionGroup then
+            local _, rawFac = Safe.Call(UnitFactionGroup, unit)
+            local cleanFac = Safe.String(rawFac)
+            if cleanFac and cleanFac ~= "" then
+                uFac = (Compat.NormalizeFaction and Compat.NormalizeFaction(cleanFac)) or cleanFac
+            end
+        end
+        if (not uFac or uFac == "") and UnitRace and Compat.FactionFromRace then
+            local locRace, engRace = Safe.Call(UnitRace, unit)
+            uFac = Compat.FactionFromRace(Safe.String(engRace) or Safe.String(locRace))
+        end
+        if myFac and myFac ~= "" and uFac and uFac ~= "" and uFac ~= myFac then
+            return true, uFac
+        end
+        local isFriend = UnitIsFriend and (Safe.Value(Safe.Call(UnitIsFriend, "player", unit)) == true)
+        local isEnemy = UnitIsEnemy and (Safe.Value(Safe.Call(UnitIsEnemy, "player", unit)) == true)
+        local reaction = UnitReaction and Safe.Number(Safe.Call(UnitReaction, unit, "player"))
+        if (not isFriend) and (isEnemy or (reaction and reaction <= 3)) then
+            return true, uFac
+        end
+    elseif myFac and myFac ~= "" and uFac and uFac ~= "" and uFac ~= myFac then
+        return true, uFac
+    end
+    return false, uFac
+end
+
+local function ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName, isOppositeHostile)
     if rawStance == "ENEMY" and IsStanceAllowed("ENEMY", key) then
         local reason = (dipEntry and dipEntry.reason and dipEntry.reason ~= "") and dipEntry.reason or (watchNote or "")
         return "ENEMY", reason, gName
@@ -855,19 +937,22 @@ local function ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWa
             or ((dipEntry and dipEntry.reason) or L["Watchlist"])
         return "WATCHLIST", reason, gName
     end
-    if isFriend and IsStanceAllowed("FRIEND", key) then
+    if (not isOppositeHostile) and isFriend and IsStanceAllowed("FRIEND", key) then
         local reason = (dipEntry and dipEntry.reason and dipEntry.reason ~= "") and dipEntry.reason or L["Friend"]
         return "FRIEND", reason, gName
     end
-    if rawStance == "ALLY" and IsStanceAllowed("ALLY", key) then
+    if (not isOppositeHostile) and rawStance == "ALLY" and IsStanceAllowed("ALLY", key) then
         return "ALLY", (dipEntry and dipEntry.reason) or "", gName
     end
-    local validSameGuild = (not gName or gName == "" or (myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) == myNormGuild))
-    if isMyGuildMember and validSameGuild and IsStanceAllowed("SAME", key) then
+    local validSameGuild = (not isOppositeHostile) and (myNormGuild and myNormGuild ~= "") and (not gName or gName == "" or NormalizeKeyPart(gName) == myNormGuild)
+    if (not isOppositeHostile) and isMyGuildMember and validSameGuild and IsStanceAllowed("SAME", key) then
         return "SAME", "", (myGuildName and myGuildName ~= "") and myGuildName or gName or L["Same Clan"]
     end
     if Spotter.manualTracked and key and Spotter.manualTracked[key] then
         local fallback = (Spotter.manualTrackedStance and Spotter.manualTrackedStance[key]) or "WATCHLIST"
+        if isOppositeHostile and (fallback == "SAME" or fallback == "ALLY" or fallback == "FRIEND") then
+            fallback = "WATCHLIST"
+        end
         return fallback, (watchNote and watchNote ~= "" and watchNote) or L["Target Radar"], gName
     end
     return nil, "", gName
@@ -1742,6 +1827,7 @@ local function MigrateEntryStateKey(self, oldKey, newKey, entry)
             ns.SpotterHUD.interactionKey = newKey
         end
     end
+    MarkTargetsDirty()
 end
 
 function Spotter:GetStanceLabel(stance)
@@ -1793,9 +1879,12 @@ local function ShouldNotifyStance(stance, key)
     return false
 end
 
-local function PlaySpotterSound(stance)
+local function PlaySpotterSound(stance, senderKeyOrName)
     local s = ns.db and ns.db.settings
     if not s or s.spotterSound == false then return end
+    if Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced(senderKeyOrName) then
+        return
+    end
     if not PlaySound then return end
 
     if SOUNDKIT then
@@ -1816,6 +1905,17 @@ end
 
 function Spotter:MaybeTriggerAlert(entry)
     if not entry or not ShouldNotifyStance(entry.stance, entry.key) then return end
+
+    local s = ns.db and ns.db.settings
+    local hudActive = (not s) or (s.spotterAutoShowHUD ~= false)
+    local hudSuppressedByUser = hudActive and ns.SpotterHUD and ns.SpotterHUD.userClosed == true
+        and entry.stance ~= "ENEMY" and entry.stance ~= "BLOCKED"
+    local willPrintChat = (not hudActive) or entry.stance == "ENEMY" or entry.stance == "BLOCKED" or entry.stance == "WATCHLIST"
+    local willShowBanner = (s and s.spotterAutoShowHUD == false) == true
+    local willShowVisual = willPrintChat or willShowBanner or (hudActive and not hudSuppressedByUser)
+    if not willShowVisual then
+        return
+    end
 
     local now = time()
     local cooldown = (entry.stance == "ENEMY" or entry.stance == "BLOCKED") and ENEMY_ALERT_COOLDOWN or FRIENDLY_ALERT_COOLDOWN
@@ -1847,13 +1947,11 @@ function Spotter:MaybeTriggerAlert(entry)
     local reasonText = (entry.reason and entry.reason ~= "") and (" — |cffffd280" .. entry.reason .. "|r") or ""
     local radarLink = "|Haddon:SCentral:spotter|h|cff58a6ff[" .. L["Target Radar"] .. "]|r|h"
 
-    local s = ns.db and ns.db.settings
-    local hudActive = (not s) or (s.spotterAutoShowHUD ~= false)
-    if (not hudActive) or entry.stance == "ENEMY" or entry.stance == "BLOCKED" or entry.stance == "WATCHLIST" then
+    if willPrintChat then
         ns:Print("%s %s%s%s%s %s", tag, playerCol, guildText, whereText, reasonText, radarLink)
     end
 
-    if s and s.spotterAutoShowHUD == false then
+    if willShowBanner then
         local screenLoc = (entry.locationText and entry.locationText ~= "") and (entry.locationText .. " · " .. proxSummary) or proxSummary
         local screenMsg = string.format(
             "%s[%s]|r %s%s|r%s%s",
@@ -1871,7 +1969,9 @@ function Spotter:MaybeTriggerAlert(entry)
         end
     end
 
-    PlaySpotterSound(entry.stance)
+    if not hudSuppressedByUser or willPrintChat or willShowBanner then
+        PlaySpotterSound(entry.stance, entry.key or entry.displayName)
+    end
 
     local alert = {
         key = entry.key,
@@ -1908,22 +2008,34 @@ local function QuickCandidateGate(unit, guid, rawUnitName)
     if (not hasAnyPosPeople) and (not hasAnyPosGuilds) then
         return false, true
     end
+    local isOppositeHostile = IsUnitOppositeOrHostile(unit, nil)
     if guid and posGuidSet[guid] then
-        return true, true
+        if not isOppositeHostile or not (guildPosGuidSet and guildPosGuidSet[guid]) then
+            return true, true
+        end
     end
     if hasAnyPosPeople and rawUnitName and rawUnitName ~= "" then
-        local firstLower = ExtractFastFirstLower(rawUnitName)
-        if firstLower and posFirstSet[firstLower] then
-            return true, true
+        if isOppositeHostile then
+            local pKey = Compat.ParseCharacterFields and Compat.ParseCharacterFields(rawUnitName)
+            local normFull = (pKey and pKey ~= "" and pKey) or NormalizeKeyPart(rawUnitName)
+            if normFull and (posAvoidKeys[normFull] or posIgnoreKeys[normFull] or (posKeySet[normFull] and not (guildPosKeySet and guildPosKeySet[normFull]))) then
+                return true, true
+            end
+        else
+            local firstLower = ExtractFastFirstLower(rawUnitName)
+            if firstLower and posFirstSet[firstLower] then
+                return true, true
+            end
         end
     end
     if hasAnyPosGuilds and unit then
         local cleanRawGuild = Safe.String(Safe.Call(GetGuildInfo, unit))
-        if (not cleanRawGuild or cleanRawGuild == "") and guid and Compat.ReadUnitTooltipGuild then
-            cleanRawGuild = Compat.ReadUnitTooltipGuild(nil, guid, true)
+        if (not cleanRawGuild or cleanRawGuild == "") and Compat.ReadUnitTooltipGuild then
+            local allowLiveTip = (unit == "mouseover" or unit == "target" or unit == "focus")
+            cleanRawGuild = Compat.ReadUnitTooltipGuild(allowLiveTip and unit or nil, guid, not allowLiveTip)
         end
         if cleanRawGuild and cleanRawGuild ~= "" then
-            local cached = posGuildRawCache[cleanRawGuild]
+            local cached = GetPosGuildRawCache(cleanRawGuild)
             if cached == nil then
                 local rawStance = Spotter:ClassifyGuild(cleanRawGuild)
                 if rawStance and IsStanceAllowed(rawStance, nil) then
@@ -1933,10 +2045,19 @@ local function QuickCandidateGate(unit, guid, rawUnitName)
                 end
                 RecordPosGuildRawCache(cleanRawGuild, cached)
             end
-            return cached ~= false, true
+            if cached == false then
+                return false, true
+            end
+            if isOppositeHostile and (cached == "SAME" or cached == "ALLY") then
+                return false, true
+            end
+            return true, true
         else
+            if isOppositeHostile then
+                return false, true
+            end
             local s = ns.db and ns.db.settings
-            if s and s.spotterNotifySameClan == true and UnitIsInMyGuild then
+            if s and s.spotterNotifySameClan == true and UnitIsInMyGuild and UnitIsFriend and Safe.Value(Safe.Call(UnitIsFriend, "player", unit)) == true then
                 if Safe.Value(Safe.Call(UnitIsInMyGuild, unit)) == true then
                     return true, true
                 end
@@ -1950,7 +2071,9 @@ end
 local function FlushInspectQueue()
     inspectQueueTimerActive = false
     if not Spotter:IsEnabled() then
-        wipe(inspectQueue)
+        wipe(inspectQUnit)
+        wipe(inspectQPlate)
+        wipe(inspectQTicker)
         wipe(inspectQueuedSet)
         inspectQueueHead = 1
         inspectQueueTail = 0
@@ -1958,19 +2081,25 @@ local function FlushInspectQueue()
     end
     local processed = 0
     while inspectQueueHead <= inspectQueueTail and processed < INSPECT_BATCH_LIMIT do
-        local rec = inspectQueue[inspectQueueHead]
-        inspectQueue[inspectQueueHead] = nil
+        local unit = inspectQUnit[inspectQueueHead]
+        local isPlate = inspectQPlate[inspectQueueHead]
+        local isTicker = inspectQTicker[inspectQueueHead]
+        inspectQUnit[inspectQueueHead] = nil
+        inspectQPlate[inspectQueueHead] = nil
+        inspectQTicker[inspectQueueHead] = nil
         inspectQueueHead = inspectQueueHead + 1
-        if rec then
-            inspectQueuedSet[rec.unit] = nil
-            if Safe.Value(Safe.Call(UnitExists, rec.unit)) == true then
-                Spotter:InspectUnit(rec.unit, rec.isNameplate, rec.fromTicker, false, true)
+        if unit then
+            inspectQueuedSet[unit] = nil
+            if Safe.Value(Safe.Call(UnitExists, unit)) == true then
+                Spotter:InspectUnit(unit, isPlate, isTicker, false, true)
                 processed = processed + 1
             end
         end
     end
     if inspectQueueHead > inspectQueueTail then
-        wipe(inspectQueue)
+        wipe(inspectQUnit)
+        wipe(inspectQPlate)
+        wipe(inspectQTicker)
         wipe(inspectQueuedSet)
         inspectQueueHead = 1
         inspectQueueTail = 0
@@ -1987,11 +2116,9 @@ local function EnqueueInspection(unit, isNameplate, fromTicker)
     end
     inspectQueuedSet[unit] = true
     inspectQueueTail = inspectQueueTail + 1
-    inspectQueue[inspectQueueTail] = {
-        unit = unit,
-        isNameplate = isNameplate == true,
-        fromTicker = fromTicker == true,
-    }
+    inspectQUnit[inspectQueueTail] = unit
+    inspectQPlate[inspectQueueTail] = (isNameplate == true)
+    inspectQTicker[inspectQueueTail] = (fromTicker == true)
     if not inspectQueueTimerActive and C_Timer and C_Timer.After then
         inspectQueueTimerActive = true
         C_Timer.After(INSPECT_SLICE_INTERVAL, FlushInspectQueue)
@@ -2014,9 +2141,9 @@ function Spotter:EnsurePruneLoop()
             Spotter._pruneTimerActive = false
             return
         end
-        Spotter:CleanupAbsentTargets(false)
+        local _, nextDelay = Spotter:CleanupAbsentTargets(false)
         if Spotter:IsEnabled() and next(Spotter.entries) ~= nil then
-            C_Timer.After(PRUNE_INTERVAL, PruneTick)
+            C_Timer.After(nextDelay or PRUNE_INTERVAL, PruneTick)
         else
             Spotter._pruneTimerActive = false
         end
@@ -2105,6 +2232,7 @@ local function TrimExcessTargets()
             Spotter.entryByGuid[dropped.guid] = nil
         end
     end
+    MarkTargetsDirty()
 end
 
 function Spotter:QueueBatchEmit(metadataDirty)
@@ -2121,6 +2249,7 @@ function Spotter:QueueBatchEmit(metadataDirty)
             Spotter._batchEmitDirty = false
             RecomputeOnScreenFlags()
             TrimExcessTargets()
+            MarkTargetsDirty()
             if shouldEmit then
                 ns:Emit("SPOTTER_UPDATED")
             end
@@ -2130,6 +2259,7 @@ function Spotter:QueueBatchEmit(metadataDirty)
         self._batchEmitDirty = false
         RecomputeOnScreenFlags()
         TrimExcessTargets()
+        MarkTargetsDirty()
         if shouldEmit then
             ns:Emit("SPOTTER_UPDATED")
         end
@@ -2278,7 +2408,8 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
         self.entryByGuid[guid] = nil
         trackedByGuid = nil
     end
-    if (not skipCooldown) and guid and not trackedByGuid and bystanderCooldown[guid] and nowClock < bystanderCooldown[guid] then
+    local cdUntil = guid and GetBystanderCooldown(guid) or nil
+    if (not skipCooldown) and guid and not trackedByGuid and cdUntil and nowClock < cdUntil then
         return nil
     end
 
@@ -2337,7 +2468,7 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
 
     local existingName = trackedByGuid and trackedByGuid.displayName and trackedByGuid.displayName:find("%s") and trackedByGuid.displayName or nil
     -- Passive nameplate hits never force a synchronous full-roster sync on FirstName collisions.
-    local useFastOnly = (not skipCooldown) and ((isNameplate == true) or (fromTicker == true) or (unit == "mouseover") or (existingName ~= nil) or (guid and bystanderCooldown[guid] ~= nil))
+    local useFastOnly = (not skipCooldown) and ((isNameplate == true) or (fromTicker == true) or (unit == "mouseover") or (existingName ~= nil) or (guid and GetBystanderCooldown(guid) ~= nil))
     local resolved, rawRealm = Compat.ResolveUnitFullName(unit, guid, existingName, useFastOnly)
     local rawName = resolved and resolved.fullName or rawUnitName
     if not rawName or rawName == "" or Compat.IsMe(rawName, guid) then
@@ -2381,23 +2512,34 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
     local isIgnoredGroup = ShouldIgnoreGroupUnit(unit, key, guid)
 
     local checkFirst = resolved and resolved.firstName or rawUnitName
+    local isOppositeHostile, unitFaction = IsUnitOppositeOrHostile(unit, existingEntry and existingEntry.faction)
     local cacheOnlyTip = (unit ~= "target" and unit ~= "focus" and unit ~= "mouseover")
     local gName, gRank = GetUnitSafeGuild(unit, guid, cacheOnlyTip)
     local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(checkFirst, rawName, guid)
+    local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
+    if isOppositeHostile then
+        isMyGuildMember = false
+        isFriend = false
+        if knownGuild and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(knownGuild) == myNormGuild then
+            knownGuild = nil
+        end
+        if gName and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) == myNormGuild then
+            gName = nil
+        end
+    end
     if (not gName or gName == "") and knownGuild and knownGuild ~= "" then
         gName = knownGuild
     end
 
-    local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
     if gName and gName ~= "" and myNormGuild and myNormGuild ~= "" then
-        if NormalizeKeyPart(gName) ~= myNormGuild then
-            -- Unit belongs to a known different guild; never misclassify them as our own clan.
+        if isOppositeHostile or NormalizeKeyPart(gName) ~= myNormGuild then
+            -- Unit belongs to a known different guild or opposite/hostile faction; never misclassify as our own clan.
             isMyGuildMember = false
         else
             isMyGuildMember = true
         end
-    elseif not gName or gName == "" then
-        if UnitIsInMyGuild then
+    elseif (not gName or gName == "") and (not isOppositeHostile) then
+        if UnitIsInMyGuild and UnitIsFriend and Safe.Value(Safe.Call(UnitIsFriend, "player", unit)) == true and not (UnitIsEnemy and Safe.Value(Safe.Call(UnitIsEnemy, "player", unit)) == true) then
             local inMyGuild = Safe.Value(Safe.Call(UnitIsInMyGuild, unit))
             if inMyGuild == true then
                 isMyGuildMember = true
@@ -2410,7 +2552,11 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
     local stance, resolvedReason
     if not isDismissed and not isIgnoredGroup then
         local rawStance, dipEntry = self:ClassifyGuild(gName)
-        stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
+        if isOppositeHostile and (rawStance == "SAME" or rawStance == "ALLY") then
+            rawStance = nil
+            dipEntry = nil
+        end
+        stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName, isOppositeHostile)
     end
     if not stance then
         local removedStale = false
@@ -2423,12 +2569,21 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
             removedStale = true
         end
         if guid then
-            RecordBystanderCooldown(guid, nowClock + GetBystanderCooldownSeconds())
+            local isDirectIntent = (unit == "target" or unit == "focus" or unit == "mouseover")
+            local hasKnownGuild = (gName ~= nil and gName ~= "")
+            if not (isDirectIntent and not hasKnownGuild) then
+                RecordBystanderCooldown(guid, nowClock + GetBystanderCooldownSeconds())
+            elseif unit == "mouseover" then
+                RecordBystanderCooldown(guid, nowClock + 1.5)
+            end
             self.entryByGuid[guid] = nil
         end
         if self.lastAlert and (self.lastAlert.key == key or (guid and self.lastAlert.guid == guid)) then
             self.lastAlert = nil
             removedStale = true
+        end
+        if removedStale then
+            MarkTargetsDirty()
         end
         HidePlateBadge(unit, nil)
         if isNameplate and self.visibleUnits[unit] then
@@ -2448,7 +2603,7 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
     end
 
     if guid then
-        bystanderCooldown[guid] = nil
+        ClearBystanderCooldown(guid)
     end
 
     local displayName = pDisplayName or rawName
@@ -2499,6 +2654,9 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
     entry.targetName = targetMacroName
     entry.guild = gName
     entry.guildRank = gRank
+    if unitFaction and unitFaction ~= "" then
+        entry.faction = unitFaction
+    end
     entry.stance = stance
     entry.reason = resolvedReason or ""
     entry._manualTracked = self.manualTracked[key] == true
@@ -2577,9 +2735,13 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
         or (entry.guild ~= prevGuild)
         or (entry.level ~= prevLevel)
         or (entry.onScreen ~= prevOnScreen)
+    if metadataChanged then
+        MarkTargetsDirty()
+    end
     if skipCooldown then
         RecomputeOnScreenFlags()
         TrimExcessTargets()
+        MarkTargetsDirty()
         self:EnsurePruneLoop()
         if metadataChanged then
             ns:Emit("SPOTTER_UPDATED")
@@ -2603,7 +2765,8 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
 
     local nowClock = (GetTime and GetTime()) or time()
     local senderCacheKey = cleanGuid or cleanSender:lower()
-    if chatCooldown[senderCacheKey] and nowClock < chatCooldown[senderCacheKey] then
+    local chatCdUntil = GetChatCooldown(senderCacheKey)
+    if chatCdUntil and nowClock < chatCdUntil then
         return nil
     end
     RecordChatCooldown(senderCacheKey, nowClock + CHAT_SIGHTING_COOLDOWN)
@@ -2642,8 +2805,16 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
             end
         end
     end
-    local parsed = Compat.ParseCharacterName(bestFullName)
-    local key = (parsed and parsed.lookupKey) or NormalizeKeyPart(bestFullName)
+    local pKey, pFirstName, pDisplayName, pSurname
+    if Compat.ParseCharacterFields then
+        pKey, pFirstName, pDisplayName, pSurname = Compat.ParseCharacterFields(bestFullName)
+    elseif Compat.ParseCharacterName then
+        local parsed = Compat.ParseCharacterName(bestFullName)
+        if parsed then
+            pKey, pFirstName, pDisplayName, pSurname = parsed.lookupKey, parsed.firstName, parsed.displayName, parsed.surname
+        end
+    end
+    local key = (pKey and pKey ~= "" and pKey) or NormalizeKeyPart(bestFullName)
     if not key or key == "" then return nil end
 
     local prevEntry = self.entries[key] or existingByGuid
@@ -2659,7 +2830,7 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
     end
     if prevEntry and prevOldKey and prevOldKey ~= key then
         local prevHasSurname = type(prevEntry.displayName) == "string" and prevEntry.displayName:find("%s") ~= nil
-        if (parsed and parsed.surname) or not prevHasSurname then
+        if pSurname or not prevHasSurname then
             MigrateEntryStateKey(self, prevOldKey, key, self.entries[key] or prevEntry)
         else
             key = prevOldKey
@@ -2677,8 +2848,8 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         return nil
     end
 
-    local firstName = (parsed and parsed.firstName) or bestFullName
-    local displayName = (parsed and parsed.displayName) or bestFullName
+    local firstName = pFirstName or bestFullName
+    local displayName = pDisplayName or bestFullName
 
     local tempEntry = {
         key = key,
@@ -2691,23 +2862,40 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         return self:InspectUnit(liveUnit, liveUnit:match("^nameplate") ~= nil)
     end
 
+    local isOppositeHostile, chatFac = IsUnitOppositeOrHostile(nil, prevEntry and prevEntry.faction)
     local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(firstName, displayName, cleanGuid)
     local gName, gRank = GetUnitSafeGuild(nil, cleanGuid, true)
+    local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
+    if isOppositeHostile then
+        isMyGuildMember = false
+        isFriend = false
+        if knownGuild and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(knownGuild) == myNormGuild then
+            knownGuild = nil
+        end
+        if gName and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) == myNormGuild then
+            gName = nil
+        end
+    end
     if (not gName or gName == "") and knownGuild and knownGuild ~= "" then
         gName = knownGuild
     end
     if (not gName or gName == "") and prevEntry and prevEntry.guild and prevEntry.guild ~= "" then
-        gName = prevEntry.guild
+        if not (isOppositeHostile and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(prevEntry.guild) == myNormGuild) then
+            gName = prevEntry.guild
+        end
     end
-    local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
-    if gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) ~= myNormGuild then
+    if gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and (isOppositeHostile or NormalizeKeyPart(gName) ~= myNormGuild) then
         isMyGuildMember = false
-    elseif gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) == myNormGuild then
+    elseif (not isOppositeHostile) and gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) == myNormGuild then
         isMyGuildMember = true
     end
     local rawStance, dipEntry = self:ClassifyGuild(gName)
+    if isOppositeHostile and (rawStance == "SAME" or rawStance == "ALLY") then
+        rawStance = nil
+        dipEntry = nil
+    end
     local stance, resolvedReason
-    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
+    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName, isOppositeHostile)
     if not stance then
         return nil
     end
@@ -2745,13 +2933,13 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         self.entryByGuid[cleanGuid] = entry
     end
 
-    if not (parsed and parsed.surname) and entry.displayName and entry.displayName:find("%s") then
+    if not pSurname and entry.displayName and entry.displayName:find("%s") then
         displayName = entry.displayName
         firstName = entry.firstName or firstName
     end
     entry.displayName = displayName
     entry.firstName = firstName
-    entry.surname = (parsed and parsed.surname) or entry.surname
+    entry.surname = pSurname or entry.surname
     entry.unitName = entry.unitName or firstName
     entry.targetName = targetMacroName
     entry.guild = gName
@@ -2773,6 +2961,7 @@ function Spotter:InspectChatSighting(rawSender, rawGuid)
         self:MaybeTriggerAlert(entry)
     end
 
+    MarkTargetsDirty()
     self:QueueBatchEmit(true)
     return entry
 end
@@ -2954,6 +3143,7 @@ function Spotter:ReconcileGroupEntries()
     end
     if removedAny then
         RecomputeOnScreenFlags()
+        MarkTargetsDirty()
         self:QueueBatchEmit(true)
     end
 end
@@ -2971,13 +3161,25 @@ function Spotter:ReclassifyActiveEntries()
         local dismissed = (not self.manualTracked[key]) and self.dismissedUntil[key] and now < self.dismissedUntil[key]
         local stance, resolvedReason, updatedGuild
         if not ignored and not dismissed then
+            local isOppositeHostile = IsUnitOppositeOrHostile(nil, entry.faction)
             local isMyGuildMember, knownGuild, _, _, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(entry.firstName, entry.displayName, entry.guid)
             local gName = (entry.guild and entry.guild ~= "") and entry.guild or knownGuild
-            if gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) ~= myNormGuild then
+            if isOppositeHostile then
+                isMyGuildMember = false
+                isFriend = false
+                if gName and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) == myNormGuild then
+                    gName = nil
+                    entry.guild = nil
+                end
+            elseif gName and gName ~= "" and myNormGuild and myNormGuild ~= "" and NormalizeKeyPart(gName) ~= myNormGuild then
                 isMyGuildMember = false
             end
             local rawStance, dipEntry = self:ClassifyGuild(gName)
-            stance, resolvedReason, updatedGuild = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
+            if isOppositeHostile and (rawStance == "SAME" or rawStance == "ALLY") then
+                rawStance = nil
+                dipEntry = nil
+            end
+            stance, resolvedReason, updatedGuild = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName, isOppositeHostile)
             if updatedGuild and updatedGuild ~= "" then
                 entry.guild = updatedGuild
             end
@@ -3023,6 +3225,7 @@ function Spotter:ReclassifyActiveEntries()
     end
 
     RecomputeOnScreenFlags()
+    MarkTargetsDirty()
     self:RefreshVisibleNameplates()
     ns:Emit("SPOTTER_UPDATED")
 end
@@ -3069,8 +3272,11 @@ function Spotter:Clear(silent)
     wipe(self.manualTracked)
     wipe(self.manualTrackedStance)
     wipe(chatCooldown)
+    wipe(chatPrev)
     chatCooldownCount = 0
-    wipe(inspectQueue)
+    wipe(inspectQUnit)
+    wipe(inspectQPlate)
+    wipe(inspectQTicker)
     wipe(inspectQueuedSet)
     inspectQueueHead = 1
     inspectQueueTail = 0
@@ -3079,6 +3285,7 @@ function Spotter:Clear(silent)
     unknownRetryCount = 0
     InvalidateBystanderCache()
     MarkPositiveIndexDirty()
+    MarkTargetsDirty()
     self.lastAlert = nil
     HideAllPlateBadges()
     if self.targetArrowFrame then
@@ -3103,8 +3310,11 @@ function Spotter:ClearTargetsOnLocationChange()
     activePlateCount = 0
     wipe(pendingPlateUnits)
     wipe(chatCooldown)
+    wipe(chatPrev)
     chatCooldownCount = 0
-    wipe(inspectQueue)
+    wipe(inspectQUnit)
+    wipe(inspectQPlate)
+    wipe(inspectQTicker)
     wipe(inspectQueuedSet)
     inspectQueueHead = 1
     inspectQueueTail = 0
@@ -3112,6 +3322,7 @@ function Spotter:ClearTargetsOnLocationChange()
     wipe(unknownRetryUnits)
     unknownRetryCount = 0
     InvalidateBystanderCache()
+    MarkTargetsDirty()
     self.lastAlert = nil
     HideAllPlateBadges()
     if self.targetArrowFrame then
@@ -3124,6 +3335,7 @@ function Spotter:ClearTargetsOnLocationChange()
         ns.SpotterHUD._compassEntry = nil
         ns.SpotterHUD._lastCompassEntryKey = nil
         ns.SpotterHUD.manualPinnedEmpty = false
+        ns.SpotterHUD.userClosed = false
         if ns.SpotterHUD.Hide then
             ns.SpotterHUD:Hide()
         end
@@ -3149,6 +3361,7 @@ function Spotter:DismissTarget(key)
             HidePlateBadge(unit, nil)
         end
     end
+    MarkTargetsDirty()
     self:UpdateFocusedPlateMarker()
     ns:Emit("SPOTTER_UPDATED")
     return true
@@ -3202,6 +3415,7 @@ function Spotter:GetTargetKinematics(entry)
 
     local unit = nil
     local distYards, distText
+    local bothStopped = false
     if isSelected then
         unit = "target"
         entry.lastSeen = time()
@@ -3209,6 +3423,12 @@ function Spotter:GetTargetKinematics(entry)
         local uName = Safe.String(Safe.Call(UnitName, "target"))
         if uName and uName ~= "" then
             entry.unitName = uName
+        end
+
+        if GetUnitSpeed then
+            local pSpd = Safe.Number(Safe.Call(GetUnitSpeed, "player")) or 0
+            local tSpd = Safe.Number(Safe.Call(GetUnitSpeed, "target")) or 0
+            bothStopped = (pSpd == 0 and tSpd == 0)
         end
 
         local groupUnit = GetCachedGroupUnitToken(entry.key, entry.guid)
@@ -3221,13 +3441,16 @@ function Spotter:GetTargetKinematics(entry)
         end
 
         if not distYards then
-            local distInterval = (entry.lastDistYards and entry.lastDistYards > 28) and 0.40 or 0.22
+            local distInterval = bothStopped and 0.85 or ((entry.lastDistYards and entry.lastDistYards > 28) and 0.40 or 0.22)
             if not entry._lastDistCheckAt or (nowClock - entry._lastDistCheckAt) >= distInterval then
                 entry._lastDistCheckAt = nowClock
                 local mYards, mText = MeasureUnitDistance("target")
                 if mYards and mText then
                     distYards = mYards
                     distText = mText
+                    if entry.lastDistYards ~= mYards then
+                        sortedTargetsDirty = true
+                    end
                     entry.lastDistYards = mYards
                     entry.lastDistText = mText
                 end
@@ -3238,6 +3461,9 @@ function Spotter:GetTargetKinematics(entry)
             end
         else
             distText = string.format("%dm", distYards)
+            if entry.lastDistYards ~= distYards then
+                sortedTargetsDirty = true
+            end
             entry.lastDistText = distText
             entry.lastDistYards = distYards
         end
@@ -3260,6 +3486,7 @@ function Spotter:GetTargetKinematics(entry)
     end
     kin.unit = unit
     kin.isSelected = isSelected == true
+    kin.stationary = bothStopped
     kin.distYards = isSelected and (distYards or entry.lastDistYards) or nil
     kin.distText = isSelected and (distText or entry.lastDistText or L["Nearby"]) or nil
     kin.exact = isSelected and (distYards ~= nil) or false
@@ -3279,7 +3506,9 @@ function Spotter:CleanupAbsentTargets(silent)
             changed = true
         end
     end
-    RecomputeOnScreenFlags()
+    if changed then
+        RecomputeOnScreenFlags()
+    end
 
     for key, exp in pairs(self.dismissedUntil) do
         if now >= exp then
@@ -3312,6 +3541,9 @@ function Spotter:CleanupAbsentTargets(silent)
     local hudHovered = hudFrame and hudFrame:IsShown() and hudFrame.IsMouseOver and hudFrame:IsMouseOver() == true
     local hudDrawerOpen = ns.SpotterHUD and ns.SpotterHUD.interactionOpen == true
 
+    local hasLiveObs = false
+    local minRemaining = 5.0
+
     for key, entry in pairs(self.entries) do
         local isCurTarget = false
         if tExists then
@@ -3342,6 +3574,9 @@ function Spotter:CleanupAbsentTargets(silent)
         if isCurTarget or isCurFocus or isCurMouseover or isHudFocused then
             entry.toastShownAt = now
             entry.lastSeen = now
+            hasLiveObs = true
+        elseif entry.onScreen then
+            hasLiveObs = true
         end
 
         local zoneLeft = (curZone and curZone ~= "" and entry.zone and entry.zone ~= "" and entry.zone ~= curZone)
@@ -3385,45 +3620,67 @@ function Spotter:CleanupAbsentTargets(silent)
                 self.lastAlert = nil
             end
             changed = true
+        elseif not hasLiveObs then
+            local rem = math.max(1.0, toastDur - toastAge)
+            if rem < minRemaining then
+                minRemaining = rem
+            end
         end
+    end
+
+    if next(self.entries) == nil and ns.SpotterHUD then
+        ns.SpotterHUD.userClosed = false
     end
 
     if changed then
         RecomputeOnScreenFlags()
+        MarkTargetsDirty()
+        self:UpdateFocusedPlateMarker()
         if not silent then
             ns:Emit("SPOTTER_UPDATED")
         end
     end
-    self:UpdateFocusedPlateMarker()
-    return changed
+    local nextDelay = hasLiveObs and 1.0 or math.max(1.0, math.min(5.0, minRemaining))
+    return changed, nextDelay
 end
 
 function Spotter:Prune(silent)
-    self:CleanupAbsentTargets(silent)
+    local changed = self:CleanupAbsentTargets(silent)
+    return changed
 end
 
 function Spotter:GetCounts()
-    local enemy, ally, same, onScreen, watchlist, friend, blocked = 0, 0, 0, 0, 0, 0, 0
-    for _, entry in pairs(self.entries) do
-        if entry.stance == "ENEMY" then
-            enemy = enemy + 1
-        elseif entry.stance == "BLOCKED" then
-            blocked = blocked + 1
-        elseif entry.stance == "WATCHLIST" then
-            watchlist = watchlist + 1
-        elseif entry.stance == "FRIEND" then
-            friend = friend + 1
-        elseif entry.stance == "ALLY" then
-            ally = ally + 1
-        elseif entry.stance == "SAME" then
-            same = same + 1
+    if not countsSynced then
+        local enemy, ally, same, onScreen, watchlist, friend, blocked = 0, 0, 0, 0, 0, 0, 0
+        for _, entry in pairs(self.entries) do
+            if entry.stance == "ENEMY" then
+                enemy = enemy + 1
+            elseif entry.stance == "BLOCKED" then
+                blocked = blocked + 1
+            elseif entry.stance == "WATCHLIST" then
+                watchlist = watchlist + 1
+            elseif entry.stance == "FRIEND" then
+                friend = friend + 1
+            elseif entry.stance == "ALLY" then
+                ally = ally + 1
+            elseif entry.stance == "SAME" then
+                same = same + 1
+            end
+            if entry.onScreen then
+                onScreen = onScreen + 1
+            end
         end
-        if entry.onScreen then
-            onScreen = onScreen + 1
-        end
+        cachedCountEnemy = enemy
+        cachedCountAlly = ally
+        cachedCountSame = same
+        cachedCountWatchlist = watchlist
+        cachedCountFriend = friend
+        cachedCountBlocked = blocked
+        cachedCountOnScreen = onScreen
+        cachedCountTotal = enemy + blocked + ally + same + watchlist + friend
+        countsSynced = true
     end
-    local total = enemy + blocked + ally + same + watchlist + friend
-    return enemy, ally, same, total, onScreen, watchlist, friend, blocked
+    return cachedCountEnemy, cachedCountAlly, cachedCountSame, cachedCountTotal, cachedCountOnScreen, cachedCountWatchlist, cachedCountFriend, cachedCountBlocked
 end
 
 local function ResolveManualTrackKey(rawName, guid)
@@ -3437,8 +3694,14 @@ local function ResolveManualTrackKey(rawName, guid)
         resolved = Compat.LookupForeverFullName(cleanGuid, cleanName, false) or resolved
     end
     local bestFullName = (resolved and resolved.fullName) or cleanName
-    local parsed = bestFullName and Compat.ParseCharacterName and Compat.ParseCharacterName(bestFullName)
-    local key = (parsed and parsed.lookupKey) or (bestFullName and NormalizeKeyPart(bestFullName))
+    local lk
+    if bestFullName and Compat.ParseCharacterFields then
+        lk = Compat.ParseCharacterFields(bestFullName)
+    elseif bestFullName and Compat.ParseCharacterName then
+        local parsed = Compat.ParseCharacterName(bestFullName)
+        lk = parsed and parsed.lookupKey
+    end
+    local key = (lk and lk ~= "" and lk) or (bestFullName and NormalizeKeyPart(bestFullName))
     return (key and key ~= "") and key or nil, cleanName, cleanGuid
 end
 
@@ -3467,6 +3730,7 @@ function Spotter:UntrackPlayer(rawName, guid)
                 HidePlateBadge(unit, nil)
             end
         end
+        MarkTargetsDirty()
         self:UpdateFocusedPlateMarker()
     end
     if ns.SpotterHUD and ns.SpotterHUD.focusedKey == key then
@@ -3547,12 +3811,24 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     end
 
     local myNormGuild, myGuildName = GetPlayerNormalizedGuild()
+    local isOppositeHostile, trackFac = IsUnitOppositeOrHostile(nil, nil)
     local isMyGuildMember, knownGuild, knownClass, knownLevel, isWatched, isFriend, watchNote, isBlocked = LookupKnownPlayerGuildOrMembership(firstName, displayName, cleanGuid)
     local gName = (rawGuild and rawGuild ~= "") and rawGuild or knownGuild
+    if isOppositeHostile then
+        isMyGuildMember = false
+        isFriend = false
+    end
     local rawStance, dipEntry = self:ClassifyGuild(gName)
+    if isOppositeHostile and (rawStance == "SAME" or rawStance == "ALLY") then
+        rawStance = nil
+        dipEntry = nil
+    end
     local stance, resolvedReason
-    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName)
+    stance, resolvedReason, gName = ResolveEffectiveStance(rawStance, dipEntry, isMyGuildMember, isWatched, isFriend, isBlocked, watchNote, key, myNormGuild, myGuildName, gName, isOppositeHostile)
     stance = stance or forcedStance or "WATCHLIST"
+    if isOppositeHostile and (stance == "SAME" or stance == "ALLY" or stance == "FRIEND") then
+        stance = "WATCHLIST"
+    end
 
     local now = time()
     local entry = self.entries[key] or { key = key, firstSeen = now }
@@ -3580,6 +3856,7 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     UpdateEntryZoneInfo(entry)
 
     RecomputeOnScreenFlags()
+    MarkTargetsDirty()
     self:EnsurePruneLoop()
     if ns.SpotterHUD then
         ns.SpotterHUD.focusedKey = key
@@ -3591,32 +3868,44 @@ function Spotter:TrackPlayer(rawName, rawGuild, classFile, level, guid, forcedSt
     return entry
 end
 
+local function SortTargetsComparator(a, b)
+    local aAlive = (a.dead ~= true)
+    local bAlive = (b.dead ~= true)
+    if aAlive ~= bAlive then return aAlive end
+    local aOn = (a.onScreen == true)
+    local bOn = (b.onScreen == true)
+    if aOn ~= bOn then return aOn end
+    local pa = STANCE_PRIORITY[a.stance] or 9
+    local pb = STANCE_PRIORITY[b.stance] or 9
+    if pa ~= pb then return pa < pb end
+    local aMan = (a._manualTracked == true)
+    local bMan = (b._manualTracked == true)
+    if aMan ~= bMan then return aMan end
+    local ad = a.lastDistYards or 999
+    local bd = b.lastDistYards or 999
+    if ad ~= bd then return ad < bd end
+    return (a.lastSeen or 0) > (b.lastSeen or 0)
+end
+
 function Spotter:GetActiveTargets(filterStance)
-    local out = {}
+    if sortedTargetsDirty then
+        wipe(sortedTargetsCache)
+        for _, entry in pairs(self.entries) do
+            sortedTargetsCache[#sortedTargetsCache + 1] = entry
+        end
+        table.sort(sortedTargetsCache, SortTargetsComparator)
+        sortedTargetsDirty = false
+    end
     local f = filterStance and filterStance:upper() or "ALL"
-    for _, entry in pairs(self.entries) do
-        if f == "ALL" or entry.stance == f then
-            table.insert(out, entry)
+    if f == "ALL" then
+        return sortedTargetsCache
+    end
+    local out = {}
+    for _, entry in ipairs(sortedTargetsCache) do
+        if entry.stance == f then
+            out[#out + 1] = entry
         end
     end
-    table.sort(out, function(a, b)
-        local aAlive = (a.dead ~= true)
-        local bAlive = (b.dead ~= true)
-        if aAlive ~= bAlive then return aAlive end
-        local aOn = (a.onScreen == true)
-        local bOn = (b.onScreen == true)
-        if aOn ~= bOn then return aOn end
-        local pa = STANCE_PRIORITY[a.stance] or 9
-        local pb = STANCE_PRIORITY[b.stance] or 9
-        if pa ~= pb then return pa < pb end
-        local aMan = (a._manualTracked == true)
-        local bMan = (b._manualTracked == true)
-        if aMan ~= bMan then return aMan end
-        local ad = a.lastDistYards or 999
-        local bd = b.lastDistYards or 999
-        if ad ~= bd then return ad < bd end
-        return (a.lastSeen or 0) > (b.lastSeen or 0)
-    end)
     return out
 end
 
@@ -3642,7 +3931,6 @@ function Spotter:RegisterEvents()
             "BN_FRIEND_INFO_CHANGED",
             "PLAYER_ENTERING_WORLD",
             "ZONE_CHANGED_NEW_AREA",
-            "UNIT_SPELLCAST_SUCCEEDED",
             "CHAT_MSG_SAY",
             "CHAT_MSG_YELL",
             "CHAT_MSG_EMOTE",
@@ -3651,11 +3939,17 @@ function Spotter:RegisterEvents()
         for _, ev in ipairs(events) do
             pcall(self._eventFrame.RegisterEvent, self._eventFrame, ev)
         end
+        if not (self._unitFrame and self._unitFrame.RegisterUnitEvent) then
+            pcall(self._eventFrame.RegisterEvent, self._eventFrame, "UNIT_SPELLCAST_SUCCEEDED")
+        end
     end
     if self._unitFrame then
         local okUnit = self._unitFrame.RegisterUnitEvent and pcall(self._unitFrame.RegisterUnitEvent, self._unitFrame, "UNIT_TARGET", "player", "target", "focus")
         if not okUnit then
             pcall(self._unitFrame.RegisterEvent, self._unitFrame, "UNIT_TARGET")
+        end
+        if self._unitFrame.RegisterUnitEvent then
+            pcall(self._unitFrame.RegisterUnitEvent, self._unitFrame, "UNIT_SPELLCAST_SUCCEEDED", "player")
         end
     end
     self._eventsRegistered = true
@@ -3827,10 +4121,14 @@ function Spotter:Init()
                     Spotter:OnGuildChanged()
                 end
             elseif event == "GUILD_ROSTER_UPDATE" then
+                MarkGuildPositiveDirty()
                 local nowClock = (GetTime and GetTime()) or time()
+                if Spotter._lastGuildBystanderClearAt == nil or (nowClock - Spotter._lastGuildBystanderClearAt) >= 5 then
+                    Spotter._lastGuildBystanderClearAt = nowClock
+                    InvalidateBystanderCache()
+                end
                 if Spotter._lastGuildReclassAt == nil or (nowClock - Spotter._lastGuildReclassAt) >= 15 then
                     Spotter._lastGuildReclassAt = nowClock
-                    MarkGuildPositiveDirty()
                     if next(Spotter.entries) ~= nil then
                         Spotter:ReclassifyActiveEntries()
                     end
@@ -3898,8 +4196,24 @@ function Spotter:Init()
 
     if not self._unitFrame then
         local uf = CreateFrame("Frame")
-        uf:SetScript("OnEvent", function(_, _, unitTarget)
+        uf:SetScript("OnEvent", function(_, ev, unitTarget, _, arg3)
             if not Spotter:IsEnabled() then return end
+            if ev == "UNIT_SPELLCAST_SUCCEEDED" then
+                if unitTarget == "player" then
+                    local spellId = Safe.Number(arg3)
+                    if spellId and TELEPORT_SPELL_IDS[spellId] then
+                        Spotter:ClearTargetsOnLocationChange()
+                        if C_Timer and C_Timer.After then
+                            C_Timer.After(0.8, function()
+                                if Spotter:IsEnabled() then
+                                    Spotter:RefreshVisibleNameplates(false)
+                                end
+                            end)
+                        end
+                    end
+                end
+                return
+            end
             if unitTarget == "player" then
                 Spotter:InspectUnit("target", false, false, true)
             elseif unitTarget == "target" then

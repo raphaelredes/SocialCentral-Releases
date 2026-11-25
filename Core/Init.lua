@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.25"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.25" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.26"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.26" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -111,7 +111,9 @@ local DEFAULTS = {
             anglesByRes = {},
             lock = false,
         },
-        minimapLeftClickAction = "smart", -- "smart" (unread chat or main hub) | "hub" | "menu"
+        minimapLeftClickAction = "smart", -- "smart" (Quick Reply -> Main Hub -> Close All) | "hub" | "menu"
+        streamerMode = false,       -- opt-in privacy mode masking BattleTags/Real IDs & sensitive message previews
+        chatModifierQuickActions = true, -- Alt+Click player names to Invite, Ctrl+Click for Social Card
         versionCheck = true,        -- passive DBM-style peer version check (rate-limited)
         clanSync = false,           -- opt-in for clan guild addon messages (status/events/signups/lfg)
         guildChatFinder = false,    -- opt-in passive /g LFM line detector (read-only, zero auto-reply)
@@ -135,6 +137,7 @@ local DEFAULTS = {
         chatMirrorChannels = true,  -- mirror native WoW Guild/Party/Raid channels inside Conversations
         chatChannelUnread = false,  -- opt-in: allow mirrored WoW channels to increment unread badges
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
+        chatMutedThreadRules = {},  -- optional expiry rules for timed/instance tab mutes [threadKey] = { untilTs | untilLeaveInstance }
         chatHistoryLimit = 100,     -- local lines kept per character conversation thread (0 to 300)
         guildChatHistorySave = true, -- persist Guild & Officer chat history locally across /reload and logins (toggleable)
         guildChatHistoryLimit = 125, -- saved Guild & Officer lines retained per channel (50 to 500, default 125)
@@ -143,6 +146,7 @@ local DEFAULTS = {
         generalChatHistoryLimit = 150, -- saved lines per Room, Group, Alliance & Mentions thread (25 to 300, default 150)
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
         chatDirectOfficialSend = true, -- send official /w, Battle.net, and guild/group replies in 1 click from Conversations (hardware-event only)
+        chatGroupReconnectSync = true, -- auto-sync missed group chat messages after disconnect/reconnect (0ms idle CPU)
         mentionAlertsEnabled = true, -- Mentions & Custom Keyword Radar in chat
         mentionSound = true,        -- play subtle chime on mention/keyword match
         mentionNicknames = "",      -- comma-separated personal nicknames / alt names
@@ -157,11 +161,17 @@ local DEFAULTS = {
         chatAntiSpamKeywords = "",  -- optional comma-separated custom blocked words for Anti-Spam Shield
         chatClickableUrls = true,   -- make Discord & web URLs clickable to open the Copy Link dialog
         embedOfficialChat = true,   -- master toggle for Official Chat (ChatFrame) enhancements & quick [SC] button
+        chatUiMode = nil,           -- nil (prompt once) | "addon" (SocialCentral chat replaces Official Chat) | "official" (Official WoW Chat only)
         officialChatQuickButton = true, -- show standardized quick [SC] control button beside Official Chat
+        officialChatShortcutButton = true, -- show SocialCentral shortcut & unread badge button beside Official Chat (mirrors Minimap button)
+        chatButtonLock = false,     -- lock Official Chat SocialCentral shortcut button against dragging
+        chatButtonCustomPos = nil,  -- legacy flat position (auto-migrated into chatButtonPositionsByRes)
+        chatButtonPositionsByRes = {}, -- per-resolution saved positions for Official Chat SocialCentral button
         officialChatShortChannels = true, -- shorten verbose public channel labels in official chat
         officialChatSenderTags = true, -- append cached [Lv], [Main], [+]/[Avoid] tags in official chat
         officialChatEditHistory = true, -- preserve typed EditBox lines across reloads (never saves BattleTags)
         officialChatFastScroll = true, -- Shift+Wheel top/bottom & Ctrl+Wheel fast page scroll in official chat
+        chatErrorOriginTags = true, -- append correlated [Origin: Addon] tags to leaked yellow system errors in Official Chat
         embedLfgMirrorBar = true,   -- show bottom SocialCentral mirror bar on Group Finder (I) Official Tab 1
         embedMailPicker = true,     -- show Alts quick-picker & [SC] toggle inside Blizzard SendMailFrame
         embedProfessionWindow = true, -- passively catalog learned recipes & show [SC] toggle on official Profession windows
@@ -170,6 +180,9 @@ local DEFAULTS = {
         addonMsgToast = false,      -- opt-in floating toast pill for text addon messages (Minimap Previews handle chats cleanly without duplicating)
         toastDuration = 6,          -- seconds each notification toast stays visible before disappearing (default 6s)
         toastTutorialShown = false, -- one-time account-wide tutorial shown when first notification toast appears
+        tutorialDismissAll = false, -- disable automatic first-time Chromie prompts across all areas (manual [?] still works)
+        lootRollPromptAnswered = false, -- whether player answered first-roll activation prompt
+        lootRollHelperEnabled = false, -- show SocialCentral Group Loot Roll mini-window with live picks & gear comparison
         toastBelowChatMigrated = false, -- one-time migration placing default toast position directly below ChatFrame1
         addonMsgChatEcho = true,    -- echo clickable [SC] summary line to Blizzard chat windows for incoming addon messages
         addonMsgChatEchoSent = true, -- echo sent [SC] addon messages into Blizzard chat windows immediately
@@ -178,7 +191,8 @@ local DEFAULTS = {
         addonMsgMinimapBadge = true, -- display compact unread counter badge on Minimap button
         minimapBadgeStyle = "fusion", -- "fusion" (multi-color circle under SC icon + hover split) | "separate" (orbital numbers around SC icon)
         addonMsgTabBadges = true,   -- display compact unread badges on Social (O) & Guild (J) side-tabs
-        msgPreviewEnabled = true,       -- show compact animated message preview capsule beside Minimap
+        msgPreviewEnabled = true,       -- show compact animated message preview capsule beside Minimap or Official Chat
+        msgPreviewAnchor = "minimap",   -- "minimap" (beside Minimap) | "chat_side" (beside Official Chat) | "chat_top" (above Official Chat)
         msgPreviewPromptAnswered = true, -- never hijack first whisper with a blocking setup dialog (setup still available manually)
         msgPreviewWhispers = true,      -- show minimap previews for Character Whispers & Direct Addon chat
         msgPreviewBNet = true,          -- show minimap previews for Battle.net friends messages
@@ -192,9 +206,17 @@ local DEFAULTS = {
         msgPreviewDuration = 6,         -- seconds to display preview before retracting back into SC icon (default 6s)
         quickReplyEnabled = true,       -- clicking Minimap icon with pending message notifications opens compact Quick Reply popup
         quickReplyDockToChat = true,    -- snap Quick Reply directly over Blizzard ChatFrame1 matching its exact size & position
+        quickReplyLocked = false,       -- lock Quick Reply window position against accidental drags (user-toggleable via header padlock or Settings)
+        quickReplyLockMode = nil,       -- "unlocked" | "pos_locked" (lock move, allow resize) | "full_locked"
+        chatQuickRepliesByContext = {}, -- per-context quick replies (local, defense, party, raid, guild)
+        quickReplyHotkeys = {},         -- user-configured keyboard shortcuts to send a quick phrase to a chosen chat
+        abilityChatMacros = {},         -- user-configured spell+chat macros (1-click drag to action bar, combat-safe)
         quickReplyEnterOpen = true,     -- press ENTER when pending notifications/drafts exist to open Quick Reply over Blizzard chat
         quickReplyAutoClose = true,     -- auto-close Quick Reply popup on inactivity while preserving typed draft
         quickReplyAutoCloseDelay = 10,  -- seconds before Quick Reply auto-closes when idle or interacting outside (default 10s)
+        quickReplyFadeInCombat = true,  -- fade Quick Reply and pass clicks through during combat when auto-close is off / in dungeon mode
+        quickReplyDungeonAutoMode = true, -- auto-open persistent Quick Reply (over Official Chat or dragged spot) in Dungeons & Raids
+        quickReplySlashOpen = true, -- auto-open/switch Quick Reply when typing /p, /g, /o, /ra, /i, /al, /r, /w (+ Space)
         quickReplyTutorialShown = false, -- one-time account-wide Quick Reply walkthrough tutorial shown on first view
         officialHideGroup = false,      -- opt-in: hide Party/Raid/Instance chat in Blizzard Official Chat while keeping in SocialCentral
         officialHideGuild = false,      -- opt-in: hide Guild/Officer chat in Blizzard Official Chat while keeping in SocialCentral
@@ -205,6 +227,8 @@ local DEFAULTS = {
         quickReplyNotifyRaid = true,    -- include Raid chat in Quick Reply & orange Raid Minimap notifications
         quickReplyNotifyRaidMigrated = false, -- one-time upgrade enabling Raid Minimap & Quick Reply notifications
         quickReplyNotifyGuild = false,  -- include Guild / Officer chat in Quick Reply notifications
+        quickReplyNotifySay = false,    -- opt-in: include Say & Yell in Quick Reply unread notifications / Enter shortcut
+        quickReplyRecordSay = true,     -- record nearby Say & Yell session logs in Quick Reply tabs & Quick History
         msgPreviewMaxVisible = 3,       -- max simultaneous minimap preview rows (1..3); extras wait in FIFO queue
         msgPreviewDefault6Migrated = false, -- one-time upgrade from initial 5s default to 6s default
         spotterEnabled = true,      -- lightweight event-driven radar (0ms idle CPU)
@@ -263,14 +287,20 @@ local DEFAULTS = {
         lfgAntiSpam = true,         -- filter WTS/GDKP/boost spam from public LFG channels
         lfgHideAvoidEnemy = false,  -- hide LFG posts from Avoid-flagged or Enemy Guild leaders
         lfgBulletinMode = true,     -- group LFG browse results under collapsible canonical Dungeon/Raid headers
+        lfgSideDrawerOpen = true,   -- remember whether the docked Filters & Tools side panel auto-opens beside Group Finder (I)
+        lfgAutoOpenOnList = true,   -- automatically switch to SocialCentral Group Finder + Filter Center right after creating/updating an Official LFG listing
+        lfgSplitGroupsAndPlayers = true, -- organize browse rows into collapsible Groups (LFM) and Players Looking (LFG) sections
         lfgHideSavedLockouts = false, -- hide dungeons/raids where the active character is already saved
         lfgHideFullGroups = true,   -- hide groups that are already 5/5 or have 0 open slots for your filtered role
         lfgWatchersEnabled = true,  -- print clickable Official Chat alerts when watched dungeons/keywords appear
         lfgWatchedActivities = {},  -- [canonicalKey] = displayLabel for active Dungeon/Raid Watchers
-        lfgWhisperTemplate = "",    -- optional custom LFG apply whisper template ({level}, {class}, {role}, {ilvl}, {activity})
+        lfgWhisperTemplate = "",    -- optional custom LFG apply whisper template ({level}, {class}, {role}, {spec}, {ilvl}, {activity}, {activity_en})
+        lfgInviteAutoWhisper = true, -- automatically whisper solo LFG players when clicking Invite (+)
+        lfgInviteWhisperTemplate = "Hi! Inviting you to our {activity_en} group!", -- customizable invite whisper template ({activity_en}, {activity})
+        lfgShowClassIconsOnRows = true, -- show up to 5 member class icons inline on LFG group rows
         lfgBrowseCategory = "ALL",  -- last chosen Browse category ("ALL" | "DUNGEONS" | "RAIDS" | "QUESTS" | "PVP" | "CUSTOM")
         lfgBrowseSource = "ALL",    -- last chosen Browse source filter
-        lfgBrowseRole = "MINE",     -- last chosen Browse role filter ("MINE" by default)
+        lfgBrowseRole = "ALL",      -- last chosen Browse role filter ("ALL" by default; Tri-State Filter Center manages roles)
         lfgBrowseSuitableLevel = true, -- filter activities & groups to character level by default
         lfgBrowseSelectedActivities = {}, -- [catId] = { [actKey] = true } persisted checked activities
         officialLfgSyncMode = "GUILD_ALLIES", -- "GUILD_ALLIES" | "GUILD_ONLY" | "OFF"
@@ -301,6 +331,15 @@ local DEFAULTS = {
     clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
     socialMeta = {},               -- [scopeKey] = { [lookupKey] = { folder, mainName, note, flag, favorite } }
     friendPresence = {},           -- [scopeKey] = { [lookupKey] = { lastSeen, lastArea, lastClass, lastLevel, favorite } } (strictly zero BattleTag/Real ID)
+    mySocialProfile = {
+        enabled = false,
+        role = "DPS",
+        availability = "OPEN",
+        langs = "PT/EN",
+        hours = "",
+        bio = "",
+    },
+    socialProfiles = {},           -- [scopeKey] = { [lookupKey] = { role, availability, langs, hours, bio, updatedAt } }
     recentCompanions = {},         -- [scopeKey] = { [lookupKey] = { name, classFile, level, zone, role, lastSeen } }
     locationShareAllow = {},       -- [scopeKey] = { [lookupKey] = true } permanently approved live map-tracking peers (char keys only, zero BattleTag/Real ID)
     chatHistory = {},              -- [scopeKey] = { [threadKey] = { ... } }
@@ -312,6 +351,7 @@ local DEFAULTS = {
     worldBuffsPersonal = {},       -- [charKey] = { saygeAt = ts, saygePlayed = playedSec }
     instanceRuns = {},             -- [i] = { sig, name, instType, enteredAt, charName, classFile }
     dungeonHistory = {},           -- [i] = { id, z, t, st, en, dur, bk, bn, er, ch, cl, rl, m = { ... } } (capped at 80 runs)
+    lfgPresets = {},               -- [i] = { name, state } account-wide saved LFG filter presets (max 20)
 }
 
 local function DeepCopyValue(val)
@@ -327,6 +367,7 @@ end
 
 local USER_MAP_SETTING_KEYS = {
     chatMutedThreads = true,
+    chatMutedThreadRules = true,
     lfgWatchedActivities = true,
     lfgBrowseSelectedActivities = true,
     chatQuickReplies = true,
@@ -442,9 +483,13 @@ local function HandleSlash(raw)
                 ns.Chat:SendAllianceMessage(rest)
             end
         else
-            if ns.ConversationsFrameTab and ns.ConversationsFrameTab.OpenOfficialModule then
-                ns.ConversationsFrameTab:OpenOfficialModule("alliance")
-            elseif ns.UI and ns.UI.OpenTab then
+            if ns.Chat and ns.Chat.EnsureStaticChannelThread then
+                ns.Chat:EnsureStaticChannelThread("ch:alliance")
+            end
+            if ns.Chat and ns.Chat.SetActiveThread then
+                ns.Chat:SetActiveThread("ch:alliance")
+            end
+            if ns.UI and ns.UI.OpenTab then
                 ns.UI:OpenTab("chat")
             end
         end
@@ -506,6 +551,10 @@ local function HandleSlash(raw)
             end
         else
             ns:NavigateToModule("chat", { threadKey = "mentions:radar" })
+        end
+    elseif cmd == "roll" or cmd == "lootroll" or cmd == "needroll" then
+        if ns.LootRoll and ns.LootRoll.RunPreviewSimulation then
+            ns.LootRoll:RunPreviewSimulation(rest)
         end
     elseif cmd == "ignore" or cmd == "block" then
         if ns.SocialPanels and ns.SocialPanels.OpenAccountIgnoreModal then
@@ -579,6 +628,7 @@ local function HandleSlash(raw)
             ns:Print("  |cffffd200/sc mentions [config|test]|r — %s", L["Mentions & Keywords Radar"])
             ns:Print("  |cffffd200/sc spam|r — %s", L["Filtered Chat Log"])
         end
+        ns:Print("  |cffffd200/sc roll [prompt|clear]|r — %s", L["Test Group Loot Roll"])
         ns:Print("  |cffffd200/sc copychat [N]|r — %s", L["Copy Official Chat"])
         ns:Print("  |cffffd200/sc ignore [name]|r — %s", L["Account Ignore"])
         ns:Print("  |cffffd200/sc export|r — %s", L["Export / Import Social Data"])
@@ -695,6 +745,9 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
     if loaded ~= ADDON_NAME then return end
     SocialCentralDB = SocialCentralDB or {}
     SocialCentralCharDB = SocialCentralCharDB or {}
+    if type(SocialCentralCharDB.lfg) ~= "table" then
+        SocialCentralCharDB.lfg = {}
+    end
     ApplyDefaults(SocialCentralDB, DEFAULTS)
     if SocialCentralDB.settings and SocialCentralDB.settings.spotterV2Migrated ~= true then
         -- One-time upgrade from previously deactivated 0.2.7 Target Radar defaults; user toggles persist afterwards.
@@ -750,6 +803,23 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.quickReplyNotifyRaidMigrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.lfgFilterCenterRoleResetV1 ~= true then
+        if SocialCentralDB.settings.lfgBrowseRole == "MINE" then
+            SocialCentralDB.settings.lfgBrowseRole = "ALL"
+        end
+        if SocialCentralDB.settings.lfgBrowseRoleV2 == "MINE" then
+            SocialCentralDB.settings.lfgBrowseRoleV2 = "ALL"
+        end
+        if SocialCentralCharDB and type(SocialCentralCharDB.settings) == "table" then
+            if SocialCentralCharDB.settings.lfgBrowseRole == "MINE" then
+                SocialCentralCharDB.settings.lfgBrowseRole = "ALL"
+            end
+            if SocialCentralCharDB.settings.lfgBrowseRoleV2 == "MINE" then
+                SocialCentralCharDB.settings.lfgBrowseRoleV2 = "ALL"
+            end
+        end
+        SocialCentralDB.settings.lfgFilterCenterRoleResetV1 = true
+    end
     ns._accountSettings = SocialCentralDB.settings
     if SocialCentralCharDB.useCharProfile == true then
         if type(SocialCentralCharDB.settings) ~= "table" then
@@ -783,6 +853,15 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
                     SocialCentralCharDB.settings.quickReplyNotifyRaid = true
                 end
                 SocialCentralCharDB.settings.quickReplyNotifyRaidMigrated = true
+            end
+            if SocialCentralCharDB.settings.lfgFilterCenterRoleResetV1 ~= true then
+                if SocialCentralCharDB.settings.lfgBrowseRole == "MINE" then
+                    SocialCentralCharDB.settings.lfgBrowseRole = "ALL"
+                end
+                if SocialCentralCharDB.settings.lfgBrowseRoleV2 == "MINE" then
+                    SocialCentralCharDB.settings.lfgBrowseRoleV2 = "ALL"
+                end
+                SocialCentralCharDB.settings.lfgFilterCenterRoleResetV1 = true
             end
         end
         SocialCentralDB.settings = SocialCentralCharDB.settings
@@ -843,6 +922,7 @@ function ns:ResetCurrentSettingsToDefaults()
     fresh.toastBelowChatMigrated = true
     fresh.focusUpgradeV1Migrated = true
     fresh.quickReplyNotifyRaidMigrated = true
+    fresh.lfgFilterCenterRoleResetV1 = true
     if ns:IsCharProfileEnabled() then
         SocialCentralCharDB = SocialCentralCharDB or {}
         SocialCentralCharDB.settings = fresh
@@ -1178,6 +1258,9 @@ function ns:NavigateToModule(modName, opts)
     if (opts.socialFilter or opts.socialSearch or opts.watchlistSearch ~= nil) and ns.UI and ns.UI.SetSocialNavigation then
         ns.UI:SetSocialNavigation(opts)
     end
+    if (opts.chatFilter or opts.chatThreadKey) and ns.UI and ns.UI.SetChatNavigation then
+        ns.UI:SetChatNavigation(opts)
+    end
     if (opts.altSubTab or opts.altBagSource or opts.altSearch ~= nil) and ns.UI and ns.UI.SetAltsNavigation then
         ns.UI:SetAltsNavigation(opts)
     end
@@ -1189,6 +1272,15 @@ function ns:NavigateToModule(modName, opts)
         if opts.lfgSelectKey and opts.lfgSelectKey ~= "" then
             ns.LFGFrameTab.pendingSelectKey = opts.lfgSelectKey
             ns.LFGFrameTab.sourceFilter = "ALL"
+            ns.LFGFrameTab.categoryFilter = "ALL"
+            ns.LFGFrameTab.suitableLevelOnly = false
+            ns.LFGFrameTab.query = ""
+            if type(ns.LFGFrameTab.browseActivityFilter) == "table" then
+                wipe(ns.LFGFrameTab.browseActivityFilter)
+            end
+            if ns.LFG and ns.LFG.ResetAdvancedFilters then
+                ns.LFG:ResetAdvancedFilters()
+            end
         end
     elseif opts.clanRightView and ns.Clan and ns.Clan.SetPreferredRightView then
         ns.Clan:SetPreferredRightView(opts.clanRightView)
@@ -1251,9 +1343,47 @@ ns.RegisterEvent(navRegenHost, "PLAYER_REGEN_ENABLED", function()
 end)
 
 if EventRegistry and EventRegistry.RegisterCallback then
-    EventRegistry:RegisterCallback("SetItemRef", function(_, link)
+    EventRegistry:RegisterCallback("SetItemRef", function(_, link, _, button)
         if ns.Safe and ns.Safe.IsSecret and ns.Safe.IsSecret(link) then return end
         if type(link) ~= "string" then return end
+        if link:sub(1, 7) == "player:" then
+            local s = ns.db and ns.db.settings
+            if s and s.chatModifierQuickActions == false then return end
+            if button ~= "LeftButton" then return end
+            local isAlt = IsAltKeyDown and IsAltKeyDown()
+            local isCtrl = IsControlKeyDown and IsControlKeyDown()
+            local isShift = IsShiftKeyDown and IsShiftKeyDown()
+            if isShift then return end
+            local rawTarget = link:match("^player:([^:]+)")
+            if not rawTarget or rawTarget == "" then return end
+            if isAlt and not isCtrl then
+                if InCombatLockdown and InCombatLockdown() then
+                    ns:Print("%s", L["Unavailable during combat."])
+                    return
+                end
+                if ns.Compat and ns.Compat.Invite then
+                    ns.Compat.Invite(rawTarget)
+                end
+                if _G.ChatEdit_GetActiveWindow and _G.ChatEdit_DeactivateChat then
+                    local eb = _G.ChatEdit_GetActiveWindow()
+                    if eb and eb.GetText then
+                        local ebTxt = eb:GetText() or ""
+                        if ebTxt == "" or ebTxt:match("^/[wW]%s+%S+%s*$") then
+                            eb:SetText("")
+                            pcall(_G.ChatEdit_DeactivateChat, eb)
+                        end
+                    end
+                end
+            elseif isCtrl and not isAlt then
+                local parsed = ns.Compat and ns.Compat.ParseCharacterName and ns.Compat.ParseCharacterName(rawTarget)
+                local disp = (parsed and parsed.displayName) or rawTarget
+                local lk = (parsed and parsed.lookupKey) or disp:lower()
+                if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
+                    ns.SocialPanels:OpenSocialMetaModal(disp, lk, { displayName = disp, lookupKey = lk })
+                end
+            end
+            return
+        end
         if link:find("addon:SCentral:update", 1, true) then
             if ns.UI and ns.UI.OpenUpdateModal then
                 ns.UI:OpenUpdateModal()

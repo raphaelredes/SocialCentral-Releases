@@ -823,6 +823,7 @@ local GUID_CACHE_LIMIT = 400
 local ROSTER_SYNC_THROTTLE = 15
 local lastRosterSyncAt = nil
 local lastSyncedGuildTotal = -1
+local lastSyncedGuildOnline = -1
 local scanTooltip
 
 local function PutBoundedMap(tbl, curCount, maxCount, key, val)
@@ -1065,6 +1066,10 @@ function Compat.ClearGuildMembers()
     wipe(guildMemberByGuid)
     wipe(guildMemberByFirst)
     wipe(guildMemberByKey)
+    Compat._guildRosterIsComplete = false
+    lastSyncedGuildTotal = -1
+    lastSyncedGuildOnline = -1
+    lastRosterSyncAt = nil
 end
 
 function Compat.IsGuildMember(firstName, guid, fullName)
@@ -1076,8 +1081,7 @@ function Compat.IsGuildMember(firstName, guid, fullName)
         if guildMemberByGuid[cleanGuid] then
             return true
         end
-        -- When our guild roster provides member GUIDs and this player's GUID is absent, they are not in our guild.
-        if next(guildMemberByGuid) ~= nil then
+        if Compat._guildRosterIsComplete == true then
             return false
         end
     end
@@ -1085,9 +1089,12 @@ function Compat.IsGuildMember(firstName, guid, fullName)
     if canonical and canonical ~= "" then
         local parsed = ParseCharInternal(canonical)
         if parsed and parsed.lookupKey and guildMemberByKey[parsed.lookupKey] then
-            return true
+            -- Full "FirstName Surname" match is safe even if GUID roster cache hasn't refreshed yet.
+            if not cleanGuid or parsed.surname ~= nil or next(guildMemberByGuid) == nil then
+                return true
+            end
         end
-        if parsed and not parsed.surname and parsed.firstName and guildMemberByFirst[parsed.firstName:lower()] then
+        if not cleanGuid and parsed and not parsed.surname and parsed.firstName and guildMemberByFirst[parsed.firstName:lower()] then
             return true
         end
     end
@@ -1177,27 +1184,37 @@ end
 
 function Compat.SyncRosterForeverNames(force, friendsOnly)
     local nowClock = (GetTime and GetTime()) or 0
-    local numGuild = Safe.Number(Safe.Call(GetNumGuildMembers)) or 0
-    if not force and not friendsOnly and lastRosterSyncAt and (nowClock - lastRosterSyncAt) < ROSTER_SYNC_THROTTLE and lastSyncedGuildTotal == numGuild then
+    local rawTotal, rawOnline = Safe.Call(GetNumGuildMembers)
+    local numGuild = Safe.Number(rawTotal) or 0
+    local numOnline = Safe.Number(rawOnline) or 0
+    if not force and not friendsOnly and lastRosterSyncAt and (nowClock - lastRosterSyncAt) < ROSTER_SYNC_THROTTLE
+        and lastSyncedGuildTotal == numGuild and lastSyncedGuildOnline == numOnline
+    then
         return
     end
     if not friendsOnly then
         lastRosterSyncAt = nowClock
         lastSyncedGuildTotal = numGuild
+        lastSyncedGuildOnline = numOnline
         wipe(foreverLookupMissAt)
         foreverLookupMissCount = 0
     end
 
     if not friendsOnly and numGuild > 0 and GetGuildRosterInfo then
-        for i = 1, numGuild do
+        local scanMax = math.min(1000, numGuild)
+        local guidHits = 0
+        for i = 1, scanMax do
             local okG, gNameRaw, _, _, _, _, _, _, _, gOnline, _, _, _, _, _, _, _, gGuidRaw = pcall(GetGuildRosterInfo, i)
-            if okG and (force or gOnline == true or gOnline == 1) then
+            if okG then
                 local gName = Safe.String(gNameRaw)
                 local cleanGuid = Safe.String(gGuidRaw)
+                if cleanGuid then
+                    guidHits = guidHits + 1
+                end
                 local parsed = gName and ParseForeverInternal(gName)
                 if parsed then
                     Compat.CacheGuildMember(cleanGuid, parsed.firstName, parsed.fullName)
-                    if parsed.surname then
+                    if (force or gOnline == true or gOnline == 1) and parsed.surname then
                         local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
                         if cleanGuid then
                             foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
@@ -1208,6 +1225,9 @@ function Compat.SyncRosterForeverNames(force, friendsOnly)
                     end
                 end
             end
+        end
+        if numGuild <= 1000 and guidHits >= numGuild then
+            Compat._guildRosterIsComplete = true
         end
     end
 
@@ -1584,11 +1604,17 @@ function Compat.Whisper(target, draftText)
     local slashName = clean:gsub("%s+", "-")
     local draft = (Compat.CleanChatMessage and Compat.CleanChatMessage(draftText)) or Compat.CleanInput(draftText)
     local hasDraft = (draft and draft ~= "") and true or false
+    if ns.QuickReply and ns.QuickReply.PrepareTemporaryOfficialEditBox then
+        ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
+    end
 
     if ChatFrameUtil and ChatFrameUtil.SendTell then
         local ok = pcall(ChatFrameUtil.SendTell, clean)
         if ok then
             if (not hasDraft) or InsertDraftIntoActiveChatBox(draft) then
+                if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                    ns.QuickReply:ShowActiveOfficialEditBox()
+                end
                 return true
             end
         end
@@ -1597,6 +1623,9 @@ function Compat.Whisper(target, draftText)
         local ok = pcall(ChatFrame_SendTell, clean)
         if ok then
             if (not hasDraft) or InsertDraftIntoActiveChatBox(draft) then
+                if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                    ns.QuickReply:ShowActiveOfficialEditBox()
+                end
                 return true
             end
         end
@@ -1604,11 +1633,21 @@ function Compat.Whisper(target, draftText)
     local line = "/w " .. slashName .. " " .. (draft or "")
     if ChatFrameUtil and ChatFrameUtil.OpenChat then
         local ok = pcall(ChatFrameUtil.OpenChat, line)
-        if ok then return true end
+        if ok then
+            if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                ns.QuickReply:ShowActiveOfficialEditBox()
+            end
+            return true
+        end
     end
     if ChatFrame_OpenChat then
         local ok = pcall(ChatFrame_OpenChat, line)
-        if ok then return true end
+        if ok then
+            if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                ns.QuickReply:ShowActiveOfficialEditBox()
+            end
+            return true
+        end
     end
     return false
 end
@@ -1621,11 +1660,17 @@ function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
     else
         cleanBNet = Compat.CleanInput(bnetName)
     end
+    if ns.QuickReply and ns.QuickReply.PrepareTemporaryOfficialEditBox then
+        ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
+    end
     if cleanBNet then
         if ChatFrameUtil and ChatFrameUtil.SendBNetTell then
             local ok = pcall(ChatFrameUtil.SendBNetTell, cleanBNet)
             if ok then
                 InsertDraftIntoActiveChatBox(draftText)
+                if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                    ns.QuickReply:ShowActiveOfficialEditBox()
+                end
                 return true
             end
         end
@@ -1633,6 +1678,9 @@ function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
             local ok = pcall(ChatFrame_SendBNetTell, cleanBNet)
             if ok then
                 InsertDraftIntoActiveChatBox(draftText)
+                if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                    ns.QuickReply:ShowActiveOfficialEditBox()
+                end
                 return true
             end
         end
@@ -2373,6 +2421,27 @@ function Compat.ShouldShowGuildFeatures()
     return true
 end
 
+function Compat.GetChatUiMode()
+    local s = ns.db and ns.db.settings
+    if s and s.chatUiMode == "official" then
+        return "official"
+    end
+    return "addon"
+end
+
+function Compat.HasChosenChatUiMode()
+    local s = ns.db and ns.db.settings
+    return (s ~= nil) and (s.chatUiMode == "addon" or s.chatUiMode == "official")
+end
+
+function Compat.IsAddonChatMode()
+    return Compat.GetChatUiMode() == "addon"
+end
+
+function Compat.IsOfficialChatMode()
+    return Compat.GetChatUiMode() == "official"
+end
+
 function Compat.IsWindowIntegrationEnabled(winKey)
     local s = ns.db and ns.db.settings
     if winKey == "O" or winKey == "social" then
@@ -2389,7 +2458,7 @@ function Compat.IsWindowIntegrationEnabled(winKey)
     elseif winKey == "M" or winKey == "buffs" or winKey == "map" then
         return false
     elseif winKey == "chatframe" or winKey == "officialchat" then
-        return not s or s.embedOfficialChat ~= false
+        return Compat.IsOfficialChatMode() and (not s or s.embedOfficialChat ~= false)
     elseif winKey == "mail" or winKey == "sendmail" then
         return not s or (s.embedCharacterWindow ~= false and s.embedMailPicker ~= false)
     elseif winKey == "tradeskill" or winKey == "profession" or winKey == "professions" then
@@ -2406,7 +2475,7 @@ function Compat.IsModuleEnabled(modKey)
     elseif m == "nearby" then
         return not s or s.moduleNearbyEnabled ~= false
     elseif m == "chat" or m == "rooms" then
-        return not s or s.moduleChatEnabled ~= false
+        return Compat.IsAddonChatMode() and (not s or s.moduleChatEnabled ~= false)
     elseif m == "group" then
         return not s or s.moduleGroupEnabled ~= false
     elseif m == "radar" or m == "spotter" or m == "targets" then
@@ -2717,4 +2786,19 @@ end
 
 function Compat.IsFocusSilenced(senderKeyOrName, bnetAccountID)
     return Compat.GetFocusSilenceReason(senderKeyOrName, bnetAccountID) ~= nil
+end
+
+function Compat.IsStreamerMode()
+    return (ns.db and ns.db.settings and ns.db.settings.streamerMode == true) or false
+end
+
+function Compat.MaskStreamerBNetName(rawName, seedIdx)
+    if not Compat.IsStreamerMode() then
+        return rawName
+    end
+    local L = ns.L or {}
+    if type(seedIdx) == "number" and seedIdx > 0 then
+        return (L["BNet #%d"] or "BNet #%d"):format(seedIdx)
+    end
+    return L["BNet Friend"] or "BNet Friend"
 end

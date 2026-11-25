@@ -630,6 +630,90 @@ function Store:NotifyWatchlistOnline(entry, opts)
     return didAny
 end
 
+-- Propagate fresh live unit-level /who sightings (UNIT_LEVEL, InspectUnit, /who) across
+-- Social, Directory, Guild Roster, Nearby, and FriendPresence without bloating SavedVariables.
+function Store:RecordLiveUnitObservation(rawName, data)
+    if type(rawName) ~= "string" or rawName == "" or type(data) ~= "table" then return end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(rawName)
+    local lookupKey = (parsed and parsed.lookupKey) or rawName:lower()
+    if not lookupKey or lookupKey == "" then return end
+
+    local nowClock = (GetTime and GetTime()) or time()
+    local newLevel = tonumber(data.level)
+    local newArea = (type(data.area) == "string" and data.area ~= "") and data.area or nil
+    local newClass = (type(data.classFile) == "string" and data.classFile ~= "") and data.classFile or nil
+    local newGuild = (type(data.guild) == "string" and data.guild ~= "") and data.guild or nil
+    local isAuthoritativeWho = (data.source == "who")
+
+    self.liveUnitObs = self.liveUnitObs or {}
+    local obs = self.liveUnitObs[lookupKey]
+    if not obs then
+        obs = {}
+        self.liveUnitObs[lookupKey] = obs
+    end
+    local stale = (nowClock - (obs.observedAt or 0)) >= 1800
+    if newLevel and newLevel > 0 then
+        if isAuthoritativeWho or stale or newLevel >= (obs.level or 0) then
+            obs.level = newLevel
+        end
+    end
+    if newArea then obs.area = newArea end
+    if newClass then obs.classFile = newClass end
+    if newGuild then obs.guild = newGuild end
+    obs.observedAt = nowClock
+    obs.source = data.source or obs.source
+
+    local socialChanged = false
+    local function PatchRow(row)
+        if type(row) ~= "table" then return end
+        if obs.level and obs.level > 0 and (row.level or 0) ~= obs.level then
+            if isAuthoritativeWho or obs.level > (row.level or 0) or (row.level or 0) <= 0 then
+                row.level = obs.level
+                socialChanged = true
+            end
+        end
+        if newArea and newArea ~= "" and row.area ~= newArea then
+            row.area = newArea
+            socialChanged = true
+        end
+        if newClass and (not row.classFile or row.classFile == "") then
+            row.classFile = newClass
+        end
+        if newGuild and (not row.guild or row.guild == "") then
+            row.guild = newGuild
+        end
+    end
+
+    if self.socialByLookup and self.socialByLookup[lookupKey] then
+        PatchRow(self.socialByLookup[lookupKey])
+    end
+    if self.socialDirectoryByLookup and self.socialDirectoryByLookup[lookupKey] then
+        PatchRow(self.socialDirectoryByLookup[lookupKey])
+    end
+    if self.guildRosterRanks and self.guildRosterRanks[lookupKey] then
+        PatchRow(self.guildRosterRanks[lookupKey])
+    end
+    if self.nearby and self.nearby[lookupKey] then
+        PatchRow(self.nearby[lookupKey])
+    end
+
+    if (obs.level and obs.level > 0) or newArea then
+        local pres = self.GetFriendPresence and self:GetFriendPresence(lookupKey)
+        if pres or (self.socialDirectoryByLookup and self.socialDirectoryByLookup[lookupKey]) then
+            self:TouchFriendPresence(lookupKey, {
+                seenNow = false,
+                area = newArea,
+                classFile = newClass,
+                level = obs.level,
+            })
+        end
+    end
+
+    if socialChanged then
+        ns:Emit("SOCIAL_UPDATED")
+    end
+end
+
 function Store:InvalidateWatchlistIndex()
     self._wlIndexDirty = true
     if ns.Watchlist then
@@ -679,7 +763,22 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
     local directEntry = list[parsed.lookupKey]
     local idMatches = self._wlIdMatches and self._wlIdMatches[parsed.lookupKey]
     local firstMatches = firstLower and self._wlNoSurnameByFirst and self._wlNoSurnameByFirst[firstLower]
-    if not directEntry and not idMatches and not firstMatches then
+    local linkedAltMatches = nil
+    if not (data and data.altLookupKey) and self.GetAllLinkedCharacters then
+        for idKey, wlEntry in pairs(list) do
+            if type(wlEntry) == "table" and wlEntry.watchAllAlts == true and idKey ~= parsed.lookupKey and wlEntry.id ~= parsed.lookupKey then
+                local linked = self:GetAllLinkedCharacters(wlEntry.id or idKey)
+                for _, altRec in ipairs(linked) do
+                    if altRec and altRec.lookupKey == parsed.lookupKey then
+                        linkedAltMatches = linkedAltMatches or {}
+                        linkedAltMatches[#linkedAltMatches + 1] = idKey
+                        break
+                    end
+                end
+            end
+        end
+    end
+    if not directEntry and not idMatches and not firstMatches and not linkedAltMatches then
         return
     end
 
@@ -690,12 +789,42 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
     local processedKeys = {}
     local hasExactTarget = (directEntry ~= nil) or (type(idMatches) == "table" and #idMatches > 0)
 
-    local function ApplyObservation(idKey, entry)
+    local function ApplyObservation(idKey, entry, isLinkedAltTarget)
         if type(entry) ~= "table" or processedKeys[idKey] then return end
         processedKeys[idKey] = true
         local exactMatch = (idKey == parsed.lookupKey) or (entry.id == parsed.lookupKey)
-        local firstMatch = firstLower and (not entry.surname or entry.surname == "") and entry.firstName and entry.firstName:lower() == firstLower
-        if not (exactMatch or firstMatch) then return end
+        local firstMatch = (not isLinkedAltTarget) and firstLower and (not entry.surname or entry.surname == "") and entry.firstName and entry.firstName:lower() == firstLower
+        if not (exactMatch or firstMatch or isLinkedAltTarget) then return end
+        if isLinkedAltTarget and not exactMatch then
+            local obsOn = data.online
+            if obsOn == true then
+                local prevSt = entry.status
+                local wasExp = (entry._expiredOnline == true)
+                entry.status = "online"
+                entry._expiredOnline = nil
+                entry.activeAltLookup = parsed.lookupKey
+                entry.activeAltName = parsed.displayName
+                if data.classFile then entry.activeAltClass = data.classFile end
+                if data.level and data.level > 0 then entry.activeAltLevel = data.level end
+                if data.area and data.area ~= "" then entry.area = data.area end
+                if data.source then entry.source = data.source end
+                entry.lastSeen = now
+                entry.lastChecked = now
+                if not (opts and opts.suppressAlert) and prevSt ~= "online" and not wasExp then
+                    self:NotifyWatchlistOnline(entry, opts)
+                end
+                changed = true
+            elseif obsOn == false and entry.activeAltLookup == parsed.lookupKey then
+                entry.activeAltLookup = nil
+                entry.activeAltName = nil
+                entry.activeAltClass = nil
+                entry.activeAltLevel = nil
+                entry.status = "offline"
+                entry._expiredOnline = nil
+                changed = true
+            end
+            return
+        end
         if not exactMatch then
             -- Do not let a full-name sighting overwrite or duplicate a separate first-name-only entry when the full-name key already exists.
             if parsed.surname and parsed.surname ~= "" and (hasExactTarget or list[parsed.lookupKey] ~= nil or (reindexedTargets and reindexedTargets[parsed.lookupKey])) then
@@ -708,7 +837,7 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
 
         local prevStatus = entry.status
         local obsOnline = data.online
-        if obsOnline == true and data.source ~= "bnet" and data.source ~= "friend" and data.source ~= "who"
+        if obsOnline == true and data.source ~= "bnet" and data.source ~= "friend" and data.source ~= "who" and data.source ~= "probe" and data.source ~= "addon"
             and ns.Social and ns.Social.GetBNetLinkInfo
         then
             local bLink = ns.Social:GetBNetLinkInfo(parsed.lookupKey)
@@ -726,12 +855,24 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
                 end
             end
         end
-        local trustedSurnameSource = (data.source == "friend" or data.source == "bnet" or data.source == "guild" or data.source == "target" or data.source == "who")
+        local trustedSurnameSource = (data.source == "friend" or data.source == "bnet" or data.source == "guild" or data.source == "target" or data.source == "who" or data.source == "probe" or data.source == "addon")
             or (data.guid and entry.guid and data.guid == entry.guid)
-        if obsOnline ~= nil then
+        if data.status == "unknown" and obsOnline == nil then
+            entry.status = "unknown"
+            entry.truncatedWarning = nil
+        elseif obsOnline ~= nil then
             entry.status = obsOnline and "online" or "offline"
             entry.lastChecked = now
             entry.truncatedWarning = nil
+        end
+        if obsOnline == true then
+            if data.source == "probe" and (not data.area or data.area == "") then
+                entry._needsWhoEnrich = true
+            elseif (data.area and data.area ~= "") or data.source == "who" or data.source == "bnet" or data.source == "friend" or data.source == "guild" then
+                entry._needsWhoEnrich = nil
+            end
+        elseif obsOnline == false then
+            entry._needsWhoEnrich = nil
         end
         if data.altLookupKey and data.altDisplayName and obsOnline == true then
             entry.activeAltLookup = data.altLookupKey
@@ -787,30 +928,42 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
             entry._expiredOnline = nil
             entry.lastSeen = now
             entry.lastChecked = now
-            local allowUnknown = opts and opts.allowUnknownTransition == true and (now - (entry.addedAt or 0)) >= 3 and not wasExpired
+            local allowUnknown = ((opts and opts.allowUnknownTransition == true) or data.source == "probe" or data.source == "addon" or data.source == "who")
+                and (now - (entry.addedAt or 0)) >= 3
+                and not wasExpired
             if not (opts and opts.suppressAlert) and (prevStatus == "offline" or (prevStatus == "unknown" and allowUnknown)) then
                 self:NotifyWatchlistOnline(entry, opts)
             end
         elseif obsOnline == false then
             entry._expiredOnline = nil
+            if self.liveUnitObs and parsed and parsed.lookupKey then
+                self.liveUnitObs[parsed.lookupKey] = nil
+            end
         end
         changed = true
     end
 
     if directEntry then
-        ApplyObservation(parsed.lookupKey, directEntry)
+        ApplyObservation(parsed.lookupKey, directEntry, false)
     end
     if idMatches then
         for _, idKey in ipairs(idMatches) do
             if idKey ~= parsed.lookupKey then
-                ApplyObservation(idKey, list[idKey])
+                ApplyObservation(idKey, list[idKey], false)
             end
         end
     end
     if firstMatches then
         for _, idKey in ipairs(firstMatches) do
             if idKey ~= parsed.lookupKey then
-                ApplyObservation(idKey, list[idKey])
+                ApplyObservation(idKey, list[idKey], false)
+            end
+        end
+    end
+    if linkedAltMatches then
+        for _, idKey in ipairs(linkedAltMatches) do
+            if idKey ~= parsed.lookupKey then
+                ApplyObservation(idKey, list[idKey], true)
             end
         end
     end
@@ -1283,11 +1436,23 @@ function Store:GetAllLinkedCharacters(rawNameOrKey)
 
     local scope = Compat.ScopeKey()
     local obs = ns.db and ns.db.observedAlts and ns.db.observedAlts[scope]
-    local obsBucket = obs and obs[key]
-    if type(obsBucket) == "table" then
-        for k, disp in pairs(obsBucket) do
-            addCand(disp or k)
+    local function scanObsBucket(bKey)
+        local b = bKey and obs and obs[bKey]
+        if type(b) == "table" then
+            for k, disp in pairs(b) do
+                addCand(disp or k)
+                local sub = obs and obs[k]
+                if type(sub) == "table" then
+                    for sk, sdisp in pairs(sub) do
+                        addCand(sdisp or sk)
+                    end
+                end
+            end
         end
+    end
+    scanObsBucket(key)
+    if rootKey and rootKey ~= key then
+        scanObsBucket(rootKey)
     end
     return out
 end
