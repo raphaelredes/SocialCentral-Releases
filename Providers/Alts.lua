@@ -941,9 +941,11 @@ function Alts:Snapshot(includeBank, force)
         local getNum = (C_Container and C_Container.GetContainerNumSlots) or _G.GetContainerNumSlots
         if getNum then
             local reagentBag = REAGENTBANK_CONTAINER
-            local okR, rSlots = reagentBag and pcall(getNum, reagentBag)
-            if okR and (Safe.Number(rSlots) or 0) > 0 then
-                bankBags[#bankBags + 1] = reagentBag
+            if reagentBag then
+                local okR, rSlots = pcall(getNum, reagentBag)
+                if okR and (Safe.Number(rSlots) or 0) > 0 then
+                    bankBags[#bankBags + 1] = reagentBag
+                end
             end
         end
         local bItems, bFree, bTot = SnapshotContainerRange(bankBags)
@@ -1062,6 +1064,8 @@ function Alts:Snapshot(includeBank, force)
     end
 
     ns.db.alts[key] = {
+        key = key,
+        legacyKey = type(prev) == "table" and prev.legacyKey or nil,
         name = name,
         firstName = resolvedFirst,
         surname = resolvedSurname,
@@ -1339,7 +1343,8 @@ function Alts:GetEstimatedRested(altData)
         else
             val = math.max(0, tonumber(altData.rested) or 0)
         end
-        local pct = math.min(150, math.floor((val / xpMax) * 100 + 0.5))
+        local denom = (liveMax > 1) and liveMax or xpMax
+        local pct = math.min(150, math.floor((val / denom) * 100 + 0.5))
         local restingLive = IsResting and Safe.Bool(Safe.Call(IsResting))
         local restingNow = (restingLive ~= nil) and restingLive or (altData.wasResting == true)
         return pct, false, 0, restingNow, pct
@@ -1600,9 +1605,12 @@ local function CompareRecipeAltEntries(a, b)
 end
 
 function Alts:GetRecipeIndex(worldScope, factionFilter)
-    local wantScope = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(worldScope))
-        or ((ns.db and ns.db.settings and Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(ns.db.settings.altsWorldScope)))
-        or ((worldScope == "all") and "all" or "pool")
+    local rawScope = worldScope
+    if rawScope == nil then
+        rawScope = ns.db and ns.db.settings and ns.db.settings.altsWorldScope
+    end
+    local wantScope = (Compat.NormalizeWorldScope and Compat.NormalizeWorldScope(rawScope))
+        or ((rawScope == "all") and "all" or "pool")
     local wantFac = factionFilter
     if wantFac == nil then
         wantFac = Compat.PlayerFaction and Compat.PlayerFaction() or "ALL"
@@ -2074,7 +2082,11 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                                 for rIdx = 1, math.min(numR, 6) do
                                     local rl = Safe.String(Safe.Call(GetTradeSkillReagentItemLink, i, rIdx))
                                     local rId = rl and tonumber(rl:match("item:(%d+)")) or nil
-                                    local _, _, qty = GetTradeSkillReagentInfo and Safe.Call(GetTradeSkillReagentInfo, i, rIdx)
+                                    local qty = nil
+                                    if GetTradeSkillReagentInfo then
+                                        local _, _, rawQty = Safe.Call(GetTradeSkillReagentInfo, i, rIdx)
+                                        qty = rawQty
+                                    end
                                     qty = Safe.Number(qty) or 1
                                     if rId and rId > 0 then
                                         CatalogUpsert(rId, rl)
@@ -2092,7 +2104,10 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
     end
 
     if isCraftFrame and GetNumCrafts and GetCraftInfo then
-        local cLine, cRank, cMax = GetCraftDisplaySkillLine and Safe.Call(GetCraftDisplaySkillLine)
+        local cLine, cRank, cMax
+        if GetCraftDisplaySkillLine then
+            cLine, cRank, cMax = Safe.Call(GetCraftDisplaySkillLine)
+        end
         profName = Safe.String(cLine) or profName
         profRank = Safe.Number(cRank) or profRank
         profMax = Safe.Number(cMax) or profMax
@@ -2121,7 +2136,11 @@ function Alts:ScanLearnedRecipes(isCraftFrame)
                             for rIdx = 1, math.min(numR, 6) do
                                 local rl = Safe.String(Safe.Call(GetCraftReagentItemLink, i, rIdx))
                                 local rId = rl and tonumber(rl:match("item:(%d+)")) or nil
-                                local _, _, qty = GetCraftReagentInfo and Safe.Call(GetCraftReagentInfo, i, rIdx)
+                                local qty = nil
+                                if GetCraftReagentInfo then
+                                    local _, _, rawQty = Safe.Call(GetCraftReagentInfo, i, rIdx)
+                                    qty = rawQty
+                                end
                                 qty = Safe.Number(qty) or 1
                                 if rId and rId > 0 then
                                     CatalogUpsert(rId, rl)
@@ -2244,7 +2263,10 @@ function Alts:ScanTradeSkillCooldowns()
                 local okCd, rem = pcall(C_TradeSkillUI.GetRecipeCooldown, rid)
                 rem = okCd and Safe.Number(rem) or nil
                 if rem and rem > 60 then
-                    local okInfo, rInfo = C_TradeSkillUI.GetRecipeInfo and pcall(C_TradeSkillUI.GetRecipeInfo, rid)
+                    local okInfo, rInfo
+                    if C_TradeSkillUI.GetRecipeInfo then
+                        okInfo, rInfo = pcall(C_TradeSkillUI.GetRecipeInfo, rid)
+                    end
                     local rName = (okInfo and type(rInfo) == "table") and Safe.String(rInfo.name) or nil
                     if rName and rName ~= "" then
                         local readyAt = now + math.floor(rem + 0.5)

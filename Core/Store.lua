@@ -581,6 +581,7 @@ function Store:NotifyWatchlistOnline(entry, opts)
     local shownSender = entry.activeAltName or entry.displayName or "?"
     local shownClass = entry.activeAltClass or entry.classFile
     local shownLookup = entry.activeAltLookup or entry.id or (entry.displayName and entry.displayName:lower()) or nil
+    local L = ns.L or {}
     local textSuffix = (entry.area and entry.area ~= "")
         and ((L["Online"] or "Online") .. " · " .. entry.area)
         or (L["Is now online in WoW: Forever"] or "Is now online in WoW: Forever")
@@ -590,7 +591,6 @@ function Store:NotifyWatchlistOnline(entry, opts)
 
     local didAny = false
     if alerts.toast ~= false and not (opts and opts.suppressToast) then
-        local L = ns.L or {}
         ns:Emit("ADDON_MESSAGE_NOTIFY", {
             id = "watchlist:" .. tostring(entry.id or entry.displayName or "?") .. ":" .. tostring(now),
             kind = "WATCHLIST_ONLINE",
@@ -986,7 +986,7 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
     end
 end
 
-local MAX_RECENT_COMPANIONS = 120
+local MAX_RECENT_COMPANIONS = 250
 local COMPANION_TTL = 365 * 86400
 
 function Store:GetSocialMetaTable()
@@ -1048,7 +1048,7 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
     if patch.nickname ~= nil then
         local cleanNick = Compat.CleanInput(patch.nickname)
         if cleanNick and #cleanNick > 28 then
-            cleanNick = cleanNick:sub(1, 28)
+            cleanNick = (Compat.TruncateUtf8 and Compat.TruncateUtf8(cleanNick, 28)) or cleanNick:sub(1, 28)
         end
         rec.nickname = cleanNick or nil
     end
@@ -1637,7 +1637,9 @@ function Store:MigrateLegacyFavorites()
     HarvestScopedTable(curPres)
     HarvestScopedTable(curWl)
 
-    for _, rootTbl in ipairs({ ns.db.socialMeta, ns.db.friendPresence, ns.db.watchlist }) do
+    local legacyFavRoots = { ns.db.socialMeta, ns.db.friendPresence, ns.db.watchlist }
+    for ri = 1, 3 do
+        local rootTbl = legacyFavRoots[ri]
         if type(rootTbl) == "table" then
             for rawKey, flatRec in pairs(rootTbl) do
                 if type(flatRec) == "table" and flatRec.favorite == true then
@@ -2563,7 +2565,7 @@ function Store:ImportSocialDataString(rawStr)
             local rawKey = parts[2]
             if rawKey and rawKey ~= "" and not rawKey:find("#", 1, true) and not rawKey:find("|K", 1, true) then
                 if recType == "I" then
-                    local dispName = parts[3] or rawKey
+                    local dispName = (parts[3] and parts[3] ~= "") and parts[3] or rawKey
                     local reason = parts[4] or "OTHER"
                     local expiresAt = tonumber(parts[5]) or 0
                     local hideChat = (parts[6] ~= "0")
@@ -2601,7 +2603,7 @@ function Store:ImportSocialDataString(rawStr)
                         end
                     end
                 elseif recType == "W" and Compat.ParseCharacterName then
-                    local disp = parts[3] or rawKey
+                    local disp = (parts[3] and parts[3] ~= "") and parts[3] or rawKey
                     local grp = parts[4] or ""
                     local fav = (parts[5] == "1")
                     local note = parts[6] or ""

@@ -29,7 +29,6 @@ local PILL_H = 44
 local ACTION_H = 44
 local MAX_NAV_NUMS = 7
 local PAGE_SIZE = 5
-local ARROW_TEX = "Interface\\AddOns\\SocialCentral\\Media\\arrow"
 
 local STANCE_RGB = {
     ENEMY     = { 0.96, 0.28, 0.28 },
@@ -121,21 +120,22 @@ local function OpenTargetContextMenu(anchor, entry)
         root:CreateTitle(entry.displayName or "?")
 
         if entry.stance ~= "ENEMY" and entry.stance ~= "BLOCKED" and targetName then
-            local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(entry.key or targetName, bnetAccId)
+            local chatModOn = (not Compat or not Compat.IsOfficialChatMode or not Compat.IsOfficialChatMode())
+                and (not Compat or not Compat.IsModuleEnabled or Compat.IsModuleEnabled("chat"))
+            local scConfirmed = chatModOn and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(entry.key or targetName, bnetAccId)
             if scConfirmed then
                 root:CreateButton(L["Whisper in SocialCentral"], function()
-                    if ns.Chat and ns.Chat.OpenDirectConversation then
-                        ns.Chat:OpenDirectConversation({
+                    if ns.Chat and ns.Chat.OpenPreferredConversation then
+                        ns.Chat:OpenPreferredConversation({
                             targetName = targetName,
+                            lookupKey = entry.key or targetName,
                             bnetAccountID = bnetAccId,
                             bnetName = bnetName,
                             classFile = entry.classFile,
+                            isCrossFaction = isCrossFac,
                             autoProbe = true,
-                            openUI = true,
+                            scConfirmed = true,
                         })
-                        if ns.UI and ns.UI.OpenTab then
-                            ns.UI:OpenTab("chat")
-                        end
                     elseif isCrossFac and bnetName and Compat.BNetWhisper then
                         Compat.BNetWhisper(bnetName, targetName)
                     elseif Compat.Whisper then
@@ -227,35 +227,33 @@ local function BuildTargetMacroText(entry, liveUnit)
         end
     end
 
-    -- 2. Exact raw unitName and Forever full-name variants first (prevents recycled nameplateN stealing focus).
-    if entry.unitName and type(entry.unitName) == "string" then
-        local cleanRaw = entry.unitName:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
-        if cleanRaw ~= "" then
-            addLine("/targetexact " .. cleanRaw)
-        end
-    end
-
+    -- Emit least specific targeting first so the last exact match always wins in WoW macros.
     local cleanDisplay = entry.displayName and entry.displayName:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
-    local candidates = Compat.GetForeverTargetVariants and Compat.GetForeverTargetVariants(cleanDisplay or entry.firstName) or {}
-    for _, cand in ipairs(candidates) do
-        local c = cand:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("^%s+", ""):gsub("%s+$", "")
-        if c ~= "" then
-            addLine("/targetexact " .. c)
-        end
+    local firstName = entry.firstName or (cleanDisplay and cleanDisplay:match("^([^%s%-]+)"))
+    local cleanFirst = firstName and firstName:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("%s+", "")
+    if cleanFirst and cleanFirst ~= "" then
+        addLine("/target " .. cleanFirst)
+        addLine("/targetexact " .. cleanFirst)
     end
 
-    -- 3. Live dynamic nameplate / soft-target token as fast fallback
     if type(liveUnit) == "string" and liveUnit ~= "" and liveUnit ~= "target" and liveUnit ~= "mouseover"
         and not liveUnit:find("[%c%|%/%\\%[%]%;%s]") then
         addLine("/target [@" .. liveUnit .. ",exists]")
     end
 
-    -- 4. Prefix fallback (/target FirstName)
-    local firstName = entry.firstName or (cleanDisplay and cleanDisplay:match("^([^%s%-]+)"))
-    local cleanFirst = firstName and firstName:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("%s+", "")
-    if cleanFirst and cleanFirst ~= "" then
-        addLine("/targetexact " .. cleanFirst)
-        addLine("/target " .. cleanFirst)
+    local cleanRaw = (entry.unitName and type(entry.unitName) == "string")
+        and entry.unitName:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        or nil
+    local candidates = Compat.GetForeverTargetVariants and Compat.GetForeverTargetVariants(cleanDisplay or entry.firstName) or {}
+    for _, cand in ipairs(candidates) do
+        local c = cand:gsub("[%c%|%/%\\%[%]%;\r\n]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if c ~= "" and c ~= cleanRaw then
+            addLine("/targetexact " .. c)
+        end
+    end
+
+    if cleanRaw and cleanRaw ~= "" then
+        addLine("/targetexact " .. cleanRaw)
     end
 
     return table.concat(lines, "\n")
@@ -875,11 +873,17 @@ function SpotterHUD:BuildFrame()
 
     compassBar:SetScript("PostClick", function(selfBtn, mouseBtn, down)
         if down or f._scDragging then return end
+        if f._scJustDraggedAt and GetTime and (GetTime() - f._scJustDraggedAt) < 0.25 then return end
         if selfBtn.entry then
             HandleTargetClick(selfBtn.entry)
             if mouseBtn == "RightButton" then
                 OpenTargetContextMenu(selfBtn, selfBtn.entry)
             end
+        end
+    end)
+    compassBar:HookScript("OnMouseDown", function(_, mouseBtn)
+        if mouseBtn == "LeftButton" and f._scPrepareDrag then
+            f._scPrepareDrag()
         end
     end)
     compassBar:HookScript("OnDragStart", function()
@@ -930,7 +934,7 @@ function SpotterHUD:BuildFrame()
             L["Target Radar & Proximity Tracking"],
             L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates. When a tracked player is detected, a compact HUD appears with click-to-target and range tracking when selected."],
             L["Click the Radar HUD outside combat to select the target, use mouse wheel or number tabs to switch targets, or click '?' anytime to open Chromie's Radar Guide."],
-            17,
+            19,
             { target = f }
         )
         helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
@@ -955,7 +959,7 @@ function SpotterHUD:BuildFrame()
     drawerSep:SetPoint("TOPLEFT", actionPanel, "TOPLEFT", 6, 0)
     drawerSep:SetPoint("TOPRIGHT", actionPanel, "TOPRIGHT", -6, 0)
     drawerSep:SetColorTexture(0.68, 0.56, 0.28, 0.35)
-    f.actionPanel = actionPanel
+    f.drawerSep = drawerSep
 
     local promptFs = actionPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     promptFs:SetPoint("TOPLEFT", 8, -4)
@@ -972,19 +976,20 @@ function SpotterHUD:BuildFrame()
         if not e then return end
         local _, targetName, bnetAccId, isCrossFac, _, bnetName = ResolveSpotterContactState(e)
         local dest = targetName or e.displayName or e.targetName
-        local hasAddon = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(e.key or dest, bnetAccId)
-        if hasAddon and ns.Chat.OpenDirectConversation then
-            ns.Chat:OpenDirectConversation({
+        local addonAllowed = (not Compat or not Compat.IsOfficialChatMode or not Compat.IsOfficialChatMode())
+            and (not Compat or not Compat.IsModuleEnabled or Compat.IsModuleEnabled("chat"))
+        local hasAddon = addonAllowed and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(e.key or dest, bnetAccId)
+        if hasAddon and ns.Chat and ns.Chat.OpenPreferredConversation then
+            ns.Chat:OpenPreferredConversation({
                 targetName = dest,
+                lookupKey = e.key or dest,
                 bnetAccountID = bnetAccId,
                 bnetName = bnetName,
                 classFile = e.classFile,
+                isCrossFaction = isCrossFac,
                 autoProbe = true,
-                openUI = true,
+                scConfirmed = true,
             })
-            if ns.UI and ns.UI.OpenTab then
-                ns.UI:OpenTab("chat")
-            end
         elseif isCrossFac and bnetName and Compat.BNetWhisper then
             Compat.BNetWhisper(bnetName, dest)
         elseif Compat.Whisper then
@@ -1167,23 +1172,37 @@ function SpotterHUD:BuildCombatArrowFrame()
     cf:SetFrameStrata("MEDIUM")
     cf:SetFrameLevel(45)
 
+    local selWash = cf:CreateTexture(nil, "BACKGROUND", nil, 1)
+    selWash:SetPoint("TOPLEFT", cf, "TOPLEFT", 5, -3)
+    selWash:SetPoint("BOTTOMRIGHT", cf, "BOTTOMRIGHT", -5, 3)
+    selWash:SetBlendMode("ADD")
+    selWash:Hide()
+    cf.selWash = selWash
+
+    local topBevel = cf:CreateTexture(nil, "BORDER", nil, 1)
+    topBevel:SetHeight(1)
+    topBevel:SetPoint("TOPLEFT", cf, "TOPLEFT", 8, -3)
+    topBevel:SetPoint("TOPRIGHT", cf, "TOPRIGHT", -8, -3)
+    topBevel:SetColorTexture(1, 0.90, 0.65, 0.16)
+    cf._topBevel = topBevel
+
     local stanceBar = cf:CreateTexture(nil, "OVERLAY")
     stanceBar:SetWidth(3)
-    stanceBar:SetPoint("TOPLEFT", cf, "TOPLEFT", 2, -2)
-    stanceBar:SetPoint("BOTTOMLEFT", cf, "BOTTOMLEFT", 2, 2)
+    stanceBar:SetPoint("TOPLEFT", cf, "TOPLEFT", 3, -3)
+    stanceBar:SetPoint("BOTTOMLEFT", cf, "BOTTOMLEFT", 3, 3)
     stanceBar:SetColorTexture(0.98, 0.80, 0.24, 1)
     cf.stanceBar = stanceBar
 
     local arrowBox = CreateTargetCrestBox(cf, 6)
 
-    local nameFs = cf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local nameFs = cf:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     nameFs:SetPoint("TOPLEFT", arrowBox, "TOPRIGHT", 8, 1)
     nameFs:SetPoint("TOPRIGHT", cf, "TOPRIGHT", -8, 1)
     nameFs:SetJustifyH("LEFT")
     nameFs:SetWordWrap(false)
     cf.nameFs = nameFs
 
-    local distFs = cf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local distFs = cf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     distFs:SetPoint("BOTTOMLEFT", arrowBox, "BOTTOMRIGHT", 8, -1)
     distFs:SetPoint("BOTTOMRIGHT", cf, "BOTTOMRIGHT", -8, -1)
     distFs:SetJustifyH("LEFT")
@@ -1272,7 +1291,8 @@ function SpotterHUD:ShowCombatArrowFallback()
         cf:ClearAllPoints()
         cf:SetPoint("TOP", self.frame, "TOP", 0, 0)
     end
-    cf.nameFs:SetText(string.format("%s[%s]|r %s%s|r", colHex, stanceTag, classHex, entry.displayName or "?"))
+    local lvlPart = (entry.level and tonumber(entry.level) and tonumber(entry.level) > 0) and (" |cff8b949e" .. tostring(entry.level) .. "|r") or ""
+    cf.nameFs:SetText(string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, entry.displayName or "?", lvlPart))
     cf.distFs:SetText(entry.locationText and entry.locationText ~= "" and ("|cff8b949e" .. entry.locationText .. "|r") or ("|cff8b949e" .. L["In Combat"] .. "|r"))
     cf.subFs:SetText(entry.locationText or (entry.guild and ("<" .. entry.guild .. ">") or ""))
     cf:Show()
@@ -1287,6 +1307,7 @@ local function ApplyActionPanelTheme(actionPanel, p)
     if actionPanel.scoutBtn then Theme:StyleButton(actionPanel.scoutBtn, "danger") end
     if actionPanel.inviteBtn then Theme:StyleButton(actionPanel.inviteBtn, "default") end
     if actionPanel.watchBtn then Theme:StyleButton(actionPanel.watchBtn, "default") end
+    actionPanel._lastLayoutStance = nil
     actionPanel._dirtyTheme = nil
 end
 
@@ -1346,6 +1367,20 @@ function SpotterHUD:UpdateAppearance()
         f._dirtyTheme = nil
     end
     Theme:ApplyBackdrop(f, "window", p)
+    local isWarm = (p and (p.key == "blizzard" or p.key == "native"))
+    if f._topBevel then
+        f._topBevel:SetColorTexture(isWarm and 1 or 0.65, isWarm and 0.90 or 0.85, isWarm and 0.65 or 1.0, isWarm and 0.16 or 0.14)
+    end
+    if f.drawerSep then
+        if isWarm then
+            f.drawerSep:SetColorTexture(0.68, 0.56, 0.28, 0.35)
+        else
+            f.drawerSep:SetColorTexture(0.30, 0.72, 1.0, 0.25)
+        end
+    end
+    if self.combatArrowFrame and self.combatArrowFrame._topBevel then
+        self.combatArrowFrame._topBevel:SetColorTexture(isWarm and 1 or 0.65, isWarm and 0.90 or 0.85, isWarm and 0.65 or 1.0, isWarm and 0.16 or 0.14)
+    end
     f._scHLForce = true
     if f.compassBar then
         f.compassBar.subFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
@@ -1382,7 +1417,7 @@ function SpotterHUD:UpdateAppearance()
         end
     end
 
-    Theme:StyleButton(f.closeBtn, "default")
+    Theme:StyleButton(f.closeBtn, "danger")
     self:Refresh()
 end
 
@@ -1654,8 +1689,11 @@ function SpotterHUD:UpdateTargetVisuals()
     end
 
     if combatShown then
-        if cf.stanceBar then
-            cf.stanceBar:SetColorTexture(stanceRgb[1], stanceRgb[2], stanceRgb[3], 1)
+        if cf._lastStanceVal ~= stanceVal then
+            cf._lastStanceVal = stanceVal
+            if cf.stanceBar then
+                cf.stanceBar:SetColorTexture(stanceRgb[1], stanceRgb[2], stanceRgb[3], 1)
+            end
         end
         local stanceTag = stanceVal == "ENEMY" and L["ENEMY"]
             or (stanceVal == "BLOCKED" and L["BLOCKED"])
@@ -1664,8 +1702,11 @@ function SpotterHUD:UpdateTargetVisuals()
             or (stanceVal == "ALLY" and L["ALLY"] or L["CLAN"])
         local colHex = (ns.Spotter and ns.Spotter.GetStanceColor and ns.Spotter:GetStanceColor(stanceVal).hex) or "|cffffffff"
         local classHex = Compat.ClassHex and Compat.ClassHex(entry.classFile) or "|cffffffff"
-        if cf.nameFs then
-            cf.nameFs:SetText(string.format("%s[%s]|r %s%s|r", colHex, stanceTag, classHex, entry.displayName or "?"))
+        local lvlPart = (entry.level and tonumber(entry.level) and tonumber(entry.level) > 0) and (" |cff8b949e" .. tostring(entry.level) .. "|r") or ""
+        local nameOut = string.format("%s[%s]|r %s%s|r%s", colHex, stanceTag, classHex, entry.displayName or "?", lvlPart)
+        if cf.nameFs and cf._lastNameOut ~= nameOut then
+            cf._lastNameOut = nameOut
+            cf.nameFs:SetText(nameOut)
         end
         ApplyHUDSelectionHighlight(cf, isTargeted, stanceRgb)
     end

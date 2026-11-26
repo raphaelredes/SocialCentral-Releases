@@ -1263,9 +1263,12 @@ function Social:Scan()
     Store.socialByGuid = rowByGuid
 
     Store.socialDirectory = dirCtx.map
-    local dirByLookup, dirByKey = {}, {}
+    local dirByLookup, dirByKey, dirByBNet = {}, {}, {}
     for k, row in pairs(dirCtx.map) do
         dirByKey[k] = row
+        if row.bnetAccountID then
+            dirByBNet[row.bnetAccountID] = row
+        end
         if row.lookupKey and row.lookupKey ~= "" then
             local prev = dirByLookup[row.lookupKey]
             local rowForever = (row.samePool ~= false)
@@ -1280,6 +1283,7 @@ function Social:Scan()
     end
     Store.socialDirectoryByKey = dirByKey
     Store.socialDirectoryByLookup = dirByLookup
+    Store.socialDirectoryByBNet = dirByBNet
 
     pendingBNetInvites = Compat.GetPendingBNetInvites and Compat.GetPendingBNetInvites() or {}
     local stats = BuildDirectoryStats(onlineCtx.map, dirCtx.map, #pendingBNetInvites)

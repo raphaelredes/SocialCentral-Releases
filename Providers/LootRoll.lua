@@ -103,47 +103,99 @@ local function EscapeLuaPattern(text)
     return (text:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1"))
 end
 
+local function ExtractFirstItemLink(msg)
+    if type(msg) ~= "string" then return nil end
+    return msg:match("(|c%x%x%x%x%x%x%x%x|Hitem:[^|]+|h.-|h|r)")
+        or msg:match("(|Hitem:[^|]+|h.-|h)")
+end
+
+local function NormalizePlayerToken(name)
+    if type(name) ~= "string" then return name end
+    return (name:gsub("^%s+", ""):gsub("[%s%.%!%,]+$", ""))
+end
+
 local function FormatGlobalToPattern(globalFmt, defaultOrder)
     if type(globalFmt) ~= "string" or globalFmt == "" then return nil, defaultOrder end
     local actualOrder = {}
     local seqIdx = 0
-    local token = globalFmt:gsub("%%(%d*)%$?([sd])", function(posStr)
+    local strCursor = 0
+    local strFields = {}
+    if defaultOrder then
+        for _, f in ipairs(defaultOrder) do
+            if f ~= "roll" then
+                strFields[#strFields + 1] = f
+            end
+        end
+    end
+    local token = globalFmt:gsub("%%(%d*)%$?([sd])", function(posStr, conv)
         seqIdx = seqIdx + 1
-        local idx = tonumber(posStr) or seqIdx
-        local fieldName = defaultOrder and defaultOrder[idx] or ("cap" .. tostring(#actualOrder + 1))
+        local idx = tonumber(posStr)
+        local fieldName
+        if idx and defaultOrder and defaultOrder[idx] then
+            fieldName = defaultOrder[idx]
+        elseif conv == "d" and defaultOrder then
+            local hasRoll = false
+            for _, f in ipairs(defaultOrder) do
+                if f == "roll" then hasRoll = true break end
+            end
+            fieldName = hasRoll and "roll" or (defaultOrder[seqIdx] or ("cap" .. tostring(#actualOrder + 1)))
+        elseif conv == "s" and defaultOrder then
+            strCursor = strCursor + 1
+            fieldName = strFields[strCursor] or defaultOrder[seqIdx] or ("cap" .. tostring(#actualOrder + 1))
+        else
+            fieldName = (defaultOrder and defaultOrder[seqIdx]) or ("cap" .. tostring(#actualOrder + 1))
+        end
         actualOrder[#actualOrder + 1] = fieldName
         if fieldName == "roll" then
             return "\2"
+        elseif fieldName == "link" then
+            return "\3"
         end
         return "\1"
     end)
     token = EscapeLuaPattern(token)
+    token = token:gsub("%%%.$", "%%.?")
     token = token:gsub("\2", "(%%d+)")
+    token = token:gsub("\3", "(.-|Hitem:[^|]+|h.-|h|?r?)")
     token = token:gsub("\1", "(.+)")
-    return "^" .. token .. "$", actualOrder
+    return "^" .. token .. "%s*$", actualOrder
 end
 
 local function BuildLootPatterns(self)
     if self._lootPatterns then return self._lootPatterns end
+    -- Self and specific patterns MUST precede generic "%s ..." patterns so "You"/"Você" cannot match a player name.
     local defs = {
-        { key = "LOOT_ROLL_ROLLED_NEED", mode = "ROLLED", choice = "NEED", order = { "roll", "link", "player" } },
-        { key = "LOOT_ROLL_ROLLED_GREED", mode = "ROLLED", choice = "GREED", order = { "roll", "link", "player" } },
-        { key = "LOOT_ROLL_ROLLED_DISENCHANT", mode = "ROLLED", choice = "DE", order = { "roll", "link", "player" } },
         { key = "LOOT_ROLL_ROLLED_NEED_SELF", mode = "ROLLED_SELF", choice = "NEED", order = { "roll", "link" } },
         { key = "LOOT_ROLL_ROLLED_GREED_SELF", mode = "ROLLED_SELF", choice = "GREED", order = { "roll", "link" } },
         { key = "LOOT_ROLL_ROLLED_DISENCHANT_SELF", mode = "ROLLED_SELF", choice = "DE", order = { "roll", "link" } },
-        { key = "LOOT_ROLL_NEED", mode = "PICK", choice = "NEED", order = { "player", "link" } },
-        { key = "LOOT_ROLL_GREED", mode = "PICK", choice = "GREED", order = { "player", "link" } },
-        { key = "LOOT_ROLL_DISENCHANT", mode = "PICK", choice = "DE", order = { "player", "link" } },
-        { key = "LOOT_ROLL_PASSED", mode = "PICK", choice = "PASS", order = { "player", "link" } },
-        { key = "LOOT_ROLL_PASSED_AUTO", mode = "PICK", choice = "PASS", order = { "player", "link" } },
-        { key = "LOOT_ROLL_PASSED_AUTO_FEMALE", mode = "PICK", choice = "PASS", order = { "player", "link" } },
+        { key = "LOOT_ROLL_ROLLED_NEED", mode = "ROLLED", choice = "NEED", order = { "roll", "link", "player" } },
+        { key = "LOOT_ROLL_ROLLED_GREED", mode = "ROLLED", choice = "GREED", order = { "roll", "link", "player" } },
+        { key = "LOOT_ROLL_ROLLED_DISENCHANT", mode = "ROLLED", choice = "DE", order = { "roll", "link", "player" } },
+        { key = "LOOT_ROLL_YOU_WON_NO_SPAM_NEED", mode = "WON_SELF", choice = "NEED", isWin = true, order = { "roll", "link" } },
+        { key = "LOOT_ROLL_YOU_WON_NO_SPAM_GREED", mode = "WON_SELF", choice = "GREED", isWin = true, order = { "roll", "link" } },
+        { key = "LOOT_ROLL_YOU_WON_NO_SPAM_DISENCHANT", mode = "WON_SELF", choice = "DE", isWin = true, order = { "roll", "link" } },
+        { key = "LOOT_ROLL_WON_NO_SPAM_NEED", mode = "WON", choice = "NEED", isWin = true, order = { "player", "roll", "link" } },
+        { key = "LOOT_ROLL_WON_NO_SPAM_GREED", mode = "WON", choice = "GREED", isWin = true, order = { "player", "roll", "link" } },
+        { key = "LOOT_ROLL_WON_NO_SPAM_DISENCHANT", mode = "WON", choice = "DE", isWin = true, order = { "player", "roll", "link" } },
+        { key = "LOOT_ROLL_YOU_WON", mode = "WON_SELF", choice = "WON", isWin = true, order = { "link" } },
+        { key = "LOOT_ROLL_WON", mode = "WON", choice = "WON", isWin = true, order = { "player", "link" } },
+        { key = "LOOT_ROLL_ALL_PASSED", mode = "ALL_PASSED", choice = "PASS", order = { "link" } },
         { key = "LOOT_ROLL_NEED_SELF", mode = "PICK_SELF", choice = "NEED", order = { "link" } },
         { key = "LOOT_ROLL_GREED_SELF", mode = "PICK_SELF", choice = "GREED", order = { "link" } },
         { key = "LOOT_ROLL_DISENCHANT_SELF", mode = "PICK_SELF", choice = "DE", order = { "link" } },
         { key = "LOOT_ROLL_PASSED_SELF", mode = "PICK_SELF", choice = "PASS", order = { "link" } },
-        { key = "LOOT_ROLL_WON", mode = "WON", choice = "WON", order = { "player", "link" } },
-        { key = "LOOT_ROLL_YOU_WON", mode = "WON_SELF", choice = "WON", order = { "link" } },
+        { key = "LOOT_ROLL_NEED", mode = "PICK", choice = "NEED", order = { "player", "link" } },
+        { key = "LOOT_ROLL_GREED", mode = "PICK", choice = "GREED", order = { "player", "link" } },
+        { key = "LOOT_ROLL_DISENCHANT", mode = "PICK", choice = "DE", order = { "player", "link" } },
+        { key = "LOOT_ROLL_PASSED_AUTO", mode = "PICK", choice = "PASS", order = { "player", "link" } },
+        { key = "LOOT_ROLL_PASSED_AUTO_FEMALE", mode = "PICK", choice = "PASS", order = { "player", "link" } },
+        { key = "LOOT_ROLL_PASSED", mode = "PICK", choice = "PASS", order = { "player", "link" } },
+        { key = "LOOT_ITEM_PUSHED_SELF", mode = "LOOT_SELF", choice = "WON", isWin = true, order = { "link" } },
+        { key = "LOOT_ITEM_SELF_MULTIPLE", mode = "LOOT_SELF", choice = "WON", isWin = true, order = { "link", "count" } },
+        { key = "LOOT_ITEM_SELF", mode = "LOOT_SELF", choice = "WON", isWin = true, order = { "link" } },
+        { key = "LOOT_ITEM_PUSHED", mode = "LOOT", choice = "WON", isWin = true, order = { "player", "link" } },
+        { key = "LOOT_ITEM_MULTIPLE", mode = "LOOT", choice = "WON", isWin = true, order = { "player", "link", "count" } },
+        { key = "LOOT_ITEM", mode = "LOOT", choice = "WON", isWin = true, order = { "player", "link" } },
     }
     local out = {}
     for _, def in ipairs(defs) do
@@ -154,6 +206,7 @@ local function BuildLootPatterns(self)
                 pattern = pat,
                 mode = def.mode,
                 choice = def.choice,
+                isWin = def.isWin == true,
                 order = resolvedOrder,
             }
         end
@@ -166,15 +219,15 @@ local function LookupGroupMemberClass(displayName, lk)
     if Compat and Compat.IsInGroup and not Compat.IsInGroup() then return nil end
     local num = (GetNumGroupMembers and Safe.Number(GetNumGroupMembers())) or 0
     local prefix = (Compat and Compat.IsInRaid and Compat.IsInRaid()) and "raid" or "party"
-    local myName = UnitName and Safe.String(UnitName("player"))
-    if myName and (Compat and Compat.IsMe and Compat.IsMe(displayName)) then
+    if Compat and Compat.IsMe and Compat.IsMe(displayName) then
         local _, cls = UnitClass("player")
         return Safe.String(cls)
     end
     for i = 1, num do
         local unit = (prefix == "party" and i == num) and "player" or (prefix .. i)
         if UnitExists and UnitExists(unit) then
-            local full = (Compat and Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName(unit)) or Safe.String(UnitName(unit))
+            local res = Compat and Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, nil, nil, true)
+            local full = (res and res.fullName) or Safe.String(UnitName(unit))
             if full then
                 local unitLk = Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(full)
                 if (lk and unitLk == lk) or (displayName and full == displayName) then
@@ -223,18 +276,29 @@ function LootRoll:IsEnabled()
     return (ns.db and ns.db.settings and ns.db.settings.lootRollHelperEnabled == true) and true or false
 end
 
+function LootRoll:IsHideOfficialEnabled()
+    return (ns.db and ns.db.settings and ns.db.settings.lootRollHideOfficial == true) and true or false
+end
+
 function LootRoll:HasAnsweredPrompt()
     return (ns.db and ns.db.settings and ns.db.settings.lootRollPromptAnswered == true) and true or false
 end
 
-function LootRoll:SetEnabledFromPrompt(enabled)
+function LootRoll:SetEnabledFromPrompt(enabled, hideOfficial)
+    local isOn = enabled and true or false
     if ns.db and ns.db.settings then
         ns.db.settings.lootRollPromptAnswered = true
-        ns.db.settings.lootRollHelperEnabled = enabled and true or false
+        ns.db.settings.lootRollHelperEnabled = isOn
+        if hideOfficial ~= nil then
+            ns.db.settings.lootRollHideOfficial = (hideOfficial and true or false)
+        end
     end
     if SocialCentralDB and SocialCentralDB.settings then
         SocialCentralDB.settings.lootRollPromptAnswered = true
-        SocialCentralDB.settings.lootRollHelperEnabled = enabled and true or false
+        SocialCentralDB.settings.lootRollHelperEnabled = isOn
+        if hideOfficial ~= nil then
+            SocialCentralDB.settings.lootRollHideOfficial = (hideOfficial and true or false)
+        end
     end
     ns:Emit("LOOT_ROLL_UPDATED")
 end
@@ -360,10 +424,12 @@ function LootRoll:GetActiveList()
             else
                 remMs = GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId)) or nil
             end
-            if remMs ~= nil and remMs <= 0 and not rec.myChoice then
+            if remMs ~= nil and remMs <= 0 and not rec.myChoice and not rec.resolved then
                 rec.expired = true
             end
-            if not rec.expired and (not rec.hideAfterAt or nowMono < rec.hideAfterAt) then
+            local withinWait = (not rec.maxWaitAt or nowMono < rec.maxWaitAt)
+            local withinHide = (not rec.hideAfterAt or nowMono < rec.hideAfterAt)
+            if not rec.expired and withinWait and withinHide then
                 table.insert(out, 1, rec)
             else
                 self.activeRolls[rId] = nil
@@ -402,7 +468,13 @@ function LootRoll:SubmitRoll(rollID, rollType)
             updatedAt = time(),
             isMe = true,
         }
-        rec.hideAfterAt = (GetTime and GetTime() or 0) + (rec.isSimulated and 8.0 or 12.0)
+        local nowMono = GetTime and GetTime() or 0
+        if rec.isSimulated then
+            rec.hideAfterAt = nowMono + 10.0
+        else
+            -- Keep the card alive while teammates finish rolling; resolution/winner sets hideAfterAt.
+            rec.maxWaitAt = math.max(rec.maxWaitAt or 0, nowMono + (rec.durationSec or 60) + 14.0)
+        end
         if rec.isSimulated and C_Timer and C_Timer.After then
             local simRec = rec
             C_Timer.After(1.3, function()
@@ -421,9 +493,18 @@ function LootRoll:SubmitRoll(rollID, rollType)
                 end
                 if bestEntry then
                     bestEntry.won = true
-                    ns:Emit("LOOT_ROLL_UPDATED", simRec.rollID)
+                    simRec.resolved = true
+                    simRec.winnerName = bestEntry.name
+                    simRec.winnerRoll = bestEntry.roll
+                else
+                    simRec.allPassed = true
+                    simRec.resolved = true
                 end
+                ns:Emit("LOOT_ROLL_UPDATED", simRec.rollID)
             end)
+        elseif C_Timer and C_Timer.After then
+            C_Timer.After(0.45, function() self:SyncLootHistory() end)
+            C_Timer.After(1.5, function() self:SyncLootHistory() end)
         end
         ns:Emit("LOOT_ROLL_UPDATED")
     end
@@ -510,6 +591,7 @@ function LootRoll:OnStartLootRoll(rollID, rollTime)
     rec.link = link
     rec.itemID = itemID
     rec.durationSec = durSec
+    rec.maxWaitAt = (GetTime and GetTime() or 0) + durSec + 18.0
     rec.comparison = self:BuildComparison(link, itemID)
 
     if not existing then
@@ -526,16 +608,318 @@ function LootRoll:OnStartLootRoll(rollID, rollTime)
     end
 end
 
+local function FindChoiceEntryKey(rec, dispName, lk, isSelf)
+    if not (rec and rec.choices) then return lk end
+    if lk and rec.choices[lk] then return lk end
+    local shortRaw = type(dispName) == "string" and dispName:gsub("%-[^-]+$", "") or nil
+    local shortLk = shortRaw and shortRaw:lower() or nil
+    if shortLk and rec.choices[shortLk] then return shortLk end
+    local isPlayer = isSelf or (Compat and Compat.IsMe and Compat.IsMe(dispName))
+    for k, entry in pairs(rec.choices) do
+        if type(entry) == "table" then
+            if isPlayer and entry.isMe then
+                return k
+            end
+            if shortLk and type(entry.name) == "string" then
+                local eShort = entry.name:gsub("%-[^-]+$", ""):lower()
+                if eShort == shortLk then
+                    return k
+                end
+            end
+        end
+    end
+    return lk or shortLk or "?"
+end
+
+local function MapModernRollState(stateVal)
+    local st = Safe.Number(stateVal)
+    if not st then return nil end
+    local enumTbl = _G.Enum and _G.Enum.EncounterLootDropRollState
+    if type(enumTbl) == "table" then
+        if st == enumTbl.NoRoll then return nil end
+        if st == enumTbl.NeedMainSpec or st == enumTbl.NeedOffSpec or st == enumTbl.Need then return "NEED" end
+        if st == enumTbl.Disenchant then return "DE" end
+        if st == enumTbl.Greed or st == enumTbl.Transmog then return "GREED" end
+        if st == enumTbl.Pass then return "PASS" end
+    end
+    if st == 0 or st == 1 then return "NEED" end
+    if st == 2 or st == 3 then return "GREED" end
+    if st == 5 then return "PASS" end
+    if st == 6 then return "DE" end
+    return nil
+end
+
+local function ResolveSafeUnitClassByGUID(guid, dispName, lk)
+    if type(guid) == "string" and guid ~= "" and _G.GetPlayerInfoByGUID then
+        local ok, _, cls = pcall(_G.GetPlayerInfoByGUID, guid)
+        if ok then
+            local cleanCls = Safe.String(cls)
+            if cleanCls and cleanCls ~= "" then
+                return cleanCls
+            end
+        end
+    end
+    return LookupGroupMemberClass(dispName, lk)
+end
+
+function LootRoll:ApplyChoiceUpdate(rec, opts)
+    if not (rec and type(opts) == "table") then return false end
+    local dispName = NormalizePlayerToken(opts.name or "?")
+    local isSelf = (opts.isSelf == true) or (Compat and Compat.IsMe and Compat.IsMe(dispName))
+    if (not dispName or dispName == "?" or dispName == "") and isSelf then
+        dispName = (Compat and Compat.MyFullName and Compat.MyFullName()) or Safe.String(UnitName and UnitName("player")) or L["You"]
+    end
+    local rawLk = (Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(dispName)) or dispName:lower()
+    local key = FindChoiceEntryKey(rec, dispName, rawLk, isSelf)
+    local prev = rec.choices[key] or {}
+    local changed = false
+
+    local cleanCls = opts.classFile or prev.classFile or LookupGroupMemberClass(dispName, key)
+    if prev.name ~= dispName and dispName ~= "?" then
+        prev.name = dispName
+        changed = true
+    elseif not prev.name then
+        prev.name = dispName
+        changed = true
+    end
+    if cleanCls and prev.classFile ~= cleanCls then
+        prev.classFile = cleanCls
+        changed = true
+    end
+    if isSelf and not prev.isMe then
+        prev.isMe = true
+        changed = true
+    end
+    if opts.choice and opts.choice ~= "WON" and prev.choice ~= opts.choice then
+        prev.choice = opts.choice
+        changed = true
+    elseif not prev.choice then
+        prev.choice = opts.choice or (opts.isWin and "NEED") or "PASS"
+        changed = true
+    end
+    local rollNum = opts.roll and Safe.Number(opts.roll) or nil
+    if rollNum and prev.roll ~= rollNum then
+        prev.roll = rollNum
+        changed = true
+    end
+    if opts.isWin then
+        if not prev.won then
+            prev.won = true
+            changed = true
+        end
+        rec.allPassed = false
+        rec.winnerName = prev.name
+        rec.winnerRoll = prev.roll or rec.winnerRoll
+        rec.resolved = true
+        if not rec._resolvedCountdownSet then
+            local nowMono = GetTime and GetTime() or 0
+            rec._resolvedCountdownSet = true
+            rec.hideAfterAt = math.max(nowMono + 9.0, rec.hideAfterAt or 0)
+        end
+    end
+    if changed then
+        prev.updatedAt = time()
+        rec.choices[key] = prev
+    end
+    return changed
+end
+
+function LootRoll:SyncLootHistory()
+    if next(self.activeRolls) == nil then return false end
+    local hist = _G.C_LootHistory
+    if not hist then return false end
+    local anyChanged = false
+    local touchedRolls = {}
+
+    if hist.GetAllEncounterInfos and hist.GetSortedDropsForEncounter then
+        local okEnc, encounters = pcall(hist.GetAllEncounterInfos)
+        if okEnc and type(encounters) == "table" then
+            local totalEnc = #encounters
+            local startIdx = math.max(1, totalEnc - 2)
+            for eIdx = totalEnc, startIdx, -1 do
+                local enc = encounters[eIdx]
+                local encId = enc and Safe.Number(enc.encounterID)
+                if encId then
+                    local okDrops, drops = pcall(hist.GetSortedDropsForEncounter, encId)
+                    if okDrops and type(drops) == "table" then
+                        for _, drop in ipairs(drops) do
+                            if type(drop) == "table" then
+                                local listId = Safe.Number(drop.lootListID)
+                                local itemLink = Safe.String(drop.itemHyperlink)
+                                local rec = nil
+                                if listId then
+                                    for _, candidate in pairs(self.activeRolls) do
+                                        if candidate and candidate.lootListID == listId then
+                                            rec = candidate
+                                            break
+                                        end
+                                    end
+                                end
+                                if not rec and itemLink then
+                                    rec = self:FindMatchingRollRecord(itemLink)
+                                    if rec and listId and not rec.lootListID then
+                                        rec.lootListID = listId
+                                    end
+                                end
+                                if rec then
+                                    local rInfos = drop.rollInfos
+                                    if (type(rInfos) ~= "table" or #rInfos == 0) and listId and hist.GetSortedInfoForDrop then
+                                        local okInfo, dropFull = pcall(hist.GetSortedInfoForDrop, encId, listId)
+                                        if okInfo and type(dropFull) == "table" then
+                                            rInfos = dropFull.rollInfos or dropFull
+                                            if Safe.Value(dropFull.allPassed) == true then
+                                                drop.allPassed = true
+                                            end
+                                            if not drop.winner and type(dropFull.winner) == "table" then
+                                                drop.winner = dropFull.winner
+                                            end
+                                        end
+                                    end
+                                    if type(rInfos) == "table" then
+                                        for _, rInfo in ipairs(rInfos) do
+                                            if type(rInfo) == "table" then
+                                                local mappedChoice = MapModernRollState(rInfo.state)
+                                                local rRoll = Safe.Number(rInfo.roll)
+                                                local isWin = (Safe.Value(rInfo.isWinner) == true)
+                                                if mappedChoice or rRoll or isWin then
+                                                    local pName = Safe.String(rInfo.playerName)
+                                                    local pGuid = Safe.String(rInfo.playerGUID)
+                                                    local pCls = Safe.String(rInfo.playerClass) or ResolveSafeUnitClassByGUID(pGuid, pName, nil)
+                                                    local did = self:ApplyChoiceUpdate(rec, {
+                                                        name = pName,
+                                                        classFile = pCls,
+                                                        choice = mappedChoice,
+                                                        roll = rRoll,
+                                                        isWin = isWin,
+                                                        isSelf = (Safe.Value(rInfo.isSelf) == true),
+                                                    })
+                                                    if did then
+                                                        anyChanged = true
+                                                        touchedRolls[rec.rollID] = true
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                    if type(drop.winner) == "table" then
+                                        local w = drop.winner
+                                        local wName = Safe.String(w.playerName)
+                                        if wName and wName ~= "" then
+                                            local didW = self:ApplyChoiceUpdate(rec, {
+                                                name = wName,
+                                                classFile = Safe.String(w.playerClass) or ResolveSafeUnitClassByGUID(Safe.String(w.playerGUID), wName, nil),
+                                                choice = MapModernRollState(w.state),
+                                                roll = Safe.Number(w.roll),
+                                                isWin = true,
+                                                isSelf = (Safe.Value(w.isSelf) == true),
+                                            })
+                                            if didW then
+                                                anyChanged = true
+                                                touchedRolls[rec.rollID] = true
+                                            end
+                                        end
+                                    elseif Safe.Value(drop.allPassed) == true and not rec.allPassed then
+                                        rec.allPassed = true
+                                        rec.resolved = true
+                                        if not rec._resolvedCountdownSet then
+                                            local nowMono = GetTime and GetTime() or 0
+                                            rec._resolvedCountdownSet = true
+                                            rec.hideAfterAt = math.max(nowMono + 7.5, rec.hideAfterAt or 0)
+                                        end
+                                        anyChanged = true
+                                        touchedRolls[rec.rollID] = true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if hist.GetNumItems and hist.GetItem then
+        local okNum, rawCount = pcall(hist.GetNumItems)
+        local nItems = okNum and Safe.Number(rawCount) or 0
+        local maxScan = math.min(nItems, 30)
+        for itemIdx = 1, maxScan do
+            local okItem, lRollID, itemLink, numPlayers, isDone, winnerIdx = pcall(hist.GetItem, itemIdx)
+            if okItem then
+                local rIdNum = Safe.Number(lRollID)
+                local cleanLink = Safe.String(itemLink)
+                local rec = (rIdNum and self.activeRolls[rIdNum]) or (cleanLink and self:FindMatchingRollRecord(cleanLink))
+                if rec then
+                    local pCount = math.min(Safe.Number(numPlayers) or 0, 40)
+                    local typeMap = { [0] = "PASS", [1] = "NEED", [2] = "GREED", [3] = "DE" }
+                    local sawWinner = false
+                    if hist.GetPlayerInfo then
+                        for pIdx = 1, pCount do
+                            local okP, pName, pClass, rType, rRoll, isWinner, isMe = pcall(hist.GetPlayerInfo, itemIdx, pIdx)
+                            if okP then
+                                local cName = Safe.String(pName)
+                                local cChoice = typeMap[Safe.Number(rType) or -1]
+                                local cRoll = Safe.Number(rRoll)
+                                local wonFlag = (Safe.Value(isWinner) == true)
+                                if wonFlag then sawWinner = true end
+                                if cName and (cChoice or cRoll or wonFlag) then
+                                    local did = self:ApplyChoiceUpdate(rec, {
+                                        name = cName,
+                                        classFile = Safe.String(pClass),
+                                        choice = cChoice,
+                                        roll = cRoll,
+                                        isWin = wonFlag,
+                                        isSelf = (Safe.Value(isMe) == true),
+                                    })
+                                    if did then
+                                        anyChanged = true
+                                        touchedRolls[rec.rollID] = true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    local doneFlag = (Safe.Value(isDone) == true)
+                    local winIdxNum = Safe.Number(winnerIdx)
+                    if doneFlag and (not winIdxNum or winIdxNum <= 0) and not sawWinner and not rec.winnerName and not rec.allPassed then
+                        rec.allPassed = true
+                        rec.resolved = true
+                        if not rec._resolvedCountdownSet then
+                            local nowMono = GetTime and GetTime() or 0
+                            rec._resolvedCountdownSet = true
+                            rec.hideAfterAt = math.max(nowMono + 7.5, rec.hideAfterAt or 0)
+                        end
+                        anyChanged = true
+                        touchedRolls[rec.rollID] = true
+                    end
+                end
+            end
+        end
+    end
+
+    if anyChanged and self:IsEnabled() then
+        local firstId = next(touchedRolls)
+        ns:Emit("LOOT_ROLL_UPDATED", firstId)
+    end
+    return anyChanged
+end
+
 function LootRoll:OnCancelLootRoll(rollID)
     local rId = Safe.Number(rollID)
     if not rId then return end
     local rec = self.activeRolls[rId]
     if rec then
         local nowMono = GetTime and GetTime() or 0
-        if rec.myChoice then
-            rec.hideAfterAt = math.max(rec.hideAfterAt or 0, nowMono + 10.0)
+        if rec.resolved then
+            rec.hideAfterAt = math.max(rec.hideAfterAt or 0, nowMono + 8.0)
+        elseif rec.myChoice then
+            -- CANCEL_LOOT_ROLL also fires right after our own vote so Blizzard hides its own roll bar; keep tracking teammates.
+            rec.maxWaitAt = math.max(rec.maxWaitAt or 0, nowMono + (rec.durationSec or 60) + 12.0)
         else
-            rec.hideAfterAt = nowMono + 1.5
+            rec.hideAfterAt = nowMono + 2.0
+        end
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.25, function() self:SyncLootHistory() end)
+            C_Timer.After(1.1, function() self:SyncLootHistory() end)
         end
         if self:IsEnabled() then
             ns:Emit("LOOT_ROLL_UPDATED", rId)
@@ -550,49 +934,63 @@ function LootRoll:OnChatMsgLoot(rawMsg)
     local msg = Safe.String(rawMsg)
     if not msg or msg == "" then return end
     local patterns = BuildLootPatterns(self)
+    local matched = false
     for _, pat in ipairs(patterns) do
         local c1, c2, c3 = msg:match(pat.pattern)
         if c1 then
+            matched = true
             local caps = { c1, c2, c3 }
             local parsed = {}
             for i, field in ipairs(pat.order) do
                 parsed[field] = caps[i]
             end
-            local link = parsed.link
+            for i = 1, #caps do
+                local v = caps[i]
+                if type(v) == "string" then
+                    if v:find("Hitem:", 1, true) then
+                        parsed.link = v
+                    elseif v:match("^%d+$") and (pat.order[i] ~= "count") then
+                        parsed.roll = v
+                    end
+                end
+            end
+            local link = parsed.link or ExtractFirstItemLink(msg)
             local rec = link and self:FindMatchingRollRecord(link) or nil
             if rec then
-                local playerRaw = parsed.player
-                if pat.mode == "PICK_SELF" or pat.mode == "ROLLED_SELF" or pat.mode == "WON_SELF" then
-                    playerRaw = (Compat and Compat.MyFullName and Compat.MyFullName()) or Safe.String(UnitName and UnitName("player")) or L["You"]
-                end
-                local dispName = playerRaw or "?"
-                local lk = (Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(dispName)) or dispName:lower()
-                local cls = LookupGroupMemberClass(dispName, lk)
-                local prev = rec.choices[lk] or { name = dispName, classFile = cls }
-                prev.name = dispName
-                prev.classFile = prev.classFile or cls
-                prev.updatedAt = time()
-                if pat.choice == "WON" then
-                    prev.won = true
-                    if not prev.choice then prev.choice = "NEED" end
-                    local nowMono = GetTime and GetTime() or 0
-                    if rec.hideAfterAt then
-                        rec.hideAfterAt = math.min(rec.hideAfterAt, nowMono + 5.0)
-                    else
-                        rec.hideAfterAt = nowMono + 5.0
+                if pat.mode == "ALL_PASSED" then
+                    rec.allPassed = true
+                    rec.resolved = true
+                    if not rec._resolvedCountdownSet then
+                        local nowMono = GetTime and GetTime() or 0
+                        rec._resolvedCountdownSet = true
+                        rec.hideAfterAt = math.max(nowMono + 7.5, rec.hideAfterAt or 0)
+                    end
+                    if self:IsEnabled() then
+                        ns:Emit("LOOT_ROLL_UPDATED", rec.rollID)
                     end
                 else
-                    prev.choice = pat.choice
-                end
-                if parsed.roll and tonumber(parsed.roll) then
-                    prev.roll = tonumber(parsed.roll)
-                end
-                rec.choices[lk] = prev
-                if self:IsEnabled() then
-                    ns:Emit("LOOT_ROLL_UPDATED", rec.rollID)
+                    local isSelf = (pat.mode == "PICK_SELF" or pat.mode == "ROLLED_SELF" or pat.mode == "WON_SELF" or pat.mode == "LOOT_SELF")
+                    local did = self:ApplyChoiceUpdate(rec, {
+                        name = parsed.player,
+                        choice = pat.choice,
+                        roll = parsed.roll,
+                        isWin = pat.isWin == true or pat.choice == "WON",
+                        isSelf = isSelf,
+                    })
+                    if did and self:IsEnabled() then
+                        ns:Emit("LOOT_ROLL_UPDATED", rec.rollID)
+                    end
                 end
             end
             break
+        end
+    end
+
+    if not matched and next(self.activeRolls) ~= nil and msg:find("Hitem:", 1, true) then
+        local link = ExtractFirstItemLink(msg)
+        local rec = link and self:FindMatchingRollRecord(link) or nil
+        if rec then
+            self:SyncLootHistory()
         end
     end
 end
@@ -603,6 +1001,38 @@ function LootRoll:Init()
     end)
     ns.RegisterEvent(self, "CANCEL_LOOT_ROLL", function(_, _, rollID)
         self:OnCancelLootRoll(rollID)
+    end)
+    local historyEvents = {
+        "LOOT_HISTORY_UPDATE_DROP",
+        "LOOT_HISTORY_UPDATE_ENCOUNTER",
+        "LOOT_HISTORY_ONE_HUNDRED_ROLL",
+        "LOOT_ROLLS_COMPLETE",
+        "LOOT_HISTORY_ROLL_CHANGED",
+        "LOOT_HISTORY_ROLL_COMPLETE",
+        "LOOT_HISTORY_FULL_UPDATE",
+        "LOOT_HISTORY_AUTO_SHOW",
+    }
+    for _, ev in ipairs(historyEvents) do
+        ns.RegisterEvent(self, ev, function()
+            self:SyncLootHistory()
+        end)
+    end
+    ns.RegisterEvent(self, "LOOT_ITEM_ROLL_WON", function(_, _, itemLink, rollVal, rollType)
+        local cleanLink = Safe.String(itemLink)
+        local rec = cleanLink and self:FindMatchingRollRecord(cleanLink) or nil
+        if rec then
+            local typeMap = { [0] = "PASS", [1] = "NEED", [2] = "GREED", [3] = "DE" }
+            local did = self:ApplyChoiceUpdate(rec, {
+                choice = typeMap[Safe.Number(rollType) or -1] or rec.myChoice or "NEED",
+                roll = Safe.Number(rollVal),
+                isWin = true,
+                isSelf = true,
+            })
+            if did and self:IsEnabled() then
+                ns:Emit("LOOT_ROLL_UPDATED", rec.rollID)
+            end
+        end
+        self:SyncLootHistory()
     end)
     ns.RegisterEvent(self, "GET_ITEM_INFO_RECEIVED", function(_, _, itemID, success)
         if not success or next(self.activeRolls) == nil then return end

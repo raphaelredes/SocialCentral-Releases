@@ -292,15 +292,20 @@ function Search.ScoreEntry(entry, tokens, synTable)
     return total
 end
 
+local highlightFoldedScratch, highlightStartsScratch, highlightEndsScratch = {}, {}, {}
+
 function Search.HighlightTitle(rawText, tokens)
     if type(rawText) ~= "string" or rawText == "" or not tokens or #tokens == 0 then
         return rawText or ""
     end
     local clean = rawText:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
-    -- Build accent-folded ASCII mirror with exact UTF-8 byte bounds so "previa" highlights "Prévia" cleanly
-    local foldedChars = {}
-    local origStarts = {}
-    local origEnds = {}
+    -- Build accent-folded ASCII mirror with exact UTF-8 byte bounds (zero per-call table allocs)
+    local foldedChars = highlightFoldedScratch
+    local origStarts = highlightStartsScratch
+    local origEnds = highlightEndsScratch
+    wipe(foldedChars)
+    wipe(origStarts)
+    wipe(origEnds)
     local pos = 1
     local len = #clean
     while pos <= len do
@@ -450,39 +455,11 @@ function Search.EnsureCard(index)
 
     local helpBtn = ns.Theme:CreateHelpButton(card, "", "", "", 18)
     helpBtn:SetPoint("RIGHT", locateBtn, "LEFT", -6, 0)
-    helpBtn:SetScript("OnClick", function()
-        local e = card._entry
-        if e and ns.Theme and ns.Theme.ShowHelpPopup then
-            ns.Theme:ShowHelpPopup(e.helpTitle or e.title, e.description ~= "" and e.description or e.title, e.howText or "", { target = card })
-        end
-    end)
-    helpBtn:SetScript("OnEnter", function(self)
-        local e = card._entry
-        if e and GameTooltip then
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:ClearLines()
-            GameTooltip:AddLine(e.helpTitle or e.title, 0.35, 0.78, 1.0)
-            if e.description and e.description ~= "" then
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine(L["What it does:"], 1.0, 0.82, 0.25)
-                GameTooltip:AddLine(e.description, 0.90, 0.93, 0.98, true)
-            end
-            if e.howText and e.howText ~= "" then
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine(L["How to use it:"], 0.35, 0.92, 0.55)
-                GameTooltip:AddLine(e.howText, 0.85, 0.90, 0.95, true)
-            end
-            GameTooltip:Show()
-        end
-    end)
-    helpBtn:SetScript("OnLeave", function()
-        if GameTooltip then GameTooltip:Hide() end
-    end)
     card.helpBtn = helpBtn
 
     local breadLbl = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     breadLbl:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -8)
-    breadLbl:SetPoint("TOPRIGHT", helpBtn, "TOPLEFT", -6, -8)
+    breadLbl:SetPoint("RIGHT", helpBtn, "LEFT", -6, 0)
     breadLbl:SetJustifyH("LEFT")
     breadLbl:SetWordWrap(false)
     card.breadLbl = breadLbl
@@ -504,7 +481,7 @@ function Search.EnsureCard(index)
 
     local titleLbl = card:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     titleLbl:SetPoint("TOPLEFT", card, "TOPLEFT", 36, -29)
-    titleLbl:SetPoint("TOPRIGHT", helpBtn, "TOPLEFT", -6, -29)
+    titleLbl:SetPoint("RIGHT", helpBtn, "LEFT", -6, 0)
     titleLbl:SetJustifyH("LEFT")
     titleLbl:SetWordWrap(false)
     card.titleLbl = titleLbl
@@ -516,7 +493,7 @@ function Search.EnsureCard(index)
     choiceHolder:Hide()
     card.choiceHolder = choiceHolder
     card.choiceBtns = {}
-    for ci = 1, 4 do
+    for ci = 1, 6 do
         local cbtn = ns.Theme:CreateButton(choiceHolder, 108, 20, "", "default")
         cbtn:SetScript("OnClick", function()
             local e = card._entry
@@ -532,13 +509,13 @@ function Search.EnsureCard(index)
 
     local stepperHolder = CreateFrame("Frame", nil, card)
     stepperHolder:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -48)
-    stepperHolder:SetSize(200, 22)
+    stepperHolder:SetSize(220, 22)
     stepperHolder:Hide()
     local sMinus = ns.Theme:CreateButton(stepperHolder, 24, 20, "-", "default")
     sMinus:SetPoint("LEFT", stepperHolder, "LEFT", 0, 0)
     local sVal = stepperHolder:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     sVal:SetPoint("LEFT", sMinus, "RIGHT", 6, 0)
-    sVal:SetWidth(68)
+    sVal:SetWidth(86)
     sVal:SetJustifyH("CENTER")
     local sPlus = ns.Theme:CreateButton(stepperHolder, 24, 20, "+", "default")
     sPlus:SetPoint("LEFT", sVal, "RIGHT", 6, 0)
@@ -575,6 +552,14 @@ function Search.EnsureCard(index)
     end)
     actionBtn:Hide()
     card.actionBtn = actionBtn
+
+    local inputPreviewLbl = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    inputPreviewLbl:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -50)
+    inputPreviewLbl:SetPoint("RIGHT", card, "RIGHT", -16, 0)
+    inputPreviewLbl:SetJustifyH("LEFT")
+    inputPreviewLbl:SetWordWrap(false)
+    inputPreviewLbl:Hide()
+    card.inputPreviewLbl = inputPreviewLbl
 
     local descLbl = card:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     descLbl:SetPoint("BOTTOMLEFT", card, "BOTTOMLEFT", 12, 8)
@@ -635,6 +620,15 @@ function Search.RefreshCardStates()
                 ns.Theme:StyleButton(card.actionBtn, "primary")
                 card.actionBtn:SetEnabled(modOn)
                 card.actionBtn:SetAlpha(modOn and 1.0 or 0.45)
+            elseif e.kind == "input" and card.inputPreviewLbl then
+                local curTxt = (e.widget and e.widget.GetText and e.widget:GetText()) or ""
+                if curTxt ~= "" then
+                    card.inputPreviewLbl:SetText(string.format(L["Current value: %s"], tostring(curTxt)))
+                else
+                    card.inputPreviewLbl:SetText(e.howText or L["Click 'Go to' to edit inside the tab."])
+                end
+                local mc = (p and p.textMuted) or { 0.72, 0.76, 0.82 }
+                card.inputPreviewLbl:SetTextColor(mc[1], mc[2], mc[3])
             end
             card.titleLbl:SetAlpha(modOn and 1.0 or 0.55)
         end
@@ -774,6 +768,10 @@ function Search.RenderResults()
             local entry = filtered[i]
             local card = Search.EnsureCard(i)
             card._entry = entry
+            if card.helpBtn and ns.Theme and ns.Theme.SetHelpButtonInfo then
+                local descText = (entry.description and entry.description ~= "") and entry.description or entry.title
+                ns.Theme:SetHelpButtonInfo(card.helpBtn, entry.helpTitle or entry.title, descText, entry.howText or "", { target = card })
+            end
             card:ClearAllPoints()
             card:SetPoint("TOPLEFT", sp, "TOPLEFT", 8, yCursor)
             card:SetWidth(maxW - 8)
@@ -785,8 +783,10 @@ function Search.RenderResults()
             card.choiceHolder:Hide()
             card.stepperHolder:Hide()
             card.actionBtn:Hide()
+            if card.inputPreviewLbl then card.inputPreviewLbl:Hide() end
 
             local hasSubCtrl = false
+            local extraChoiceH = 0
             if entry.kind == "checkbox" then
                 card.cb:Show()
                 card.titleLbl:ClearAllPoints()
@@ -795,8 +795,7 @@ function Search.RenderResults()
             else
                 card.titleLbl:ClearAllPoints()
                 card.titleLbl:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -26)
-                card.titleLbl:SetPoint("TOPRIGHT", card.helpBtn, "TOPLEFT", -8, -26)
-                local extraChoiceH = 0
+                card.titleLbl:SetPoint("RIGHT", card.helpBtn, "LEFT", -8, 0)
                 if entry.kind == "choice" and type(entry.options) == "table" then
                     hasSubCtrl = true
                     card.choiceHolder:Show()
@@ -825,6 +824,11 @@ function Search.RenderResults()
                 elseif entry.kind == "stepper" then
                     hasSubCtrl = true
                     card.stepperHolder:Show()
+                elseif entry.kind == "input" then
+                    hasSubCtrl = true
+                    if card.inputPreviewLbl then
+                        card.inputPreviewLbl:Show()
+                    end
                 elseif entry.kind == "action" and entry.onTrigger then
                     hasSubCtrl = true
                     ns.Theme:SetButtonText(card.actionBtn, entry.actionLabel or entry.title)
@@ -1040,44 +1044,68 @@ end
 
 local function AddSectionHeader(parent, text, anchorTo, yOffset, helpTitle, helpWhat, helpHow)
     local secBar = EnsurePageSectionBar(parent)
-    local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    local secStrip = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    secStrip:SetHeight(26)
     if anchorTo then
-        fs:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, yOffset or -16)
+        secStrip:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", -2, yOffset or -14)
     elseif secBar then
-        fs:SetPoint("TOPLEFT", secBar, "BOTTOMLEFT", 0, yOffset or -12)
+        secStrip:SetPoint("TOPLEFT", secBar, "BOTTOMLEFT", -2, yOffset or -10)
     else
-        fs:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, yOffset or -8)
+        secStrip:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, yOffset or -8)
     end
+    secStrip:SetPoint("RIGHT", parent, "RIGHT", -12, 0)
+    if ns.Theme and ns.Theme.ApplyBackdrop then
+        ns.Theme:ApplyBackdrop(secStrip, "surface")
+    end
+
+    local fs = secStrip:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    fs:SetPoint("LEFT", secStrip, "LEFT", 8, 0)
     local secIdx = (parent and parent._scSections) and (#parent._scSections + 1) or nil
     local displayHeading = secIdx and string.format("%d. %s", secIdx, text or "") or (text or "")
     fs:SetText(displayHeading)
     if ns.Theme and ns.Theme.DecorateSectionHeader then
-        ns.Theme:DecorateSectionHeader(parent, fs, math.min(540, math.max(320, (parent:GetWidth() or 590) - 24)))
+        ns.Theme:DecorateSectionHeader(parent, secStrip, math.min(540, math.max(320, (parent:GetWidth() or 590) - 24)))
     end
     if helpTitle then
-        HelpBtn(parent, fs, helpTitle, helpWhat, helpHow)
+        HelpBtn(secStrip, fs, helpTitle, helpWhat, helpHow)
     end
     if secBar and parent._scSections then
         local jBtn = ns.Theme:CreateButton(secBar, 120, 20, displayHeading, "default")
         jBtn:SetScript("OnClick", function()
-            ScrollToSectionHeader(parent, fs)
+            ScrollToSectionHeader(parent, secStrip)
         end)
         parent._scSections[#parent._scSections + 1] = {
             title = text or "",
-            header = fs,
+            header = secStrip,
             btn = jBtn,
         }
         if #parent._scSections >= 2 then
-            local topBtn = ns.Theme:CreateButton(parent, 64, 18, "↑ " .. L["Top"], "default")
+            local topBtn = ns.Theme:CreateButton(secStrip, 64, 18, "↑ " .. L["Top"], "default")
             ns.Theme:AutoFitButton(topBtn, 52, 10, 96)
-            topBtn:SetPoint("LEFT", fs, "TOPLEFT", 482, -2)
+            topBtn:SetPoint("RIGHT", secStrip, "RIGHT", -6, 0)
             topBtn:SetScript("OnClick", function()
                 if Search.scrollFrame and Search.scrollFrame.SetVerticalScroll then
                     Search.scrollFrame:SetVerticalScroll(0)
                 end
             end)
+            topBtn:SetScript("OnEnter", function(selfBtn)
+                if GameTooltip then
+                    GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+                    GameTooltip:SetText(L["Top"], 1, 0.85, 0.25)
+                    GameTooltip:AddLine(L["Return to the top of this settings tab."], 0.85, 0.90, 0.96, true)
+                    GameTooltip:Show()
+                end
+            end)
+            topBtn:SetScript("OnLeave", function()
+                if GameTooltip then GameTooltip:Hide() end
+            end)
             syncFns[#syncFns + 1] = function()
+                if ns.Theme and ns.Theme.ApplyBackdrop then ns.Theme:ApplyBackdrop(secStrip, "surface") end
                 ns.Theme:StyleButton(topBtn, "default")
+            end
+        else
+            syncFns[#syncFns + 1] = function()
+                if ns.Theme and ns.Theme.ApplyBackdrop then ns.Theme:ApplyBackdrop(secStrip, "surface") end
             end
         end
         ReflowPageSectionBar(parent)
@@ -1088,7 +1116,7 @@ local function AddSectionHeader(parent, text, anchorTo, yOffset, helpTitle, help
         description = helpWhat,
         howText = helpHow,
     }
-    return fs
+    return secStrip
 end
 
 local function CreateFieldLabel(parent, text, anchorTo, yOffset, helpTitle, helpWhat, helpHow)
@@ -1120,6 +1148,10 @@ local function CreateCheckbox(parent, labelText, anchorTo, yOffset, getter, sett
     label:SetJustifyH("LEFT")
     label:SetWordWrap(true)
     label:SetText(labelText)
+    local rowHighlight = cb:CreateTexture(nil, "HIGHLIGHT")
+    rowHighlight:SetPoint("TOPLEFT", cb, "TOPLEFT", -2, 2)
+    rowHighlight:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", 8, -2)
+    rowHighlight:SetColorTexture(1, 0.94, 0.78, 0.06)
     local function FitCheckboxLabel()
         local pw = (parent and parent.GetWidth and parent:GetWidth()) or 590
         local avail = (pw < 420) and math.max(150, pw - 58) or math.max(260, pw - 86)
@@ -1362,8 +1394,11 @@ local function CollectDisabledNotificationNames()
     if chatOn and s.mentionAlertsEnabled == false then out[#out + 1] = L["Mentions & Keywords Radar"] end
     if chatOn and s.chatSound == false then out[#out + 1] = L["Chat Sounds (Master)"] end
     if guildOn and s.clanLfgAlertEnabled == false then out[#out + 1] = L["Clan Dungeon Alerts"] end
+    if guildOn and s.clanEventAlertEnabled == false then out[#out + 1] = L["Guild Event Alerts"] end
     if guildOn and s.clanSignupAlertEnabled == false then out[#out + 1] = L["Guild Signup Alerts"] end
     if guildOn and s.clanEventReminders == false then out[#out + 1] = L["Guild Event Reminders"] end
+    if s.worldBuffsAlerts == false then out[#out + 1] = L["World Buff Drop Alerts"] end
+    if s.worldBuffsExpiryAlert == false then out[#out + 1] = L["World Buff Expiry Warning"] end
     if guildOn and s.spotterScoutAlert == false then out[#out + 1] = L["Guild Scout Alerts"] end
     if s.groupAvoidAlert == false then out[#out + 1] = L["Group Avoid Warnings"] end
     return out
@@ -1618,10 +1653,27 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             DoCopy()
         end
     end)
+    local copyAccHelp = HelpBtn(
+        charProfActions,
+        copyAccBtn,
+        L["Help: Copy Account Profile"],
+        L["Copies your current shared Account Profile settings onto this character so you can customize from that baseline."],
+        L["Click to overwrite this character's per-character settings with your shared Account Profile (requires Per-Character Profile enabled)."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Copy from Account Profile"],
+        actionLabel = L["Copy from Account Profile"],
+        widget = copyAccBtn,
+        helpTitle = L["Help: Copy Account Profile"],
+        description = L["Copies your current shared Account Profile settings onto this character so you can customize from that baseline."],
+        howText = L["Click to overwrite this character's per-character settings with your shared Account Profile (requires Per-Character Profile enabled)."],
+        onTrigger = function() copyAccBtn:Click() end,
+    })
 
     local resetProfBtn = ns.Theme:CreateButton(charProfActions, 168, 20, L["Reset Profile to Defaults"], "default")
     ns.Theme:AutoFitButton(resetProfBtn, 146, 14, 220)
-    resetProfBtn:SetPoint("LEFT", copyAccBtn, "RIGHT", 6, 0)
+    resetProfBtn:SetPoint("LEFT", copyAccHelp or copyAccBtn, "RIGHT", 8, 0)
     resetProfBtn:SetScript("OnClick", function()
         local function DoReset()
             if ns.ResetCurrentSettingsToDefaults and ns:ResetCurrentSettingsToDefaults() then
@@ -1723,7 +1775,6 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
             s.dndInstanceEntered = nil
         end
         NotifySettingChanged("CLAN_UPDATED")
-        ns:Emit("WORLD_BUFFS_UPDATED")
         ns:Emit("CHAT_UPDATED")
         for _, sync in ipairs(syncFns) do sync() end
     end
@@ -1752,7 +1803,7 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
     )
     Search.Register({
         kind = "choice",
-        title = L["Help: 1-Click Presets"],
+        title = L["1-Click Presets"],
         widget = presetRow,
         helpTitle = L["Help: 1-Click Presets"],
         description = L["Instantly switch between Full Suite, Friends & Chat Only, or Ultra-Light (Alts & Notes) presets, then fine-tune any checkbox below."],
@@ -1805,7 +1856,7 @@ local function BuildOverviewTab(ov, deps, refs, NotifySettingChanged, CloseSetti
         function() return not ns.db or not ns.db.settings or ns.db.settings.embedSocialWindow ~= false end,
         function(checked) ns.db.settings.embedSocialWindow = checked; NotifySettingChanged() end,
         L["Help: Integrate Social (O)"],
-        L["Attaches the SocialCentral Watchlist, Social, Nearby, and Conversations side-tab to Blizzard's Friends/Social (O) window."],
+        L["Attaches the SocialCentral Watchlist, Social, and Nearby side-tab to Blizzard's Friends/Social (O) window."],
         L["Uncheck to keep Blizzard's Friends (O) window 100% vanilla while still keeping '/sc hub' available."]
     )
     local embLfgCb = CreateGridCheckbox(
@@ -2459,18 +2510,34 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
     AddDeps(deps.chat, mpMasterCb, mpWhisperCb, mpBNetCb, mpGroupCb, mpGuildCb, mpRoomsCb, mpSilDngCb, mpSilRaidCb, mpSilPvpCb, mpSilCombatCb, durLbl, durStep, maxVisLbl, maxVisStep, mpAnchorLbl, mpAnchorRow, testMpBtn, moveMpPosBtn, resetMpPosBtn)
 
     -- Quick Reply Popup (Minimap Click on Pending Notifications)
-    local qrHdr = CreateSubHeader(nf, L["Quick Reply Popup (Minimap)"], mpPosRow, -14)
+    local qrHdr = AddSectionHeader(
+        nf,
+        L["Quick Reply Popup (Minimap)"],
+        mpPosRow,
+        -14,
+        L["Help: Quick Reply Popup Section"],
+        L["Configures the floating Quick Reply window, Official Chat docking, active-tab preservation, and combat focus behavior."],
+        L["Enable Quick Reply below, choose whether it stays docked over Official Chat, and customize auto-open or idle-fade rules."]
+    )
 
     local qrMasterCb = CreateCheckbox(
         nf, L["Open Quick Reply popup when clicking Minimap with pending messages"], qrHdr, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyEnabled ~= false end,
         function(checked)
             ns.db.settings.quickReplyEnabled = checked
+            if ns.QuickReply then
+                if not checked and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() then
+                    ns.QuickReply.frame:Hide()
+                elseif checked and ns.QuickReply.SyncInstanceAutoMode then
+                    ns.QuickReply._closedManuallyPersistent = false
+                    ns.QuickReply:SyncInstanceAutoMode(true)
+                end
+            end
             if ns.Chat and ns.Chat.InvalidateUnreadCache then ns.Chat:InvalidateUnreadCache() end
             NotifySettingChanged("CHAT_UPDATED")
         end,
         L["Help: Quick Reply Popup"],
-        L["When enabled, clicking the Minimap or Official Chat shortcut opens the compact Quick Reply window preserving your active tab (with General fixed first, Combat Log in a header button, and direct notification jumps)."],
+        L["When enabled, clicking the Minimap or Official Chat shortcut jumps directly to your newest unread message (or toggles Quick Reply when caught up). Out of combat, Quick Reply stays ready to type after sending (press ESC, click outside, or use an ability to leave); in combat, sending releases focus immediately so you can move freely and press ENTER to reopen your last chat."],
         L["You can drag Quick Reply anywhere while unlocked, lock its position with the Padlock, place it over Official Chat with the Map button, and reopen straight to your last sent chat using ENTER even during combat."]
     )
 
@@ -2549,32 +2616,92 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         L["Reopening from the Minimap or Chat button preserves your current tab (switching only when you click a notification). During combat, Blizzard's bar receives your ready message for one final ENTER confirmation; outside combat, one ENTER sends directly."]
     )
 
+    local qrIdleFadeCb = CreateCheckbox(
+        nf, L["Make Quick Reply transparent after inactivity"], qrEnterOpenCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyIdleFade ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyIdleFade = checked
+            if ns.QuickReply then
+                ns.QuickReply._lastOpaqueActivityAt = (GetTime and GetTime()) or 0
+                if ns.QuickReply.UpdateAutoCloseButton then ns.QuickReply:UpdateAutoCloseButton() end
+                if ns.QuickReply.ApplyCombatFadeStep then ns.QuickReply:ApplyCombatFadeStep(0, true) end
+            end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Quick Reply Idle Transparency"],
+        L["Keeps Quick Reply visible at all times while automatically fading it to a gentle transparent state after the configured seconds of inactivity."],
+        L["Hovering, clicking, or typing immediately restores full visibility. Uncheck if you want Quick Reply to remain fully opaque at all times."]
+    )
+
+    local qrFadeDurLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    qrFadeDurLbl:SetPoint("TOPLEFT", qrIdleFadeCb, "BOTTOMLEFT", 24, -6)
+    qrFadeDurLbl:SetText(L["Seconds before Quick Reply becomes transparent:"])
+    HelpBtn(
+        nf, qrFadeDurLbl, L["Help: Quick Reply Transparency Delay"],
+        L["Sets how many seconds Quick Reply waits without interaction before turning transparent (15 seconds by default)."],
+        L["You can also adjust this timer or keep Quick Reply fully opaque directly from the timer button in the Quick Reply header."]
+    )
+
+    Search.SetPendingMeta(
+        L["Seconds before Quick Reply becomes transparent:"],
+        L["Help: Quick Reply Transparency Delay"],
+        L["Sets how many seconds Quick Reply waits without interaction before turning transparent (15 seconds by default)."],
+        L["You can also adjust this timer or keep Quick Reply fully opaque directly from the timer button in the Quick Reply header."]
+    )
+    local qrFadeDurStep = CreateStepperRow(
+        nf, qrFadeDurLbl, -4, 5, 120, "s",
+        function() return (ns.db and ns.db.settings and tonumber(ns.db.settings.quickReplyFadeDelay)) or 15 end,
+        function(val)
+            if ns.db and ns.db.settings then
+                ns.db.settings.quickReplyFadeDelay = val
+                ns.db.settings.quickReplyIdleFade = true
+                if ns.QuickReply then
+                    ns.QuickReply._lastOpaqueActivityAt = (GetTime and GetTime()) or 0
+                    if ns.QuickReply.UpdateAutoCloseButton then ns.QuickReply:UpdateAutoCloseButton() end
+                    if ns.QuickReply.ApplyCombatFadeStep then ns.QuickReply:ApplyCombatFadeStep(0, true) end
+                end
+                NotifySettingChanged("CHAT_UPDATED")
+            end
+        end,
+        5
+    )
+
     local qrAutoCloseCb = CreateCheckbox(
-        nf, L["Auto-close Quick Reply on inactivity (saves draft)"], qrEnterOpenCb, -6,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyAutoClose ~= false end,
+        nf, L["Auto-close Quick Reply on inactivity (saves draft)"], qrFadeDurStep, -8,
+        function() return (ns.db and ns.db.settings and ns.db.settings.quickReplyAutoClose == true) or false end,
         function(checked)
             ns.db.settings.quickReplyAutoClose = checked
-            NotifySettingChanged()
+            if ns.QuickReply then
+                if not checked then
+                    ns.QuickReply._closedManuallyPersistent = false
+                end
+                if ns.QuickReply.SyncEscapeCloseRegistration then ns.QuickReply:SyncEscapeCloseRegistration() end
+                if ns.QuickReply.UpdateAutoCloseButton then ns.QuickReply:UpdateAutoCloseButton() end
+                if ns.QuickReply.SyncInstanceAutoMode then ns.QuickReply:SyncInstanceAutoMode(true) end
+            end
+            NotifySettingChanged("CHAT_UPDATED")
         end,
         L["Help: Quick Reply Auto-Close & Drafts"],
-        L["Automatically closes the Quick Reply popup after the configured inactivity timer (or when interacting outside it, e.g. to focus on combat), keeping your typed message saved as a draft."],
-        L["Click the Minimap icon anytime to jump right back to that conversation with your draft restored, or adjust the delay directly in the Quick Reply header."]
+        L["Off by default so Quick Reply stays always open. Enable if you prefer Quick Reply to close automatically after inactivity while keeping your typed message saved as a draft."],
+        L["Click the Minimap icon anytime to reopen with your draft restored, or toggle Always Show / Auto-close directly in the Quick Reply header."]
     )
+    qrAutoCloseCb:ClearAllPoints()
+    qrAutoCloseCb:SetPoint("TOPLEFT", qrFadeDurStep, "BOTTOMLEFT", -24, -8)
 
     local qrAutoCloseDurLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     qrAutoCloseDurLbl:SetPoint("TOPLEFT", qrAutoCloseCb, "BOTTOMLEFT", 24, -6)
     qrAutoCloseDurLbl:SetText(L["Quick Reply auto-close delay (seconds):"])
     HelpBtn(
         nf, qrAutoCloseDurLbl, L["Help: Quick Reply Auto-Close Delay"],
-        L["Sets how many seconds the Quick Reply popup waits after inactivity or outside interaction before closing automatically."],
-        L["You can also change this timer or disable auto-close directly from the button in the Quick Reply window header."]
+        L["Sets how many seconds the Quick Reply popup waits after inactivity or outside interaction before closing automatically (when Auto-Close is enabled)."],
+        L["You can also change this timer or keep Quick Reply always open directly from the button in the Quick Reply window header."]
     )
 
     Search.SetPendingMeta(
         L["Quick Reply auto-close delay (seconds):"],
         L["Help: Quick Reply Auto-Close Delay"],
-        L["Sets how many seconds the Quick Reply popup waits after inactivity or outside interaction before closing automatically."],
-        L["You can also change this timer or disable auto-close directly from the button in the Quick Reply window header."]
+        L["Sets how many seconds the Quick Reply popup waits after inactivity or outside interaction before closing automatically (when Auto-Close is enabled)."],
+        L["You can also change this timer or keep Quick Reply always open directly from the button in the Quick Reply window header."]
     )
     local qrAutoCloseDurStep = CreateStepperRow(
         nf, qrAutoCloseDurLbl, -4, 5, 60, "s",
@@ -2583,28 +2710,35 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
             if ns.db and ns.db.settings then
                 ns.db.settings.quickReplyAutoCloseDelay = val
                 ns.db.settings.quickReplyAutoClose = true
-                NotifySettingChanged()
+                if ns.QuickReply then
+                    if ns.QuickReply.SyncEscapeCloseRegistration then ns.QuickReply:SyncEscapeCloseRegistration() end
+                    if ns.QuickReply.UpdateAutoCloseButton then ns.QuickReply:UpdateAutoCloseButton() end
+                end
+                NotifySettingChanged("CHAT_UPDATED")
             end
         end,
         5
     )
 
     local qrCombatFadeCb = CreateCheckbox(
-        nf, L["Fade Quick Reply and pass clicks through during combat (when Auto-Close is off)"], qrAutoCloseDurStep, -8,
-        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyFadeInCombat ~= false end,
+        nf, L["Hide Quick Reply during combat (click-through)"], qrAutoCloseDurStep, -8,
+        function() return (ns.db and ns.db.settings and ns.db.settings.quickReplyFadeInCombat == true) or false end,
         function(checked)
             ns.db.settings.quickReplyFadeInCombat = checked
+            if ns.QuickReply and ns.QuickReply.ApplyCombatFadeStep then
+                ns.QuickReply:ApplyCombatFadeStep(0, true)
+            end
             NotifySettingChanged("CHAT_UPDATED")
         end,
         L["Help: Quick Reply Combat Fade"],
-        L["When Quick Reply is set to stay open (Auto-Close disabled or inside Dungeons/Raids), entering combat releases keyboard focus, lets mouse clicks pass through, and smoothly fades the window out of the way so you can focus on the fight."],
-        L["As soon as combat ends, Quick Reply returns smoothly to full visibility and interactivity."]
+        L["Off by default so Quick Reply stays visible during combat. When enabled, entering combat releases keyboard focus, lets mouse clicks pass through, and smoothly hides Quick Reply out of the way until combat ends."],
+        L["Even while hidden in combat, pressing ENTER still lets you reply immediately, and Quick Reply returns automatically as soon as combat ends."]
     )
     qrCombatFadeCb:ClearAllPoints()
     qrCombatFadeCb:SetPoint("TOPLEFT", qrAutoCloseDurStep, "BOTTOMLEFT", -24, -8)
 
     local qrDungeonAutoCb = CreateCheckbox(
-        nf, L["Auto-open Quick Reply in Dungeons & Raids (fades in combat)"], qrCombatFadeCb, -6,
+        nf, L["Auto-open Quick Reply in Dungeons & Raids"], qrCombatFadeCb, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyDungeonAutoMode ~= false end,
         function(checked)
             ns.db.settings.quickReplyDungeonAutoMode = checked
@@ -2615,8 +2749,8 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
             NotifySettingChanged("CHAT_UPDATED")
         end,
         L["Help: Quick Reply Dungeon Mode"],
-        L["Automatically opens Quick Reply over Blizzard Official Chat (or your custom dragged position) when entering a Dungeon or Raid, staying open out of combat and fading out automatically during combat."],
-        L["Stays open even if you press ESC or click outside (ESC only releases typing focus). Click X or turn off this option whenever you want to close it; leaving the instance restores your normal timer."]
+        L["Automatically opens Quick Reply over Blizzard Official Chat (or your custom dragged position) when entering a Dungeon or Raid and keeps it open even if Auto-Close is enabled."],
+        L["Stays open even if you press ESC or click outside (ESC only releases typing focus). Click X or turn off this option whenever you want to close it."]
     )
 
     local qrSlashOpenCb = CreateCheckbox(
@@ -2631,8 +2765,23 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         L["Works both from Blizzard's Official Chat bar (out of combat) and directly inside Quick Reply. Leaves /s, /y, numbered channels, and other slash commands untouched."]
     )
 
+    local qrCtrlWCb = CreateCheckbox(
+        nf, L["Close unpinned Quick Reply tabs with Ctrl+W (if unbound)"], qrSlashOpenCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyCtrlWCloseTab ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyCtrlWCloseTab = checked
+            if ns.QuickReply and ns.QuickReply.SyncQuickReplyHotkeys then
+                ns.QuickReply:SyncQuickReplyHotkeys()
+            end
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Close Tabs with Ctrl+W"],
+        L["Lets you close the active unpinned tab in Quick Reply using Ctrl+W (like modern web browsers), leaving pinned tabs and General protected."],
+        L["Automatically stays inactive if CTRL-W is already bound in your WoW Keybindings or SocialCentral hotkeys/macros."]
+    )
+
     local qrWhisperCb = CreateCheckbox(
-        nf, L["Quick Reply notifications: Whispers & SocialCentral Chat"], qrSlashOpenCb, -8,
+        nf, L["Quick Reply notifications: Whispers & SocialCentral Chat"], qrCtrlWCb, -8,
         function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyNotifyWhisper ~= false end,
         function(checked)
             ns.db.settings.quickReplyNotifyWhisper = checked
@@ -2733,7 +2882,7 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         L["Off by default so busy cities stay quiet; incoming Say and Yell still appear inside General while disabled."]
     )
 
-    AddDeps(deps.chat, qrMasterCb, qrDockChatCb, qrLockCb, qrEnterOpenCb, qrAutoCloseCb, qrAutoCloseDurLbl, qrAutoCloseDurStep, qrCombatFadeCb, qrDungeonAutoCb, qrSlashOpenCb, qrWhisperCb, qrBNetCb, qrPartyCb, qrRaidCb, qrGuildCb, qrRecordSayCb, qrSayNotifyCb)
+    AddDeps(deps.chat, qrMasterCb, qrDockChatCb, qrLockCb, qrLockModeRow, qrEnterOpenCb, qrIdleFadeCb, qrFadeDurLbl, qrFadeDurStep, qrAutoCloseCb, qrAutoCloseDurLbl, qrAutoCloseDurStep, qrCombatFadeCb, qrDungeonAutoCb, qrSlashOpenCb, qrCtrlWCb, qrWhisperCb, qrBNetCb, qrPartyCb, qrRaidCb, qrGuildCb, qrRecordSayCb, qrSayNotifyCb)
     return qrSayNotifyCb
 end
 
@@ -2817,7 +2966,7 @@ local function BuildMentionsSettingsSection(nf, anchorTo, deps, NotifySettingCha
         if ns.db and ns.db.settings then ns.db.settings.mentionNicknames = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
         selfBox:ClearFocus()
     end)
-    nickIn:SetScript("OnEditFocusLost", function(selfBox)
+    nickIn:HookScript("OnEditFocusLost", function(selfBox)
         if ns.db and ns.db.settings then ns.db.settings.mentionNicknames = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
     end)
     HelpBtn(nickRow, nickIn, L["Help: Mention Nicknames"], L["Extra personal nicknames or alt names to watch for in addition to your current character's first name."], L["Separate entries with commas (e.g. 'Rapha, MainName'). Matching is case- and accent-insensitive."])
@@ -2849,7 +2998,7 @@ local function BuildMentionsSettingsSection(nf, anchorTo, deps, NotifySettingCha
         if ns.db and ns.db.settings then ns.db.settings.mentionKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
         selfBox:ClearFocus()
     end)
-    kwIn:SetScript("OnEditFocusLost", function(selfBox)
+    kwIn:HookScript("OnEditFocusLost", function(selfBox)
         if ns.db and ns.db.settings then ns.db.settings.mentionKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
     end)
     HelpBtn(kwRow, kwIn, L["Help: Custom Monitored Keywords"], L["Watch selected chat channels for custom words or short phrases such as bosses, dungeons, enchants, or portals."], L["Separate keywords with commas (e.g. 'Onyxia, Crusader, Portal, BRD'). Matching ignores accents and capitalization."])
@@ -2999,8 +3148,8 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
     )
 
     local mutedStatusLbl = nf:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    mutedStatusLbl:SetPoint("TOPLEFT", mutedHeader, "BOTTOMLEFT", 4, -6)
-    mutedStatusLbl:SetPoint("TOPRIGHT", nf, "TOPRIGHT", -16, -30)
+    mutedStatusLbl:SetPoint("TOPLEFT", mutedHeader, "BOTTOMLEFT", 4, -8)
+    mutedStatusLbl:SetPoint("RIGHT", nf, "RIGHT", -16, 0)
     mutedStatusLbl:SetJustifyH("LEFT")
     mutedStatusLbl:SetWordWrap(true)
 
@@ -3026,6 +3175,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
             s.worldBuffsAlerts = true
             s.worldBuffsExpiryAlert = true
             s.clanLfgAlertEnabled = true
+            s.clanEventAlertEnabled = true
             s.clanSignupAlertEnabled = true
             s.clanEventReminders = true
             s.spotterScoutAlert = true
@@ -3037,10 +3187,27 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         NotifySettingChanged("CLAN_UPDATED")
         for _, sync in ipairs(syncFns) do sync() end
     end)
+    local unmuteAlertsHelp = HelpBtn(
+        mutedBtnRow,
+        unmuteAlertsBtn,
+        L["Help: Re-enable Alerts"],
+        L["Turns all silenced SocialCentral alert categories, sounds, Do Not Disturb timers, and popup notifications back on in one click."],
+        L["Click whenever an alert category was turned off and you want to restore all popup notifications cleanly."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Re-enable Alerts"],
+        actionLabel = L["Re-enable Alerts"],
+        widget = unmuteAlertsBtn,
+        helpTitle = L["Help: Re-enable Alerts"],
+        description = L["Turns all silenced SocialCentral alert categories, sounds, Do Not Disturb timers, and popup notifications back on in one click."],
+        howText = L["Click whenever an alert category was turned off and you want to restore all popup notifications cleanly."],
+        onTrigger = function() unmuteAlertsBtn:Click() end,
+    })
 
     local unmutePlayersBtn = ns.Theme:CreateButton(mutedBtnRow, 174, 22, L["Unmute All Players"], "default")
     ns.Theme:AutoFitButton(unmutePlayersBtn, 144, 16, 220)
-    unmutePlayersBtn:SetPoint("LEFT", unmuteAlertsBtn, "RIGHT", 8, 0)
+    unmutePlayersBtn:SetPoint("LEFT", unmuteAlertsHelp or unmuteAlertsBtn, "RIGHT", 10, 0)
     unmutePlayersBtn:SetScript("OnClick", function()
         if ns.db and ns.db.socialMeta and ns.Compat and ns.Compat.ScopeKey then
             local tbl = ns.db.socialMeta[ns.Compat.ScopeKey()]
@@ -3058,11 +3225,32 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         if ns.db and ns.db.settings and type(ns.db.settings.chatMutedThreadRules) == "table" then
             wipe(ns.db.settings.chatMutedThreadRules)
         end
+        if ns.Chat then
+            if type(ns.Chat.sessionMutedThreads) == "table" then wipe(ns.Chat.sessionMutedThreads) end
+            if type(ns.Chat.sessionMutedThreadRules) == "table" then wipe(ns.Chat.sessionMutedThreadRules) end
+        end
         NotifySettingChanged("SOCIAL_UPDATED")
         ns:Emit("WATCHLIST_UPDATED")
         ns:Emit("CHAT_UPDATED")
         for _, sync in ipairs(syncFns) do sync() end
     end)
+    HelpBtn(
+        mutedBtnRow,
+        unmutePlayersBtn,
+        L["Help: Unmute All Players"],
+        L["Clears notification mutes on all individual players and muted conversations so their whispers and online alerts show again."],
+        L["Click to unmute every player and thread you previously silenced via the bell-off button or conversation menu."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Unmute All Players"],
+        actionLabel = L["Unmute All Players"],
+        widget = unmutePlayersBtn,
+        helpTitle = L["Help: Unmute All Players"],
+        description = L["Clears notification mutes on all individual players and muted conversations so their whispers and online alerts show again."],
+        howText = L["Click to unmute every player and thread you previously silenced via the bell-off button or conversation menu."],
+        onTrigger = function() unmutePlayersBtn:Click() end,
+    })
 
     refs.mutedStatusLbl = mutedStatusLbl
     refs.unmuteAlertsBtn = unmuteAlertsBtn
@@ -3116,6 +3304,12 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
 
     local friendAlertHeader = AddSectionHeader(
         nf, L["Friend Online Alerts"], soundCb, -14,
+        L["Help: Friend Online Alerts"],
+        L["Notifies you cleanly when Character Friends or Battle.net friends enter World of Warcraft: Forever, after an 8-second post-login grace window and 120-second anti-spam cooldown."],
+        L["Enabled for All Friends by default; mute specific players via the bell icon in the Social (O) list, or switch to Favorites Only or Off below."]
+    )
+    Search.SetPendingMeta(
+        L["Friend Online Alert Mode"],
         L["Help: Friend Online Alerts"],
         L["Notifies you cleanly when Character Friends or Battle.net friends enter World of Warcraft: Forever, after an 8-second post-login grace window and 120-second anti-spam cooldown."],
         L["Enabled for All Friends by default; mute specific players via the bell icon in the Social (O) list, or switch to Favorites Only or Off below."]
@@ -3255,11 +3449,23 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
     local tabsRowLbl = officialChatTabsRow:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     tabsRowLbl:SetPoint("TOPLEFT", 0, -2)
     tabsRowLbl:SetText("|cffb8c2d0" .. L["Blizzard chat tabs displaying [SC] addon chat:"] .. "|r")
-    HelpBtn(
+    local tabsHelpBtn = HelpBtn(
         officialChatTabsRow, tabsRowLbl, L["Help: Official Chat Tabs for [SC]"],
         L["Choose which Blizzard chat windows (General, custom Whispers tab, etc.) display incoming and sent [SC] addon messages."],
         L["You can also toggle this directly inside Blizzard's right-click Tab Settings window via the '[SC] Addon Chat' checkbox."]
     )
+    Search.Register({
+        kind = "action",
+        title = L["Blizzard chat tabs displaying [SC] addon chat:"],
+        actionLabel = L["Go to"],
+        widget = officialChatTabsRow,
+        helpTitle = L["Help: Official Chat Tabs for [SC]"],
+        description = L["Choose which Blizzard chat windows (General, custom Whispers tab, etc.) display incoming and sent [SC] addon messages."],
+        howText = L["You can also toggle this directly inside Blizzard's right-click Tab Settings window via the '[SC] Addon Chat' checkbox."],
+        onTrigger = function()
+            Search.LocateEntry({ tabId = "notifications", widget = officialChatTabsRow })
+        end,
+    })
     local tabCheckboxes = {}
     for cid = 1, 10 do
         local tcb = CreateFrame("CheckButton", nil, officialChatTabsRow, "UICheckButtonTemplate")
@@ -3444,7 +3650,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Strictly triggered only by your manual Send click/Enter outside combat or boss chat lockdowns; safely falls back to pre-filling the chat bar when restricted."]
     )
     AddDeps(deps.defaultBtns, unmuteAlertsBtn, unmutePlayersBtn, resetToastPosBtn, testToastBtn)
-    AddDeps(deps.chat, addonToastCb, resetToastPosBtn, toastDurLbl, toastDurStep, addonEchoCb, addonEchoSentCb, addonFlashCb, chatSoundCb, chatSoundWhispersCb, chatSoundRoomsCb, chatSoundAllianceCb, chatSoundGuildCb, chatSoundGroupCb, chatMirrorCb, chatChannelUnreadCb, addonDirectCb, chatDirectOfficialCb)
+    AddDeps(deps.chat, addonToastCb, addonEchoCb, addonEchoSentCb, addonFlashCb, chatSoundCb, chatSoundWhispersCb, chatSoundRoomsCb, chatSoundAllianceCb, chatSoundGuildCb, chatSoundGroupCb, chatMirrorCb, chatChannelUnreadCb, addonDirectCb, chatDirectOfficialCb)
 
     local guildAlertsHeader = AddSectionHeader(
         nf, L["Guild, LFG & World Buff Alerts"], chatDirectOfficialCb, -14,
@@ -3500,7 +3706,7 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         if ns.db and ns.db.settings then ns.db.settings.clanLfgAlertFilter = ns.Compat.CleanInput(self:GetText() or "") or "" end
         self:ClearFocus()
     end)
-    clanFilterInput:SetScript("OnEditFocusLost", function(self)
+    clanFilterInput:HookScript("OnEditFocusLost", function(self)
         if ns.db and ns.db.settings then ns.db.settings.clanLfgAlertFilter = ns.Compat.CleanInput(self:GetText() or "") or "" end
     end)
     HelpBtn(clanFilterRow, clanFilterInput, L["Help: Clan Alert Keywords"], L["Comma-separated dungeon or level keywords (e.g. 'BRD, Strat, tank') so Clan Dungeon Alerts only fire on matching requests."], L["Leave blank to receive alerts for all Dungeon LFG calls inside your guild."])
@@ -3722,10 +3928,111 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         if ns.SpotterHUD and ns.SpotterHUD.Toggle then ns.SpotterHUD:Toggle() end
     end)
     HelpBtn(rd, openRadarBtn, L["Help: Open Target Radar"], L["Manually opens the Target Radar HUD to test target tracking and range display."], L["Click this button or type '/sc radar' to show or hide the floating radar."])
+    Search.Register({
+        kind = "action",
+        title = L["Open Target Radar"],
+        actionLabel = L["Open Target Radar"],
+        widget = openRadarBtn,
+        helpTitle = L["Help: Open Target Radar"],
+        description = L["Manually opens the Target Radar HUD to test target tracking and range display."],
+        howText = L["Click this button or type '/sc radar' to show or hide the floating radar."],
+        onTrigger = function() openRadarBtn:Click() end,
+    })
+
+    local gatherHeader = AddSectionHeader(
+        rd,
+        L["Collectibles & Gathering Highlight (Official)"],
+        openRadarBtn,
+        -14,
+        L["Help: Collectibles Highlight"],
+        L["Helps herbalists, miners, anglers, and treasure hunters spot nearby collectibles against grass and terrain using Blizzard's official Soft-Target interaction glow, bright sparkle halos, and contrast labels (100% policy-compliant, no terrain ESP). Includes Blizzard's native Interact Key support — you can keep clicking normally with your mouse or bind an optional key in Game Options -> Controls."],
+        L["Enable manually here or confirm the prompt when turning on Find Herbs / Find Minerals / Find Fish on your Minimap. Disabling automatically restores your original game settings."]
+    )
+    local gatherEnabledCb = CreateCheckbox(
+        rd, L["Enable Collectibles Highlight (Herbs, Ore, Fish & Treasures)"], gatherHeader, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.gatherHighlightEnabled == true end,
+        function(checked)
+            if ns.GatherHighlight and ns.GatherHighlight.SetEnabled then
+                ns.GatherHighlight:SetEnabled(checked, true)
+            elseif ns.db and ns.db.settings then
+                ns.db.settings.gatherHighlightEnabled = checked
+                ns.db.settings.gatherHighlightPromptAnswered = true
+            end
+            NotifySettingChanged()
+        end,
+        L["Help: Enable Collectibles Highlight"],
+        L["Master opt-in toggle for highlighting nearby herbs, mining veins, fishing pools, and chests right as you approach or face them."],
+        L["Uses official Blizzard world-object interaction highlights within normal range (cannot highlight nodes across the entire zone or behind walls)."]
+    )
+    local gatherSparkleCb = CreateCheckbox(
+        rd, L["Show bright sparkle halo & contrast label on nearby node"], gatherEnabledCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.gatherHighlightNameplateGlow ~= false end,
+        function(checked) ns.db.settings.gatherHighlightNameplateGlow = checked; NotifySettingChanged() end,
+        L["Help: Collectibles Sparkle Halo"],
+        L["Draws a pulsing golden starburst halo, downward arrow, and dark-backed high-contrast name tag above the active nearby collectible whenever WoW exposes its plate."],
+        L["Ideal when green herbs blend into dense grass, bushes, or mossy ground."]
+    )
+    local gatherRangeCb = CreateCheckbox(
+        rd, L["Expand official detection cone, interact icon & object outline"], gatherSparkleCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.gatherHighlightEnhanceRange ~= false end,
+        function(checked)
+            ns.db.settings.gatherHighlightEnhanceRange = checked
+            ns.db.settings.gatherHighlightOutline = checked
+            if ns.GatherHighlight and ns.GatherHighlight.SyncOfficialCVars then
+                ns.GatherHighlight:SyncOfficialCVars()
+            end
+            NotifySettingChanged()
+        end,
+        L["Help: Official Soft-Target Boost"],
+        L["Activates Blizzard's native wide-angle Soft-Target object detection, floating interact icon, and glowing 3D outline on nearby herbs and ores outside combat. Blizzard's engine may show its yellow 'Interact Key' tip because Soft-Target also supports pressing 1 optional key (bound in Game Options -> Controls) to interact with/gather the highlighted object; you can close that tip with X and keep right-clicking normally."],
+        L["Your previous Blizzard settings are saved safely and restored automatically whenever you turn this option or Collectibles Highlight off."]
+    )
+    local gatherBeaconCb = CreateCheckbox(
+        rd, L["Show compact indicator banner when a collectible is in front"], gatherRangeCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.gatherHighlightFloatBeacon ~= false end,
+        function(checked) ns.db.settings.gatherHighlightFloatBeacon = checked; NotifySettingChanged() end,
+        L["Help: Collectibles Screen Indicator"],
+        L["Shows a sleek non-clickable pill near the top of your screen displaying the detected herb, ore, or pool name as soon as one enters your forward detection cone."],
+        L["Clicks pass straight through this pill to the game world so it never blocks clicking an herb."]
+    )
+    local gatherSoundCb = CreateCheckbox(
+        rd, L["Play subtle chime when spotting a collectible node"], gatherBeaconCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.gatherHighlightSound == true end,
+        function(checked) ns.db.settings.gatherHighlightSound = checked; NotifySettingChanged() end,
+        L["Help: Collectibles Spot Chime"],
+        L["Plays a soft ping when a new herb, mining vein, fishing pool, or chest enters your forward highlight cone (rate-limited to avoid spam and respects Focus Mode / Do Not Disturb)."],
+        L["Leave off for silent visual highlighting only."]
+    )
+
+    local posBeaconBtn = ns.Theme:CreateButton(rd, 198, 22, L["Position Screen Indicator"], "default")
+    ns.Theme:AutoFitButton(posBeaconBtn, 168, 16, 260)
+    posBeaconBtn:SetPoint("TOPLEFT", gatherSoundCb, "BOTTOMLEFT", 4, -8)
+    posBeaconBtn:SetScript("OnClick", function()
+        if ns.GatherHighlightUI and ns.GatherHighlightUI.SetBeaconPreviewMode then
+            ns.GatherHighlightUI:SetBeaconPreviewMode(true)
+        end
+    end)
+    HelpBtn(
+        rd,
+        posBeaconBtn,
+        L["Help: Position Screen Indicator"],
+        L["Temporarily shows the Collectibles Highlight banner in draggable preview mode so you can place it anywhere on your screen."],
+        L["Click this button, drag the preview banner to your preferred spot, and click X when finished."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Position Screen Indicator"],
+        actionLabel = L["Position Screen Indicator"],
+        widget = posBeaconBtn,
+        helpTitle = L["Help: Position Screen Indicator"],
+        description = L["Temporarily shows the Collectibles Highlight banner in draggable preview mode so you can place it anywhere on your screen."],
+        howText = L["Click this button, drag the preview banner to your preferred spot, and click X when finished."],
+        onTrigger = function() posBeaconBtn:Click() end,
+    })
 
     local resetRadarTabBtn = ns.Theme:CreateButton(rd, 190, 22, L["Restore Defaults (This Tab)"], "default")
     ns.Theme:AutoFitButton(resetRadarTabBtn, 160, 16, 250)
-    resetRadarTabBtn:SetPoint("TOPLEFT", openRadarBtn, "BOTTOMLEFT", 0, -12)
+    resetRadarTabBtn:SetPoint("TOPLEFT", posBeaconBtn, "BOTTOMLEFT", 0, -12)
     resetRadarTabBtn:SetScript("OnClick", function()
         local function DoReset()
             local s = ns.db and ns.db.settings
@@ -3745,6 +4052,20 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
                 s.spotterIgnoreGroup = true
                 s.spotterSound = true
                 s.spotterLockHUD = false
+                s.gatherHighlightEnhanceRange = true
+                s.gatherHighlightOutline = true
+                s.gatherHighlightNameplateGlow = true
+                s.gatherHighlightFloatBeacon = true
+                s.gatherHighlightSound = false
+                s.gatherHighlightPromptAnswered = false
+                if ns.GatherHighlight and ns.GatherHighlight.SetEnabled then
+                    ns.GatherHighlight:SetEnabled(false, false)
+                else
+                    s.gatherHighlightEnabled = false
+                end
+                if ns.GatherHighlightUI and ns.GatherHighlightUI.ResetBeaconPosition then
+                    ns.GatherHighlightUI:ResetBeaconPosition()
+                end
             end
             NotifySettingChanged()
             for _, sync in ipairs(syncFns) do sync() end
@@ -3761,9 +4082,27 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
             DoReset()
         end
     end)
+    HelpBtn(
+        rd,
+        resetRadarTabBtn,
+        L["Help: Restore Radar Defaults"],
+        L["Resets every Target Radar, World Buff, and nameplate alert setting on this tab back to factory defaults."],
+        L["Click and confirm to restore all Radar & Map settings without affecting your other tabs."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Restore Defaults (This Tab)"],
+        actionLabel = L["Restore Defaults (This Tab)"],
+        widget = resetRadarTabBtn,
+        helpTitle = L["Help: Restore Radar Defaults"],
+        description = L["Resets every Target Radar, World Buff, and nameplate alert setting on this tab back to factory defaults."],
+        howText = L["Click and confirm to restore all Radar & Map settings without affecting your other tabs."],
+        onTrigger = function() resetRadarTabBtn:Click() end,
+    })
 
-    AddDeps(deps.defaultBtns, resetRadarTabBtn)
+    AddDeps(deps.defaultBtns, posBeaconBtn, resetRadarTabBtn)
     AddDeps(deps.primaryBtns, openRadarBtn)
+    AddDeps(deps.gather, gatherSparkleCb, gatherRangeCb, gatherBeaconCb, gatherSoundCb, posBeaconBtn)
     AddDeps(deps.radar, spotterAutoHudCb, spotterDurLbl, spotterDurStep, spotterPlateArrowCb, spotterBadgesCb, spotterTargetHighlightCb, spotterEnemyCb, spotterAllyCb, spotterWatchlistCb, spotterFriendsCb, spotterBlockedCb, spotterSameCb, spotterIgnoreGroupCb, spotterSoundCb, spotterLockCb, openRadarBtn)
 end
 
@@ -4010,7 +4349,7 @@ local function BuildChatShieldSettingsSection(gn, anchorTo, deps)
         if ns.db and ns.db.settings then ns.db.settings.chatAntiSpamKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
         selfBox:ClearFocus()
     end)
-    spamKwIn:SetScript("OnEditFocusLost", function(selfBox)
+    spamKwIn:HookScript("OnEditFocusLost", function(selfBox)
         if ns.db and ns.db.settings then ns.db.settings.chatAntiSpamKeywords = ns.Compat.CleanInput(selfBox:GetText() or "") or "" end
     end)
     HelpBtn(spamKwRow, spamKwIn, L["Help: Custom Anti-Spam Words"], L["Add extra words or short phrases to hide in public channels when Anti-Spam Shield is enabled."], L["Separate entries with commas (e.g. 'gdkp, boost, carry'). Ignored for Friends, Guild, and Group members."])
@@ -4292,8 +4631,25 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
         L["Check to open the roll card automatically on group loot drops (only asks once on your first drop by default)."]
     )
 
+    local lootRollHideOfficialCb = CreateCheckbox(
+        gn, L["Hide Blizzard's official loot roll bar while SocialCentral is active"], lootRollHelperCb, -4,
+        function() return ns.db and ns.db.settings and ns.db.settings.lootRollHideOfficial == true end,
+        function(checked)
+            if ns.db and ns.db.settings then
+                ns.db.settings.lootRollHideOfficial = checked
+            end
+            if SocialCentralDB and SocialCentralDB.settings then
+                SocialCentralDB.settings.lootRollHideOfficial = checked
+            end
+            ns:Emit("LOOT_ROLL_UPDATED")
+        end,
+        L["Help: Hide Official Loot Roll Bar"],
+        L["Automatically hides WoW's default group loot roll bars whenever SocialCentral's Group Loot Roll window is enabled so the two bars never overlap."],
+        L["Requires 'Enable SocialCentral Group Loot Roll window' to be checked. If you close SocialCentral's roll window or uncheck this option, Blizzard's official bar reappears automatically."]
+    )
+
     local whoHeader = CreateFieldLabel(
-        gn, L["/who mode"], lootRollHelperCb, -10,
+        gn, L["/who mode"], lootRollHideOfficialCb, -10,
         L["Help: /who Mode"],
         L["Controls how manual /who responses are captured silently without interrupting your gameplay."],
         L["Choose 'Silent UI' (hides Blizzard Friends popup outside combat) or 'Chat Filter' (parses chat lines cleanly without touching FriendsFrame)."]
@@ -4335,18 +4691,18 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
     local histHeader = CreateFieldLabel(
         gn, L["Character Whisper history per thread (0 = off)"], nearbyRow, -10,
         L["Help: Whisper History Limit"],
-        L["Saves the last N lines per Character Whisper locally (0 to 300 lines; lightweight storage, ~0.2 KB per line). Battle.net Real IDs and BattleTags are never persisted to disk."],
-        L["Use '-' and '+' in steps of 10. Set to 0 if you want session-only whispers without SavedVariables history."]
+        L["Saves the last N lines per Character Whisper locally (0 to 2000 lines, default 300; capped at 100 MB text across all characters). Battle.net Real IDs and BattleTags are never persisted to disk."],
+        L["Use '-' and '+' in steps of 50. Set to 0 if you want session-only whispers without SavedVariables history."]
     )
-    local histRow = CreateStepperRow(gn, histHeader, -6, 0, 300, L["lines"], function()
+    local histRow = CreateStepperRow(gn, histHeader, -6, 0, 2000, L["lines"], function()
         if ns.db and ns.db.settings and ns.db.settings.chatHistoryLimit ~= nil then
             return ns.db.settings.chatHistoryLimit
         end
-        return 100
+        return 300
     end, function(val)
         ns.db.settings.chatHistoryLimit = val
         ns:Emit("CHAT_UPDATED")
-    end, 10)
+    end, 50)
 
     local guildHistCb = CreateCheckbox(
         gn, L["Save Guild & Officer chat history across reloads/logins"], histRow, -10,
@@ -4357,35 +4713,35 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
         end,
         L["Help: Save Guild Chat History"],
         L["Keeps recent Guild and Officer chat messages saved locally so you can still read what happened before a /reload, disconnect, or relog."],
-        L["Enabled by default (125 lines). Uncheck if you prefer Guild chat to reset on every reload or login."]
+        L["Enabled by default (300 lines). Uncheck if you prefer Guild chat to reset on every reload or login."]
     )
 
     local guildHistHeader = CreateFieldLabel(
         gn, L["Saved Guild & Officer chat lines"], guildHistCb, -6,
         L["Help: Guild Chat History Limit"],
-        L["Defines how many recent messages (50 to 500 lines, default 125) are kept saved per Guild and Officer channel across reloads and logins."],
-        L["Use '-' and '+' in steps of 25. Requires 'Save Guild & Officer chat history across reloads/logins' to be checked."]
+        L["Defines how many recent messages (50 to 2000 lines, default 300; capped at 100 MB text) are kept saved per Guild and Officer channel across reloads and logins."],
+        L["Use '-' and '+' in steps of 50. Requires 'Save Guild & Officer chat history across reloads/logins' to be checked."]
     )
-    local guildHistRow = CreateStepperRow(gn, guildHistHeader, -6, 50, 500, L["lines"], function()
+    local guildHistRow = CreateStepperRow(gn, guildHistHeader, -6, 50, 2000, L["lines"], function()
         local raw = ns.db and ns.db.settings and ns.db.settings.guildChatHistoryLimit
-        local num = tonumber(raw) or 125
-        if num < 50 then num = 50 elseif num > 500 then num = 500 end
+        local num = tonumber(raw) or 300
+        if num < 50 then num = 50 elseif num > 2000 then num = 2000 end
         return num
     end, function(val)
         ns.db.settings.guildChatHistoryLimit = val
         ns:Emit("CHAT_UPDATED")
-    end, 25)
+    end, 50)
 
     local generalHistCb = CreateCheckbox(
-        gn, L["Save Private Rooms, Alliance & Mentions history across reloads/logins"], guildHistRow, -10,
+        gn, L["Save General, Private Rooms, Alliance & Mentions history across reloads/logins"], guildHistRow, -10,
         function() return not ns.db or not ns.db.settings or ns.db.settings.generalChatHistorySave ~= false end,
         function(checked)
             if ns.db and ns.db.settings then ns.db.settings.generalChatHistorySave = checked end
             NotifySettingChanged("CHAT_UPDATED")
         end,
         L["Help: Save General Conversations History"],
-        L["Keeps recent messages from Private Rooms, Alliance Chat, and the Mentions Radar saved locally across /reload and logins with very low memory footprint (~0.2 KB per message)."],
-        L["Enabled by default (150 lines). Uncheck if you prefer Private Rooms, Alliance, and Mentions to reset each session."]
+        L["Keeps recent messages from General chat, Private Rooms, Alliance Chat, and the Mentions Radar saved locally across /reload and logins (protected by an automatic 100 MB text quota)."],
+        L["Enabled by default (300 lines). Uncheck if you prefer General, Private Rooms, Alliance, and Mentions to reset each session."]
     )
 
     local groupHistCb = CreateCheckbox(
@@ -4413,20 +4769,20 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
     )
 
     local generalHistHeader = CreateFieldLabel(
-        gn, L["Saved lines per Room, Group, Alliance & Mentions"], groupReconnectCb, -6,
+        gn, L["Saved lines per General, Room, Group, Alliance & Mentions"], groupReconnectCb, -6,
         L["Help: General Conversation History Limit"],
-        L["Controls how many recent messages (25 to 300 lines, default 150) are stored per Private Room, Party/Raid/Instance channel, Alliance Chat, and Mentions Radar. Up to 400 total conversations are retained automatically."],
-        L["Use '-' and '+' in steps of 25. Lower this value only if you want an even smaller SavedVariables file."]
+        L["Controls how many recent messages (50 to 2000 lines, default 300) are stored per General tab, Private Room, Party/Raid/Instance channel, Alliance Chat, and Mentions Radar (up to 2000 conversations and 100 MB text total)."],
+        L["Use '-' and '+' in steps of 50. Lower this value only if you want an even smaller SavedVariables file."]
     )
-    local generalHistRow = CreateStepperRow(gn, generalHistHeader, -6, 25, 300, L["lines"], function()
+    local generalHistRow = CreateStepperRow(gn, generalHistHeader, -6, 50, 2000, L["lines"], function()
         local raw = ns.db and ns.db.settings and ns.db.settings.generalChatHistoryLimit
-        local num = tonumber(raw) or 150
-        if num < 25 then num = 25 elseif num > 300 then num = 300 end
+        local num = tonumber(raw) or 300
+        if num < 50 then num = 50 elseif num > 2000 then num = 2000 end
         return num
     end, function(val)
         ns.db.settings.generalChatHistoryLimit = val
         ns:Emit("CHAT_UPDATED")
-    end, 25)
+    end, 50)
 
     local expRow = CreateFrame("Frame", nil, gn)
     expRow:SetPoint("TOPLEFT", generalHistRow, "BOTTOMLEFT", 0, -8)
@@ -4457,7 +4813,7 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
     })
 
     AddDeps(deps.social, folderCb)
-    AddDeps(deps.group, rcAuditCb, lootRollHelperCb)
+    AddDeps(deps.group, rcAuditCb, lootRollHelperCb, lootRollHideOfficialCb)
     AddDeps(deps.nearby, nearbyRow)
     AddDeps(deps.chat, histHeader, histRow, guildHistCb, guildHistHeader, guildHistRow, generalHistCb, groupHistCb, groupReconnectCb, generalHistHeader, generalHistRow)
     AddDeps(deps.defaultBtns, expBtn)
@@ -4477,6 +4833,12 @@ local function BuildGeneralTab(gn, deps, NotifySettingChanged)
     langValue:SetText(L["Active Language: %s (%s)"]:format(ns.activeLangLabel or "English", ns.activeLocale or "enUS") .. "  [" .. langModeNote .. "]")
 
     local langLabelByVal = { auto = L["Auto (WoW)"], enUS = "English", ptBR = "Português (BR)", esES = "Español" }
+    Search.SetPendingMeta(
+        L["Active Language"],
+        L["Help: Language"],
+        L["Choose Auto (WoW) to follow your game client language automatically, or override SocialCentral to English, Português (BR), or Español independently."],
+        L["Click a language button below and confirm Reload UI (outside combat) so all menus, tooltips, and labels re-render cleanly in your chosen language."]
+    )
     local langRow = CreateChoiceRow(gn, langValue, -6, {
         { value = "auto", label = L["Auto (WoW)"], width = 116 },
         { value = "enUS", label = "English", width = 94 },
@@ -4499,11 +4861,34 @@ local function BuildGeneralTab(gn, deps, NotifySettingChanged)
         if InCombatLockdown and InCombatLockdown() then ns:Print(L["In Combat"]); return end
         if ReloadUI then ReloadUI() elseif C_UI and C_UI.Reload then C_UI.Reload() end
     end)
+    HelpBtn(
+        gn,
+        langReloadBtn,
+        L["Help: Reload UI Language"],
+        L["Reloads the WoW interface right away so any language change takes full effect across all menus and labels."],
+        L["Click after choosing English, Português, or Español above (blocked while in combat)."]
+    )
+    Search.Register({
+        kind = "action",
+        title = L["Reload UI to Apply Language"],
+        actionLabel = L["Reload UI to Apply Language"],
+        widget = langReloadBtn,
+        helpTitle = L["Help: Reload UI Language"],
+        description = L["Reloads the WoW interface right away so any language change takes full effect across all menus and labels."],
+        howText = L["Click after choosing English, Português, or Español above (blocked while in combat)."],
+        onTrigger = function() langReloadBtn:Click() end,
+    })
 
     local themeHeader = AddSectionHeader(
         gn, L["Theme"], langReloadBtn, -12,
         L["Help: Theme"],
-        L["Choose between Blizzard Official (default in-game portrait window, dark marble inset, and classic red/pewter buttons), Modern Theme (optional dark minimalist UI), or Classic Gold."],
+        L["Choose between Blizzard Official (default in-game portrait window, dark inset, and charcoal-bronze buttons), Modern Theme (optional dark minimalist UI), or Classic Gold."],
+        L["Click your preferred design button (or open the visual Preview Picker below); changes apply immediately across all SocialCentral windows without /reload."]
+    )
+    Search.SetPendingMeta(
+        L["Visual Theme"],
+        L["Help: Theme"],
+        L["Choose between Blizzard Official (default in-game portrait window, dark inset, and charcoal-bronze buttons), Modern Theme (optional dark minimalist UI), or Classic Gold."],
         L["Click your preferred design button (or open the visual Preview Picker below); changes apply immediately across all SocialCentral windows without /reload."]
     )
     local themeRow = CreateChoiceRow(gn, themeHeader, -6, {
@@ -4524,10 +4909,17 @@ local function BuildGeneralTab(gn, deps, NotifySettingChanged)
     themePickerBtn:SetScript("OnClick", function()
         if ns.Theme and ns.Theme.ShowThemeWelcomePicker then ns.Theme:ShowThemeWelcomePicker() end
     end)
+    local themePickerHelp = HelpBtn(
+        gn,
+        themePickerBtn,
+        L["Help: Theme"],
+        L["Choose between Blizzard Official (default in-game portrait window, dark inset, and charcoal-bronze buttons), Modern Theme (optional dark minimalist UI), or Classic Gold."],
+        L["Click your preferred design button (or open the visual Preview Picker below); changes apply immediately across all SocialCentral windows without /reload."]
+    )
 
     local resetPosBtn = ns.Theme:CreateButton(gn, 200, 22, L["Reset All Window Positions"], "default")
     ns.Theme:AutoFitButton(resetPosBtn, 170, 18, 270)
-    resetPosBtn:SetPoint("LEFT", themePickerBtn, "RIGHT", 12, 0)
+    resetPosBtn:SetPoint("LEFT", themePickerHelp or themePickerBtn, "RIGHT", 12, 0)
     resetPosBtn:SetScript("OnClick", function()
         if ns.UI and ns.UI.OpenConfirmModal then
             ns.UI:OpenConfirmModal({
@@ -4618,26 +5010,6 @@ local function BuildGeneralTab(gn, deps, NotifySettingChanged)
             if NotifySettingChanged then NotifySettingChanged("CHAT_UPDATED") end
         end
     end)
-    Search.Register({
-        kind = "choice",
-        title = L["Exclusive Chat Mode"],
-        widget = chatModeRow,
-        helpTitle = L["Help: Exclusive Chat Mode"],
-        description = L["Forces an exclusive choice between SocialCentral Chat (Quick Reply & Conversations, hiding Blizzard Official Chat) or Official WoW Chat (hiding and disabling all addon chat)."],
-        howText = L["Right-click the Minimap or chat emblem icon at any time to switch modes instantly without reloading."],
-        options = {
-            { value = "addon", label = L["SocialCentral Chat (Quick Reply)"] },
-            { value = "official", label = L["Official WoW Chat"] },
-        },
-        get = function()
-            return (ns.Compat and ns.Compat.IsOfficialChatMode and ns.Compat.IsOfficialChatMode()) and "official" or "addon"
-        end,
-        set = function(val)
-            if ns.Minimap and ns.Minimap.SetChatUiMode then
-                ns.Minimap:SetChatUiMode(val)
-            end
-        end,
-    })
 
     local minimapClickHeader = CreateFieldLabel(
         gn, L["Minimap Left-Click behavior"], chatModeRow, -10,
@@ -4832,7 +5204,7 @@ function Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHei
 
     local searchRow = CreateFrame("Frame", nil, headerArea)
     searchRow:SetPoint("TOPLEFT", tabBar, "BOTTOMLEFT", 0, -6)
-    searchRow:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", 0, -72)
+    searchRow:SetPoint("RIGHT", headerArea, "RIGHT", 0, 0)
     searchRow:SetHeight(26)
 
     local searchBox = CreateFrame("EditBox", "SocialCentralSettingsSearchBox", searchRow, "SearchBoxTemplate")
@@ -4860,7 +5232,8 @@ function Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHei
         countLbl,
         L["Help: Settings Search"],
         L["Instantly searches every SocialCentral option across all four tabs by title, description, channel, or common keywords in English, Portuguese, and Spanish (no accents required)."],
-        L["Toggle checkboxes, adjust counters, switch options, or run actions right inside the search results — or click 'Go to' on any card to jump directly to its tab and highlight it."]
+        L["Toggle checkboxes, adjust counters, switch options, or run actions right inside the search results — or click 'Go to' on any card to jump directly to its tab and highlight it."],
+        { target = searchBox }
     )
     if searchHelp then
         searchHelp:ClearAllPoints()
@@ -4899,7 +5272,7 @@ function Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHei
     emptyTitle:SetWordWrap(false)
     local emptyHint = emptyBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     emptyHint:SetPoint("TOPLEFT", emptyTitle, "BOTTOMLEFT", 0, -6)
-    emptyHint:SetPoint("TOPRIGHT", -12, -32)
+    emptyHint:SetPoint("RIGHT", emptyBox, "RIGHT", -12, 0)
     emptyHint:SetJustifyH("LEFT")
     emptyHint:SetText(L["Try a quick topic below or search by tab, feature, or shortcut key:"])
     sp.emptyBox = emptyBox
@@ -4924,17 +5297,30 @@ function Search.BuildUI(headerArea, tabBar, content, scrollFrame, pages, pageHei
         Search.emptyChips[#Search.emptyChips + 1] = { term = topic, btn = qBtn }
     end
 
+    local searchDebounceTimer
     searchBox:HookScript("OnTextChanged", function(self)
         local raw = self:GetText() or ""
         local trimmed = raw:match("^%s*(.-)%s*$") or ""
-        if trimmed ~= Search.query then
-            Search.query = trimmed
-            Search.tabFilter = "all"
-            Search.StopBeacon()
-            if scrollFrame.SetVerticalScroll then
-                scrollFrame:SetVerticalScroll(0)
-            end
+        if trimmed == Search.query then
+            return
+        end
+        Search.query = trimmed
+        Search.tabFilter = "all"
+        Search.StopBeacon()
+        if scrollFrame.SetVerticalScroll then
+            scrollFrame:SetVerticalScroll(0)
+        end
+        if searchDebounceTimer and searchDebounceTimer.Cancel then
+            searchDebounceTimer:Cancel()
+            searchDebounceTimer = nil
+        end
+        if trimmed == "" or not (C_Timer and C_Timer.NewTimer) then
             Search.RenderResults()
+        else
+            searchDebounceTimer = C_Timer.NewTimer(0.09, function()
+                searchDebounceTimer = nil
+                Search.RenderResults()
+            end)
         end
     end)
 
@@ -4980,13 +5366,16 @@ local function BuildPanel()
     rootContainer:SetAllPoints(panel)
 
     -- Top Fixed Header, Category Navigation Tabs & Pinned Search Bar
-    local headerArea = CreateFrame("Frame", nil, rootContainer)
-    headerArea:SetPoint("TOPLEFT", rootContainer, "TOPLEFT", 12, -10)
-    headerArea:SetPoint("TOPRIGHT", rootContainer, "TOPRIGHT", -12, -10)
-    headerArea:SetHeight(110)
+    local headerArea = CreateFrame("Frame", nil, rootContainer, "BackdropTemplate")
+    headerArea:SetPoint("TOPLEFT", rootContainer, "TOPLEFT", 10, -8)
+    headerArea:SetPoint("TOPRIGHT", rootContainer, "TOPRIGHT", -10, -8)
+    headerArea:SetHeight(112)
+    if ns.Theme and ns.Theme.ApplyBackdrop then
+        ns.Theme:ApplyBackdrop(headerArea, "header")
+    end
 
     local title = headerArea:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", 2, -2)
+    title:SetPoint("TOPLEFT", 10, -8)
     title:SetText("SocialCentral  v" .. (ns.version or "0.0.0"))
 
     local subtitle = headerArea:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
@@ -4994,15 +5383,16 @@ local function BuildPanel()
     subtitle:SetText(L["Unified social hub for WoW: Forever."])
 
     local guildBadgeLbl = headerArea:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    guildBadgeLbl:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", -4, -4)
+    guildBadgeLbl:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", -10, -8)
     guildBadgeLbl:SetJustifyH("RIGHT")
+    guildBadgeLbl:SetWordWrap(false)
 
     local tabBar = CreateFrame("Frame", nil, headerArea)
     tabBar:SetPoint("TOPLEFT", subtitle, "BOTTOMLEFT", 0, -8)
-    tabBar:SetPoint("TOPRIGHT", headerArea, "TOPRIGHT", 0, -40)
+    tabBar:SetPoint("RIGHT", headerArea, "RIGHT", -10, 0)
     tabBar:SetHeight(26)
 
-    HelpBtn(
+    local headerHelpBtn = HelpBtn(
         headerArea,
         title,
         L["Help: SocialCentral Settings"],
@@ -5032,10 +5422,17 @@ local function BuildPanel()
             },
         }
     )
+    if headerHelpBtn then
+        guildBadgeLbl:SetPoint("LEFT", headerHelpBtn, "RIGHT", 10, 0)
+    end
+    subtitle:SetPoint("RIGHT", guildBadgeLbl, "LEFT", -8, 0)
 
     local scrollFrame = CreateFrame("ScrollFrame", "SocialCentralSettingsScroll", rootContainer, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", headerArea, "BOTTOMLEFT", -6, -4)
-    scrollFrame:SetPoint("BOTTOMRIGHT", rootContainer, "BOTTOMRIGHT", -28, 6)
+    scrollFrame:SetPoint("TOPLEFT", headerArea, "BOTTOMLEFT", -4, -4)
+    scrollFrame:SetPoint("BOTTOMRIGHT", rootContainer, "BOTTOMRIGHT", -26, 6)
+    if ns.Theme and ns.Theme.StyleScrollFrame then
+        ns.Theme:StyleScrollFrame(scrollFrame)
+    end
 
     local content = CreateFrame("Frame", nil, scrollFrame)
     content:SetSize(610, 1220)
@@ -5043,10 +5440,10 @@ local function BuildPanel()
 
     local pages = {}
     local pageHeights = {
-        overview = 1290,
-        notifications = 2940,
-        radar = 980,
-        general = 2210,
+        overview = 1320,
+        notifications = 3600,
+        radar = 1040,
+        general = 2900,
     }
     local catTabs = {
         { id = "overview", label = L["Summary & Windows"] },
@@ -5087,7 +5484,35 @@ local function BuildPanel()
         for id, pFrame in pairs(pages) do
             pFrame:SetShown(id == tabId)
         end
-        content:SetHeight(pageHeights[tabId] or 800)
+        local page = pages[tabId]
+        local calcH
+        if page and page.GetTop and page.GetChildren then
+            local pTop = page:GetTop()
+            if pTop then
+                local lowest = pTop
+                local function ScanKidBottom(n, ...)
+                    for ci = 1, n do
+                        local kid = select(ci, ...)
+                        if kid and kid.GetBottom then
+                            local kb = kid:GetBottom()
+                            if kb and kb < lowest then
+                                lowest = kb
+                            end
+                        end
+                    end
+                end
+                ScanKidBottom(select("#", page:GetChildren()), page:GetChildren())
+                if lowest < pTop then
+                    calcH = math.max(420, math.ceil(pTop - lowest + 36))
+                end
+            end
+        end
+        local baseH = calcH or pageHeights[tabId] or 800
+        if calcH and page then
+            pageHeights[tabId] = calcH
+            page:SetHeight(calcH)
+        end
+        content:SetHeight(baseH)
         if scrollFrame.SetVerticalScroll then
             scrollFrame:SetVerticalScroll(0)
         end
@@ -5095,19 +5520,44 @@ local function BuildPanel()
             ns.Theme:StyleButton(item.btn, "tab")
             ns.Theme:SetButtonActive(item.btn, item.id == tabId, "tab")
         end
+        if ns.Theme and ns.Theme.ApplyBackdrop then
+            ns.Theme:ApplyBackdrop(headerArea, "header")
+        end
+        if ns.Theme and ns.Theme.StyleScrollFrame then
+            ns.Theme:StyleScrollFrame(scrollFrame)
+        end
         for _, sync in ipairs(syncFns) do
             sync()
         end
+        panel._scLastSyncedAt = GetTime and GetTime() or 0
     end
 
     local prevTabBtn
+    local function ReflowSettingsTabs()
+        local availW = (tabBar.GetWidth and tabBar:GetWidth()) or 580
+        if availW < 320 then availW = 580 end
+        local totalBtns = #catButtons
+        local maxEach = math.max(96, math.floor((availW - (math.max(0, totalBtns - 1) * 5)) / math.max(1, totalBtns)))
+        local prev = nil
+        for _, item in ipairs(catButtons) do
+            local btn = item.btn
+            ns.Theme:AutoFitButton(btn, 88, 18, maxEach)
+            btn:ClearAllPoints()
+            if not prev then
+                btn:SetPoint("TOPLEFT", tabBar, "TOPLEFT", 0, 0)
+            else
+                btn:SetPoint("LEFT", prev, "RIGHT", 5, 0)
+            end
+            prev = btn
+        end
+    end
     for _, spec in ipairs(catTabs) do
         local btn = ns.Theme:CreateButton(tabBar, 134, 24, spec.label, "tab")
-        ns.Theme:AutoFitButton(btn, 98, 22, 210)
+        ns.Theme:AutoFitButton(btn, 88, 18, 180)
         if not prevTabBtn then
             btn:SetPoint("TOPLEFT", tabBar, "TOPLEFT", 0, 0)
         else
-            btn:SetPoint("LEFT", prevTabBtn, "RIGHT", 6, 0)
+            btn:SetPoint("LEFT", prevTabBtn, "RIGHT", 5, 0)
         end
         btn:SetScript("OnClick", function()
             SelectCategoryTab(spec.id)
@@ -5115,6 +5565,8 @@ local function BuildPanel()
         catButtons[#catButtons + 1] = { id = spec.id, baseLabel = spec.label, btn = btn }
         prevTabBtn = btn
     end
+    tabBar:HookScript("OnSizeChanged", ReflowSettingsTabs)
+    refs.ReflowSettingsTabs = ReflowSettingsTabs
 
     local function SafeHideSettingsFrame(sp)
         if not sp then return end
@@ -5151,6 +5603,7 @@ local function BuildPanel()
     local deps = {
         wb = { _scModKey = "wb" },
         radar = { _scModKey = "radar" },
+        gather = { _scModKey = "gather" },
         guild = { _scModKey = "guild" },
         lfg = { _scModKey = "lfg" },
         social = { _scModKey = "social" },
@@ -5233,9 +5686,11 @@ local function BuildPanel()
                 lbl = string.format("%s (%d)", item.baseLabel, offTotal)
             end
             ns.Theme:SetButtonText(item.btn, lbl)
-            ns.Theme:AutoFitButton(item.btn, 98, 22, 220)
             ns.Theme:StyleButton(item.btn, "tab")
             ns.Theme:SetButtonActive(item.btn, item.id == activeCategoryTab, "tab")
+        end
+        if refs.ReflowSettingsTabs then
+            refs.ReflowSettingsTabs()
         end
 
         for _, b in ipairs(deps.defaultBtns) do
@@ -5263,6 +5718,7 @@ local function BuildPanel()
         local modStates = {
             wb = not s or s.embedWorldMap ~= false,
             radar = not s or s.spotterEnabled ~= false,
+            gather = (s ~= nil and s.gatherHighlightEnabled == true),
             guild = (not Compat or not Compat.IsWindowIntegrationEnabled) or Compat.IsWindowIntegrationEnabled("J"),
             lfg = not s or s.embedLfgWindow ~= false,
             social = not s or s.embedSocialWindow ~= false,
@@ -5310,6 +5766,12 @@ local function BuildPanel()
     if ns.Theme and ns.Theme.RegisterListener then
         ns.Theme:RegisterListener(function()
             if rootContainer and rootContainer:IsVisible() then
+                if ns.Theme.ApplyBackdrop then
+                    ns.Theme:ApplyBackdrop(headerArea, "header")
+                end
+                if ns.Theme.StyleScrollFrame then
+                    ns.Theme:StyleScrollFrame(scrollFrame)
+                end
                 for _, sync in ipairs(syncFns) do sync() end
                 if Search.query ~= "" then
                     Search.RenderResults()
@@ -5398,8 +5860,11 @@ function SettingsMod:Register()
                 subFrame:HookScript("OnShow", function()
                     BuildPanel()
                     DockRootContainer(subFrame, spec.id)
-                    for _, sync in ipairs(syncFns) do
-                        sync()
+                    local nowT = GetTime and GetTime() or 0
+                    if not panel._scLastSyncedAt or (nowT - panel._scLastSyncedAt) > 0.05 then
+                        for _, sync in ipairs(syncFns) do
+                            sync()
+                        end
                     end
                     if Search.query ~= "" then
                         Search.RenderResults()

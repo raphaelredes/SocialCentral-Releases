@@ -551,7 +551,8 @@ end
 
 function LFG:IsSoloClassSelected(classFile)
     local sc = self:GetCharState().soloClasses
-    return sc and (sc[classFile] ~= false) or true
+    if not sc then return true end
+    return sc[classFile] ~= false
 end
 
 function LFG:ToggleSoloClass(classFile)
@@ -1347,21 +1348,21 @@ function LFG:ExecuteRowAction(item, isHardwareEvent)
 
     self:MarkAsked(item)
     local draft = self:FormatApplyMessage(item)
-    local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetAccId)
-    if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
-        ns.Chat:OpenDirectConversation({
+    local addonAllowed = (not Compat or not Compat.IsOfficialChatMode or not Compat.IsOfficialChatMode())
+        and (not Compat or not Compat.IsModuleEnabled or Compat.IsModuleEnabled("chat"))
+    local scConfirmed = addonAllowed and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetAccId)
+    if scConfirmed and ns.Chat and ns.Chat.OpenPreferredConversation then
+        return ns.Chat:OpenPreferredConversation({
             targetName = targetName,
+            lookupKey = rKey,
+            bnetAccountID = bnetAccId,
+            bnetName = bnetName,
             classFile = item.classFile,
-            autoProbe = true,
-            openUI = true,
             draftText = draft,
+            isCrossFaction = isCrossFac,
+            autoProbe = true,
+            scConfirmed = true,
         })
-        if ns.LFGFrameTab and ns.LFGFrameTab.OpenOfficialModule then
-            ns.LFGFrameTab:OpenOfficialModule("chat")
-        elseif ns.UI and ns.UI.ShowHub then
-            ns.UI:ShowHub("chat")
-        end
-        return true
     end
     if isCrossFac and bnetName and Compat.BNetWhisper then
         return Compat.BNetWhisper(bnetName, targetName, draft)

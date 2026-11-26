@@ -201,16 +201,18 @@ local function SuppressWhoUiFrames()
         suppressedSet[existing] = true
     end
 
-    for _, root in ipairs({
-        _G.FriendsFrame,
-        _G.WhoFrame,
-        _G.LFGParentFrame,
-        _G.LFGWhoListFrame,
-        _G.LFGListingFrame,
-        _G.LFGBrowseFrame,
-        _G.WhoListingFrame,
-        _G.WhoListScrollFrame,
-    }) do
+    local whoRootNames = {
+        "FriendsFrame",
+        "WhoFrame",
+        "LFGParentFrame",
+        "LFGWhoListFrame",
+        "LFGListingFrame",
+        "LFGBrowseFrame",
+        "WhoListingFrame",
+        "WhoListScrollFrame",
+    }
+    for i = 1, #whoRootNames do
+        local root = _G[whoRootNames[i]]
         if root then
             CollectWhoListeningFrames(root, 5, list, seen)
         end
@@ -2020,8 +2022,9 @@ local function AppendPlayerTooltipLines(tooltip, isLegacyHook)
     local acctIgn = Store and Store.GetAccountIgnore and Store:GetAccountIgnore(lookupKey) or nil
     local noteMain = (not (meta and meta.mainName and meta.mainName ~= "") and dirEntry and dirEntry.guildNote and Compat.ExtractMainFromGuildNote)
         and Compat.ExtractMainFromGuildNote(dirEntry.guildNote) or nil
+    local socProf = (lookupKey and ns.Clan and ns.Clan.GetPlayerSocialProfile) and ns.Clan:GetPlayerSocialProfile(lookupKey) or nil
 
-    if not meta and not noteMain and not acctIgn and not wl and not comp and not isPeer and not savedPeer and not guildStance and not linkedAlts and not nativeNote and not activeLfg then
+    if not meta and not noteMain and not acctIgn and not wl and not comp and not isPeer and not savedPeer and not guildStance and not linkedAlts and not nativeNote and not activeLfg and not socProf then
         return
     end
 
@@ -2101,7 +2104,6 @@ local function AppendPlayerTooltipLines(tooltip, isLegacyHook)
     if activeLfg then
         tooltip:AddLine("|cff3fb950[" .. tostring(activeLfg.mode or "LFG") .. "]|r " .. tostring(activeLfg.activity or L["Group"]), 0.35, 0.92, 0.55, true)
     end
-    local socProf = (lookup and ns.Clan and ns.Clan.GetPlayerSocialProfile) and ns.Clan:GetPlayerSocialProfile(lookup) or nil
     if socProf then
         local spParts = {}
         if socProf.role and socProf.role ~= "" then spParts[#spParts + 1] = socProf.role end
@@ -2216,7 +2218,14 @@ local function RegisterUnitContextMenus()
 
         if scConfirmed and chatModOn then
             rootDescription:CreateButton(L["Message in SocialCentral"], function()
-                if ns.NavigateToModule then
+                if ns.Chat and ns.Chat.OpenPreferredConversation then
+                    ns.Chat:OpenPreferredConversation({
+                        targetName = parsed.displayName,
+                        lookupKey = parsed.lookupKey,
+                        bnetAccountID = bnId,
+                        scConfirmed = true,
+                    })
+                elseif ns.NavigateToModule then
                     ns:NavigateToModule("chat", {
                         targetName = parsed.displayName,
                         bnetAccountID = bnId,

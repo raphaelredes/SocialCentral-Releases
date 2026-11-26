@@ -57,7 +57,7 @@ local function ApplyIconOnlyLootButton(btn, texPath, iconSize)
         ns.Theme:SetButtonText(btn, "")
     end
     local sz = iconSize or 26
-    local ico = btn:CreateTexture(nil, "ARTWORK", nil, 2)
+    local ico = (btn._textLayer or btn):CreateTexture(nil, "OVERLAY", nil, 2)
     ico:SetSize(sz, sz)
     ico:SetPoint("CENTER", btn, "CENTER", 0, 0)
     ico:SetTexture(texPath)
@@ -84,10 +84,13 @@ function LootRollUI:EnsurePromptFrame()
 
     local pFrame = CreateFrame("Frame", "SocialCentralLootRollPrompt", UIParent, "BackdropTemplate")
     pFrame:Hide()
-    pFrame:SetSize(376, 178)
+    pFrame:SetSize(392, 206)
     pFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
     pFrame:SetClampedToScreen(true)
     table.insert(UISpecialFrames, "SocialCentralLootRollPrompt")
+    if pFrame.hideOfficialCb then
+        pFrame.hideOfficialCb:SetChecked(true)
+    end
     Theme:PrepareTopOverlayModal(pFrame, 850)
 
     local hdr = CreateFrame("Frame", nil, pFrame)
@@ -104,7 +107,7 @@ function LootRollUI:EnsurePromptFrame()
     closeBtn:SetPoint("RIGHT", hdr, "RIGHT", 0, 0)
     closeBtn:SetScript("OnClick", function()
         if ns.LootRoll and ns.LootRoll.SetEnabledFromPrompt then
-            ns.LootRoll:SetEnabledFromPrompt(false)
+            ns.LootRoll:SetEnabledFromPrompt(false, false)
         end
         pFrame:Hide()
     end)
@@ -112,8 +115,8 @@ function LootRollUI:EnsurePromptFrame()
     local helpBtn = Theme:CreateHelpButton(
         hdr,
         L["Help: Group Loot Roll Window"],
-        L["Shows a sleek SocialCentral roll card on group drops with Need/Greed/Disenchant/Pass buttons, automatic stat & item level comparison against your equipped gear, and each teammate's live choice as they pick."],
-        L["Choose Enable Now to start using it right on this drop, or Not Now to keep Blizzard's default bar (you can toggle anytime in Settings)."],
+        L["Shows a sleek SocialCentral roll card on group drops with Need/Greed/Disenchant/Pass buttons, automatic stat & item level comparison against your equipped gear, live teammate choices, roll numbers, and the final winner."],
+        L["Choose Enable Now to start using it right on this drop (you can also hide WoW's official roll bar so they don't overlap), or Keep Default anytime in Settings -> Summary & Windows."],
         16
     )
     helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -4, 0)
@@ -152,13 +155,26 @@ function LootRollUI:EnsurePromptFrame()
     descFs:SetWordWrap(true)
     descFs:SetText(L["Would you like to activate SocialCentral's Group Loot Roll mini-window with equipped-gear comparison and live party choices?"])
 
+    local hideOfficialCb = CreateFrame("CheckButton", nil, pFrame, "UICheckButtonTemplate")
+    hideOfficialCb:SetSize(22, 22)
+    hideOfficialCb:SetPoint("TOPLEFT", descFs, "BOTTOMLEFT", -2, -6)
+    hideOfficialCb:SetChecked(true)
+    local hideOfficialLbl = pFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hideOfficialLbl:SetPoint("LEFT", hideOfficialCb, "RIGHT", 5, 0)
+    hideOfficialLbl:SetPoint("RIGHT", pFrame, "RIGHT", -14, 0)
+    hideOfficialLbl:SetJustifyH("LEFT")
+    hideOfficialLbl:SetWordWrap(true)
+    hideOfficialLbl:SetText(L["Hide official WoW roll bar while active"])
+    pFrame.hideOfficialCb = hideOfficialCb
+
     local enableBtn = Theme:CreateButton(pFrame, 154, 24, L["Enable Now"], "primary")
     local enW = Theme:AutoFitButton(enableBtn, 120, 18, 220)
     enableBtn:SetPoint("BOTTOMRIGHT", pFrame, "BOTTOMRIGHT", -14, 12)
     enableBtn:SetScript("OnClick", function()
+        local hideOff = pFrame.hideOfficialCb and pFrame.hideOfficialCb:GetChecked() and true or false
         pFrame:Hide()
         if ns.LootRoll and ns.LootRoll.SetEnabledFromPrompt then
-            ns.LootRoll:SetEnabledFromPrompt(true)
+            ns.LootRoll:SetEnabledFromPrompt(true, hideOff)
         end
         LootRollUI:Refresh()
     end)
@@ -169,7 +185,7 @@ function LootRollUI:EnsurePromptFrame()
     pFrame:SetWidth(math.max(392, enW + skW + 48))
     skipBtn:SetScript("OnClick", function()
         if ns.LootRoll and ns.LootRoll.SetEnabledFromPrompt then
-            ns.LootRoll:SetEnabledFromPrompt(false)
+            ns.LootRoll:SetEnabledFromPrompt(false, false)
         end
         pFrame:Hide()
     end)
@@ -192,6 +208,9 @@ function LootRollUI:ShowFirstRollPrompt(rec)
         pFrame.itemIco:SetTexture(rec.texture or "Interface\\Icons\\INV_Misc_QuestionMark")
         pFrame.itemName:SetText(QualityHex(rec.quality) .. tostring(rec.name or "?") .. "|r")
     end
+    if pFrame.hideOfficialCb then
+        pFrame.hideOfficialCb:SetChecked(true)
+    end
     Theme:PrepareTopOverlayModal(pFrame, 850)
     pFrame:Show()
     if pFrame.Raise then pFrame:Raise() end
@@ -206,7 +225,7 @@ function LootRollUI:EnsureFrame()
 
     local f = CreateFrame("Frame", "SocialCentralLootRollFrame", UIParent, "BackdropTemplate")
     f:Hide()
-    f:SetSize(248, 166)
+    f:SetSize(276, 166)
     ApplyDefaultLootRollPlacement(f)
     f:SetFrameStrata("DIALOG")
     f:SetFrameLevel(540)
@@ -232,13 +251,19 @@ function LootRollUI:EnsureFrame()
 
     local closeBtn = Theme:CreateButton(hdr, 18, 16, "X", "default")
     closeBtn:SetPoint("RIGHT", hdr, "RIGHT", -3, 0)
-    closeBtn:SetScript("OnClick", function() f:Hide() end)
+    closeBtn:SetScript("OnClick", function()
+        LootRollUI._userClosedActive = true
+        f:Hide()
+        if LootRollUI.SyncOfficialRollBarVisibility then
+            LootRollUI:SyncOfficialRollBarVisibility()
+        end
+    end)
     f.closeBtn = closeBtn
 
     local helpBtn = Theme:CreateHelpButton(
         hdr,
         L["Help: Group Loot Roll Window"],
-        L["Shows active group loot drops with Need, Greed, Disenchant, and Pass buttons, real-time teammate choices, and automatic item level & stat deltas against your currently equipped slot."],
+        L["Shows active group loot drops with Need, Greed, Disenchant, and Pass buttons, real-time teammate choices, roll numbers, and winners alongside automatic item level & stat deltas against your equipped slot."],
         L["Hover the item icon to inspect the full tooltip, Shift+Click it to link in chat, or switch tabs at the top when multiple items drop at once."],
         14
     )
@@ -461,9 +486,10 @@ function LootRollUI:EnsureFrame()
     end)
 
     picksDrawer._rows = {}
-    for idx = 1, 6 do
+    for idx = 1, 8 do
         local row = CreateFrame("Frame", nil, picksDrawer)
         row:SetHeight(16)
+        if row.SetClipsChildren then row:SetClipsChildren(true) end
         row:SetPoint("TOPLEFT", picksDrawer, "TOPLEFT", 7, -5 - ((idx - 1) * 16))
         row:SetPoint("TOPRIGHT", picksDrawer, "TOPRIGHT", -7, -5 - ((idx - 1) * 16))
         row:Hide()
@@ -534,7 +560,7 @@ function LootRollUI:EnsureFrame()
     end
     f.picksDrawer = picksDrawer
 
-    local function OnRollFrameUpdate(selfFrame)
+    local function OnRollFrameUpdate(selfFrame, elapsed)
         local nowMono = GetTime and GetTime() or 0
         if not selfFrame._nextRollCheckAt or nowMono >= selfFrame._nextRollCheckAt then
             selfFrame._nextRollCheckAt = nowMono + 0.5
@@ -548,6 +574,12 @@ function LootRollUI:EnsureFrame()
                 end
             end
         end
+        selfFrame._animElapsed = (selfFrame._animElapsed or 0) + (elapsed or 0)
+        if selfFrame._animElapsed < 0.033 then
+            return
+        end
+        selfFrame._animElapsed = 0
+
         local d = selfFrame.picksDrawer
         if d and d._hasWinner and d:IsShown() then
             local pulse = 0.5 + 0.5 * math.sin(nowMono * 4.5)
@@ -567,8 +599,12 @@ function LootRollUI:EnsureFrame()
                     end
                     if rw.winShimmer then
                         local rwW = math.max(120, rw:GetWidth() or 230)
-                        rw.winShimmer:ClearAllPoints()
-                        rw.winShimmer:SetPoint("LEFT", rw, "LEFT", (sweep * (rwW + 30)) - 30, 0)
+                        local sx = math.floor((sweep * (rwW + 30)) - 30)
+                        if rw._lastShimmerX ~= sx then
+                            rw._lastShimmerX = sx
+                            rw.winShimmer:ClearAllPoints()
+                            rw.winShimmer:SetPoint("LEFT", rw, "LEFT", sx, 0)
+                        end
                         rw.winShimmer:SetAlpha(0.18 + 0.52 * sweepAlpha)
                     end
                 end
@@ -578,23 +614,38 @@ function LootRollUI:EnsureFrame()
         if not rec or not selfFrame.timerBg or not selfFrame.timerFill then return end
         local fullW = math.max(40, (selfFrame.timerBg:GetWidth() or 350))
         if rec.myChoice then
-            selfFrame.timerFill:SetWidth(fullW)
-            selfFrame.timerFill:SetVertexColor(0.32, 0.78, 0.45, 0.85)
+            if selfFrame._lastTimerChoiceDone ~= rec.rollID or selfFrame._lastTimerFullW ~= fullW then
+                selfFrame._lastTimerChoiceDone = rec.rollID
+                selfFrame._lastTimerFullW = fullW
+                selfFrame._lastTimerPx = nil
+                selfFrame.timerFill:SetWidth(fullW)
+                selfFrame.timerFill:SetVertexColor(0.32, 0.78, 0.45, 0.85)
+            end
             return
         end
-        selfFrame.timerFill:SetVertexColor(0.88, 0.68, 0.22, 1.0)
+        if selfFrame._lastTimerChoiceDone ~= nil then
+            selfFrame._lastTimerChoiceDone = nil
+            selfFrame.timerFill:SetVertexColor(0.88, 0.68, 0.22, 1.0)
+        end
         local remMs
         if rec.isSimulated then
-            remMs = math.max(0, ((rec.simExpiresAt or 0) - (GetTime and GetTime() or 0)) * 1000)
+            remMs = math.max(0, ((rec.simExpiresAt or 0) - nowMono) * 1000)
         else
             remMs = GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rec.rollID)) or 0
         end
         local totalMs = math.max(1000, (tonumber(rec.durationSec) or 60) * 1000)
         local frac = math.max(0.02, math.min(1.0, remMs / totalMs))
-        selfFrame.timerFill:SetWidth(math.max(2, fullW * frac))
+        local wantPx = math.max(2, math.floor((fullW * frac) + 0.5))
+        if selfFrame._lastTimerPx ~= wantPx then
+            selfFrame._lastTimerPx = wantPx
+            selfFrame.timerFill:SetWidth(wantPx)
+        end
     end
 
     f:HookScript("OnShow", function(selfFrame)
+        selfFrame._animElapsed = 0.04
+        selfFrame._lastTimerPx = nil
+        selfFrame._lastTimerChoiceDone = nil
         selfFrame:SetScript("OnUpdate", OnRollFrameUpdate)
     end)
     f:HookScript("OnHide", function(selfFrame)
@@ -615,7 +666,7 @@ function LootRollUI:ApplyTheme()
         f._solidOpaqueBg:SetVertexColor(bg[1], bg[2], bg[3], 1.0)
     end
     Theme:ApplyBackdrop(f, "window", p)
-    Theme:ApplyBackdrop(f.header, "surface", p)
+    Theme:ApplyBackdrop(f.header, "header", p)
     Theme:ApplyBackdrop(f.itemCard, "inset", p)
     Theme:ApplyBackdrop(f.compBox, "inset", p)
     if f.picksDrawer then
@@ -627,21 +678,141 @@ function LootRollUI:ApplyTheme()
     end
 end
 
+function LootRollUI:ShouldSuppressOfficialRollBar()
+    if not (ns.LootRoll and ns.LootRoll.IsEnabled and ns.LootRoll:IsEnabled()) then
+        return false
+    end
+    if not (ns.LootRoll.IsHideOfficialEnabled and ns.LootRoll:IsHideOfficialEnabled()) then
+        return false
+    end
+    if self._userClosedActive then
+        return false
+    end
+    local active = ns.LootRoll:GetActiveList()
+    return (#active > 0) and true or false
+end
+
+function LootRollUI:SyncSingleOfficialLootFrame(frame, shouldHide, isContainer)
+    if not frame then return end
+    if frame.IsForbidden and frame:IsForbidden() then return end
+
+    if not frame._scLootHideHooked and frame.HookScript then
+        frame._scLootHideHooked = true
+        frame:HookScript("OnShow", function(selfFrame)
+            if LootRollUI and LootRollUI.ShouldSuppressOfficialRollBar and LootRollUI:ShouldSuppressOfficialRollBar() then
+                LootRollUI:SyncSingleOfficialLootFrame(selfFrame, true, selfFrame == _G.GroupLootContainer)
+            end
+        end)
+    end
+
+    local isProtected = frame.IsProtected and frame:IsProtected()
+    local inCombat = InCombatLockdown and InCombatLockdown()
+    if shouldHide then
+        if inCombat and isProtected then
+            self._pendingOfficialLootSync = true
+            return
+        end
+        if frame.IsShown and frame:IsShown() then
+            frame._scWasSuppressed = true
+        end
+        pcall(frame.SetAlpha, frame, 0)
+        if not isProtected then
+            pcall(frame.Hide, frame)
+        end
+    else
+        if inCombat and isProtected then
+            self._pendingOfficialLootSync = true
+            return
+        end
+        pcall(frame.SetAlpha, frame, 1)
+        if frame._scWasSuppressed then
+            frame._scWasSuppressed = nil
+            local shouldShow = false
+            if isContainer then
+                local maxFrames = Safe.Number(_G.NUM_GROUP_LOOT_FRAMES) or 8
+                for i = 1, maxFrames do
+                    local child = _G["GroupLootFrame" .. i]
+                    local rId = child and child.rollID and Safe.Number(child.rollID)
+                    local rem = rId and GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId))
+                    if rem and rem > 0 then
+                        shouldShow = true
+                        break
+                    end
+                end
+            else
+                local rId = frame.rollID and Safe.Number(frame.rollID)
+                local rem = rId and GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId))
+                if rem and rem > 0 then
+                    shouldShow = true
+                end
+            end
+            if shouldShow and not isProtected then
+                pcall(frame.Show, frame)
+            end
+        end
+    end
+end
+
+function LootRollUI:SyncOfficialRollBarVisibility()
+    local shouldHide = self:ShouldSuppressOfficialRollBar()
+    local maxFrames = math.max(8, Safe.Number(_G.NUM_GROUP_LOOT_FRAMES) or 8)
+    for i = 1, maxFrames do
+        local f = _G["GroupLootFrame" .. i]
+        if f then
+            self:SyncSingleOfficialLootFrame(f, shouldHide, false)
+        end
+    end
+    local container = _G.GroupLootContainer
+    if container then
+        if type(container.rollFrames) == "table" then
+            for _, rf in ipairs(container.rollFrames) do
+                self:SyncSingleOfficialLootFrame(rf, shouldHide, false)
+            end
+        end
+        self:SyncSingleOfficialLootFrame(container, shouldHide, true)
+    end
+end
+
+function LootRollUI:InstallOfficialLootHooks()
+    if self._officialLootHooksInstalled then return end
+    self._officialLootHooksInstalled = true
+    if hooksecurefunc then
+        if type(_G.GroupLootFrame_OpenNewFrame) == "function" then
+            hooksecurefunc("GroupLootFrame_OpenNewFrame", function()
+                LootRollUI:SyncOfficialRollBarVisibility()
+            end)
+        end
+        if type(_G.GroupLootContainer_AddFrame) == "function" then
+            hooksecurefunc("GroupLootContainer_AddFrame", function()
+                LootRollUI:SyncOfficialRollBarVisibility()
+            end)
+        end
+    end
+end
+
 function LootRollUI:Refresh()
     if not (ns.LootRoll and ns.LootRoll.IsEnabled and ns.LootRoll:IsEnabled()) then
         if self.frame and self.frame:IsShown() then
             self.frame:Hide()
         end
+        self:SyncOfficialRollBarVisibility()
         return
     end
     local active = ns.LootRoll:GetActiveList()
     if #active == 0 then
         self.selectedRollID = nil
+        self._userClosedActive = nil
         if self.frame and self.frame:IsShown() then
             self.frame:Hide()
         end
+        self:SyncOfficialRollBarVisibility()
         return
     end
+    if self._userClosedActive then
+        self:SyncOfficialRollBarVisibility()
+        return
+    end
+    self:SyncOfficialRollBarVisibility()
 
     local f = self:EnsureFrame()
     if not f then return end
@@ -673,8 +844,15 @@ function LootRollUI:Refresh()
             local tBtn = f.rollTabBtns[idx]
             if not tBtn then
                 tBtn = ns.Theme:CreateButton(f.tabsRow, 46, 18, "", "default")
+                tBtn:SetScript("OnClick", function(selfBtn)
+                    if selfBtn._rollId then
+                        LootRollUI.selectedRollID = selfBtn._rollId
+                        LootRollUI:Refresh()
+                    end
+                end)
                 f.rollTabBtns[idx] = tBtn
             end
+            tBtn._rollId = r.rollID
             local isSel = (r.rollID == self.selectedRollID)
             ns.Theme:StyleButton(tBtn, isSel and "primary" or "default")
             tBtn:ClearAllPoints()
@@ -685,10 +863,6 @@ function LootRollUI:Refresh()
             end
             ns.Theme:SetButtonText(tBtn, string.format("#%d%s", idx, (r.myChoice and " |cff47ef66*|r" or "")))
             ns.Theme:AutoFitButton(tBtn, 36, 10, 72)
-            tBtn:SetScript("OnClick", function()
-                LootRollUI.selectedRollID = r.rollID
-                LootRollUI:Refresh()
-            end)
             tBtn:Show()
             prevTab = tBtn
         end
@@ -756,16 +930,42 @@ function LootRollUI:Refresh()
     end
 
     -- Roll Action Buttons (Centered Icon-Only Row)
-    f:SetWidth(248)
-    if selectedRec.myChoice then
+    f:SetWidth(276)
+    local picksList = {}
+    local winnerChoiceRec = nil
+    for _, cRec in pairs(selectedRec.choices or {}) do
+        picksList[#picksList + 1] = cRec
+        if cRec.won == true then
+            winnerChoiceRec = cRec
+        end
+    end
+    table.sort(picksList, function(a, b)
+        if (a.won == true) ~= (b.won == true) then return a.won == true end
+        local ra, rb = tonumber(a.roll) or -1, tonumber(b.roll) or -1
+        if ra ~= rb then return ra > rb end
+        return tostring(a.name or "") < tostring(b.name or "")
+    end)
+
+    if selectedRec.myChoice or winnerChoiceRec or selectedRec.allPassed then
         f.btnNeed:Hide()
         f.btnGreed:Hide()
         f.btnDE:Hide()
         f.btnPass:Hide()
-        local choiceLbl = ns.LootRoll:GetRollChoiceLabel(selectedRec.myChoice)
-        local choiceHex = ns.LootRoll:GetChoiceColor(selectedRec.myChoice)
-        local choiceIco = FormatChoiceIconTag(selectedRec.myChoice, 16)
-        f.statusBanner:SetText(choiceIco .. "  " .. L["Your choice"] .. ": " .. choiceHex .. choiceLbl .. "|r")
+        if winnerChoiceRec then
+            local wName = tostring(winnerChoiceRec.name or selectedRec.winnerName or "?")
+            local wRoll = winnerChoiceRec.roll or selectedRec.winnerRoll
+            local winIco = FormatChoiceIconTag("WON", 15)
+            local winRollStr = wRoll and ("  [" .. tostring(wRoll) .. "]") or ""
+            f.statusBanner:SetText(winIco .. "  |cffffea70" .. string.format(L["Winner: %s"], wName) .. winRollStr .. "|r")
+        elseif selectedRec.allPassed then
+            local passIco = FormatChoiceIconTag("PASS", 15)
+            f.statusBanner:SetText(passIco .. "  |cff9da7b5" .. L["All passed"] .. "|r")
+        else
+            local choiceLbl = ns.LootRoll:GetRollChoiceLabel(selectedRec.myChoice)
+            local choiceHex = ns.LootRoll:GetChoiceColor(selectedRec.myChoice)
+            local choiceIco = FormatChoiceIconTag(selectedRec.myChoice, 16)
+            f.statusBanner:SetText(choiceIco .. "  " .. L["Your choice"] .. ": " .. choiceHex .. choiceLbl .. "|r")
+        end
         f.statusBanner:Show()
     else
         f.statusBanner:Hide()
@@ -782,7 +982,7 @@ function LootRollUI:Refresh()
         local rowBtns = showDE and { f.btnNeed, f.btnGreed, f.btnDE, f.btnPass } or { f.btnNeed, f.btnGreed, f.btnPass }
         local bW, bH, bGap = 46, 32, 8
         local totalW = (#rowBtns * bW) + ((#rowBtns - 1) * bGap)
-        local startX = math.floor((238 - totalW) * 0.5)
+        local startX = math.floor((266 - totalW) * 0.5)
         for i, b in ipairs(rowBtns) do
             b:SetSize(bW, bH)
             b:ClearAllPoints()
@@ -794,24 +994,13 @@ function LootRollUI:Refresh()
     f:SetHeight(showTabs and 187 or 166)
 
     -- Live Player Choices in separate bottom drawer (grows downward independently; zero shifting of main roll card)
-    local picksList = {}
-    for _, cRec in pairs(selectedRec.choices or {}) do
-        picksList[#picksList + 1] = cRec
-    end
-    table.sort(picksList, function(a, b)
-        if (a.won == true) ~= (b.won == true) then return a.won == true end
-        local ra, rb = tonumber(a.roll) or -1, tonumber(b.roll) or -1
-        if ra ~= rb then return ra > rb end
-        return tostring(a.name or "") < tostring(b.name or "")
-    end)
-
     local drawer = f.picksDrawer
     local tipRows = {}
-    local shownRows = math.min(6, #picksList)
+    local shownRows = math.min(8, #picksList)
     if drawer then
         drawer._hasWinner = false
         if shownRows == 0 then
-            for idx = 1, 6 do
+            for idx = 1, 8 do
                 local r = drawer._rows[idx]
                 if r then
                     r._isWinner = false
@@ -824,7 +1013,7 @@ function LootRollUI:Refresh()
             end
             drawer:Hide()
         else
-            for idx = 1, 6 do
+            for idx = 1, 8 do
                 local row = drawer._rows[idx]
                 local pr = (idx <= shownRows) and picksList[idx] or nil
                 if row and pr then
@@ -859,7 +1048,17 @@ function LootRollUI:Refresh()
 
                     local pickHex = isWon and "|cffffea70" or ns.LootRoll:GetChoiceColor(pr.choice)
                     local pickLbl = ns.LootRoll:GetRollChoiceLabel(isWon and "WON" or pr.choice)
-                    row.rollFs:SetText(pr.roll and (pickHex .. tostring(pr.roll) .. "|r") or "")
+                    local rightStr
+                    if pr.roll then
+                        if isWon then
+                            rightStr = pickHex .. L["Won"] .. " " .. tostring(pr.roll) .. "|r"
+                        else
+                            rightStr = ns.LootRoll:GetChoiceColor(pr.choice) .. ns.LootRoll:GetRollChoiceLabel(pr.choice) .. " · " .. tostring(pr.roll) .. "|r"
+                        end
+                    else
+                        rightStr = pickHex .. pickLbl .. "|r"
+                    end
+                    row.rollFs:SetText(rightStr)
 
                     local winPrefix = isWon and (FormatChoiceIconTag("WON", 13) .. " ") or ""
                     local voteTag = FormatChoiceIconTag(voteKey, 14)
@@ -888,7 +1087,21 @@ function LootRollUI:Refresh()
 end
 
 function LootRollUI:Init()
-    ns:On("LOOT_ROLL_FIRST_PROMPT", function(rec)
+    self:InstallOfficialLootHooks()
+    ns.RegisterEvent(self, "START_LOOT_ROLL", function()
+        self._userClosedActive = false
+        self:SyncOfficialRollBarVisibility()
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0, function() self:SyncOfficialRollBarVisibility() end)
+        end
+    end)
+    ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
+        if self._pendingOfficialLootSync then
+            self._pendingOfficialLootSync = nil
+            self:SyncOfficialRollBarVisibility()
+        end
+    end)
+    ns.On("LOOT_ROLL_FIRST_PROMPT", function(rec)
         self:ShowFirstRollPrompt(rec)
     end)
     ns:On("LOOT_ROLL_UPDATED", function()

@@ -563,7 +563,8 @@ local function FoldLfgLookupText(s)
     if cached ~= nil then
         return cached
     end
-    local folded = s:lower()
+    local lowerStr = (Compat and Compat.LowerUtf8) and Compat.LowerUtf8(s) or s:lower()
+    local folded = lowerStr
         :gsub("á", "a"):gsub("à", "a"):gsub("ã", "a"):gsub("â", "a")
         :gsub("é", "e"):gsub("ê", "e"):gsub("í", "i")
         :gsub("ó", "o"):gsub("ô", "o"):gsub("õ", "o")
@@ -1129,6 +1130,27 @@ local function HasAtlas(name)
     return ns.Theme and ns.Theme.HasAtlas and ns.Theme:HasAtlas(name)
 end
 
+local function IterVarargChildren(fn, ...)
+    local n = select("#", ...)
+    for i = 1, n do
+        local ch = select(i, ...)
+        if ch then
+            fn(ch)
+        end
+    end
+end
+
+local function ForEachChildNode(node, fn)
+    if not node or not node.GetChildren or not fn then
+        return
+    end
+    if Compat and Compat.ForEachChild then
+        Compat.ForEachChild(node, fn)
+    else
+        IterVarargChildren(fn, node:GetChildren())
+    end
+end
+
 local function MaxHierarchyLevel(root, depth)
     local maxLvl = 0
     if not root or (depth or 0) <= 0 then
@@ -1140,14 +1162,14 @@ local function MaxHierarchyLevel(root, depth)
             maxLvl = lvl
         end
     end
-    if root.GetChildren then
-        local children = { root:GetChildren() }
-        for i = 1, #children do
-            local childMax = MaxHierarchyLevel(children[i], (depth or 1) - 1)
+    local nextDepth = (depth or 1) - 1
+    if nextDepth > 0 and root.GetChildren then
+        ForEachChildNode(root, function(child)
+            local childMax = MaxHierarchyLevel(child, nextDepth)
             if childMax > maxLvl then
                 maxLvl = childMax
             end
-        end
+        end)
     end
     return maxLvl
 end
@@ -1676,7 +1698,7 @@ local function DiscoverRightSideTabs(parentFrame, excludeTab, namedKeys)
         if not node or depth <= 0 or not IsSafeUiObj(node) or not node.GetChildren then
             return
         end
-        for _, child in ipairs({ node:GetChildren() }) do
+        local function VisitRightChild(child)
             if IsSafeUiObj(child) and not IsExcludedChromeOrAddon(child) and (not child.IsShown or child:IsShown()) then
                 local hasScript = child.HasScript and (child:HasScript("OnClick") or child:HasScript("OnMouseUp") or child:HasScript("OnMouseDown"))
                 if hasScript and IsOnRightEdge(child) then
@@ -1684,6 +1706,16 @@ local function DiscoverRightSideTabs(parentFrame, excludeTab, namedKeys)
                 end
                 ScanRightEdgeChildren(child, depth - 1)
             end
+        end
+        if Compat and Compat.ForEachChild then
+            Compat.ForEachChild(node, VisitRightChild)
+        else
+            local function LoopChildren(n, ...)
+                for i = 1, n do
+                    VisitRightChild(select(i, ...))
+                end
+            end
+            LoopChildren(select("#", node:GetChildren()), node:GetChildren())
         end
     end
     ScanRightEdgeChildren(parentFrame, 3)
@@ -1807,7 +1839,7 @@ local function ComputeSideTabTargetLevel(parentFrame, tab, nativeTabs, minBaseLe
         end
         local pRight = parentFrame.GetRight and parentFrame:GetRight() or nil
         if parentFrame.GetChildren then
-            for _, child in ipairs({ parentFrame:GetChildren() }) do
+            ForEachChildNode(parentFrame, function(child)
                 if child and not IsAddonSideTabFrame(child, tab) and IsSafeUiObj(child) and (not child.IsShown or child:IsShown()) then
                     local cLeft = child.GetLeft and child:GetLeft()
                     if pRight and cLeft and cLeft >= (pRight - 42) then
@@ -1816,7 +1848,7 @@ local function ComputeSideTabTargetLevel(parentFrame, tab, nativeTabs, minBaseLe
                         ConsiderLevel(child:GetFrameLevel() or 0)
                     end
                 end
-            end
+            end)
         end
     end
     return math.min(9500, math.max(minBaseLevel or 600, maxOtherLvl + 35))
@@ -1921,13 +1953,11 @@ local function DimNativeTabSelectionVisual(nt, shouldDim)
             end
         end
         nt._scWasDisabledByBlizz = nil
-        if nt.GetChildren then
-            for _, sub in ipairs({ nt:GetChildren() }) do
-                if sub and IsSafeUiObj(sub) then
-                    sub._scWasDisabledByBlizz = nil
-                end
+        ForEachChildNode(nt, function(sub)
+            if IsSafeUiObj(sub) then
+                sub._scWasDisabledByBlizz = nil
             end
-        end
+        end)
         nt._scSelectionDimmed = nil
         return
     end
@@ -1939,17 +1969,15 @@ local function DimNativeTabSelectionVisual(nt, shouldDim)
             pcall(nt.SetEnabled, nt, true)
         end
     end
-    if nt.GetChildren then
-        for _, sub in ipairs({ nt:GetChildren() }) do
-            if sub and IsSafeUiObj(sub) and sub.IsEnabled and sub.SetEnabled then
-                local okSE, subEn = pcall(sub.IsEnabled, sub)
-                if okSE and not subEn then
-                    sub._scWasDisabledByBlizz = true
-                    pcall(sub.SetEnabled, sub, true)
-                end
+    ForEachChildNode(nt, function(sub)
+        if IsSafeUiObj(sub) and sub.IsEnabled and sub.SetEnabled then
+            local okSE, subEn = pcall(sub.IsEnabled, sub)
+            if okSE and not subEn then
+                sub._scWasDisabledByBlizz = true
+                pcall(sub.SetEnabled, sub, true)
             end
         end
-    end
+    end)
 
     local neverDim = {
         [nt.Icon or false] = true,
@@ -2168,13 +2196,11 @@ local function HookNativeHostTab(parentFrame, nt, excludeScTab, namedKeys, isLfg
     end
 
     HookOne(nt)
-    if nt.GetChildren then
-        for _, sub in ipairs({ nt:GetChildren() }) do
-            if sub ~= excludeScTab and sub.HasScript and (sub:HasScript("OnClick") or sub:HasScript("OnMouseDown") or sub:HasScript("OnMouseUp")) then
-                HookOne(sub)
-            end
+    ForEachChildNode(nt, function(sub)
+        if sub ~= excludeScTab and sub.HasScript and (sub:HasScript("OnClick") or sub:HasScript("OnMouseDown") or sub:HasScript("OnMouseUp")) then
+            HookOne(sub)
         end
-    end
+    end)
 end
 
 local function SetNativeTabsCheckedFalse()
@@ -2192,11 +2218,11 @@ local function ElevateTree(root, targetLevel, depth)
             pcall(root.SetFrameLevel, root, capped)
         end
     end
-    if root.GetChildren then
-        local children = { root:GetChildren() }
-        for i = 1, #children do
-            ElevateTree(children[i], capped + 1, (depth or 1) - 1)
-        end
+    local nextDepth = (depth or 1) - 1
+    if nextDepth > 0 and root.GetChildren then
+        ForEachChildNode(root, function(child)
+            ElevateTree(child, capped + 1, nextDepth)
+        end)
     end
 end
 
@@ -2220,8 +2246,8 @@ local function CollectLfgCloseButtonCandidates(parent)
     local hTop = parent.GetTop and parent:GetTop() or nil
     local function ScanForClose(node, depth)
         if not node or (depth or 0) <= 0 or not node.GetChildren then return end
-        for _, ch in ipairs({ node:GetChildren() }) do
-            if ch and ch ~= LFGFrameTab.subPanel and ch ~= _G.SocialCentralLFGSubPanel then
+        ForEachChildNode(node, function(ch)
+            if ch ~= LFGFrameTab.subPanel and ch ~= _G.SocialCentralLFGSubPanel then
                 local isForb = false
                 if ch.IsForbidden then
                     local okF, fVal = pcall(ch.IsForbidden, ch)
@@ -2244,7 +2270,7 @@ local function CollectLfgCloseButtonCandidates(parent)
                     ScanForClose(ch, depth - 1)
                 end
             end
-        end
+        end)
     end
     ScanForClose(parent, 3)
     return found
@@ -2258,10 +2284,10 @@ local function DisableFrameMouseTree(root, depth)
     if root.EnableMouseWheel then
         pcall(root.EnableMouseWheel, root, false)
     end
-    if root.GetChildren then
-        for _, ch in ipairs({ root:GetChildren() }) do
+    if (depth or 0) > 1 and root.GetChildren then
+        ForEachChildNode(root, function(ch)
             DisableFrameMouseTree(ch, depth - 1)
-        end
+        end)
     end
 end
 
@@ -3153,7 +3179,10 @@ end
 
 local function ApplySubPanelChromeLayout(c, useLfgHost, topOffset, hdrHeight)
     if not (c and c.artFrame) then return end
-    local chromeSig = (useLfgHost and "H:" or "S:") .. tostring(topOffset or 0) .. ":" .. tostring(hdrHeight or 0)
+    local p = Theme:GetPalette()
+    local isBlizz = Theme:IsBlizzard(p)
+    local pKey = (p and p.key) or "blizzard"
+    local chromeSig = pKey .. ":" .. (useLfgHost and "H:" or "S:") .. tostring(topOffset or 0) .. ":" .. tostring(hdrHeight or 0)
     if c.artFrame._scChromeSig == chromeSig then
         return
     end
@@ -3171,6 +3200,8 @@ local function ApplySubPanelChromeLayout(c, useLfgHost, topOffset, hdrHeight)
     local artParent = LFGFrameTab.subPanel or c.artFrame
 
     if c.solidOpaqueBg then
+        local wBg = (p and p.windowBg) or { 0.08, 0.075, 0.07, 1.0 }
+        c.solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
         c.solidOpaqueBg:ClearAllPoints()
         c.solidOpaqueBg:SetPoint("TOPLEFT", artParent, "TOPLEFT", bgLeft, bgTop)
         c.solidOpaqueBg:SetPoint("BOTTOMRIGHT", artParent, "BOTTOMRIGHT", bgRight, bgBottom)
@@ -3182,21 +3213,44 @@ local function ApplySubPanelChromeLayout(c, useLfgHost, topOffset, hdrHeight)
         if hdrHeight then
             c.headerBg:SetHeight(hdrHeight)
         end
+        if isBlizz and HasAtlas("groupfinder-Stat-StoneBG") then
+            c.headerBg:SetAtlas("groupfinder-Stat-StoneBG", false)
+            c.headerBg:SetVertexColor(1, 1, 1, 1)
+        else
+            c.headerBg:SetTexture(WHITE8X8)
+            local hb = (p and p.headerBg) or { 0.12, 0.13, 0.16, 1.0 }
+            c.headerBg:SetVertexColor(hb[1], hb[2], hb[3], 1.0)
+        end
     end
     if c.headerSep then
         c.headerSep:ClearAllPoints()
         c.headerSep:SetPoint("TOPLEFT", c.artFrame, "TOPLEFT", leftPad, topOffset)
         c.headerSep:SetPoint("TOPRIGHT", c.artFrame, "TOPRIGHT", rightPad, topOffset)
+        if isBlizz then
+            c.headerSep:SetVertexColor(0.45, 0.35, 0.18, 0.85)
+        else
+            local br = (p and p.surfaceBorder) or { 0.22, 0.30, 0.42, 0.85 }
+            c.headerSep:SetVertexColor(br[1], br[2], br[3], 0.85)
+        end
     end
     if c.bgArt then
         c.bgArt:ClearAllPoints()
         c.bgArt:SetPoint("TOPLEFT", c.artFrame, "TOPLEFT", leftPad, topOffset)
         c.bgArt:SetPoint("BOTTOMRIGHT", c.artFrame, "BOTTOMRIGHT", rightPad, footerTop)
+        if isBlizz and HasAtlas("groupfinder-background") then
+            c.bgArt:SetAtlas("groupfinder-background", false)
+            c.bgArt:SetVertexColor(1, 1, 1, 1)
+        else
+            c.bgArt:SetTexture(WHITE8X8)
+            local ib = (p and p.insetBg) or { 0.05, 0.06, 0.08, 1.0 }
+            c.bgArt:SetVertexColor(ib[1], ib[2], ib[3], 1.0)
+        end
     end
     if c.insideFrame then
         c.insideFrame:ClearAllPoints()
         c.insideFrame:SetPoint("TOPLEFT", c.artFrame, "TOPLEFT", insideLeft, topOffset)
         c.insideFrame:SetPoint("BOTTOMRIGHT", c.artFrame, "BOTTOMRIGHT", insideRight, footerTop)
+        c.insideFrame:SetShown(isBlizz and HasAtlas("common-insideframe"))
     end
 end
 
@@ -3249,7 +3303,7 @@ local function SyncActionButtonsVisibility(c, isBrowse, isCats, isActs, hasListi
     if c.listHelpBtn and c.body then
         c.listHelpBtn:ClearAllPoints()
         if c.listSelfBtn then
-            c.listHelpBtn:SetPoint("RIGHT", c.listSelfBtn, "LEFT", -6, 0)
+            c.listHelpBtn:SetPoint("RIGHT", c.listSelfBtn, "LEFT", -4, 0)
         end
         c.listHelpBtn:Show()
     end
@@ -3285,7 +3339,13 @@ function LFGFrameTab:UpdateViewLayout()
     local useLfgHost = (self.subPanel ~= nil) and (_G.LFGParentFrame ~= nil) and (self.subPanel:GetParent() == _G.LFGParentFrame)
     ApplySubPanelChromeLayout(c, useLfgHost, topOffset, hdrHeight)
 
-    if c.browseHeader then c.browseHeader:SetShown(isBrowse) end
+    if c.browseHeader then
+        c.browseHeader:SetShown(isBrowse)
+        if c.catDropdown then
+            c.catDropdown:ClearAllPoints()
+            c.catDropdown:SetPoint("TOPLEFT", c.browseHeader, "TOPLEFT", useLfgHost and 62 or 10, -24)
+        end
+    end
     if c.activityDropdown and isBrowse then
         c.activityDropdown:Show()
     end
@@ -3476,13 +3536,25 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
         end
     end
 
+    local bodyW = (c.body and c.body.GetWidth and c.body:GetWidth()) or 350
+    local narrowBottom = (bodyW > 0 and bodyW < 420)
+    if c.backBtn then
+        AutoFitNativeButton(c.backBtn, narrowBottom and 66 or 92, narrowBottom and 12 or 18, narrowBottom and 82 or 124)
+    end
+    if c.browseGroupsBtn then
+        AutoFitNativeButton(c.browseGroupsBtn, narrowBottom and 88 or 108, narrowBottom and 14 or 20, narrowBottom and 118 or 152)
+    end
     if c.listGroupBtn then
         local ctaLabel = hasListing and L["Edit Listing"] or (inGroup and L["List Group"] or L["List Self"])
         c.listGroupBtn:SetText(ctaLabel)
-        AutoFitNativeButton(c.listGroupBtn, 88, 16, 134)
+        AutoFitNativeButton(c.listGroupBtn, narrowBottom and 76 or 88, narrowBottom and 12 or 16, narrowBottom and 104 or 134)
         c.listGroupBtn:ClearAllPoints()
         if self.viewMode == "categories" then
-            c.listGroupBtn:SetPoint("BOTTOM", c.body, "BOTTOM", 0, 5)
+            if hasListing and canManage and c.browseGroupsBtn then
+                c.listGroupBtn:SetPoint("LEFT", c.browseGroupsBtn, "RIGHT", 6, 0)
+            else
+                c.listGroupBtn:SetPoint("BOTTOMRIGHT", c.body, "BOTTOMRIGHT", -10, 5)
+            end
         else
             c.listGroupBtn:SetPoint("BOTTOM", c.body, "BOTTOM", 12, 5)
         end
@@ -3509,7 +3581,7 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
             postLabel = L["List Self"]
         end
         c.listSelfBtn:SetText(postLabel)
-        AutoFitNativeButton(c.listSelfBtn, 100, 18, 158)
+        AutoFitNativeButton(c.listSelfBtn, narrowBottom and 84 or 100, narrowBottom and 12 or 18, narrowBottom and 116 or 158)
         c.listSelfBtn._scNonLeader = not canManage
         c.listSelfBtn._scLeaderName = leaderName
         c.listSelfBtn._scNeedsSelection = (not isOfficialBroadcast) and canManage and (self.viewMode == "activities") and (not hasRole or not hasAct)
@@ -3519,10 +3591,12 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     end
     if c.unlistBtn then
         c.unlistBtn:SetText(L["Delete Listing"])
-        AutoFitNativeButton(c.unlistBtn, 86, 16, 132)
+        AutoFitNativeButton(c.unlistBtn, narrowBottom and 76 or 86, narrowBottom and 12 or 16, narrowBottom and 98 or 132)
         c.unlistBtn:ClearAllPoints()
         if self.viewMode == "categories" then
             c.unlistBtn:SetPoint("BOTTOMRIGHT", c.body, "BOTTOMRIGHT", -10, 5)
+        elseif c.listHelpBtn and c.listSelfBtn then
+            c.unlistBtn:SetPoint("RIGHT", c.listHelpBtn, "LEFT", -6, 0)
         else
             c.unlistBtn:SetPoint("BOTTOM", c.body, "BOTTOM", -8, 5)
         end
@@ -3652,11 +3726,15 @@ local function EnsureStandaloneLfgHost()
     return host
 end
 
+function LFGFrameTab:EnsureStandaloneLfgHost()
+    return EnsureStandaloneLfgHost()
+end
+
 function LFGFrameTab:ShowSubPanel(customHost)
     if type(customHost) == "boolean" then
         customHost = nil
     end
-    if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("I") then
+    if (not customHost) and ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("I") then
         return
     end
     if IsCombatLocked() then
@@ -4096,23 +4174,24 @@ function LFGFrameTab:RefreshTheme()
         end
         Theme:ApplyBackdrop(self.standaloneHost, "window", p)
         if self.standaloneHost.headerBar and self.standaloneHost.headerBar._bg then
-            if p and p.key == "blizzard" then
-                self.standaloneHost.headerBar._bg:SetVertexColor(0.18, 0.14, 0.09, 1.0)
-            elseif p and p.key == "native" then
-                self.standaloneHost.headerBar._bg:SetVertexColor(0.13, 0.11, 0.09, 1.0)
-            else
-                self.standaloneHost.headerBar._bg:SetVertexColor(0.12, 0.13, 0.16, 1.0)
-            end
+            local hBg = p.headerBg or { 0.12, 0.13, 0.16, 1.0 }
+            self.standaloneHost.headerBar._bg:SetVertexColor(hBg[1], hBg[2], hBg[3], 1.0)
         end
         if self.standaloneHost.closeBtn then
             Theme:StyleButton(self.standaloneHost.closeBtn, "default")
         end
     end
-    if self.nativeBridgeBar then
-        Theme:ApplyBackdrop(self.nativeBridgeBar, "window", p)
-    end
     local panel = self.subPanel
-    if not panel then return end
+    if not panel then
+        if self.nativeBridgeBar then
+            local wBg = p.windowBg or { 0.08, 0.075, 0.07, 1.0 }
+            if self.nativeBridgeBar._solidOpaqueBg then
+                self.nativeBridgeBar._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
+            end
+            Theme:ApplyBackdrop(self.nativeBridgeBar, "surface", p)
+        end
+        return
+    end
 
     if panel._solidOpaqueBg then
         local wBg = p.windowBg or { 0.08, 0.075, 0.07, 1.0 }
@@ -4124,6 +4203,15 @@ function LFGFrameTab:RefreshTheme()
     end
 
     local c = self.controls
+    if c.artFrame then
+        c.artFrame._scChromeSig = nil
+    end
+    if c.leaderNoticePanel and Theme.ApplyBackdrop then
+        Theme:ApplyBackdrop(c.leaderNoticePanel, "surface", p)
+    end
+    if c.leaderBrowseBar and Theme.ApplyBackdrop then
+        Theme:ApplyBackdrop(c.leaderBrowseBar, "surface", p)
+    end
     if c.listGroupBtn then
         StyleNativeButton(c.listGroupBtn, false)
     end
@@ -4519,16 +4607,22 @@ local function OpenPlayerWhisper(item)
     local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and ns.Social:GetBNetLinkInfo(rKey)
     local isCrossFac = (item.sameFaction == false) or (bInfo and bInfo.sameFaction == false)
     local bnetName = item.bnetName or (bInfo and bInfo.bnetName)
-    local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, item.bnetAccountID or (bInfo and bInfo.bnetAccountID))
-    if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
-        ns.Chat:OpenDirectConversation({
+    local bnetAccId = item.bnetAccountID or (bInfo and bInfo.bnetAccountID)
+    local addonAllowed = (not Compat or not Compat.IsOfficialChatMode or not Compat.IsOfficialChatMode())
+        and (not Compat or not Compat.IsModuleEnabled or Compat.IsModuleEnabled("chat"))
+    local scConfirmed = addonAllowed and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(rKey, bnetAccId)
+    if scConfirmed and ns.Chat and ns.Chat.OpenPreferredConversation then
+        ns.Chat:OpenPreferredConversation({
             targetName = targetName,
+            lookupKey = rKey,
+            bnetAccountID = bnetAccId,
+            bnetName = bnetName,
             classFile = item.classFile,
-            autoProbe = true,
-            openUI = true,
             draftText = draft,
+            isCrossFaction = isCrossFac,
+            autoProbe = true,
+            scConfirmed = true,
         })
-        LFGFrameTab:OpenOfficialModule("chat")
     elseif isCrossFac and bnetName and Compat.BNetWhisper then
         Compat.BNetWhisper(bnetName, targetName, draft)
     elseif Compat.Whisper then
@@ -5403,12 +5497,6 @@ local function CreateLfgRow(parent)
     row.metaFs:SetJustifyH("LEFT")
     row.metaFs:SetWordWrap(false)
 
-    row._scSep = row:CreateTexture(nil, "ARTWORK", nil, 1)
-    row._scSep:SetHeight(1)
-    row._scSep:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 8, 0)
-    row._scSep:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -8, 0)
-    row._scSep:SetColorTexture(0.68, 0.56, 0.28, 0.16)
-
     row:SetScript("OnClick", function(selfRow, btn)
         local it = selfRow._item
         if not it then return end
@@ -5427,10 +5515,18 @@ local function CreateLfgRow(parent)
         SyncRowSelectionVisuals()
         local scParent = selfRow:GetParent()
         if scParent and scParent.GetChildren then
-            for _, sibling in ipairs({ scParent:GetChildren() }) do
+            local function SyncSib(sibling)
                 if sibling and sibling._item and sibling.SelectedTex then
                     sibling.SelectedTex:SetShown(GetItemIdentityKey(sibling._item) == LFGFrameTab.selectedKey)
                 end
+            end
+            if Compat and Compat.ForEachChild then
+                Compat.ForEachChild(scParent, SyncSib)
+            else
+                local function LoopSib(n, ...)
+                    for i = 1, n do SyncSib(select(i, ...)) end
+                end
+                LoopSib(select("#", scParent:GetChildren()), scParent:GetChildren())
             end
         end
         LFGFrameTab:UpdateBottomButtons()
@@ -6053,16 +6149,23 @@ local function UpdateLfgRow(row, item, idx, palette)
     local rowW = (row.GetWidth and row:GetWidth()) or 0
     if rowW < 180 then rowW = 314 end
     local isNarrow = (rowW < 380)
-    row.levelFs:SetText(isNarrow and "" or lvlPart)
+    row.levelFs:SetText((rowW < 250) and "" or lvlPart)
 
     local classSlug = type(item.classFile) == "string" and item.classFile:lower() or nil
     local classAtlas = classSlug and ("groupfinder-icon-class-" .. classSlug) or nil
-    local hasClassIcon = (not isNarrow) and (classAtlas and HasAtlas(classAtlas)) and true or false
+    local hasClassIcon = (rowW >= 220) and (classAtlas and HasAtlas(classAtlas)) and true or false
+    if row.classIcon then
+        local cSize = isNarrow and 14 or 18
+        if row._scClassIconSize ~= cSize then
+            row._scClassIconSize = cSize
+            row.classIcon:SetSize(cSize, cSize)
+        end
+    end
     local badgeSpecs, numBadges = BuildLfgRowBadgeSpecs(item, sMeta)
 
     local leftStart = isLeaderOrGroup and 31 or 12
-    local lvlW = ((not isNarrow) and lvlPart ~= "") and ((row.levelFs:GetStringWidth() or 36) + 7) or 0
-    local clsW = hasClassIcon and 22 or 0
+    local lvlW = (rowW >= 250 and lvlPart ~= "") and ((row.levelFs:GetStringWidth() or 36) + 7) or 0
+    local clsW = hasClassIcon and (isNarrow and 18 or 22) or 0
     local badgesW = (numBadges > 0) and (numBadges * 17 + 6) or 0
     local extraTagW = ((sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup or item.isEnemyGuild or item._lockoutInfo) and 48 or 0
     local maxNameW = math.max(isNarrow and 84 or 96, math.min(isNarrow and 220 or 240, rowW - leftStart - roleBlockW - lvlW - clsW - badgesW - extraTagW - (isNarrow and 6 or 8)))
@@ -6072,7 +6175,7 @@ local function UpdateLfgRow(row, item, idx, palette)
         or 96
     row.nameFs:SetWidth(math.min(maxNameW, math.max(42, nameStrW)))
 
-    local lastAnchor = ((not isNarrow) and lvlPart ~= "") and row.levelFs or row.nameFs
+    local lastAnchor = (rowW >= 250 and lvlPart ~= "") and row.levelFs or row.nameFs
     local rowAnchorSig = (isNarrow and "NARROW:" or "WIDE:")
         .. (((not isNarrow) and lvlPart ~= "") and "L:" or "N:")
         .. (hasClassIcon and "C:" or "0:")
@@ -7810,15 +7913,7 @@ local function CreateLeaderNoticePanel(categoryView, controls)
     box:SetPoint("TOPLEFT", categoryView, "TOPLEFT", 12, -16)
     box:SetPoint("TOPRIGHT", categoryView, "TOPRIGHT", -12, -16)
     box:SetHeight(212)
-    box:SetBackdrop({
-        bgFile = WHITE8X8,
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = false,
-        edgeSize = 14,
-        insets = { left = 3, right = 3, top = 3, bottom = 3 },
-    })
-    box:SetBackdropColor(0.08, 0.075, 0.065, 0.96)
-    box:SetBackdropBorderColor(0.88, 0.68, 0.22, 0.95)
+    Theme:ApplyBackdrop(box, "surface")
     box:Hide()
 
     local icon = box:CreateTexture(nil, "ARTWORK")
@@ -7826,9 +7921,22 @@ local function CreateLeaderNoticePanel(categoryView, controls)
     icon:SetPoint("TOPLEFT", box, "TOPLEFT", 14, -14)
     icon:SetTexture("Interface\\GroupFrame\\UI-Group-LeaderIcon")
 
+    local noticeHelpBtn = Theme.CreateHelpButton and Theme:CreateHelpButton(
+        box,
+        L["Only the group leader can manage group listings."],
+        L["In a party or raid, Blizzard only lets the group leader publish or edit Group Finder listings."],
+        L["You can switch to Browse anytime to find groups, whisper players, or ask the leader to publish."],
+        18,
+        { target = box }
+    ) or nil
+    if noticeHelpBtn then
+        noticeHelpBtn:SetPoint("TOPRIGHT", box, "TOPRIGHT", -10, -12)
+        controls.leaderNoticeHelpBtn = noticeHelpBtn
+    end
+
     local title = box:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("LEFT", icon, "RIGHT", 8, 0)
-    title:SetPoint("RIGHT", box, "RIGHT", -14, 0)
+    title:SetPoint("RIGHT", noticeHelpBtn or box, noticeHelpBtn and "LEFT" or "RIGHT", noticeHelpBtn and -6 or -14, 0)
     title:SetJustifyH("LEFT")
     title:SetWordWrap(true)
     title:SetTextColor(1.0, 0.82, 0.20)
@@ -7850,15 +7958,7 @@ end
 local function CreateLeaderBrowseBar(body, controls)
     local bar = CreateFrame("Frame", nil, body, "BackdropTemplate")
     bar:SetHeight(22)
-    bar:SetBackdrop({
-        bgFile = WHITE8X8,
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = false,
-        edgeSize = 10,
-        insets = { left = 2, right = 2, top = 2, bottom = 2 },
-    })
-    bar:SetBackdropColor(0.14, 0.11, 0.06, 0.94)
-    bar:SetBackdropBorderColor(0.85, 0.65, 0.20, 0.90)
+    Theme:ApplyBackdrop(bar, "surface")
     bar:EnableMouse(true)
     bar:Hide()
 
@@ -8328,9 +8428,10 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
         if origListRefreshTheme then
             origListRefreshTheme(self)
         end
+        local p = Theme:GetPalette()
         Theme:ApplyBackdrop(self.container, "none")
-        if self.emptyLabel then
-            self.emptyLabel:SetTextColor(0.86, 0.84, 0.78)
+        if self.emptyLabel and p and p.textMuted then
+            self.emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
         end
     end
 
@@ -8344,8 +8445,9 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
         if origListRender then
             origListRender(self)
         end
-        if self.emptyLabel then
-            self.emptyLabel:SetTextColor(0.86, 0.84, 0.78)
+        local p = Theme:GetPalette()
+        if self.emptyLabel and p and p.textMuted then
+            self.emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
         end
         local needsScroll = (self.thumb and self.thumb.IsShown and self.thumb:IsShown()) == true
         self._needsScroll = needsScroll
@@ -8520,8 +8622,8 @@ function LFGFrameTab:EnsureNativeBridgeBar()
     local helpBtn = Theme:CreateHelpButton(
         bar,
         L["Help: Official LFG + SocialCentral Mirror"],
-        L["Blizzard restricts public Group Finder creation to the native Official tab (Tab 1). Clicking here switches you there with your roles ready."],
-        L["Once you click Blizzard's List button on Tab 1, SocialCentral automatically mirrors your Official listing to Guild, Allies & Friends."],
+        L["Auto-Mirror captures listings created on Tab 1 and broadcasts them to your Guild, Allies, and Friends inside SocialCentral."],
+        L["Toggle Auto-Mirror here, click Scan to refresh Official LFG listings, or click Share to announce your active listing in Guild chat."],
         16,
         { target = bar }
     )
@@ -8791,9 +8893,11 @@ function LFGFrameTab:UpdateNativeBridgeBar()
         if bar.shareGchatBtn then bar.shareGchatBtn:Hide() end
         if bar.privateListBtn then bar.privateListBtn:Hide() end
 
+        local barW = (bar.GetWidth and bar:GetWidth()) or 326
+        local halfCap = math.max(96, math.floor((barW - 22) * 0.5))
         bar.viewBtn:SetText(L["View Groups (%d)"]:format(tot))
         StyleNativeButton(bar.viewBtn, tot > 0)
-        AutoFitNativeButton(bar.viewBtn, 108, 14, 166)
+        AutoFitNativeButton(bar.viewBtn, 96, 12, halfCap)
         bar.viewBtn:ClearAllPoints()
         bar.viewBtn:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 8, 5)
 
@@ -8807,7 +8911,7 @@ function LFGFrameTab:UpdateNativeBridgeBar()
             if bar.postGroupBtn.SetEnabled then
                 bar.postGroupBtn:SetEnabled(canManage and not combat)
             end
-            AutoFitNativeButton(bar.postGroupBtn, 102, 14, 152)
+            AutoFitNativeButton(bar.postGroupBtn, 96, 12, halfCap)
         end
     end
 end
@@ -9045,56 +9149,30 @@ function LFGFrameTab:EnsureSocialSideTab()
             L["SocialCentral: Watchlist, Social & Nearby"],
             L["View Watchlist (/who), Social folders, Battle.net/Guild friends, and Nearby players right inside Blizzard's Social window."],
             function()
-                local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
-                local socialUnread = (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false)))) or 0
                 local targetTab
-                if socialUnread > 0 and chatModOn then
-                    targetTab = "chat"
-                else
-                    for _, cand in ipairs({ "watchlist", "social", "nearby", "chat" }) do
-                        if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled(cand) then
-                            targetTab = cand
-                            break
-                        end
+                for _, cand in ipairs({ "watchlist", "social", "nearby" }) do
+                    if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled(cand) then
+                        targetTab = cand
+                        break
                     end
-                    targetTab = targetTab or "social"
                 end
+                targetTab = targetTab or "social"
                 if ns.UI then
-                    ns.UI:OpenEmbedded(parent, { "watchlist", "social", "nearby", "chat" }, targetTab)
+                    ns.UI:OpenEmbedded(parent, { "watchlist", "social", "nearby" }, targetTab)
                 end
             end,
             "embedSocialWindow"
         )
         self.socialTab:SetScript("OnEnter", function(selfBtn)
             GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
-            GameTooltip:AddLine(L["SocialCentral: Watchlist, Social & Chat"], 0.35, 0.72, 1.0)
-            local summary = ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()
-            local unreadDirect = summary and summary.totalDirect or 0
-            if unreadDirect > 0 then
+            GameTooltip:AddLine(L["SocialCentral: Watchlist, Social & Nearby"], 0.35, 0.72, 1.0)
+            GameTooltip:AddLine(L["View Watchlist (/who), Social folders, Battle.net/Guild friends, and Nearby players right inside Blizzard's Social window."], 0.85, 0.88, 0.92, true)
+            if ns.Watchlist and ns.Watchlist.GetStats then
+                local on = ns.Watchlist:GetStats()
+                local socOnline = ns.Social and ns.Social.GetCount and ns.Social:GetCount("all") or 0
                 GameTooltip:AddLine(" ")
-                GameTooltip:AddDoubleLine(L["Unread Messages (Direct)"], tostring(unreadDirect), 1.0, 0.42, 0.42, 1.0, 0.85, 0.35)
-                if summary.senders then
-                    local shown = 0
-                    for _, item in ipairs(summary.senders) do
-                        if shown >= 5 then break end
-                        GameTooltip:AddDoubleLine("  " .. tostring(item.title or "?"), tostring(item.unread or 0), 0.90, 0.94, 0.98, 1.0, 0.42, 0.42)
-                        shown = shown + 1
-                    end
-                end
-                if (summary.invites or 0) > 0 then
-                    GameTooltip:AddDoubleLine("  " .. L["Room Invite"], tostring(summary.invites), 0.58, 0.88, 0.98, 1.0, 0.85, 0.35)
-                end
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine(L["Click to open Conversations"], 0.40, 0.92, 0.55, true)
-            else
-                GameTooltip:AddLine(L["View Watchlist (/who), Social folders, Battle.net/Guild friends, and Nearby players right inside Blizzard's Social window."], 0.85, 0.88, 0.92, true)
-                if ns.Watchlist and ns.Watchlist.GetStats then
-                    local on = ns.Watchlist:GetStats()
-                    local socOnline = ns.Social and ns.Social.GetCount and ns.Social:GetCount("all") or 0
-                    GameTooltip:AddLine(" ")
-                    GameTooltip:AddDoubleLine(L["Watchlist"] .. " (" .. L["Online"] .. ")", tostring(on or 0), 0.78, 0.84, 0.92, 0.40, 0.92, 0.55)
-                    GameTooltip:AddDoubleLine(L["Social"] .. " (" .. L["Online"] .. ")", tostring(socOnline or 0), 0.78, 0.84, 0.92, 0.58, 0.88, 0.98)
-                end
+                GameTooltip:AddDoubleLine(L["Watchlist"] .. " (" .. L["Online"] .. ")", tostring(on or 0), 0.78, 0.84, 0.92, 0.40, 0.92, 0.55)
+                GameTooltip:AddDoubleLine(L["Social"] .. " (" .. L["Online"] .. ")", tostring(socOnline or 0), 0.78, 0.84, 0.92, 0.58, 0.88, 0.98)
             end
             GameTooltip:Show()
         end)
@@ -9759,7 +9837,12 @@ function LFGFrameTab:RefreshProfessionQuickButton()
     local s = ns.db and ns.db.settings
     local host = ResolveVisibleProfessionHost()
     local shouldShow = (host ~= nil) and (not s or s.embedProfessionWindow ~= false)
-    if not btn then return end
+    if not btn then
+        if shouldShow then
+            self:AttachProfessionButton()
+        end
+        return
+    end
     if shouldShow then
         AnchorProfessionQuickBtn(btn, host)
         if btn.RefreshTheme then btn:RefreshTheme() end
@@ -9866,13 +9949,16 @@ end
 
 -- ============================================================================
 local function OpenSocialUIModule(targetTab, fallbackToChatFrame, forceKeepOpen)
-    local sf = _G.SocialUIFrame or _G.FriendsFrame
-    if sf and sf.IsShown and sf:IsShown() then
-        LFGFrameTab:AttachSocialUI()
-        LFGFrameTab:EnsureSocialSideTab()
-        if ns.UI and ns.UI.OpenEmbedded then
-            ns.UI:OpenEmbedded(sf, { "watchlist", "social", "nearby", "chat" }, targetTab, forceKeepOpen ~= false)
-            return
+    if targetTab ~= "chat" and targetTab ~= "rooms" then
+        local sf = _G.SocialUIFrame or _G.FriendsFrame
+        local allowEmbed = not (ns.Compat and ns.Compat.IsWindowIntegrationEnabled) or ns.Compat.IsWindowIntegrationEnabled("O")
+        if allowEmbed and sf and sf.IsShown and sf:IsShown() then
+            LFGFrameTab:AttachSocialUI()
+            LFGFrameTab:EnsureSocialSideTab()
+            if ns.UI and ns.UI.OpenEmbedded then
+                ns.UI:OpenEmbedded(sf, { "watchlist", "social", "nearby" }, targetTab, forceKeepOpen ~= false)
+                return
+            end
         end
     end
     if ns.UI and ns.UI.ShowHub then
@@ -9880,7 +9966,8 @@ local function OpenSocialUIModule(targetTab, fallbackToChatFrame, forceKeepOpen)
     end
 end
 
-function LFGFrameTab:SyncAllEmbeddedTabStates()
+function LFGFrameTab:SyncAllEmbeddedTabStates(forceGeoSync)
+    local nowT = (GetTime and GetTime()) or 0
     if self.sideTab then
         local lfgHost = _G.LFGParentFrame
         local shown = lfgHost and lfgHost.IsShown and lfgHost:IsShown()
@@ -9894,9 +9981,14 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
             end
         end
         if shown or not anyLfgEmbed then
-            SyncHostNativeTabs(lfgHost, self.sideTab, anyLfgEmbed, { "ListingTab", "BrowsingTab", "WhoListingTab" })
+            local sig = (shown and "S:" or "H:") .. (anyLfgEmbed and "A" or "N")
+            if not lfgHost or lfgHost._scLastNativeTabSig ~= sig or forceGeoSync then
+                if lfgHost then lfgHost._scLastNativeTabSig = sig end
+                SyncHostNativeTabs(lfgHost, self.sideTab, anyLfgEmbed, { "ListingTab", "BrowsingTab", "WhoListingTab" })
+            end
         end
-        if shown and self.sideTab:IsShown() then
+        if shown and self.sideTab:IsShown() and (forceGeoSync or not self.sideTab._lastGeoSyncAt or (nowT - self.sideTab._lastGeoSyncAt) >= 1.0) then
+            self.sideTab._lastGeoSyncAt = nowT
             SyncRightSideTabHitboxAndLayer(lfgHost, self.sideTab, DiscoverNativeSideTabs(lfgHost), 600)
         end
     end
@@ -9904,18 +9996,17 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local socialHost = _G.SocialUIFrame or _G.FriendsFrame
         local shown = socialHost and socialHost.IsShown and socialHost:IsShown()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(socialHost)
-        local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
-        local chatSummary = (chatModOn and ns.Chat and ns.Chat.GetUnreadSummary and ns.Chat:GetUnreadSummary()) or nil
-        local socialUnread = (chatSummary and chatSummary.totalDirect)
-            or (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false))))
-            or 0
-        local socialTone = (chatSummary and chatSummary.directTones and #chatSummary.directTones > 0) and chatSummary.directTones or "whisper"
         UpdateSideTabVisual(self.socialTab, active)
-        UpdateSideTabBadge(self.socialTab, socialUnread, socialTone)
+        UpdateSideTabBadge(self.socialTab, 0, "whisper")
         if shown or not active then
-            SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
+            local sig = (shown and "S:" or "H:") .. (active and "A" or "N")
+            if not socialHost or socialHost._scLastNativeTabSig ~= sig or forceGeoSync then
+                if socialHost then socialHost._scLastNativeTabSig = sig end
+                SyncHostNativeTabs(socialHost, self.socialTab, active, nil)
+            end
         end
-        if shown and self.socialTab:IsShown() then
+        if shown and self.socialTab:IsShown() and (forceGeoSync or not self.socialTab._lastGeoSyncAt or (nowT - self.socialTab._lastGeoSyncAt) >= 1.0) then
+            self.socialTab._lastGeoSyncAt = nowT
             SyncRightSideTabHitboxAndLayer(socialHost, self.socialTab, DiscoverRightSideTabs(socialHost, self.socialTab), 600)
         end
     end
@@ -9927,9 +10018,14 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         UpdateSideTabVisual(self.guildTab, active)
         UpdateSideTabBadge(self.guildTab, active and 0 or guildUnread, "guild")
         if shown or not active then
-            SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
+            local sig = (shown and "S:" or "H:") .. (active and "A" or "N")
+            if not guildHost or guildHost._scLastNativeTabSig ~= sig or forceGeoSync then
+                if guildHost then guildHost._scLastNativeTabSig = sig end
+                SyncHostNativeTabs(guildHost, self.guildTab, active, COMMUNITIES_NATIVE_TABS)
+            end
         end
-        if shown and self.guildTab:IsShown() then
+        if shown and self.guildTab:IsShown() and (forceGeoSync or not self.guildTab._lastGeoSyncAt or (nowT - self.guildTab._lastGeoSyncAt) >= 1.0) then
+            self.guildTab._lastGeoSyncAt = nowT
             SyncRightSideTabHitboxAndLayer(guildHost, self.guildTab, DiscoverRightSideTabs(guildHost, self.guildTab, COMMUNITIES_NATIVE_TABS), 600)
         end
     end
@@ -9939,9 +10035,14 @@ function LFGFrameTab:SyncAllEmbeddedTabStates()
         local active = ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(charHost)
         UpdateSideTabVisual(self.charTab, active)
         if shown or not active then
-            SyncHostNativeTabs(charHost, self.charTab, active, CHARACTER_NATIVE_TABS)
+            local sig = (shown and "S:" or "H:") .. (active and "A" or "N")
+            if not charHost or charHost._scLastNativeTabSig ~= sig or forceGeoSync then
+                if charHost then charHost._scLastNativeTabSig = sig end
+                SyncHostNativeTabs(charHost, self.charTab, active, CHARACTER_NATIVE_TABS)
+            end
         end
-        if shown and self.charTab:IsShown() then
+        if shown and self.charTab:IsShown() and (forceGeoSync or not self.charTab._lastGeoSyncAt or (nowT - self.charTab._lastGeoSyncAt) >= 1.0) then
+            self.charTab._lastGeoSyncAt = nowT
             SyncRightSideTabHitboxAndLayer(charHost, self.charTab, DiscoverRightSideTabs(charHost, self.charTab, CHARACTER_NATIVE_TABS), 600)
         end
     end
@@ -9968,7 +10069,7 @@ function LFGFrameTab:IsShortcutEligible(winKey)
         return false
     end
     if winKey == "O" and ns.Compat and ns.Compat.IsModuleEnabled then
-        for _, cand in ipairs({ "watchlist", "social", "nearby", "chat" }) do
+        for _, cand in ipairs({ "watchlist", "social", "nearby" }) do
             if ns.Compat.IsModuleEnabled(cand) then
                 return true
             end
@@ -9999,21 +10100,15 @@ function LFGFrameTab:ActivateAddonTabForShortcut(winKey, hostFrame)
         if ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(hostFrame) then
             return true
         end
-        local chatModOn = (not ns.Compat or not ns.Compat.IsModuleEnabled) or ns.Compat.IsModuleEnabled("chat")
-        local socialUnread = (chatModOn and ns.Chat and ((ns.Chat.GetUnreadDirectCount and ns.Chat:GetUnreadDirectCount()) or (ns.Chat.GetTotalUnread and ns.Chat:GetTotalUnread(false)))) or 0
         local targetTab
-        if socialUnread > 0 and chatModOn then
-            targetTab = "chat"
-        else
-            for _, cand in ipairs({ "watchlist", "social", "nearby", "chat" }) do
-                if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled(cand) then
-                    targetTab = cand
-                    break
-                end
+        for _, cand in ipairs({ "watchlist", "social", "nearby" }) do
+            if not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled(cand) then
+                targetTab = cand
+                break
             end
         end
         if targetTab and ns.UI and ns.UI.OpenEmbedded then
-            ns.UI:OpenEmbedded(hostFrame, { "watchlist", "social", "nearby", "chat" }, targetTab, true)
+            ns.UI:OpenEmbedded(hostFrame, { "watchlist", "social", "nearby" }, targetTab, true)
             return true
         end
     elseif winKey == "J" then
@@ -10113,10 +10208,14 @@ function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
         m = CreateFrame("Frame", "SocialCentralShortcutPromptModal", UIParent, "BackdropTemplate")
         m:SetSize(486, 278)
         m:SetPoint("CENTER")
-        m:SetFrameStrata("FULLSCREEN_DIALOG")
-        m:SetFrameLevel(860)
-        m:SetToplevel(true)
-        m:EnableMouse(true)
+        if Theme.PrepareTopOverlayModal then
+            Theme:PrepareTopOverlayModal(m, 860)
+        else
+            m:SetFrameStrata("FULLSCREEN_DIALOG")
+            m:SetFrameLevel(860)
+            m:SetToplevel(true)
+            m:EnableMouse(true)
+        end
         if m.SetClipsChildren then m:SetClipsChildren(false) end
         Theme:MakeMovable(m, { key = "modal_shortcut_prompt" })
         if type(UISpecialFrames) == "table" then
@@ -10177,8 +10276,8 @@ function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
         m.bodyFs = bodyFs
 
         local scopeBox = CreateFrame("Frame", nil, m, "BackdropTemplate")
-        scopeBox:SetPoint("TOPLEFT", 16, -106)
-        scopeBox:SetPoint("TOPRIGHT", -16, -106)
+        scopeBox:SetPoint("TOPLEFT", bodyFs, "BOTTOMLEFT", 0, -10)
+        scopeBox:SetPoint("TOPRIGHT", bodyFs, "BOTTOMRIGHT", 0, -10)
         scopeBox:SetHeight(68)
         m.scopeBox = scopeBox
 
@@ -10220,7 +10319,7 @@ function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
         m.SyncScopeChecks = SyncScopeChecks
 
         local btnAddon = Theme:CreateButton(m, 198, 26, L["Open SocialCentral Tab"], "primary")
-        Theme:AutoFitButton(btnAddon, 150, 20, 218)
+        Theme:AutoFitButton(btnAddon, 150, 18, 206)
         btnAddon:SetPoint("BOTTOMRIGHT", -16, 32)
         btnAddon:SetScript("OnClick", function()
             local wKey = m._winKey
@@ -10232,7 +10331,7 @@ function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
         m.btnAddon = btnAddon
 
         local btnOfficial = Theme:CreateButton(m, 198, 26, L["Keep Blizzard Official Tab"], "default")
-        Theme:AutoFitButton(btnOfficial, 150, 20, 218)
+        Theme:AutoFitButton(btnOfficial, 150, 18, 206)
         btnOfficial:SetPoint("RIGHT", btnAddon, "LEFT", -10, 0)
         btnOfficial:SetScript("OnClick", function()
             local wKey = m._winKey
@@ -10266,10 +10365,14 @@ function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
     if m.SyncScopeChecks then m.SyncScopeChecks() end
 
     local p = Theme:GetPalette()
-    m:SetParent(UIParent)
-    m:SetFrameStrata("FULLSCREEN_DIALOG")
-    m:SetFrameLevel(860)
-    m:SetToplevel(true)
+    if Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(m, 860)
+    else
+        m:SetParent(UIParent)
+        m:SetFrameStrata("FULLSCREEN_DIALOG")
+        m:SetFrameLevel(860)
+        m:SetToplevel(true)
+    end
     if m._solidOpaqueBg then
         local wBg = (p and p.windowBg) or { 0.08, 0.08, 0.09, 1.0 }
         m._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
@@ -10438,7 +10541,9 @@ function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
     end
 
     if mod == "chat" or mod == "rooms" then
-        OpenSocialUIModule("chat", true, forceKeepOpen)
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub("chat")
+        end
         return
     end
 

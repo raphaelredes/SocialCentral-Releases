@@ -6,6 +6,7 @@ ns.Theme = Theme
 
 local WHITE8X8 = "Interface\\Buttons\\WHITE8X8"
 local listeners = {}
+local decoratedHeaders = setmetatable({}, { __mode = "k" })
 
 function Theme:HasAtlas(atlasName)
     return C_Texture and C_Texture.GetAtlasInfo and atlasName and C_Texture.GetAtlasInfo(atlasName) ~= nil
@@ -38,6 +39,7 @@ Theme.PALETTES = {
         dangerHoverBg = { 0.58, 0.18, 0.18, 1.0 },
         dangerBorder = { 0.75, 0.25, 0.25, 1.0 },
         text = { 0.93, 0.95, 0.98 },
+        textGold = { 0.96, 0.80, 0.34 },
         textMuted = { 0.62, 0.68, 0.76 },
         textDim = { 0.44, 0.49, 0.57 },
         online = { 0.24, 0.85, 0.45 },
@@ -70,6 +72,7 @@ Theme.PALETTES = {
         dangerHoverBg = { 0.60, 0.20, 0.17, 1.0 },
         dangerBorder = { 0.78, 0.30, 0.26, 1.0 },
         text = { 0.98, 0.94, 0.84 },
+        textGold = { 1.0, 0.84, 0.24 },
         textMuted = { 0.76, 0.70, 0.58 },
         textDim = { 0.54, 0.49, 0.41 },
         online = { 0.25, 0.88, 0.42 },
@@ -187,8 +190,14 @@ end
 
 --- Notify registered UI views to re-apply the current palette.
 function Theme:NotifyChanged()
+    local pal = self:GetPalette()
+    for sep in pairs(decoratedHeaders) do
+        if sep and sep._refreshRuleFn then
+            pcall(sep._refreshRuleFn, sep, pal)
+        end
+    end
     for _, fn in ipairs(listeners) do
-        pcall(fn, self:GetPalette())
+        pcall(fn, pal)
     end
 end
 
@@ -228,10 +237,62 @@ local function SyncDepthPolish(frame, kind, p, isBlizz)
     if not frame then return end
     local fw = frame.GetWidth and frame:GetWidth() or 0
     local fh = frame.GetHeight and frame:GetHeight() or 0
-    local isLargeFrame = (not frame._scIsListRow) and (fw == 0 or fw >= 100)
-    local wantSheen = isLargeFrame and (kind == "header" or kind == "surface" or kind == "window")
-    local wantBevel = isLargeFrame and (kind == "header" or kind == "surface")
+    local depthSig = tostring(kind or "") .. ":" .. tostring(p and p.key or "dark") .. ":" .. tostring(math.floor((fw or 0) + 0.5)) .. "x" .. tostring(math.floor((fh or 0) + 0.5)) .. ":" .. (frame._scNoStone and "1" or "0")
+    if frame._scDepthSig == depthSig then
+        return
+    end
+    frame._scDepthSig = depthSig
+
+    local isLargeFrame = (not frame._scIsListRow) and (fw == 0 or fw >= 60)
+    local isWideFrame = (not frame._scIsListRow) and (fw == 0 or fw >= 100)
+    local wantGrad = isLargeFrame and (kind == "header" or kind == "surface" or kind == "inset" or (kind == "window" and not isBlizz))
+    local wantSheen = isWideFrame and (kind == "header" or kind == "surface" or kind == "window")
+    local wantBevel = isWideFrame and (kind == "header" or kind == "surface")
+    local wantBotBevel = isWideFrame and (kind == "header" or kind == "surface")
     local wantInsetStone = (kind == "inset" and isBlizz and not frame._scNoStone and fw >= 120 and fh >= 80 and HasAtlas("groupfinder-background"))
+
+    if wantGrad then
+        if not frame._scGradBg then
+            local gbg = frame:CreateTexture(nil, "BACKGROUND", nil, -7)
+            gbg:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -1)
+            gbg:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
+            frame._scGradBg = gbg
+        end
+        if kind == "header" then
+            if isBlizz then
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.055, 0.048, 0.040, 0.85, 0.145, 0.120, 0.085, 0.92)
+            elseif p.key == "native" then
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.10, 0.09, 0.07, 0.92, 0.21, 0.18, 0.13, 0.95)
+            else
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.07, 0.09, 0.12, 0.92, 0.13, 0.17, 0.23, 0.96)
+            end
+        elseif kind == "surface" then
+            if isBlizz then
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.055, 0.050, 0.045, 0.90, 0.098, 0.088, 0.076, 0.94)
+            elseif p.key == "native" then
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.11, 0.10, 0.08, 0.90, 0.17, 0.15, 0.12, 0.95)
+            else
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.075, 0.09, 0.125, 0.92, 0.115, 0.14, 0.19, 0.96)
+            end
+        elseif kind == "inset" then
+            if isBlizz then
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.048, 0.044, 0.040, 0.65, 0.024, 0.022, 0.020, 0.82)
+            elseif p.key == "native" then
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.085, 0.075, 0.062, 0.86, 0.050, 0.044, 0.036, 0.92)
+            else
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.058, 0.070, 0.092, 0.88, 0.034, 0.040, 0.056, 0.94)
+            end
+        else -- non-blizzard window atmospheric shading
+            if p.key == "native" then
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.085, 0.078, 0.065, 0.96, 0.145, 0.128, 0.102, 0.96)
+            else
+                ApplySafeGradient(frame._scGradBg, "VERTICAL", 0.052, 0.062, 0.082, 0.96, 0.088, 0.108, 0.142, 0.96)
+            end
+        end
+        frame._scGradBg:Show()
+    elseif frame._scGradBg then
+        frame._scGradBg:Hide()
+    end
 
     if wantSheen then
         if not frame._scCardSheen then
@@ -244,16 +305,16 @@ local function SyncDepthPolish(frame, kind, p, isBlizz)
         if kind == "header" then
             frame._scCardSheen:SetHeight(math.max(20, (frame:GetHeight() or 36) - 4))
             if isBlizz then
-                ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, 0.52, 0.40, 0.16, 0.18)
+                ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, 0.56, 0.42, 0.16, 0.22)
             else
-                ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, acc[1] * 0.24 + 0.06, acc[2] * 0.24 + 0.06, acc[3] * 0.24 + 0.08, 0.28)
+                ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, acc[1] * 0.26 + 0.06, acc[2] * 0.26 + 0.06, acc[3] * 0.26 + 0.08, 0.32)
             end
         elseif kind == "surface" then
             frame._scCardSheen:SetHeight(48)
-            ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, 1, 1, 1, isBlizz and 0.03 or 0.045)
+            ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, 1, 1, 1, isBlizz and 0.04 or 0.055)
         else
-            frame._scCardSheen:SetHeight(56)
-            ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, acc[1] * 0.3 + 0.05, acc[2] * 0.3 + 0.05, acc[3] * 0.3 + 0.08, isBlizz and 0.04 or 0.14)
+            frame._scCardSheen:SetHeight(58)
+            ApplySafeGradient(frame._scCardSheen, "VERTICAL", 0, 0, 0, 0, acc[1] * 0.3 + 0.05, acc[2] * 0.3 + 0.05, acc[3] * 0.3 + 0.08, isBlizz and 0.04 or 0.16)
         end
         frame._scCardSheen:Show()
     elseif frame._scCardSheen then
@@ -264,18 +325,32 @@ local function SyncDepthPolish(frame, kind, p, isBlizz)
         if not frame._scTopBevel then
             local bev = frame:CreateTexture(nil, "BORDER", nil, 2)
             bev:SetHeight(1)
-            bev:SetPoint("TOPLEFT", frame, "TOPLEFT", 3, -2)
-            bev:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -3, -2)
+            bev:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -1)
+            bev:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -1)
             frame._scTopBevel = bev
         end
         if isBlizz or p.key == "native" then
-            frame._scTopBevel:SetColorTexture(0.95, 0.80, 0.38, 0.24)
+            frame._scTopBevel:SetColorTexture(0.95, 0.80, 0.38, 0.28)
         else
-            frame._scTopBevel:SetColorTexture(0.65, 0.85, 1.0, 0.16)
+            frame._scTopBevel:SetColorTexture(0.65, 0.85, 1.0, 0.20)
         end
         frame._scTopBevel:Show()
     elseif frame._scTopBevel then
         frame._scTopBevel:Hide()
+    end
+
+    if wantBotBevel then
+        if not frame._scBotBevel then
+            local bBev = frame:CreateTexture(nil, "BORDER", nil, 2)
+            bBev:SetHeight(1)
+            bBev:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 2, 1)
+            bBev:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 1)
+            frame._scBotBevel = bBev
+        end
+        frame._scBotBevel:SetColorTexture(0, 0, 0, isBlizz and 0.48 or 0.38)
+        frame._scBotBevel:Show()
+    elseif frame._scBotBevel then
+        frame._scBotBevel:Hide()
     end
 
     if wantInsetStone then
@@ -286,37 +361,59 @@ local function SyncDepthPolish(frame, kind, p, isBlizz)
             st:SetAtlas("groupfinder-background", false)
             frame._scInsetStone = st
         end
-        frame._scInsetStone:SetVertexColor(0.36, 0.34, 0.32, 0.42)
+        frame._scInsetStone:SetVertexColor(0.36, 0.34, 0.32, 0.40)
         frame._scInsetStone:Show()
     elseif frame._scInsetStone then
         frame._scInsetStone:Hide()
     end
 end
 
---- Add a clean tapered gold/accent horizontal rule directly below a section heading.
+local function ApplyDecoratedHeaderColors(sep, p)
+    if not sep then return end
+    local pal = p or Theme:GetPalette()
+    local isWarm = (pal and (pal.key == "blizzard" or pal.key == "native"))
+    local r, g, b = 0.90, 0.74, 0.28
+    if not isWarm and pal and pal.accentBorder then
+        r, g, b = pal.accentBorder[1], pal.accentBorder[2], pal.accentBorder[3]
+    end
+    if sep._accentPip then
+        sep._accentPip:SetColorTexture(r, g, b, 0.95)
+    end
+    if sep._leftTex then
+        ApplySafeGradient(sep._leftTex, "HORIZONTAL", r, g, b, 0.80, r, g, b, 0.24)
+    end
+    if sep._rightTex then
+        ApplySafeGradient(sep._rightTex, "HORIZONTAL", r, g, b, 0.24, r, g, b, 0.0)
+    end
+end
+
+--- Add a clean tapered gold/accent horizontal rule directly below a section heading (auto-updates on theme switch).
 function Theme:DecorateSectionHeader(parent, labelFs, lineWidth)
     if not (parent and labelFs) then return nil end
-    local p = self:GetPalette()
-    local isBlizz = self:IsBlizzard(p) or p.key == "native"
-    local r, g, b = 0.88, 0.72, 0.28
-    if not isBlizz and p.accentBorder then
-        r, g, b = p.accentBorder[1], p.accentBorder[2], p.accentBorder[3]
-    end
     local halfW = math.floor((lineWidth or 280) * 0.5)
     local sep = CreateFrame("Frame", nil, parent)
-    sep:SetHeight(2)
+    sep:SetHeight(3)
     sep:SetPoint("TOPLEFT", labelFs, "BOTTOMLEFT", 0, -4)
     sep:SetWidth(halfW * 2)
 
+    local pip = sep:CreateTexture(nil, "ARTWORK", nil, 1)
+    pip:SetSize(14, 2)
+    pip:SetPoint("LEFT", sep, "LEFT", 0, 0)
+    sep._accentPip = pip
+
     local leftTex = sep:CreateTexture(nil, "ARTWORK")
-    leftTex:SetPoint("LEFT", sep, "LEFT", 0, 0)
-    leftTex:SetSize(halfW, 1)
-    ApplySafeGradient(leftTex, "HORIZONTAL", r, g, b, 0.72, r, g, b, 0.22)
+    leftTex:SetPoint("LEFT", pip, "RIGHT", 2, 0)
+    leftTex:SetSize(math.max(12, halfW - 16), 1)
+    sep._leftTex = leftTex
 
     local rightTex = sep:CreateTexture(nil, "ARTWORK")
     rightTex:SetPoint("LEFT", leftTex, "RIGHT", 0, 0)
     rightTex:SetSize(halfW, 1)
-    ApplySafeGradient(rightTex, "HORIZONTAL", r, g, b, 0.22, r, g, b, 0.0)
+    sep._rightTex = rightTex
+
+    sep._refreshRuleFn = ApplyDecoratedHeaderColors
+    decoratedHeaders[sep] = true
+    ApplyDecoratedHeaderColors(sep, self:GetPalette())
 
     return sep
 end
@@ -698,6 +795,39 @@ local function SetToggleSquareRingColor(ring, r, g, b, a)
     end
 end
 
+local function ApplyButtonSurfaceGradient(frame, r, g, b, a, hovered, active, isWarm, isTab)
+    if not frame then return end
+    if not frame._scGradBg then
+        local gbg = frame:CreateTexture(nil, "ARTWORK", nil, -2)
+        gbg:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -1)
+        gbg:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
+        frame._scGradBg = gbg
+    end
+    local topBoost = active and 0.08 or (hovered and 0.07 or 0.045)
+    if isTab then
+        topBoost = active and 0.09 or (hovered and 0.06 or 0.03)
+    end
+    local botShade = active and 0.025 or 0.04
+    local rTop = math.min(1, r + (isWarm and topBoost * 1.1 or topBoost))
+    local gTop = math.min(1, g + topBoost)
+    local bTop = math.min(1, b + (isWarm and topBoost * 0.7 or topBoost * 1.15))
+    local rBot = math.max(0, r - botShade)
+    local gBot = math.max(0, g - botShade)
+    local bBot = math.max(0, b - botShade)
+    ApplySafeGradient(frame._scGradBg, "VERTICAL", rBot, gBot, bBot, (a or 1) * 0.92, rTop, gTop, bTop, (a or 1) * 0.96)
+    frame._scGradBg:Show()
+
+    if not frame._scBtnShadow then
+        local sh = frame:CreateTexture(nil, "ARTWORK", nil, 0)
+        sh:SetHeight(1)
+        sh:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 2, 1)
+        sh:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 1)
+        frame._scBtnShadow = sh
+    end
+    frame._scBtnShadow:SetColorTexture(0, 0, 0, active and 0.48 or 0.36)
+    frame._scBtnShadow:Show()
+end
+
 local function ApplyButtonColors(btn, hovered)
     local p = Theme:GetPalette()
     if not btn.SetBackdrop then
@@ -719,6 +849,8 @@ local function ApplyButtonColors(btn, hovered)
         local vis = EnsureBlizzButtonVisual(btn, true)
         if vis then
             if btn._scNavIndicator then btn._scNavIndicator:Hide() end
+            if btn._scGradBg then btn._scGradBg:Hide() end
+            if btn._scBtnShadow then btn._scBtnShadow:Hide() end
             if btn._scAppliedBackdrop ~= nil then
                 btn:SetBackdrop(nil)
                 btn._scAppliedBackdrop = nil
@@ -731,9 +863,10 @@ local function ApplyButtonColors(btn, hovered)
                 vis._scAppliedBackdrop = BACKDROP_SPEC
             end
             if active then
-                vis:SetBackdropColor(0.14, 0.12, 0.09, 0.98)
-                vis:SetBackdropBorderColor(0.84, 0.66, 0.24, 1)
-                vis._topAccent:SetColorTexture(0.98, 0.80, 0.28, 0.95)
+                vis:SetBackdropColor(0.15, 0.13, 0.095, 0.98)
+                vis:SetBackdropBorderColor(0.86, 0.68, 0.24, 1)
+                ApplyButtonSurfaceGradient(vis, 0.16, 0.135, 0.095, 0.98, hovered, true, true, true)
+                vis._topAccent:SetColorTexture(0.98, 0.80, 0.28, 0.98)
                 vis._topAccent:Show()
                 vis._bottomBridge:SetColorTexture(0.10, 0.09, 0.08, 1)
                 vis._bottomBridge:Show()
@@ -742,20 +875,22 @@ local function ApplyButtonColors(btn, hovered)
                     btn.label:SetTextColor(1.0, 1.0, 1.0)
                 end
             elseif hovered then
-                vis:SetBackdropColor(0.11, 0.10, 0.09, 0.95)
-                vis:SetBackdropBorderColor(0.66, 0.52, 0.22, 1)
-                vis._topAccent:SetColorTexture(0.82, 0.64, 0.24, 0.65)
+                vis:SetBackdropColor(0.12, 0.105, 0.09, 0.96)
+                vis:SetBackdropBorderColor(0.68, 0.54, 0.23, 1)
+                ApplyButtonSurfaceGradient(vis, 0.12, 0.105, 0.088, 0.96, true, false, true, true)
+                vis._topAccent:SetColorTexture(0.84, 0.66, 0.24, 0.72)
                 vis._topAccent:Show()
                 vis._bottomBridge:SetColorTexture(0.36, 0.29, 0.16, 0.9)
                 vis._bottomBridge:Show()
                 SyncBlizzTextOffset(btn, 0, -1)
                 if btn.label then
-                    btn.label:SetTextColor(1.0, 0.93, 0.65)
+                    btn.label:SetTextColor(1.0, 0.94, 0.68)
                 end
             else
-                vis:SetBackdropColor(0.07, 0.07, 0.08, 0.90)
-                vis:SetBackdropBorderColor(0.38, 0.30, 0.16, 0.95)
-                vis._topAccent:SetColorTexture(0.55, 0.44, 0.18, 0.28)
+                vis:SetBackdropColor(0.075, 0.07, 0.075, 0.92)
+                vis:SetBackdropBorderColor(0.38, 0.31, 0.17, 0.95)
+                ApplyButtonSurfaceGradient(vis, 0.08, 0.075, 0.075, 0.92, false, false, true, true)
+                vis._topAccent:SetColorTexture(0.55, 0.44, 0.18, 0.34)
                 vis._topAccent:Show()
                 vis._bottomBridge:SetColorTexture(0.32, 0.25, 0.13, 0.85)
                 vis._bottomBridge:Show()
@@ -814,6 +949,12 @@ local function ApplyButtonColors(btn, hovered)
             btn._scNavIndicator:Hide()
         end
         ApplyBackdropSpec(btn, BACKDROP_SPEC, bgNav, brNav, false)
+        if btn:IsEnabled() then
+            ApplyButtonSurfaceGradient(btn, bgNav[1], bgNav[2], bgNav[3], bgNav[4] or 0.9, hovered, active, isBlizz or p.key == "native", false)
+        else
+            if btn._scGradBg then btn._scGradBg:Hide() end
+            if btn._scBtnShadow then btn._scBtnShadow:Hide() end
+        end
         if btn.label then
             btn.label:SetTextColor(txtNav[1], txtNav[2], txtNav[3])
         end
@@ -928,7 +1069,13 @@ local function ApplyButtonColors(btn, hovered)
     ApplyBackdropSpec(btn, BACKDROP_SPEC, bg, border, false)
     local bw = btn:GetWidth() or 0
     local bh = btn:GetHeight() or 0
-    if variant ~= "ghost" and btn:IsEnabled() and bw >= 32 and bh >= 18 then
+    if variant ~= "ghost" and btn:IsEnabled() and bg and (bg[4] or 1) > 0.1 then
+        ApplyButtonSurfaceGradient(btn, bg[1], bg[2], bg[3], bg[4] or 1, hovered, active, isBlizz or p.key == "native", variant == "tab")
+    else
+        if btn._scGradBg then btn._scGradBg:Hide() end
+        if btn._scBtnShadow then btn._scBtnShadow:Hide() end
+    end
+    if variant ~= "ghost" and btn:IsEnabled() and bw >= 28 and bh >= 18 then
         if not btn._scBtnGloss then
             local gloss = btn:CreateTexture(nil, "ARTWORK", nil, 1)
             gloss:SetPoint("TOPLEFT", btn, "TOPLEFT", 2, -1)
@@ -938,10 +1085,10 @@ local function ApplyButtonColors(btn, hovered)
         if variant == "tab" and active then
             btn._scBtnGloss:SetHeight(2)
             local ac = p.accentBorder or { 0.35, 0.78, 1.0 }
-            btn._scBtnGloss:SetColorTexture(ac[1], ac[2], ac[3], 0.95)
+            btn._scBtnGloss:SetColorTexture(ac[1], ac[2], ac[3], 0.96)
         else
             btn._scBtnGloss:SetHeight(1)
-            btn._scBtnGloss:SetColorTexture(1, 0.95, 0.82, (variant == "primary" or hovered) and 0.20 or 0.09)
+            btn._scBtnGloss:SetColorTexture(1, 0.96, 0.86, (variant == "primary" or hovered) and 0.24 or 0.11)
         end
         btn._scBtnGloss:Show()
     elseif btn._scBtnGloss then
@@ -1036,7 +1183,13 @@ function Theme:ConfigureIconButton(btn, width, height, tex, opts)
     else
         btn.ico:SetTexture(tex)
         local tc = opts.texCoord
-        if not tc and ((type(tex) == "string" and tex:find("Interface\\Icons\\", 1, true)) or type(tex) == "number") then
+        if not tc and type(tex) == "string" then
+            if tex:find("Interface\\Icons\\", 1, true) then
+                tc = { 0.08, 0.92, 0.08, 0.92 }
+            elseif tex:find("Character-Plus", 1, true) or tex:find("ReadyCheck-", 1, true) then
+                tc = { 0.12, 0.88, 0.12, 0.88 }
+            end
+        elseif not tc and type(tex) == "number" then
             tc = { 0.08, 0.92, 0.08, 0.92 }
         end
         if tc then
@@ -1365,10 +1518,25 @@ local function ApplyInputBackdrop(target, focused, hovered, textTarget)
         target._scInputStyleSig = styleSig
         target:SetBackdropColor(bg[1], bg[2], bg[3], 1.0)
         target:SetBackdropBorderColor(border[1], border[2], border[3], 1.0)
+        if not target._scNoInputShade and target.CreateTexture then
+            if not target._scInputTopShade then
+                local sh = target:CreateTexture(nil, "ARTWORK", nil, -1)
+                sh:SetHeight(2)
+                sh:SetPoint("TOPLEFT", target, "TOPLEFT", 1, -1)
+                sh:SetPoint("TOPRIGHT", target, "TOPRIGHT", -1, -1)
+                target._scInputTopShade = sh
+            end
+            target._scInputTopShade:SetColorTexture(0, 0, 0, focused and 0.25 or 0.42)
+            target._scInputTopShade:Show()
+        end
         if textTarget and textTarget.SetTextColor then
             textTarget:SetTextColor(textColor[1], textColor[2], textColor[3])
         end
     end
+end
+
+function Theme:ApplyInputBackdrop(target, focused, hovered, textTarget)
+    return ApplyInputBackdrop(target, focused, hovered, textTarget)
 end
 
 --- Apply responsive theme visuals and placeholder updates to a Theme EditBox.
@@ -1532,12 +1700,13 @@ function Theme:ShowHyperlinkTooltip(owner, link)
             GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
             GameTooltip:ClearLines()
             local count = snap.roster.size or #snap.roster.members
-            local hdr = string.format(L["Group #%d (%d members)"], snap.seq or 1, count)
+            local refTs = snap.startedAt or snap.msgTs
+            local whenStr = (refTs and ns.Chat and ns.Chat.FormatWhenLabel) and ns.Chat:FormatWhenLabel(refTs, true) or ""
+            local hdr = (whenStr ~= "")
+                and string.format(L["Group · %s (%d players)"], whenStr, count)
+                or string.format(L["Group (%d players)"], count)
             if snap.roster.zone and snap.roster.zone ~= "" then
                 hdr = hdr .. " · " .. snap.roster.zone
-            end
-            if snap.msgTs and snap.msgTs > 0 then
-                hdr = hdr .. " · " .. date("%H:%M", snap.msgTs)
             end
             GameTooltip:AddLine(hdr, 0.48, 0.72, 1.0, true)
             for _, mem in ipairs(snap.roster.members) do
@@ -1562,9 +1731,30 @@ function Theme:ShowHyperlinkTooltip(owner, link)
         end
         return false
     elseif link:find("addon:SCentral:msgact:", 1, true) then
+        local idxStr, tKey = link:match("addon:SCentral:msgact:(%d+):?([^|]*)")
+        if (not tKey or tKey == "") and ns.Chat then
+            tKey = (ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.activeKey) or ns.Chat.activeThreadKey
+        end
+        local thr = tKey and ns.Chat and ns.Chat.threads and ns.Chat.threads[tKey]
+        local entry = idxStr and thr and thr.messages and thr.messages[tonumber(idxStr) or -1]
         GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
         GameTooltip:ClearLines()
-        GameTooltip:AddLine(L["Message Actions"], 1.0, 0.88, 0.35, true)
+        if entry and tonumber(entry.ts) and tonumber(entry.ts) > 0 and ns.Chat and ns.Chat.FormatRelativeWhenText then
+            GameTooltip:AddLine(ns.Chat:FormatRelativeWhenText(entry.ts), 1.0, 0.88, 0.35, true)
+        else
+            GameTooltip:AddLine(L["Message Actions"], 1.0, 0.88, 0.35, true)
+        end
+        if entry and entry.groupRosterId and ns.Chat and ns.Chat.GetThreadGroupSnapshot then
+            local gSnap = ns.Chat:GetThreadGroupSnapshot(tKey, tonumber(idxStr))
+            if gSnap and gSnap.roster then
+                local gCnt = gSnap.roster.size or (gSnap.roster.members and #gSnap.roster.members) or 0
+                local gInfoLine = string.format(L["%d players in group"], math.max(1, gCnt))
+                if gSnap.roster.zone and gSnap.roster.zone ~= "" then
+                    gInfoLine = gSnap.roster.zone .. " · " .. gInfoLine
+                end
+                GameTooltip:AddLine(gInfoLine, 0.48, 0.76, 1.0, true)
+            end
+        end
         GameTooltip:AddLine(L["Click to quote, copy, or save to notes."], 0.82, 0.88, 0.94, true)
         GameTooltip:Show()
         return true
@@ -1623,7 +1813,11 @@ function Theme:OpenGroupSnapshotMenu(owner, threadKey, msgIdx)
     end
     MenuUtil.CreateContextMenu(owner, function(_, root)
         local count = snap.roster.size or #snap.roster.members
-        local hdr = string.format(L["Group #%d (%d members)"], snap.seq or 1, count)
+        local refTs = snap.startedAt or snap.msgTs
+        local whenStr = (refTs and ns.Chat and ns.Chat.FormatWhenLabel) and ns.Chat:FormatWhenLabel(refTs, true) or ""
+        local hdr = (whenStr ~= "")
+            and string.format(L["Group · %s (%d players)"], whenStr, count)
+            or string.format(L["Group (%d players)"], count)
         if snap.roster.zone and snap.roster.zone ~= "" then
             hdr = hdr .. " · " .. snap.roster.zone
         end
@@ -1987,7 +2181,10 @@ end
 Theme._viewportListeners = Theme._viewportListeners or {}
 
 function Theme:GetScreenDimensions()
-    local uw, uh = UIParent and UIParent.GetSize and UIParent:GetSize()
+    local uw, uh
+    if UIParent and UIParent.GetSize then
+        uw, uh = UIParent:GetSize()
+    end
     uw = tonumber(uw)
     uh = tonumber(uh)
     if not uw or not uh or uw < 300 or uh < 200 then
@@ -2166,8 +2363,8 @@ function Theme:ClearSavedWindowPosition(posKey, clearSizeAlso)
     self:EnsureResolutionPositionsMigrated()
     local byRes = ns.db.windowPositionsByRes
     if type(byRes) == "table" then
-        local bucket, _, isNeighbor = self:ResolveResolutionBucket(byRes, false)
-        if type(bucket) == "table" and not isNeighbor and type(bucket[posKey]) == "table" then
+        local bucket, _, _ = self:ResolveResolutionBucket(byRes, false)
+        if type(bucket) == "table" and type(bucket[posKey]) == "table" then
             if clearSizeAlso ~= false or (bucket[posKey].width == nil and bucket[posKey].height == nil) then
                 bucket[posKey] = nil
             else
@@ -2193,7 +2390,10 @@ local function SaveWindowCenterOffset(win, posKey, opts)
     if UIParent and win.GetParent and win:GetParent() ~= UIParent then return end
     local scale = GetRelativeScaleToUIParent(win)
     local cx, cy = win:GetCenter()
-    local ux, uy = UIParent and UIParent:GetCenter()
+    local ux, uy
+    if UIParent then
+        ux, uy = UIParent:GetCenter()
+    end
     local anchor = opts and opts.anchor or "CENTER"
 
     if anchor == "TOP" then
@@ -2234,7 +2434,10 @@ function Theme:RestoreWindowPosition(win, posKey, combatLock, opts)
     if combatLock and InCombatLockdown and InCombatLockdown() then
         return false
     end
-    local uw, uh = UIParent and UIParent:GetSize()
+    local uw, uh
+    if UIParent then
+        uw, uh = UIParent:GetSize()
+    end
     local ww, wh = win:GetSize()
     local scale = GetRelativeScaleToUIParent(win)
     local dx = tonumber(saved.dx)
@@ -2271,7 +2474,7 @@ end
 local function IsHandleAttachedToWindow(handle, win)
     if not (handle and win) then return false end
     if win.IsVisible and not win:IsVisible() then return false end
-    if handle == win then return true end
+    if handle == win or handle._scDragWin == win then return true end
     local parent = handle.GetParent and handle:GetParent() or nil
     if not parent or (UIParent and parent == UIParent) then
         return true
@@ -2307,6 +2510,7 @@ function Theme:AttachDragHandle(handle, win)
     if handle == win and win._scMovableHooked then
         return
     end
+    handle._scDragWin = win
     if not win._scLocked then
         handle:EnableMouse(true)
     end
@@ -2441,7 +2645,10 @@ function Theme:MakeMovable(win, opts)
         local relScale = winScale / uiScale
         local anchor = (opts and opts.anchor == "TOP") and "TOP" or "CENTER"
         local cx, cy = win:GetCenter()
-        local ux, uy = UIParent and UIParent:GetCenter()
+        local ux, uy
+        if UIParent then
+            ux, uy = UIParent:GetCenter()
+        end
         local startOffX, startOffY = 0, 0
         if anchor == "TOP" then
             local top = win:GetTop()
@@ -2473,8 +2680,14 @@ function Theme:MakeMovable(win, opts)
         if win.StartMoving then
             usedNativeMove = (pcall(win.StartMoving, win) == true)
         end
-        local rawX, rawY = GetCursorPosition and GetCursorPosition()
-        local uw, uh = UIParent and UIParent:GetSize()
+        local rawX, rawY
+        if GetCursorPosition then
+            rawX, rawY = GetCursorPosition()
+        end
+        local uw, uh
+        if UIParent then
+            uw, uh = UIParent:GetSize()
+        end
         local ww, wh = win:GetSize()
         local minOffX, maxOffX, minOffY, maxOffY
         if uw and ww and ww > 0 then
@@ -2526,7 +2739,10 @@ function Theme:MakeMovable(win, opts)
             if ds.usedNativeMove then
                 return
             end
-            local curX, curY = GetCursorPosition and GetCursorPosition()
+            local curX, curY
+            if GetCursorPosition then
+                curX, curY = GetCursorPosition()
+            end
             if not (curX and curY and curX == curX and curY == curY) then
                 return
             end
@@ -2731,14 +2947,38 @@ function Theme:QueueViewportChanged()
 end
 
 --- Configure any shared modal/popup to sit above all native & World Map hosts with a 100% opaque backing.
-function Theme:PrepareTopOverlayModal(m, minLevel)
+function Theme:PrepareTopOverlayModal(m, minLevel, opts)
     if not m then return end
+    if not self._overlayModals then
+        self._overlayModals = setmetatable({}, { __mode = "k" })
+    end
+    self._overlayModals[m] = true
     if m.GetParent and m:GetParent() ~= UIParent then
         m:SetParent(UIParent)
     end
     local mapShown = _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown()
     local targetLevel = mapShown and math.max(minLevel or 850, 2750) or math.max(minLevel or 850, 840)
-    targetLevel = math.min(9200, targetLevel)
+    local stackAbove = (type(opts) == "table" and opts.aboveShownModals == true) or (helpPopup ~= nil and m == helpPopup)
+    if stackAbove then
+        local maxOther = 0
+        for otherM in pairs(self._overlayModals) do
+            if otherM and otherM ~= m and otherM.IsShown and otherM:IsShown()
+                and otherM.GetFrameStrata and otherM:GetFrameStrata() == "FULLSCREEN_DIALOG"
+                and otherM.GetFrameLevel
+            then
+                local okLvl, oLvl = pcall(otherM.GetFrameLevel, otherM)
+                if okLvl and type(oLvl) == "number" and oLvl > maxOther then
+                    maxOther = oLvl
+                end
+            end
+        end
+        if maxOther > 0 then
+            targetLevel = math.max(targetLevel, maxOther + 35)
+        end
+        targetLevel = math.min(9350, targetLevel)
+    else
+        targetLevel = math.min(9200, targetLevel)
+    end
     m:SetFrameStrata("FULLSCREEN_DIALOG")
     m:SetFrameLevel(targetLevel)
     if m.SetToplevel then m:SetToplevel(true) end
@@ -2794,17 +3034,21 @@ local function CollectGuideTargetObjs(rawTarget, outList, seen)
     end
 end
 
+local guideObjsScratch = {}
+local guideSeenScratch = {}
+
 local function ComputeGuideTargetsRect(rawTarget)
-    local objs = {}
-    local seen = {}
-    CollectGuideTargetObjs(rawTarget, objs, seen)
-    if #objs == 0 then return nil end
+    wipe(guideObjsScratch)
+    wipe(guideSeenScratch)
+    CollectGuideTargetObjs(rawTarget, guideObjsScratch, guideSeenScratch)
+    if #guideObjsScratch == 0 then return nil end
 
     local uiScale = (_G.UIParent and _G.UIParent.GetEffectiveScale and _G.UIParent:GetEffectiveScale()) or 1
     if not uiScale or uiScale <= 0 then uiScale = 1 end
 
     local minL, minB, maxR, maxT = nil, nil, nil, nil
-    for _, obj in ipairs(objs) do
+    for i = 1, #guideObjsScratch do
+        local obj = guideObjsScratch[i]
         local vis = (not obj.IsVisible) or obj:IsVisible()
         if vis and obj.GetLeft and obj.GetRight and obj.GetBottom and obj.GetTop then
             local l = obj:GetLeft()
@@ -2978,7 +3222,9 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
 
     if not tl then
         spot:Hide()
-        if not m._userDragged then
+        spot._lastRectSig = nil
+        if not m._userDragged and m._lastDockSig ~= "center" then
+            m._lastDockSig = "center"
             m:ClearAllPoints()
             m:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 60)
         end
@@ -2991,13 +3237,19 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
     tt = math.min(uiH - 4, tt)
     if tr <= tl or tt <= tb then
         spot:Hide()
+        spot._lastRectSig = nil
         return
     end
 
-    spot:ClearAllPoints()
-    spot:SetFrameLevel(math.max(862, (m.GetFrameLevel and m:GetFrameLevel() or 865) - 3))
-    spot:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", tl - 4, tb - 4)
-    spot:SetPoint("TOPRIGHT", _G.UIParent, "BOTTOMLEFT", tr + 4, tt + 4)
+    local spotLvl = math.max(862, (m.GetFrameLevel and m:GetFrameLevel() or 865) - 3)
+    local rectSig = string.format("%.1f:%.1f:%.1f:%.1f:%d", tl, tb, tr, tt, spotLvl)
+    if spot._lastRectSig ~= rectSig or not spot:IsShown() then
+        spot._lastRectSig = rectSig
+        spot:ClearAllPoints()
+        spot:SetFrameLevel(spotLvl)
+        spot:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", tl - 4, tb - 4)
+        spot:SetPoint("TOPRIGHT", _G.UIParent, "BOTTOMLEFT", tr + 4, tt + 4)
+    end
 
     local t = nowT or (GetTime and GetTime()) or 0
     local wave = 0.5 + 0.5 * math.sin(t * 5.8)
@@ -3006,7 +3258,9 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
         ed:SetColorTexture(1.0, 0.84, 0.26, edgeA)
     end
     spot.fill:SetVertexColor(1.0, 0.84, 0.26, 0.07 + 0.09 * wave)
-    spot:Show()
+    if not spot:IsShown() then
+        spot:Show()
+    end
 
     local canAbove = (tt + 26 + mh) <= (uiH - 12)
     local canBelow = (tb - 26 - mh) >= 12
@@ -3015,42 +3269,73 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
 
     local bob = math.sin(t * 6.0) * 4
     local arrow = spot.arrow
-    arrow:ClearAllPoints()
     local dx, dy = nil, nil
     local cx = (tl + tr) * 0.5
     local cy = (tb + tt) * 0.5
+    local wantDir
 
     if canAbove then
-        arrow:SetDirection("DOWN")
+        wantDir = "DOWN"
+        if arrow._lastDir ~= wantDir then
+            arrow._lastDir = wantDir
+            arrow:SetDirection(wantDir)
+        end
+        arrow:ClearAllPoints()
         arrow:SetPoint("BOTTOM", spot, "TOP", 0, 2 + bob)
         dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
         dy = math.max(12, math.min(uiH - mh - 12, tt + 40))
     elseif canRight then
-        arrow:SetDirection("LEFT")
+        wantDir = "LEFT"
+        if arrow._lastDir ~= wantDir then
+            arrow._lastDir = wantDir
+            arrow:SetDirection(wantDir)
+        end
+        arrow:ClearAllPoints()
         arrow:SetPoint("LEFT", spot, "RIGHT", 2 + bob, 0)
         dx = math.max(12, math.min(uiW - mw - 12, tr + 40))
         dy = math.max(12, math.min(uiH - mh - 12, cy - mh * 0.5))
     elseif canLeft then
-        arrow:SetDirection("RIGHT")
+        wantDir = "RIGHT"
+        if arrow._lastDir ~= wantDir then
+            arrow._lastDir = wantDir
+            arrow:SetDirection(wantDir)
+        end
+        arrow:ClearAllPoints()
         arrow:SetPoint("RIGHT", spot, "LEFT", -2 - bob, 0)
         dx = math.max(12, math.min(uiW - mw - 12, tl - mw - 40))
         dy = math.max(12, math.min(uiH - mh - 12, cy - mh * 0.5))
     elseif canBelow then
-        arrow:SetDirection("UP")
+        wantDir = "UP"
+        if arrow._lastDir ~= wantDir then
+            arrow._lastDir = wantDir
+            arrow:SetDirection(wantDir)
+        end
+        arrow:ClearAllPoints()
         arrow:SetPoint("TOP", spot, "BOTTOM", 0, -2 - bob)
         dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
         dy = math.max(12, math.min(uiH - mh - 12, tb - mh - 40))
     else
-        arrow:SetDirection("DOWN")
+        wantDir = "DOWN"
+        if arrow._lastDir ~= wantDir then
+            arrow._lastDir = wantDir
+            arrow:SetDirection(wantDir)
+        end
+        arrow:ClearAllPoints()
         arrow:SetPoint("BOTTOM", spot, "TOP", 0, 2 + bob)
         dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
         dy = math.max(12, math.min(uiH - mh - 12, uiH - mh - 16))
     end
-    arrow:Show()
+    if not arrow:IsShown() then
+        arrow:Show()
+    end
 
     if not m._userDragged and dx and dy then
-        m:ClearAllPoints()
-        m:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", dx, dy)
+        local dockSig = string.format("%.1f:%.1f", dx, dy)
+        if m._lastDockSig ~= dockSig then
+            m._lastDockSig = dockSig
+            m:ClearAllPoints()
+            m:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", dx, dy)
+        end
     end
 end
 
@@ -3448,6 +3733,7 @@ local function EnsureNpcGuidePopup()
         local rightGroupW = nextW + ((backW > 0) and (6 + backW) or 0)
         local neededBubbleW = math.max(396, leftGroupW + rightGroupW + 50)
         local popupW = math.max(520, math.min(720, neededBubbleW + 122))
+        m:SetWidth(popupW)
         local bodyW = popupW - 164
         m.body:SetWidth(bodyW)
 
@@ -3460,7 +3746,7 @@ local function EnsureNpcGuidePopup()
         local extraTop = (st.tag and st.tag ~= "") and 52 or 38
         local bubbleNeedH = math.max(146, math.min(360, extraTop + bodyH + 50))
         local totalH = math.max(154, bubbleNeedH + 8)
-        m:SetSize(popupW, totalH)
+        m:SetHeight(totalH)
 
         TriggerNpcPortraitSpeech(m, (idx == 1 and 67) or 60)
         SyncNpcGuideSpotlightAndDock(m, spec, st, (GetTime and GetTime()) or 0)
@@ -3893,7 +4179,7 @@ local helpPulseAttached = false
 
 local function HelpPulseOnUpdate(_, elapsed)
     helpPulseAccum = helpPulseAccum + (elapsed or 0)
-    if helpPulseAccum < 0.06 then
+    if helpPulseAccum < 0.10 then
         return
     end
     helpPulseAccum = 0
@@ -4220,11 +4506,11 @@ end
 
 local themeWelcomePopup
 
---- First-run visual theme chooser showing side-by-side live miniature examples of Blizzard Official vs Modern Theme.
+--- First-run & settings visual theme chooser showing live miniature previews for all 3 SocialCentral styles.
 function Theme:ShowThemeWelcomePicker()
     if not themeWelcomePopup then
         local m = CreateFrame("Frame", "SocialCentralThemePicker", UIParent, "BackdropTemplate")
-        m:SetSize(664, 464)
+        m:SetSize(928, 480)
         m:SetPoint("CENTER")
         self:PrepareTopOverlayModal(m, 880)
         self:MakeMovable(m, { key = "themePicker" })
@@ -4237,8 +4523,8 @@ function Theme:ShowThemeWelcomePicker()
         m.helpBtn = self:CreateHelpButton(
             m,
             L["Help: Choose Visual Style"],
-            L["Lets you pick between Native WoW (classic gold-and-brown frames) and Modern Dark (high-contrast obsidian panels) for every SocialCentral window."],
-            L["Click either preview card to apply that design right away, or switch themes anytime later in Settings or the top header button."],
+            L["Lets you pick between Blizzard Official (dark charcoal & bronze-gold), Classic Gold (warm obsidian-gold frames), and Modern Theme (high-contrast dark slate) for every SocialCentral window."],
+            L["Click any of the three preview cards to apply that visual style right away, or switch themes anytime later in Settings."],
             20,
             { target = m }
         )
@@ -4276,21 +4562,35 @@ function Theme:ShowThemeWelcomePicker()
         m.sub:SetPoint("TOPRIGHT", -20, -40)
         m.sub:SetJustifyH("LEFT")
         m.sub:SetWordWrap(true)
-        m.sub:SetText(L["Select which theme to use as your default visual style. You can switch anytime from the header or Settings."])
+        m.sub:SetText(L["Select any of the three themes below as your visual style. You can switch anytime in Settings -> General & Tools."])
 
-        local function BuildSampleCard(isBlizzSample, xAnchorPoint, xOffset)
+        local function BuildSampleCard(kind, xOffset)
+            local isBlizzSample = (kind == "blizzard")
+            local isNativeSample = (kind == "native")
             local card = CreateFrame("Frame", nil, m, "BackdropTemplate")
-            card:SetSize(302, 356)
-            card:SetPoint(xAnchorPoint, m, xAnchorPoint, xOffset, -76)
+            card:SetSize(284, 366)
+            card:SetPoint("TOPLEFT", m, "TOPLEFT", xOffset, -78)
             card:EnableMouse(true)
+            card._themeKind = kind
 
-            local bgSpec = BACKDROP_SPEC
-            local cardBg = isBlizzSample and { 0.11, 0.095, 0.075, 1.0 } or { 0.07, 0.08, 0.11, 1.0 }
-            local baseBorder = isBlizzSample and { 0.68, 0.56, 0.30, 1.0 } or { 0.24, 0.34, 0.46, 0.95 }
-            local hoverBorder = isBlizzSample and { 1.0, 0.82, 0.22, 1.0 } or { 0.35, 0.78, 1.0, 1.0 }
-            card:SetBackdrop(bgSpec)
+            local cardBg = isBlizzSample and { 0.10, 0.09, 0.075, 1.0 }
+                or (isNativeSample and { 0.12, 0.105, 0.085, 1.0 } or { 0.07, 0.08, 0.11, 1.0 })
+            local baseBorder = isBlizzSample and { 0.62, 0.52, 0.28, 1.0 }
+                or (isNativeSample and { 0.58, 0.48, 0.28, 1.0 } or { 0.24, 0.34, 0.46, 0.95 })
+            local hoverBorder = isBlizzSample and { 1.0, 0.82, 0.22, 1.0 }
+                or (isNativeSample and { 0.96, 0.78, 0.28, 1.0 } or { 0.35, 0.78, 1.0, 1.0 })
+            card._baseBorder = baseBorder
+            card._hoverBorder = hoverBorder
+            card:SetBackdrop(BACKDROP_SPEC)
             card:SetBackdropColor(cardBg[1], cardBg[2], cardBg[3], cardBg[4])
             card:SetBackdropBorderColor(baseBorder[1], baseBorder[2], baseBorder[3], baseBorder[4])
+
+            local sheen = card:CreateTexture(nil, "BACKGROUND", nil, -4)
+            sheen:SetPoint("TOPLEFT", 1, -1)
+            sheen:SetPoint("TOPRIGHT", -1, -1)
+            sheen:SetHeight(62)
+            ApplySafeGradient(sheen, "VERTICAL", 0, 0, 0, 0,
+                hoverBorder[1] * 0.25 + 0.05, hoverBorder[2] * 0.25 + 0.05, hoverBorder[3] * 0.25 + 0.05, 0.22)
 
             local title = card:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
             title:SetPoint("TOPLEFT", 14, -12)
@@ -4299,6 +4599,9 @@ function Theme:ShowThemeWelcomePicker()
             if isBlizzSample then
                 title:SetText(L["Blizzard Official"])
                 title:SetTextColor(1.0, 0.82, 0.0)
+            elseif isNativeSample then
+                title:SetText(L["Classic Gold"])
+                title:SetTextColor(0.96, 0.78, 0.28)
             else
                 title:SetText(L["Modern Theme"])
                 title:SetTextColor(0.38, 0.80, 1.0)
@@ -4307,41 +4610,37 @@ function Theme:ShowThemeWelcomePicker()
             local badge = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
             badge:SetPoint("TOPRIGHT", -14, -15)
             badge:SetJustifyH("RIGHT")
-            badge:SetText(isBlizzSample and ("[" .. L["Default"] .. "]") or ("[" .. L["Optional"] .. "]"))
-            if isBlizzSample then
-                badge:SetTextColor(0.30, 0.92, 0.45)
-            else
-                badge:SetTextColor(0.62, 0.72, 0.86)
-            end
-            title:SetPoint("RIGHT", badge, "LEFT", -8, 0)
+            card.badge = badge
+            title:SetPoint("RIGHT", badge, "LEFT", -6, 0)
 
             local sub = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             sub:SetPoint("TOPLEFT", 14, -34)
             sub:SetPoint("TOPRIGHT", -14, -34)
             sub:SetJustifyH("LEFT")
             sub:SetWordWrap(false)
-            sub:SetText(isBlizzSample and L["Default - Classic WoW Window"] or L["Optional - Sleek Dark Minimalist UI"])
+            sub:SetText(isBlizzSample and L["Default - Blizzard Portrait & Stone"]
+                or (isNativeSample and L["Optional - Warm Obsidian & Gold"] or L["Optional - Sleek Dark Minimalist UI"]))
             sub:SetTextColor(0.84, 0.86, 0.90)
 
-            -- Visual miniature example directly underneath the title
+            -- Visual miniature preview
             local preview = CreateFrame("Frame", nil, card, "BackdropTemplate")
-            preview:SetPoint("TOPLEFT", 14, -56)
-            preview:SetPoint("TOPRIGHT", -14, -56)
-            preview:SetHeight(194)
+            preview:SetPoint("TOPLEFT", 12, -56)
+            preview:SetPoint("TOPRIGHT", -12, -56)
+            preview:SetHeight(196)
 
             if isBlizzSample then
-                preview:SetBackdrop(BLIZZ_SURFACE_BACKDROP)
-                preview:SetBackdropColor(0.18, 0.165, 0.145, 0.98)
-                preview:SetBackdropBorderColor(0.64, 0.55, 0.36, 1.0)
+                preview:SetBackdrop(BACKDROP_SPEC)
+                preview:SetBackdropColor(0.085, 0.08, 0.072, 1.0)
+                preview:SetBackdropBorderColor(0.56, 0.48, 0.30, 1.0)
 
                 local pHdr = preview:CreateTexture(nil, "ARTWORK")
-                pHdr:SetPoint("TOPLEFT", 4, -4)
-                pHdr:SetPoint("TOPRIGHT", -4, -4)
+                pHdr:SetPoint("TOPLEFT", 2, -2)
+                pHdr:SetPoint("TOPRIGHT", -2, -2)
                 pHdr:SetHeight(24)
-                pHdr:SetColorTexture(0.14, 0.11, 0.08, 0.95)
+                pHdr:SetColorTexture(0.07, 0.065, 0.055, 1.0)
 
                 local port = preview:CreateTexture(nil, "OVERLAY")
-                port:SetSize(28, 28)
+                port:SetSize(26, 26)
                 port:SetPoint("TOPLEFT", 4, -2)
                 if SetPortraitToTexture then
                     pcall(SetPortraitToTexture, port, "Interface\\AddOns\\SocialCentral\\Media\\icon")
@@ -4356,32 +4655,53 @@ function Theme:ShowThemeWelcomePicker()
 
                 local pClose = CreateFrame("Frame", nil, preview, "BackdropTemplate")
                 pClose:SetSize(14, 14)
-                pClose:SetPoint("TOPRIGHT", -8, -8)
+                pClose:SetPoint("TOPRIGHT", -6, -6)
                 pClose:SetBackdrop(BACKDROP_SPEC)
-                pClose:SetBackdropColor(0.66, 0.12, 0.10, 1.0)
-                pClose:SetBackdropBorderColor(0.90, 0.74, 0.28, 1.0)
+                pClose:SetBackdropColor(0.22, 0.19, 0.14, 1.0)
+                pClose:SetBackdropBorderColor(0.84, 0.66, 0.24, 1.0)
                 local pCloseTxt = pClose:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 pCloseTxt:SetPoint("CENTER", 0, 1)
                 pCloseTxt:SetText("x")
 
-                local pSum = preview:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                pSum:SetPoint("TOPLEFT", 10, -34)
-                pSum:SetText(L["Online"] .. ": 3 / 5")
-                pSum:SetTextColor(1.0, 0.82, 0.0)
+                local pTab1 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                pTab1:SetSize(58, 16)
+                pTab1:SetPoint("TOPLEFT", 8, -30)
+                pTab1:SetBackdrop(BACKDROP_SPEC)
+                pTab1:SetBackdropColor(0.15, 0.13, 0.095, 1.0)
+                pTab1:SetBackdropBorderColor(0.86, 0.68, 0.24, 1.0)
+                local pTab1Acc = pTab1:CreateTexture(nil, "OVERLAY")
+                pTab1Acc:SetHeight(2)
+                pTab1Acc:SetPoint("TOPLEFT", 1, -1)
+                pTab1Acc:SetPoint("TOPRIGHT", -1, -1)
+                pTab1Acc:SetColorTexture(0.98, 0.80, 0.28, 1.0)
+                local pTab1Txt = pTab1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                pTab1Txt:SetPoint("CENTER")
+                pTab1Txt:SetText(L["Social"])
+
+                local pTab2 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                pTab2:SetSize(56, 16)
+                pTab2:SetPoint("LEFT", pTab1, "RIGHT", 4, 0)
+                pTab2:SetBackdrop(BACKDROP_SPEC)
+                pTab2:SetBackdropColor(0.075, 0.07, 0.075, 1.0)
+                pTab2:SetBackdropBorderColor(0.38, 0.31, 0.17, 1.0)
+                local pTab2Txt = pTab2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                pTab2Txt:SetPoint("CENTER")
+                pTab2Txt:SetText(L["Chat"])
+                pTab2Txt:SetTextColor(1.0, 0.82, 0.0)
 
                 local pWell = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                pWell:SetPoint("TOPLEFT", 8, -50)
+                pWell:SetPoint("TOPLEFT", 8, -48)
                 pWell:SetPoint("BOTTOMRIGHT", -8, 32)
-                pWell:SetBackdrop(BLIZZ_INSET_BACKDROP)
-                pWell:SetBackdropColor(0.20, 0.19, 0.18, 0.98)
-                pWell:SetBackdropBorderColor(0.54, 0.47, 0.34, 1.0)
+                pWell:SetBackdrop(BACKDROP_SPEC)
+                pWell:SetBackdropColor(0.048, 0.045, 0.042, 1.0)
+                pWell:SetBackdropBorderColor(0.36, 0.30, 0.19, 1.0)
 
                 local r1 = CreateFrame("Frame", nil, pWell, "BackdropTemplate")
-                r1:SetPoint("TOPLEFT", 6, -6)
-                r1:SetPoint("TOPRIGHT", -16, -6)
+                r1:SetPoint("TOPLEFT", 5, -5)
+                r1:SetPoint("TOPRIGHT", -14, -5)
                 r1:SetHeight(32)
                 r1:SetBackdrop(FLAT_BACKDROP_SPEC)
-                r1:SetBackdropColor(0.08, 0.075, 0.07, 0.36)
+                r1:SetBackdropColor(0.30, 0.23, 0.08, 0.45)
                 local d1 = r1:CreateTexture(nil, "OVERLAY")
                 d1:SetSize(6, 6)
                 d1:SetPoint("LEFT", 6, 4)
@@ -4400,7 +4720,7 @@ function Theme:ShowThemeWelcomePicker()
                 r2:SetPoint("TOPRIGHT", r1, "BOTTOMRIGHT", 0, -2)
                 r2:SetHeight(32)
                 r2:SetBackdrop(FLAT_BACKDROP_SPEC)
-                r2:SetBackdropColor(0.03, 0.03, 0.03, 0.46)
+                r2:SetBackdropColor(0.02, 0.02, 0.02, 0.45)
                 local d2 = r2:CreateTexture(nil, "OVERLAY")
                 d2:SetSize(6, 6)
                 d2:SetPoint("LEFT", 6, 4)
@@ -4412,57 +4732,73 @@ function Theme:ShowThemeWelcomePicker()
                 local s2 = r2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 s2:SetPoint("BOTTOMLEFT", 16, 4)
                 s2:SetText(L["Online"] .. " - Dalaran")
-                s2:SetTextColor(0.84, 0.80, 0.72)
+                s2:SetTextColor(0.78, 0.74, 0.66)
 
                 local pScroll = pWell:CreateTexture(nil, "ARTWORK")
-                pScroll:SetWidth(6)
-                pScroll:SetPoint("TOPRIGHT", -6, -8)
-                pScroll:SetPoint("BOTTOMRIGHT", -6, 8)
-                pScroll:SetColorTexture(0.38, 0.34, 0.28, 0.78)
+                pScroll:SetWidth(5)
+                pScroll:SetPoint("TOPRIGHT", -5, -6)
+                pScroll:SetPoint("BOTTOMRIGHT", -5, 6)
+                pScroll:SetColorTexture(0.56, 0.45, 0.24, 0.88)
 
-                local bRed = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                bRed:SetSize(74, 20)
-                bRed:SetPoint("BOTTOMLEFT", 8, 8)
-                bRed:SetBackdrop(BACKDROP_SPEC)
-                bRed:SetBackdropColor(0.62, 0.12, 0.10, 1.0)
-                bRed:SetBackdropBorderColor(0.84, 0.66, 0.24, 1.0)
-                local bRedTxt = bRed:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                bRedTxt:SetPoint("CENTER")
-                bRedTxt:SetText(L["Add"])
-                bRedTxt:SetTextColor(1.0, 0.88, 0.35)
+                local bPri = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                bPri:SetSize(66, 20)
+                bPri:SetPoint("BOTTOMLEFT", 8, 7)
+                bPri:SetBackdrop(BACKDROP_SPEC)
+                bPri:SetBackdropColor(0.48, 0.10, 0.08, 1.0)
+                bPri:SetBackdropBorderColor(0.94, 0.78, 0.24, 1.0)
+                local bPriTxt = bPri:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                bPriTxt:SetPoint("CENTER")
+                bPriTxt:SetText(L["Add"])
+                bPriTxt:SetTextColor(1.0, 0.92, 0.70)
 
-                local bGrey1 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                bGrey1:SetSize(82, 20)
-                bGrey1:SetPoint("LEFT", bRed, "RIGHT", 6, 0)
-                bGrey1:SetBackdrop(BACKDROP_SPEC)
-                bGrey1:SetBackdropColor(0.24, 0.24, 0.26, 1.0)
-                bGrey1:SetBackdropBorderColor(0.55, 0.50, 0.40, 1.0)
-                local bGrey1Txt = bGrey1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-                bGrey1Txt:SetPoint("CENTER")
-                bGrey1Txt:SetText(L["Whisper"])
-                bGrey1Txt:SetTextColor(0.88, 0.88, 0.90)
+                local bChar1 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                bChar1:SetSize(76, 20)
+                bChar1:SetPoint("LEFT", bPri, "RIGHT", 5, 0)
+                bChar1:SetBackdrop(BACKDROP_SPEC)
+                bChar1:SetBackdropColor(0.12, 0.11, 0.095, 1.0)
+                bChar1:SetBackdropBorderColor(0.40, 0.34, 0.21, 1.0)
+                local bChar1Txt = bChar1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                bChar1Txt:SetPoint("CENTER")
+                bChar1Txt:SetText(L["Whisper"])
+                bChar1Txt:SetTextColor(0.94, 0.86, 0.64)
 
-                local bGrey2 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                bGrey2:SetSize(74, 20)
-                bGrey2:SetPoint("LEFT", bGrey1, "RIGHT", 6, 0)
-                bGrey2:SetBackdrop(BACKDROP_SPEC)
-                bGrey2:SetBackdropColor(0.24, 0.24, 0.26, 1.0)
-                bGrey2:SetBackdropBorderColor(0.55, 0.50, 0.40, 1.0)
-                local bGrey2Txt = bGrey2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-                bGrey2Txt:SetPoint("CENTER")
-                bGrey2Txt:SetText(L["Invite"])
-                bGrey2Txt:SetTextColor(0.88, 0.88, 0.90)
+                local bChar2 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                bChar2:SetSize(68, 20)
+                bChar2:SetPoint("LEFT", bChar1, "RIGHT", 5, 0)
+                bChar2:SetBackdrop(BACKDROP_SPEC)
+                bChar2:SetBackdropColor(0.12, 0.11, 0.095, 1.0)
+                bChar2:SetBackdropBorderColor(0.40, 0.34, 0.21, 1.0)
+                local bChar2Txt = bChar2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                bChar2Txt:SetPoint("CENTER")
+                bChar2Txt:SetText(L["Invite"])
+                bChar2Txt:SetTextColor(0.94, 0.86, 0.64)
             else
+                local winC = isNativeSample and { 0.11, 0.10, 0.09, 1.0 } or { 0.06, 0.07, 0.09, 1.0 }
+                local winBr = isNativeSample and { 0.56, 0.48, 0.31, 1.0 } or { 0.20, 0.24, 0.30, 1.0 }
+                local hdrC = isNativeSample and { 0.16, 0.14, 0.11, 1.0 } or { 0.09, 0.11, 0.14, 1.0 }
+                local tabActBg = isNativeSample and { 0.44, 0.33, 0.11, 0.96 } or { 0.13, 0.36, 0.56, 0.95 }
+                local tabActBr = isNativeSample and { 0.92, 0.76, 0.31, 1.0 } or { 0.30, 0.72, 1.0, 1.0 }
+                local surfBg = isNativeSample and { 0.14, 0.13, 0.11, 1.0 } or { 0.09, 0.11, 0.15, 1.0 }
+                local surfBr = isNativeSample and { 0.45, 0.39, 0.26, 1.0 } or { 0.18, 0.22, 0.28, 1.0 }
+                local wellBg = isNativeSample and { 0.08, 0.07, 0.06, 0.96 } or { 0.05, 0.06, 0.08, 0.96 }
+                local row1Bg = isNativeSample and { 0.33, 0.26, 0.13, 0.90 } or { 0.14, 0.27, 0.42, 0.90 }
+                local row2Bg = isNativeSample and { 0.12, 0.11, 0.09, 0.75 } or { 0.10, 0.12, 0.16, 0.75 }
+                local txtMain = isNativeSample and { 0.98, 0.94, 0.84 } or { 0.93, 0.95, 0.98 }
+                local txtMuted = isNativeSample and { 0.76, 0.70, 0.58 } or { 0.62, 0.68, 0.76 }
+                local btnBg = isNativeSample and { 0.22, 0.18, 0.13, 0.96 } or { 0.14, 0.17, 0.22, 0.95 }
+                local btnBr = isNativeSample and { 0.58, 0.49, 0.31, 0.95 } or { 0.28, 0.33, 0.41, 0.95 }
+                local thumbC = isNativeSample and { 0.52, 0.44, 0.28, 0.92 } or { 0.30, 0.37, 0.48, 0.90 }
+
                 preview:SetBackdrop(BACKDROP_SPEC)
-                preview:SetBackdropColor(0.06, 0.07, 0.09, 1.0)
-                preview:SetBackdropBorderColor(0.20, 0.24, 0.30, 1.0)
+                preview:SetBackdropColor(winC[1], winC[2], winC[3], 1.0)
+                preview:SetBackdropBorderColor(winBr[1], winBr[2], winBr[3], 1.0)
 
                 local pHdr = CreateFrame("Frame", nil, preview, "BackdropTemplate")
                 pHdr:SetPoint("TOPLEFT", 1, -1)
                 pHdr:SetPoint("TOPRIGHT", -1, -1)
                 pHdr:SetHeight(24)
                 pHdr:SetBackdrop(FLAT_BACKDROP_SPEC)
-                pHdr:SetBackdropColor(0.09, 0.11, 0.14, 1.0)
+                pHdr:SetBackdropColor(hdrC[1], hdrC[2], hdrC[3], 1.0)
 
                 local pIcon = pHdr:CreateTexture(nil, "ARTWORK")
                 pIcon:SetSize(15, 15)
@@ -4472,53 +4808,53 @@ function Theme:ShowThemeWelcomePicker()
                 local pTitle = pHdr:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 pTitle:SetPoint("LEFT", pIcon, "RIGHT", 6, 0)
                 pTitle:SetText("SocialCentral")
-                pTitle:SetTextColor(0.93, 0.95, 0.98)
+                pTitle:SetTextColor(txtMain[1], txtMain[2], txtMain[3])
 
                 local pTab1 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                pTab1:SetSize(64, 18)
-                pTab1:SetPoint("TOPLEFT", 8, -30)
+                pTab1:SetSize(58, 17)
+                pTab1:SetPoint("TOPLEFT", 8, -29)
                 pTab1:SetBackdrop(BACKDROP_SPEC)
-                pTab1:SetBackdropColor(0.13, 0.36, 0.56, 0.95)
-                pTab1:SetBackdropBorderColor(0.30, 0.72, 1.0, 1.0)
+                pTab1:SetBackdropColor(tabActBg[1], tabActBg[2], tabActBg[3], 0.95)
+                pTab1:SetBackdropBorderColor(tabActBr[1], tabActBr[2], tabActBr[3], 1.0)
                 local pTab1Txt = pTab1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 pTab1Txt:SetPoint("CENTER")
                 pTab1Txt:SetText(L["Social"])
 
                 local pTab2 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                pTab2:SetSize(62, 18)
+                pTab2:SetSize(54, 17)
                 pTab2:SetPoint("LEFT", pTab1, "RIGHT", 4, 0)
                 pTab2:SetBackdrop(BACKDROP_SPEC)
-                pTab2:SetBackdropColor(0.09, 0.11, 0.15, 1.0)
-                pTab2:SetBackdropBorderColor(0.18, 0.22, 0.28, 1.0)
+                pTab2:SetBackdropColor(surfBg[1], surfBg[2], surfBg[3], 1.0)
+                pTab2:SetBackdropBorderColor(surfBr[1], surfBr[2], surfBr[3], 1.0)
                 local pTab2Txt = pTab2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 pTab2Txt:SetPoint("CENTER")
                 pTab2Txt:SetText(L["Chat"])
-                pTab2Txt:SetTextColor(0.62, 0.68, 0.76)
+                pTab2Txt:SetTextColor(txtMuted[1], txtMuted[2], txtMuted[3])
 
                 local pTab3 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                pTab3:SetSize(62, 18)
+                pTab3:SetSize(54, 17)
                 pTab3:SetPoint("LEFT", pTab2, "RIGHT", 4, 0)
                 pTab3:SetBackdrop(BACKDROP_SPEC)
-                pTab3:SetBackdropColor(0.09, 0.11, 0.15, 1.0)
-                pTab3:SetBackdropBorderColor(0.18, 0.22, 0.28, 1.0)
+                pTab3:SetBackdropColor(surfBg[1], surfBg[2], surfBg[3], 1.0)
+                pTab3:SetBackdropBorderColor(surfBr[1], surfBr[2], surfBr[3], 1.0)
                 local pTab3Txt = pTab3:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 pTab3Txt:SetPoint("CENTER")
                 pTab3Txt:SetText(L["Clan"])
-                pTab3Txt:SetTextColor(0.62, 0.68, 0.76)
+                pTab3Txt:SetTextColor(txtMuted[1], txtMuted[2], txtMuted[3])
 
                 local pWell = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                pWell:SetPoint("TOPLEFT", 8, -52)
+                pWell:SetPoint("TOPLEFT", 8, -50)
                 pWell:SetPoint("BOTTOMRIGHT", -8, 32)
                 pWell:SetBackdrop(BACKDROP_SPEC)
-                pWell:SetBackdropColor(0.05, 0.06, 0.08, 0.96)
-                pWell:SetBackdropBorderColor(0.18, 0.22, 0.28, 0.90)
+                pWell:SetBackdropColor(wellBg[1], wellBg[2], wellBg[3], 0.96)
+                pWell:SetBackdropBorderColor(surfBr[1], surfBr[2], surfBr[3], 0.90)
 
                 local r1 = CreateFrame("Frame", nil, pWell, "BackdropTemplate")
                 r1:SetPoint("TOPLEFT", 4, -4)
                 r1:SetPoint("TOPRIGHT", -14, -4)
                 r1:SetHeight(32)
                 r1:SetBackdrop(FLAT_BACKDROP_SPEC)
-                r1:SetBackdropColor(0.14, 0.27, 0.42, 0.90)
+                r1:SetBackdropColor(row1Bg[1], row1Bg[2], row1Bg[3], 0.90)
                 local d1 = r1:CreateTexture(nil, "OVERLAY")
                 d1:SetSize(6, 6)
                 d1:SetPoint("LEFT", 6, 4)
@@ -4526,18 +4862,18 @@ function Theme:ShowThemeWelcomePicker()
                 local n1 = r1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 n1:SetPoint("TOPLEFT", 16, -4)
                 n1:SetText("Valkur Maul")
-                n1:SetTextColor(0.93, 0.95, 0.98)
+                n1:SetTextColor(txtMain[1], txtMain[2], txtMain[3])
                 local s1 = r1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 s1:SetPoint("BOTTOMLEFT", 16, 4)
                 s1:SetText(L["Online"] .. " - Stormwind")
-                s1:SetTextColor(0.62, 0.76, 0.92)
+                s1:SetTextColor(tabActBr[1], tabActBr[2], tabActBr[3])
 
                 local r2 = CreateFrame("Frame", nil, pWell, "BackdropTemplate")
                 r2:SetPoint("TOPLEFT", r1, "BOTTOMLEFT", 0, -2)
                 r2:SetPoint("TOPRIGHT", r1, "BOTTOMRIGHT", 0, -2)
                 r2:SetHeight(32)
                 r2:SetBackdrop(FLAT_BACKDROP_SPEC)
-                r2:SetBackdropColor(0.10, 0.12, 0.16, 0.75)
+                r2:SetBackdropColor(row2Bg[1], row2Bg[2], row2Bg[3], 0.75)
                 local d2 = r2:CreateTexture(nil, "OVERLAY")
                 d2:SetSize(6, 6)
                 d2:SetPoint("LEFT", 6, 4)
@@ -4545,50 +4881,50 @@ function Theme:ShowThemeWelcomePicker()
                 local n2 = r2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 n2:SetPoint("TOPLEFT", 16, -4)
                 n2:SetText("Elune")
-                n2:SetTextColor(0.93, 0.95, 0.98)
+                n2:SetTextColor(txtMain[1], txtMain[2], txtMain[3])
                 local s2 = r2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 s2:SetPoint("BOTTOMLEFT", 16, 4)
                 s2:SetText(L["Online"] .. " - Dalaran")
-                s2:SetTextColor(0.62, 0.68, 0.76)
+                s2:SetTextColor(txtMuted[1], txtMuted[2], txtMuted[3])
 
                 local pScroll = pWell:CreateTexture(nil, "ARTWORK")
                 pScroll:SetWidth(5)
                 pScroll:SetPoint("TOPRIGHT", -4, -6)
                 pScroll:SetPoint("BOTTOMRIGHT", -4, 6)
-                pScroll:SetColorTexture(0.30, 0.37, 0.48, 0.90)
+                pScroll:SetColorTexture(thumbC[1], thumbC[2], thumbC[3], thumbC[4])
 
-                local bBlue = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                bBlue:SetSize(74, 20)
-                bBlue:SetPoint("BOTTOMLEFT", 8, 8)
-                bBlue:SetBackdrop(BACKDROP_SPEC)
-                bBlue:SetBackdropColor(0.13, 0.36, 0.56, 0.95)
-                bBlue:SetBackdropBorderColor(0.30, 0.72, 1.0, 0.95)
-                local bBlueTxt = bBlue:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-                bBlueTxt:SetPoint("CENTER")
-                bBlueTxt:SetText(L["Add"])
-                bBlueTxt:SetTextColor(0.95, 0.98, 1.0)
+                local bPri = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                bPri:SetSize(66, 20)
+                bPri:SetPoint("BOTTOMLEFT", 8, 7)
+                bPri:SetBackdrop(BACKDROP_SPEC)
+                bPri:SetBackdropColor(tabActBg[1], tabActBg[2], tabActBg[3], 0.95)
+                bPri:SetBackdropBorderColor(tabActBr[1], tabActBr[2], tabActBr[3], 0.95)
+                local bPriTxt = bPri:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                bPriTxt:SetPoint("CENTER")
+                bPriTxt:SetText(L["Add"])
+                bPriTxt:SetTextColor(txtMain[1], txtMain[2], txtMain[3])
 
-                local bSlate1 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                bSlate1:SetSize(82, 20)
-                bSlate1:SetPoint("LEFT", bBlue, "RIGHT", 6, 0)
-                bSlate1:SetBackdrop(BACKDROP_SPEC)
-                bSlate1:SetBackdropColor(0.14, 0.17, 0.22, 0.95)
-                bSlate1:SetBackdropBorderColor(0.28, 0.33, 0.41, 0.95)
-                local bSlate1Txt = bSlate1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-                bSlate1Txt:SetPoint("CENTER")
-                bSlate1Txt:SetText(L["Whisper"])
-                bSlate1Txt:SetTextColor(0.90, 0.94, 0.98)
+                local bSec1 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                bSec1:SetSize(76, 20)
+                bSec1:SetPoint("LEFT", bPri, "RIGHT", 5, 0)
+                bSec1:SetBackdrop(BACKDROP_SPEC)
+                bSec1:SetBackdropColor(btnBg[1], btnBg[2], btnBg[3], 0.95)
+                bSec1:SetBackdropBorderColor(btnBr[1], btnBr[2], btnBr[3], 0.95)
+                local bSec1Txt = bSec1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                bSec1Txt:SetPoint("CENTER")
+                bSec1Txt:SetText(L["Whisper"])
+                bSec1Txt:SetTextColor(txtMain[1], txtMain[2], txtMain[3])
 
-                local bSlate2 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
-                bSlate2:SetSize(74, 20)
-                bSlate2:SetPoint("LEFT", bSlate1, "RIGHT", 6, 0)
-                bSlate2:SetBackdrop(BACKDROP_SPEC)
-                bSlate2:SetBackdropColor(0.14, 0.17, 0.22, 0.95)
-                bSlate2:SetBackdropBorderColor(0.28, 0.33, 0.41, 0.95)
-                local bSlate2Txt = bSlate2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-                bSlate2Txt:SetPoint("CENTER")
-                bSlate2Txt:SetText(L["Invite"])
-                bSlate2Txt:SetTextColor(0.90, 0.94, 0.98)
+                local bSec2 = CreateFrame("Frame", nil, preview, "BackdropTemplate")
+                bSec2:SetSize(68, 20)
+                bSec2:SetPoint("LEFT", bSec1, "RIGHT", 5, 0)
+                bSec2:SetBackdrop(BACKDROP_SPEC)
+                bSec2:SetBackdropColor(btnBg[1], btnBg[2], btnBg[3], 0.95)
+                bSec2:SetBackdropBorderColor(btnBr[1], btnBr[2], btnBr[3], 0.95)
+                local bSec2Txt = bSec2:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                bSec2Txt:SetPoint("CENTER")
+                bSec2Txt:SetText(L["Invite"])
+                bSec2Txt:SetTextColor(txtMain[1], txtMain[2], txtMain[3])
             end
 
             local cap = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -4597,8 +4933,10 @@ function Theme:ShowThemeWelcomePicker()
             cap:SetJustifyH("LEFT")
             cap:SetWordWrap(true)
             cap:SetText(isBlizzSample
-                and L["Portrait, marble inset & classic two-tone buttons"]
-                or L["Dark slate surface, sky-blue accents & flat buttons"])
+                and L["Portrait, dark inset well & matte charcoal-bronze buttons"]
+                or (isNativeSample
+                    and L["Warm obsidian-bronze surface, gold accents & amber glow"]
+                    or L["Dark slate surface, sky-blue accents & flat buttons"]))
             cap:SetTextColor(0.76, 0.80, 0.86)
 
             local cta = CreateFrame("Button", nil, card, "BackdropTemplate")
@@ -4607,8 +4945,11 @@ function Theme:ShowThemeWelcomePicker()
             cta:SetPoint("BOTTOMRIGHT", -14, 12)
             cta:SetBackdrop(BACKDROP_SPEC)
             if isBlizzSample then
-                cta:SetBackdropColor(0.58, 0.12, 0.10, 1.0)
-                cta:SetBackdropBorderColor(0.92, 0.76, 0.26, 1.0)
+                cta:SetBackdropColor(0.48, 0.10, 0.08, 1.0)
+                cta:SetBackdropBorderColor(0.94, 0.78, 0.24, 1.0)
+            elseif isNativeSample then
+                cta:SetBackdropColor(0.44, 0.33, 0.11, 1.0)
+                cta:SetBackdropBorderColor(0.92, 0.76, 0.31, 1.0)
             else
                 cta:SetBackdropColor(0.14, 0.38, 0.60, 1.0)
                 cta:SetBackdropBorderColor(0.32, 0.74, 1.0, 1.0)
@@ -4618,44 +4959,84 @@ function Theme:ShowThemeWelcomePicker()
             cta.lbl:SetPoint("RIGHT", -8, 0)
             cta.lbl:SetJustifyH("CENTER")
             cta.lbl:SetWordWrap(false)
-            cta.lbl:SetText(isBlizzSample and L["Use Blizzard Official (Default)"] or L["Use Modern Theme"])
-            cta.lbl:SetTextColor(isBlizzSample and 1.0 or 0.96, isBlizzSample and 0.90 or 0.98, isBlizzSample and 0.42 or 1.0)
+            cta.lbl:SetText(isBlizzSample
+                and L["Use Blizzard Official (Default)"]
+                or (isNativeSample and L["Use Classic Gold"] or L["Use Modern Theme"]))
+            cta.lbl:SetTextColor(
+                (isBlizzSample or isNativeSample) and 1.0 or 0.96,
+                isBlizzSample and 0.92 or (isNativeSample and 0.94 or 0.98),
+                isBlizzSample and 0.56 or (isNativeSample and 0.66 or 1.0)
+            )
 
-            local targetTheme = isBlizzSample and "blizzard" or "dark"
             card:SetScript("OnEnter", function(selfCard)
                 selfCard:SetBackdropBorderColor(hoverBorder[1], hoverBorder[2], hoverBorder[3], 1.0)
             end)
             card:SetScript("OnLeave", function(selfCard)
-                selfCard:SetBackdropBorderColor(baseBorder[1], baseBorder[2], baseBorder[3], baseBorder[4])
+                local curTheme = Theme:GetThemeName()
+                local br = (curTheme == kind) and hoverBorder or baseBorder
+                selfCard:SetBackdropBorderColor(br[1], br[2], br[3], br[4] or 1.0)
             end)
             card:SetScript("OnMouseUp", function()
-                FinishChoice(targetTheme)
+                FinishChoice(kind)
             end)
             cta:SetScript("OnEnter", function()
                 card:SetBackdropBorderColor(hoverBorder[1], hoverBorder[2], hoverBorder[3], 1.0)
             end)
             cta:SetScript("OnLeave", function()
-                card:SetBackdropBorderColor(baseBorder[1], baseBorder[2], baseBorder[3], baseBorder[4])
+                local curTheme = Theme:GetThemeName()
+                local br = (curTheme == kind) and hoverBorder or baseBorder
+                card:SetBackdropBorderColor(br[1], br[2], br[3], br[4] or 1.0)
             end)
             cta:SetScript("OnClick", function()
-                FinishChoice(targetTheme)
+                FinishChoice(kind)
             end)
             return card
         end
 
-        m.cardBlizz = BuildSampleCard(true, "TOPLEFT", 20)
-        m.cardModern = BuildSampleCard(false, "TOPRIGHT", -20)
+        m.cardBlizz = BuildSampleCard("blizzard", 20)
+        m.cardNative = BuildSampleCard("native", 322)
+        m.cardModern = BuildSampleCard("dark", 624)
+
+        local function SyncPickerState()
+            local curTheme = Theme:GetThemeName()
+            local cards = { m.cardBlizz, m.cardNative, m.cardModern }
+            for _, c in ipairs(cards) do
+                if c then
+                    local active = (c._themeKind == curTheme)
+                    local br = active and c._hoverBorder or c._baseBorder
+                    c:SetBackdropBorderColor(br[1], br[2], br[3], br[4] or 1.0)
+                    if c.badge then
+                        if active then
+                            c.badge:SetText("[" .. L["In Use"] .. "]")
+                            c.badge:SetTextColor(0.30, 0.92, 0.45)
+                        elseif c._themeKind == "blizzard" then
+                            c.badge:SetText("[" .. L["Default"] .. "]")
+                            c.badge:SetTextColor(0.96, 0.80, 0.28)
+                        else
+                            c.badge:SetText("[" .. L["Optional"] .. "]")
+                            c.badge:SetTextColor(0.62, 0.72, 0.86)
+                        end
+                    end
+                end
+            end
+        end
+        m.SyncPickerState = SyncPickerState
+        SyncPickerState()
 
         self:RegisterListener(function()
             if m:IsShown() then
                 self:ApplyBackdrop(m, "window")
                 self:StyleButton(m.closeBtn, "default")
+                if m.SyncPickerState then m.SyncPickerState() end
             end
         end)
 
         themeWelcomePopup = m
     end
 
+    if themeWelcomePopup.SyncPickerState then
+        themeWelcomePopup.SyncPickerState()
+    end
     self:PrepareTopOverlayModal(themeWelcomePopup, 880)
     self:ApplyBackdrop(themeWelcomePopup, "window")
     self:StyleButton(themeWelcomePopup.closeBtn, "default")
@@ -4721,9 +5102,15 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
         emptyText = nil,
     }
 
+    local emptyRule = viewport:CreateTexture(nil, "ARTWORK")
+    emptyRule:SetSize(84, 1)
+    emptyRule:SetPoint("CENTER", viewport, "CENTER", 0, 22)
+    emptyRule:Hide()
+    list.emptyRule = emptyRule
+
     local emptyLabel = viewport:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    emptyLabel:SetPoint("LEFT", viewport, "LEFT", 16, 6)
-    emptyLabel:SetPoint("RIGHT", viewport, "RIGHT", -16, 6)
+    emptyLabel:SetPoint("LEFT", viewport, "LEFT", 16, 4)
+    emptyLabel:SetPoint("RIGHT", viewport, "RIGHT", -16, 4)
     emptyLabel:SetJustifyH("CENTER")
     emptyLabel:SetWordWrap(true)
     emptyLabel:Hide()
@@ -4732,30 +5119,56 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     local function UpdateTrackColors(hovered)
         local p = Theme:GetPalette()
         local isBlizz = Theme:IsBlizzard(p)
-        viewport:ClearAllPoints()
-        track:ClearAllPoints()
-        if scrollUpBtn then scrollUpBtn:Hide() end
-        if scrollDownBtn then scrollDownBtn:Hide() end
-        if isBlizz then
-            viewport:SetPoint("TOPLEFT", 3, -3)
-            viewport:SetPoint("BOTTOMRIGHT", -13, 3)
-            track:SetWidth(6)
-            track:SetPoint("TOPRIGHT", -4, -4)
-            track:SetPoint("BOTTOMRIGHT", -4, 4)
-        else
-            viewport:SetPoint("TOPLEFT", 2, -2)
-            viewport:SetPoint("BOTTOMRIGHT", -12, 2)
-            track:SetWidth(6)
-            track:SetPoint("TOPRIGHT", -3, -4)
-            track:SetPoint("BOTTOMRIGHT", -3, 4)
+        local sbSig = tostring(p and p.key or "dark") .. (hovered and ":1" or ":0")
+        if list._scTrackThemeSig ~= sbSig then
+            list._scTrackThemeSig = sbSig
+            viewport:ClearAllPoints()
+            track:ClearAllPoints()
+            if scrollUpBtn then scrollUpBtn:Hide() end
+            if scrollDownBtn then scrollDownBtn:Hide() end
+            if isBlizz then
+                viewport:SetPoint("TOPLEFT", 3, -3)
+                viewport:SetPoint("BOTTOMRIGHT", -13, 3)
+                track:SetWidth(6)
+                track:SetPoint("TOPRIGHT", -4, -4)
+                track:SetPoint("BOTTOMRIGHT", -4, 4)
+            else
+                viewport:SetPoint("TOPLEFT", 2, -2)
+                viewport:SetPoint("BOTTOMRIGHT", -12, 2)
+                track:SetWidth(6)
+                track:SetPoint("TOPRIGHT", -3, -4)
+                track:SetPoint("BOTTOMRIGHT", -3, 4)
+            end
+            if track.SetBackdrop then
+                track:SetBackdrop(BACKDROP_SPEC)
+                track:SetBackdropColor(p.scrollTrack[1], p.scrollTrack[2], p.scrollTrack[3], p.scrollTrack[4])
+                local br = p.surfaceBorder or { 0.25, 0.25, 0.25, 0.4 }
+                track:SetBackdropBorderColor(br[1], br[2], br[3], 0.42)
+            end
+            local c = hovered and p.scrollThumbHover or p.scrollThumb
+            local cTopR, cTopG, cTopB = math.min(1, c[1] + 0.14), math.min(1, c[2] + 0.14), math.min(1, c[3] + 0.14)
+            ApplySafeGradient(thumb.tex, "VERTICAL", c[1], c[2], c[3], c[4] or 0.92, cTopR, cTopG, cTopB, c[4] or 0.96)
+            if not thumb._topGloss then
+                local tg = thumb:CreateTexture(nil, "OVERLAY", nil, 1)
+                tg:SetHeight(1)
+                tg:SetPoint("TOPLEFT", 0, 0)
+                tg:SetPoint("TOPRIGHT", 0, 0)
+                thumb._topGloss = tg
+            end
+            thumb._topGloss:SetColorTexture(1, 0.96, 0.88, hovered and 0.45 or 0.24)
+            emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+            local ac = (isBlizz or p.key == "native") and { 0.88, 0.72, 0.28 } or (p.accentBorder or { 0.35, 0.78, 1.0 })
+            emptyRule:SetColorTexture(ac[1], ac[2], ac[3], 0.35)
         end
-        if track.SetBackdrop then
-            track:SetBackdrop(FLAT_BACKDROP_SPEC)
-            track:SetBackdropColor(p.scrollTrack[1], p.scrollTrack[2], p.scrollTrack[3], p.scrollTrack[4])
+        local sepR, sepG, sepB, sepA = 0.55, 0.78, 1.0, 0.06
+        if isBlizz or p.key == "native" then
+            sepR, sepG, sepB, sepA = 0.78, 0.64, 0.28, 0.085
         end
-        local c = hovered and p.scrollThumbHover or p.scrollThumb
-        thumb.tex:SetColorTexture(c[1], c[2], c[3], c[4])
-        emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        for _, r in ipairs(list.rows) do
+            if r._scRowSep then
+                r._scRowSep:SetColorTexture(sepR, sepG, sepB, sepA)
+            end
+        end
     end
 
     thumb:SetScript("OnEnter", function() UpdateTrackColors(true) end)
@@ -4776,6 +5189,15 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
             vpH = 280
         end
         local needed = math.max(1, math.ceil(vpH / list.rowHeight) + 1)
+        if #list.rows >= needed then
+            return
+        end
+        local p = Theme:GetPalette()
+        local isWarm = (p and (p.key == "blizzard" or p.key == "native"))
+        local sepR, sepG, sepB, sepA = 0.55, 0.78, 1.0, 0.06
+        if isWarm then
+            sepR, sepG, sepB, sepA = 0.78, 0.64, 0.28, 0.085
+        end
         while #list.rows < needed do
             local idx = #list.rows + 1
             local row = createRowFn(viewport, idx, list.rowHeight)
@@ -4787,7 +5209,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
                 rSep:SetHeight(1)
                 rSep:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 6, 0)
                 rSep:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -6, 0)
-                rSep:SetColorTexture(1, 1, 1, 0.05)
+                rSep:SetColorTexture(sepR, sepG, sepB, sepA)
                 row._scRowSep = rSep
             end
             list.rows[idx] = row
@@ -4796,6 +5218,10 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
 
     local function SyncScrollListLayers()
         local cLvl = math.max(1, math.min(9960, (container.GetFrameLevel and container:GetFrameLevel()) or 1))
+        if list._scLastContainerLvl == cLvl then
+            return cLvl
+        end
+        list._scLastContainerLvl = cLvl
         if viewport.SetFrameLevel and (viewport:GetFrameLevel() or 0) ~= (cLvl + 1) then
             viewport:SetFrameLevel(cLvl + 1)
         end
@@ -4809,6 +5235,8 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     end
 
     function list:RefreshTheme()
+        list._scTrackThemeSig = nil
+        list._scLastContainerLvl = nil
         Theme:ApplyBackdrop(container, "inset")
         SyncScrollListLayers()
         UpdateTrackColors(false)
@@ -4821,7 +5249,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
 
     --- Dynamically update scroll row height and re-pool rows to support compact/standard density modes.
     function list:SetRowHeight(newHeight)
-        local h = tonumber(newHeight)
+        local h = math.max(16, tonumber(newHeight) or 30)
         if not h or h < 16 or self.rowHeight == h then
             return
         end
@@ -4830,6 +5258,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
             if row.SetHeight then
                 row:SetHeight(h)
             end
+            row._scRenderedY = nil
         end
         local maxOffset = GetMaxOffset()
         if (self.offset or 0) > maxOffset then
@@ -4853,10 +5282,13 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
 
         local total = #self.items
         if total == 0 then
+            local hasEmpty = (self.emptyText ~= nil and self.emptyText ~= "")
             emptyLabel:SetText(self.emptyText or "")
-            emptyLabel:SetShown(self.emptyText ~= nil and self.emptyText ~= "")
+            emptyLabel:SetShown(hasEmpty)
+            emptyRule:SetShown(hasEmpty)
         else
             emptyLabel:Hide()
+            emptyRule:Hide()
         end
 
         local firstIndex = math.floor(self.offset / self.rowHeight) + 1
@@ -5001,6 +5433,60 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
 
     UpdateTrackColors(false)
     return list
+end
+
+--- Sleek theme-aware reskin for native UIPanelScrollFrameTemplate scrollbars across Settings and modals.
+function Theme:StyleScrollFrame(sf)
+    if not sf then return end
+    local p = self:GetPalette()
+    local isBlizz = self:IsBlizzard(p)
+    local sbName = sf.GetName and sf:GetName() or nil
+    local sb = sf.ScrollBar or (sbName and _G[sbName .. "ScrollBar"]) or nil
+    if not sb then return end
+    local sig = tostring(p and p.key or "dark")
+    if sb._scStyledSig == sig then
+        return
+    end
+    sb._scStyledSig = sig
+
+    if not sb._scBgStrip then
+        local bg = sb:CreateTexture(nil, "BACKGROUND", nil, -6)
+        bg:SetWidth(8)
+        bg:SetPoint("TOP", sb, "TOP", 0, -16)
+        bg:SetPoint("BOTTOM", sb, "BOTTOM", 0, 16)
+        sb._scBgStrip = bg
+    end
+    local tr = p.scrollTrack or { 0.06, 0.07, 0.09, 0.78 }
+    sb._scBgStrip:SetColorTexture(tr[1], tr[2], tr[3], tr[4] or 0.80)
+
+    local thumb = (sb.GetThumbTexture and sb:GetThumbTexture())
+        or sb.ThumbTexture
+        or (sbName and _G[sbName .. "ScrollBarThumbTexture"])
+        or nil
+    if thumb and thumb.SetTexture then
+        local tc = p.scrollThumb or { 0.35, 0.42, 0.55, 0.90 }
+        thumb:SetTexture(WHITE8X8)
+        thumb:SetVertexColor(tc[1], tc[2], tc[3], tc[4] or 0.92)
+        thumb:SetWidth(8)
+    end
+
+    local upBtn = sb.ScrollUpButton or (sbName and _G[sbName .. "ScrollBarScrollUpButton"])
+    local dnBtn = sb.ScrollDownButton or (sbName and _G[sbName .. "ScrollBarScrollDownButton"])
+    local tintA = isBlizz and 0.92 or 0.72
+    if upBtn and upBtn.SetAlpha then upBtn:SetAlpha(tintA) end
+    if dnBtn and dnBtn.SetAlpha then dnBtn:SetAlpha(tintA) end
+
+    local nReg = sb.GetNumRegions and sb:GetNumRegions() or 0
+    for i = 1, nReg do
+        local reg = select(i, sb:GetRegions())
+        if reg and reg ~= sb._scBgStrip and reg ~= thumb and reg.GetObjectType and reg:GetObjectType() == "Texture" then
+            if isBlizz then
+                reg:SetAlpha(0.75)
+            else
+                reg:SetAlpha(0.18)
+            end
+        end
+    end
 end
 
 local BADGE_CIRCLE_TEX = "Interface\\AddOns\\SocialCentral\\Media\\dot"
@@ -5557,6 +6043,7 @@ function Theme:CreateCounterBadge(parent, opts)
 
     local function StopAnimLoop()
         anim:SetScript("OnUpdate", nil)
+        b._animAccum = 0
         anim:SetScale(1)
         if b._fusion and b._fusion.flash then
             b._fusion.flash:Hide()
@@ -5574,7 +6061,6 @@ function Theme:CreateCounterBadge(parent, opts)
             StopAnimLoop()
             return
         end
-        local delta = math.min(dt or 0, 0.05)
         local now = (GetTime and GetTime()) or 0
         local pulsing = b._pulseEnabled == true
         local popping = (b._popUntil or 0) > now
@@ -5584,6 +6070,18 @@ function Theme:CreateCounterBadge(parent, opts)
             StopAnimLoop()
             return
         end
+        local stepDt = dt or 0
+        if not popping and not bursting then
+            b._animAccum = (b._animAccum or 0) + stepDt
+            if b._animAccum < 0.04 then
+                return
+            end
+            stepDt = b._animAccum
+            b._animAccum = 0
+        else
+            b._animAccum = 0
+        end
+        local delta = math.min(stepDt, 0.08)
 
         if popping then
             local popDur = bursting and 0.34 or 0.24
@@ -5704,6 +6202,14 @@ function Theme:CreateCounterBadge(parent, opts)
     end
 
     function b:SetCount(count, toneKey)
+        local n = math.floor(tonumber(count) or 0)
+        local resolvedTone = toneKey and (type(toneKey) == "string" and BADGE_TONES[toneKey:lower()] and toneKey:lower() or "whisper") or (self._tone or "whisper")
+        if n <= 0 and not self._isMulti and (self._count or 0) == 0 and not self:IsShown() then
+            return
+        end
+        if n > 0 and not self._isMulti and self._count == n and self._tone == resolvedTone and self:IsShown() then
+            return
+        end
         self._isMulti = false
         self._multiTones = nil
         HideFusionVisuals()
@@ -5715,7 +6221,6 @@ function Theme:CreateCounterBadge(parent, opts)
         else
             ApplyToneColors(self._tone or "whisper")
         end
-        local n = math.floor(tonumber(count) or 0)
         if n <= 0 then
             self._count = 0
             self._popUntil = 0
@@ -5956,7 +6461,235 @@ function Theme:CreateOfficialQuickButton(parent, opts)
     return btn
 end
 
+local hookedBlizzMenuFrames = setmetatable({}, { __mode = "k" })
+
+local function IsSocialCentralMenuOwner(owner)
+    local cur = owner
+    local depth = 0
+    while cur and depth < 16 do
+        depth = depth + 1
+        if cur.IsForbidden and cur:IsForbidden() then
+            return false
+        end
+        if Theme._overlayModals and Theme._overlayModals[cur] == true then
+            return true
+        end
+        local name = cur.GetName and cur:GetName() or nil
+        if type(name) == "string" and name:sub(1, 13) == "SocialCentral" then
+            return true
+        end
+        if cur == _G.SocialCentralFrame
+            or cur == _G.SocialCentralQuickReplyFrame
+            or cur == _G.SocialCentralLFGStandaloneHost
+            or cur == _G.SocialCentralSettingsFrame
+        then
+            return true
+        end
+        cur = cur.GetParent and cur:GetParent() or nil
+    end
+    return false
+end
+
+function Theme:GetHighestShownOverlayLevel()
+    local best = 0
+    if not self._overlayModals then
+        return 0
+    end
+    for m in pairs(self._overlayModals) do
+        if m and m.IsShown and m:IsShown()
+            and m.GetFrameStrata and m:GetFrameStrata() == "FULLSCREEN_DIALOG"
+            and m.GetFrameLevel
+        then
+            local okLvl, lvl = pcall(m.GetFrameLevel, m)
+            if okLvl and type(lvl) == "number" and lvl > best then
+                best = lvl
+            end
+        end
+    end
+    return best
+end
+
+local function ElevateSingleMenuFrame(mf, minLevel)
+    if not mf then return false end
+    if (mf.IsForbidden and mf:IsForbidden()) or (mf.IsProtected and mf:IsProtected()) then
+        return false
+    end
+    if mf.IsShown and not mf:IsShown() then
+        return false
+    end
+    if mf.GetFrameStrata and mf:GetFrameStrata() ~= "FULLSCREEN_DIALOG" and mf.SetFrameStrata then
+        pcall(mf.SetFrameStrata, mf, "FULLSCREEN_DIALOG")
+    end
+    local okCur, curLvl = pcall(mf.GetFrameLevel, mf)
+    curLvl = (okCur and type(curLvl) == "number") and curLvl or 0
+    if curLvl < minLevel and mf.SetFrameLevel then
+        pcall(mf.SetFrameLevel, mf, minLevel)
+    end
+    if mf.Raise then
+        pcall(mf.Raise, mf)
+    end
+    if not hookedBlizzMenuFrames[mf] and mf.HookScript then
+        hookedBlizzMenuFrames[mf] = true
+        mf:HookScript("OnShow", function(selfMf)
+            local mgr = _G.Menu and _G.Menu.GetManager and _G.Menu.GetManager() or nil
+            local anyOverlay = Theme:GetHighestShownOverlayLevel() > 0
+            if Theme._lastMenuWasSocialCentral or anyOverlay or (mgr and mgr.IsAnyMenuOpen and mgr:IsAnyMenuOpen() and (Theme._menuElevationUntil or 0) >= ((_G.GetTime and _G.GetTime()) or 0)) then
+                Theme:ElevateOpenBlizzardMenus()
+            end
+        end)
+    end
+    return true
+end
+
+local function LooksLikeBlizzardMenuContainer(frame, openMenu)
+    if not frame or (frame.IsForbidden and frame:IsForbidden()) or (frame.IsProtected and frame:IsProtected()) then
+        return false
+    end
+    if openMenu and frame == openMenu then
+        return true
+    end
+    if type(frame.GetMenuDescription) == "function" or frame.menuDescription ~= nil or type(frame.SetMenuDescription) == "function" then
+        return true
+    end
+    local name = frame.GetName and frame:GetName() or nil
+    if type(name) == "string" and name:match("^DropDownList%d+$") then
+        return true
+    end
+    return false
+end
+
+local function ElevateMenuSubtree(rootFrame, baseLevel, depth, seen)
+    if not rootFrame or seen[rootFrame] or depth > 6 then
+        return
+    end
+    seen[rootFrame] = true
+    ElevateSingleMenuFrame(rootFrame, baseLevel + (depth * 20))
+    if rootFrame.GetChildren then
+        local children = { rootFrame:GetChildren() }
+        for _, child in ipairs(children) do
+            if child and not seen[child] and child.IsShown and child:IsShown() and LooksLikeBlizzardMenuContainer(child, nil) then
+                ElevateMenuSubtree(child, baseLevel, depth + 1, seen)
+            end
+        end
+    end
+end
+
+--- Raise open Blizzard Menu / DropDownList popups (and submenus) above all SocialCentral modals.
+function Theme:ElevateOpenBlizzardMenus()
+    local topOverlay = self:GetHighestShownOverlayLevel()
+    local baseLevel = math.min(9700, math.max(9500, topOverlay + 120))
+    local seen = {}
+    local mgr = _G.Menu and _G.Menu.GetManager and _G.Menu.GetManager() or nil
+    local openMenu = (mgr and mgr.GetOpenMenu and mgr:GetOpenMenu()) or nil
+
+    if openMenu and openMenu.IsShown and openMenu:IsShown() then
+        ElevateMenuSubtree(openMenu, baseLevel, 0, seen)
+    end
+    if mgr and type(mgr.openMenus) == "table" then
+        for idx, om in ipairs(mgr.openMenus) do
+            if om and om.IsShown and om:IsShown() then
+                ElevateMenuSubtree(om, baseLevel, math.max(0, idx - 1), seen)
+            end
+        end
+    end
+    if _G.UIParent and _G.UIParent.GetChildren then
+        local depth = (openMenu and 1) or 0
+        local uChildren = { _G.UIParent:GetChildren() }
+        for _, child in ipairs(uChildren) do
+            if child and not seen[child] and child.IsShown and child:IsShown() and LooksLikeBlizzardMenuContainer(child, openMenu) then
+                ElevateMenuSubtree(child, baseLevel, depth, seen)
+                depth = depth + 1
+            end
+        end
+    end
+    for i = 1, 3 do
+        local ddl = _G["DropDownList" .. i]
+        if ddl and ddl.IsShown and ddl:IsShown() then
+            ElevateSingleMenuFrame(ddl, baseLevel + ((i - 1) * 20))
+        end
+    end
+end
+
+local function OnBlizzardMenuTriggered(owner)
+    local isSC = IsSocialCentralMenuOwner(owner) or (Theme:GetHighestShownOverlayLevel() > 0)
+    Theme._lastMenuWasSocialCentral = isSC and true or false
+    if not isSC then
+        return
+    end
+    Theme._menuElevationUntil = ((_G.GetTime and _G.GetTime()) or 0) + 2.0
+    Theme:ElevateOpenBlizzardMenus()
+    if _G.C_Timer and _G.C_Timer.After then
+        _G.C_Timer.After(0, function()
+            if Theme._lastMenuWasSocialCentral or Theme:GetHighestShownOverlayLevel() > 0 then
+                Theme:ElevateOpenBlizzardMenus()
+            end
+        end)
+    end
+end
+
+function Theme:InstallGlobalMenuElevationHooks()
+    if self._menuHooksInstalled then
+        return
+    end
+    self._menuHooksInstalled = true
+    if type(_G.hooksecurefunc) ~= "function" then
+        return
+    end
+    if _G.MenuUtil and type(_G.MenuUtil.CreateContextMenu) == "function" then
+        self._hookedCreateContextMenu = true
+        _G.hooksecurefunc(_G.MenuUtil, "CreateContextMenu", function(owner)
+            OnBlizzardMenuTriggered(owner)
+        end)
+    end
+    local mgr = _G.Menu and _G.Menu.GetManager and _G.Menu.GetManager() or nil
+    if mgr then
+        if type(mgr.OpenContextMenu) == "function" then
+            self._hookedMgrOpenContextMenu = true
+            _G.hooksecurefunc(mgr, "OpenContextMenu", function(_, owner)
+                OnBlizzardMenuTriggered(owner)
+            end)
+        end
+        if type(mgr.OpenMenu) == "function" then
+            self._hookedMgrOpenMenu = true
+            _G.hooksecurefunc(mgr, "OpenMenu", function(_, owner)
+                OnBlizzardMenuTriggered(owner)
+            end)
+        end
+    end
+    if type(_G.ToggleDropDownMenu) == "function" then
+        self._hookedToggleDropDownMenu = true
+        _G.hooksecurefunc("ToggleDropDownMenu", function(_, _, dropDownFrame)
+            OnBlizzardMenuTriggered(dropDownFrame)
+        end)
+    end
+end
+
+Theme:InstallGlobalMenuElevationHooks()
+
 if ns.RegisterEvent then
+    ns.RegisterEvent(Theme, "PLAYER_LOGIN", function()
+        if not Theme._hookedCreateContextMenu and _G.MenuUtil and type(_G.MenuUtil.CreateContextMenu) == "function" and type(_G.hooksecurefunc) == "function" then
+            Theme._hookedCreateContextMenu = true
+            _G.hooksecurefunc(_G.MenuUtil, "CreateContextMenu", function(owner)
+                OnBlizzardMenuTriggered(owner)
+            end)
+        end
+        local mgr = _G.Menu and _G.Menu.GetManager and _G.Menu.GetManager() or nil
+        if mgr and type(_G.hooksecurefunc) == "function" then
+            if not Theme._hookedMgrOpenContextMenu and type(mgr.OpenContextMenu) == "function" then
+                Theme._hookedMgrOpenContextMenu = true
+                _G.hooksecurefunc(mgr, "OpenContextMenu", function(_, owner)
+                    OnBlizzardMenuTriggered(owner)
+                end)
+            end
+            if not Theme._hookedMgrOpenMenu and type(mgr.OpenMenu) == "function" then
+                Theme._hookedMgrOpenMenu = true
+                _G.hooksecurefunc(mgr, "OpenMenu", function(_, owner)
+                    OnBlizzardMenuTriggered(owner)
+                end)
+            end
+        end
+    end)
     ns.RegisterEvent(Theme, "DISPLAY_SIZE_CHANGED", function()
         Theme:QueueViewportChanged()
     end)

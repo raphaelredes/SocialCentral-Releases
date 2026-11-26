@@ -27,7 +27,7 @@ local TOAST_H_DEFAULT = 54
 local TOAST_H_INVITE = 82
 local NAV_H = 22
 local MAX_NAV_NUMS = 5
-local PAGE_SIZE = 5
+local PAGE_SIZE = 4
 local MAX_VISIBLE_TOASTS = 1
 local MAX_QUEUE = 15
 local MAX_RECENT_HISTORY = 25
@@ -222,11 +222,20 @@ local function ApplyToastThemeToFrame(f)
     end
     local p = Theme and Theme.GetPalette and Theme:GetPalette()
     if p then
+        local isWarm = (p.key == "blizzard" or p.key == "native")
+        if f.topBevel then
+            if isWarm then
+                f.topBevel:SetColorTexture(1, 0.90, 0.68, 0.16)
+            else
+                f.topBevel:SetColorTexture(0.65, 0.85, 1.0, 0.14)
+            end
+        end
+        if f.progressTrack then
+            local pt = p.insetBg or { 0.05, 0.06, 0.09 }
+            f.progressTrack:SetColorTexture(pt[1], pt[2], pt[3], 0.90)
+        end
         if f.bodyLbl then
             f.bodyLbl:SetTextColor(p.text[1], p.text[2], p.text[3])
-        end
-        if f.queueLbl then
-            f.queueLbl:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
         end
         if f.navBar then
             ApplyToastNavBarTheme(f.navBar, p)
@@ -937,9 +946,9 @@ function Toast:EnsureFrame(index)
         local helpBtn = Theme:CreateHelpButton(
             f,
             L["Floating Notifications & Pagination"],
-            L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)),
+            L["Notification Toasts appear beside your Minimap or chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)),
             L["Quick Actions: Left-click to open, hover to pause the countdown, drag to reposition anywhere, or right-click / click the bell to silence."],
-            16,
+            18,
             { target = f }
         )
         helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
@@ -956,7 +965,7 @@ function Toast:EnsureFrame(index)
     muteNotifBtn:SetFrameLevel(f:GetFrameLevel() + 10)
     muteNotifBtn:SetHitRectInsets(-3, -3, -4, -4)
     local muteIco = muteNotifBtn:CreateTexture(nil, "OVERLAY")
-    muteIco:SetSize(12, 12)
+    muteIco:SetSize(15, 15)
     muteIco:SetPoint("CENTER")
     muteIco:SetTexture(ICON_BELL_OFF)
     muteIco:SetVertexColor(0.95, 0.72, 0.35)
@@ -1005,16 +1014,6 @@ function Toast:EnsureFrame(index)
     end)
     markReadBtn:Hide()
     f.markReadBtn = markReadBtn
-
-    local queueLbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    if Theme and Theme.ApplyReadableCounterFont then
-        Theme:ApplyReadableCounterFont(queueLbl, 14, 17, 0, true)
-    end
-    queueLbl:SetTextColor(1.0, 0.88, 0.34)
-    queueLbl:SetPoint("RIGHT", closeBtn, "LEFT", -4, 0)
-    queueLbl:SetJustifyH("RIGHT")
-    queueLbl:Hide()
-    f.queueLbl = queueLbl
 
     -- Left-aligned text stack directly beside circular emblem
     local titleLbl = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -1121,6 +1120,9 @@ function Toast:EnsureFrame(index)
     f.progressFill = progressFill
 
     f:SetScript("OnClick", function(self, mouseButton)
+        if Toast.anchorFrame and (Toast.anchorFrame._scDragging or (Toast.anchorFrame._scJustDraggedAt and GetTime and (GetTime() - Toast.anchorFrame._scJustDraggedAt) < 0.25)) then
+            return
+        end
         local curItem = self.itemData
         if not curItem then return end
         if mouseButton == "RightButton" then
@@ -1258,14 +1260,18 @@ local function RenderItemOnFrame(f, item, showNav)
         if f.iconRing then
             f.iconRing:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.92)
         end
-        if f.iconTex then
-            f.iconTex:SetTexture(ResolveIconForKind(item.kind))
-        end
         if f.iconHalo then
             f.iconHalo:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.34)
         end
         if f.progressFill then
             ApplyTexGradient(f.progressFill, "HORIZONTAL", rgb[1] * 0.65, rgb[2] * 0.65, rgb[3] * 0.65, 0.90, math.min(1, rgb[1] + 0.25), math.min(1, rgb[2] + 0.25), math.min(1, rgb[3] + 0.25), 1.0)
+        end
+    end
+    local iconKey = item.kind or "DIRECT"
+    if f._lastIconKind ~= iconKey then
+        f._lastIconKind = iconKey
+        if f.iconTex then
+            f.iconTex:SetTexture(ResolveIconForKind(item.kind))
         end
     end
 
@@ -1336,13 +1342,6 @@ local function RenderItemOnFrame(f, item, showNav)
     local showQuickRead = (not hasActionRow) and item.threadKey and item.threadKey ~= "" and ns.Chat and ns.Chat.MarkThreadRead
     if f.markReadBtn then
         f.markReadBtn:SetShown(showQuickRead == true)
-    end
-    if f.queueLbl then
-        if Theme and Theme.ApplyReadableCounterFont then
-            Theme:ApplyReadableCounterFont(f.queueLbl, 14, 17, 0, true)
-        end
-        f.queueLbl:SetText("")
-        f.queueLbl:Hide()
     end
 
     local rightPad = showNav and (canMuteItem and -29 or -8) or (canMuteItem and -70 or -48)
@@ -1430,6 +1429,7 @@ function Toast:ShowTutorial(forceShow)
         end
         return nil
     end
+    local durSecText = math.floor(GetConfiguredToastDuration() + 0.5)
     self.tutorialDialog = Theme:ShowNpcGuide({
         key = "toast",
         doneLabel = L["Got it, don't show again"],
@@ -1437,7 +1437,7 @@ function Toast:ShowTutorial(forceShow)
         steps = {
             {
                 title = L["Floating Notifications & Pagination"],
-                text = L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)),
+                text = L["Notification Toasts appear beside your Minimap or chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(durSecText),
             },
             {
                 title = L["Floating Notifications & Pagination"],
@@ -1445,7 +1445,7 @@ function Toast:ShowTutorial(forceShow)
             },
             {
                 title = L["Toast Tutorial"],
-                text = L["Tip: You can change the 6s display timer or reset the position below chat anytime in Settings -> Notifications."],
+                text = L["Tip: You can change the %ds display timer or switch Minimap / Chat / custom positions anytime in Settings -> Notifications."]:format(durSecText),
             },
         },
     })
@@ -1466,6 +1466,7 @@ function Toast:ShowTutorialIfNeeded()
             end
             return nil
         end
+        local durSecText = math.floor(GetConfiguredToastDuration() + 0.5)
         Theme:PromptWindowTutorial({
             tutorialKey = "toastTutorialShown",
             title = L["Floating Notifications"],
@@ -1479,7 +1480,7 @@ function Toast:ShowTutorialIfNeeded()
                 steps = {
                     {
                         title = L["Floating Notifications & Pagination"],
-                        text = L["Notification Toasts appear right below your chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(math.floor(GetConfiguredToastDuration() + 0.5)),
+                        text = L["Notification Toasts appear beside your Minimap or chat window showing 1 alert at a time so your screen stays clean. Each notification disappears automatically after %ds (configurable in Settings -> Notifications)."]:format(durSecText),
                     },
                     {
                         title = L["Floating Notifications & Pagination"],
@@ -1487,7 +1488,7 @@ function Toast:ShowTutorialIfNeeded()
                     },
                     {
                         title = L["Toast Tutorial"],
-                        text = L["Tip: You can change the 6s display timer or reset the position below chat anytime in Settings -> Notifications."],
+                        text = L["Tip: You can change the %ds display timer or switch Minimap / Chat / custom positions anytime in Settings -> Notifications."]:format(durSecText),
                     },
                 },
             },
@@ -1651,7 +1652,7 @@ function Toast:LayoutStack()
 
             if card:IsShown() and card.progressFill then
                 local newW = math.max(1, (TOAST_WIDTH - 8) * remainingFrac)
-                if card._lastProgressW ~= newW then
+                if math.abs((card._lastProgressW or -99) - newW) >= 0.5 then
                     card._lastProgressW = newW
                     card.progressFill:SetWidth(newW)
                 end
@@ -1932,6 +1933,24 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         xBtn:SetScript("OnClick", function() pop:Hide() end)
         pop.xBtn = xBtn
 
+        if Theme and Theme.CreateHelpButton then
+            local hBtn = Theme:CreateHelpButton(
+                pop,
+                L["Disable this notification?"],
+                L["Lets you turn off just this alert category, mute the individual sender, or pause all SocialCentral alerts briefly with Do Not Disturb."],
+                L["Re-enable any silenced alert anytime in Settings -> Notifications."],
+                18,
+                { target = pop }
+            )
+            hBtn:SetPoint("RIGHT", xBtn, "LEFT", -3, 0)
+            pop.helpBtn = hBtn
+            title:SetPoint("RIGHT", hBtn, "LEFT", -6, 0)
+        end
+
+        if Theme and Theme.MakeMovable then
+            Theme:MakeMovable(pop, { key = "toastConfirmPopup", skipAutoRestore = true })
+        end
+
         local subLbl = pop:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         subLbl:SetPoint("TOPLEFT", 12, -31)
         subLbl:SetPoint("TOPRIGHT", -12, -31)
@@ -1981,7 +2000,7 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
         end)
         pop.dndBtn = dndBtn
 
-        pop:SetScript("OnHide", function(selfPop)
+        pop:HookScript("OnHide", function(selfPop)
             selfPop._targetItem = nil
         end)
         if _G.UISpecialFrames then
@@ -1993,6 +2012,9 @@ function Toast:ShowConfirmDisablePopup(anchorToast, item)
 
     local pop = self.confirmPopup
     pop._targetItem = item
+    if Theme and Theme.PrepareTopOverlayModal then
+        Theme:PrepareTopOverlayModal(pop, 885)
+    end
     if Theme and Theme.ApplyBackdrop then
         Theme:ApplyBackdrop(pop, "window")
     end
@@ -2257,7 +2279,12 @@ function Toast:ShowTestNotification(variant)
 
     local resolvedSelf = Compat and Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
     local myName = (resolvedSelf and resolvedSelf.fullName) or (ns.Safe and ns.Safe.String(ns.Safe.Call(UnitName, "player"))) or "SocialCentral"
-    local _, myClass = ns.Safe and ns.Safe.Call(UnitClass, "player") or UnitClass("player")
+    local _, myClass
+    if ns.Safe and ns.Safe.Call then
+        _, myClass = ns.Safe.Call(UnitClass, "player")
+    elseif UnitClass then
+        _, myClass = UnitClass("player")
+    end
     local now = time()
     local cfgDur = GetConfiguredToastDuration()
 
@@ -2532,6 +2559,20 @@ function Toast:Init()
         Theme:RegisterListener(function()
             for _, f in ipairs(Toast.framePool) do
                 ApplyToastThemeToFrame(f)
+            end
+            local pop = Toast.confirmPopup
+            if pop and pop:IsShown() then
+                Theme:ApplyBackdrop(pop, "window")
+                local p = Theme:GetPalette()
+                if p and pop._solidOpaqueBg then
+                    local wb = p.windowBg or { 0.06, 0.06, 0.08, 1.0 }
+                    pop._solidOpaqueBg:SetVertexColor(wb[1], wb[2], wb[3], 1.0)
+                end
+                Theme:StyleButton(pop.xBtn, "default")
+                Theme:StyleButton(pop.confirmBtn, "primary")
+                Theme:StyleButton(pop.playerBtn, "default")
+                Theme:StyleButton(pop.cancelBtn, "default")
+                if pop.dndBtn then Theme:StyleButton(pop.dndBtn, "default") end
             end
         end)
     end

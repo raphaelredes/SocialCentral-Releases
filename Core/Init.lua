@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.26"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.26" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.27"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.27" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -138,12 +138,13 @@ local DEFAULTS = {
         chatChannelUnread = false,  -- opt-in: allow mirrored WoW channels to increment unread badges
         chatMutedThreads = {},      -- per-conversation mute map [threadKey] = true
         chatMutedThreadRules = {},  -- optional expiry rules for timed/instance tab mutes [threadKey] = { untilTs | untilLeaveInstance }
-        chatHistoryLimit = 100,     -- local lines kept per character conversation thread (0 to 300)
+        chatHistoryLimit = 300,     -- local lines kept per character conversation thread (0 to 2000)
         guildChatHistorySave = true, -- persist Guild & Officer chat history locally across /reload and logins (toggleable)
-        guildChatHistoryLimit = 125, -- saved Guild & Officer lines retained per channel (50 to 500, default 125)
-        generalChatHistorySave = true, -- persist Private Rooms, Alliance & Mentions history across /reload and logins
+        guildChatHistoryLimit = 300, -- saved Guild & Officer lines retained per channel (50 to 2000, default 300)
+        generalChatHistorySave = true, -- persist General, Private Rooms, Alliance & Mentions history across /reload and logins
         groupChatHistorySave = true, -- persist Party, Raid & Instance chat history across /reload and logins
-        generalChatHistoryLimit = 150, -- saved lines per Room, Group, Alliance & Mentions thread (25 to 300, default 150)
+        generalChatHistoryLimit = 300, -- saved lines per General, Room, Group, Alliance & Mentions thread (50 to 2000, default 300)
+        historyLimitsExpandedV2Migrated = false, -- one-time upgrade expanding default saved history limits with 100MB account text cap
         addonDirectChat = true,     -- enable verified 1-on-1 SocialCentral direct chat & peer handshake
         chatDirectOfficialSend = true, -- send official /w, Battle.net, and guild/group replies in 1 click from Conversations (hardware-event only)
         chatGroupReconnectSync = true, -- auto-sync missed group chat messages after disconnect/reconnect (0ms idle CPU)
@@ -183,6 +184,7 @@ local DEFAULTS = {
         tutorialDismissAll = false, -- disable automatic first-time Chromie prompts across all areas (manual [?] still works)
         lootRollPromptAnswered = false, -- whether player answered first-roll activation prompt
         lootRollHelperEnabled = false, -- show SocialCentral Group Loot Roll mini-window with live picks & gear comparison
+        lootRollHideOfficial = false, -- opt-in: hide Blizzard's default GroupLootFrame bars when SocialCentral's roll window is active
         toastBelowChatMigrated = false, -- one-time migration placing default toast position directly below ChatFrame1
         addonMsgChatEcho = true,    -- echo clickable [SC] summary line to Blizzard chat windows for incoming addon messages
         addonMsgChatEchoSent = true, -- echo sent [SC] addon messages into Blizzard chat windows immediately
@@ -212,11 +214,15 @@ local DEFAULTS = {
         quickReplyHotkeys = {},         -- user-configured keyboard shortcuts to send a quick phrase to a chosen chat
         abilityChatMacros = {},         -- user-configured spell+chat macros (1-click drag to action bar, combat-safe)
         quickReplyEnterOpen = true,     -- press ENTER when pending notifications/drafts exist to open Quick Reply over Blizzard chat
-        quickReplyAutoClose = true,     -- auto-close Quick Reply popup on inactivity while preserving typed draft
-        quickReplyAutoCloseDelay = 10,  -- seconds before Quick Reply auto-closes when idle or interacting outside (default 10s)
-        quickReplyFadeInCombat = true,  -- fade Quick Reply and pass clicks through during combat when auto-close is off / in dungeon mode
+        quickReplyAutoClose = false,    -- stay always visible by default; opt-in auto-close on inactivity while preserving typed draft
+        quickReplyAutoCloseDelay = 10,  -- seconds before Quick Reply auto-closes when auto-close is enabled (default 10s)
+        quickReplyIdleFade = true,      -- fade Quick Reply to transparent after inactivity while staying visible
+        quickReplyFadeDelay = 15,       -- seconds of inactivity before Quick Reply becomes transparent (default 15s)
+        quickReplyFadeInCombat = false, -- opt-in: hide Quick Reply and pass clicks through during combat (off by default)
+        quickReplyAlwaysShowV1Migrated = false, -- one-time upgrade enabling always-open Quick Reply + 15s idle transparency
         quickReplyDungeonAutoMode = true, -- auto-open persistent Quick Reply (over Official Chat or dragged spot) in Dungeons & Raids
         quickReplySlashOpen = true, -- auto-open/switch Quick Reply when typing /p, /g, /o, /ra, /i, /al, /r, /w (+ Space)
+        quickReplyCtrlWCloseTab = true, -- close active unpinned Quick Reply tab with Ctrl+W when CTRL-W has no external keybind
         quickReplyTutorialShown = false, -- one-time account-wide Quick Reply walkthrough tutorial shown on first view
         officialHideGroup = false,      -- opt-in: hide Party/Raid/Instance chat in Blizzard Official Chat while keeping in SocialCentral
         officialHideGuild = false,      -- opt-in: hide Guild/Officer chat in Blizzard Official Chat while keeping in SocialCentral
@@ -251,6 +257,16 @@ local DEFAULTS = {
         spotterPlateTutorialShown = false, -- show one-time nameplate tutorial (Shift+V / V) on first radar sighting
         spotterRadarTutorialShown = false, -- show one-time target radar proximity tutorial on first radar tracking
         spotterV2Migrated = false,  -- one-time migration from legacy deactivated spotter defaults
+        gatherHighlightEnabled = false, -- opt-in: highlight nearby herbs, ore veins, fish & treasures via official Soft-Target + plate sparkles
+        gatherHighlightEnhanceRange = true, -- use official Soft-Target interact icons/cone & restore original CVars on disable
+        gatherHighlightOutline = true, -- enable official outline highlight on nearby objects when gather highlight is on
+        gatherHighlightNameplateGlow = true, -- show animated high-contrast sparkle halo & label over targeted collectible node
+        gatherHighlightFloatBeacon = true, -- show non-blocking top indicator capsule when a collectible is detected in front
+        gatherHighlightSound = false, -- optional subtle chime when spotting a collectible node
+        gatherHighlightPromptAnswered = false, -- true once user answered the Minimap tracking prompt or toggled manually
+        gatherHighlightTutorialShown = false, -- one-time Chromie explanation of Collectibles Highlight & native Interact Key
+        gatherInteractTipExplained = false, -- one-time Chromie bubble triggered when Blizzard's yellow Interact Key tip appears
+        gatherHighlightSavedCVars = nil, -- snapshot of original user CVars restored automatically when feature is turned off
         embedSocialWindow = true,   -- integrate SocialCentral side-tab inside Social / Friends (O)
         embedLfgWindow = true,      -- integrate Clans & Allies LFG tab inside Group Finder (I)
         embedGuildWindow = true,    -- integrate Guild Hub & Diplomacy side-tab inside Communities / Guild (J)
@@ -308,7 +324,7 @@ local DEFAULTS = {
         dungeonRunLogEnabled = true, -- passively record started dungeon/raid groups, teammates & run duration (zero CLEU)
         dungeonLogPromptShown = false, -- one-time account-wide reminder after finishing the first dungeon or raid
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
-        clanRosterHistoryLimit = 50, -- max guild roster join/leave/rank entries retained (25..500)
+        clanRosterHistoryLimit = 150, -- max guild roster join/leave/rank entries retained (25..1000)
         socialGroupByFolder = true,  -- organize O -> Social into collapsible colored folder sections
         socialOfficialPopupAlerts = true, -- show warning banner on official Invite, Trade & Duel popups from Ignored/Avoid players
         clanOfficialGreenWall = true, -- mirror Alliance Guild chat into Blizzard Official Chat (ChatFrame1)
@@ -486,10 +502,19 @@ local function HandleSlash(raw)
             if ns.Chat and ns.Chat.EnsureStaticChannelThread then
                 ns.Chat:EnsureStaticChannelThread("ch:alliance")
             end
+            local qrEnabled = (not ns.db or not ns.db.settings or ns.db.settings.quickReplyEnabled ~= false)
+            if qrEnabled and ns.QuickReply and ns.QuickReply.OpenThread and ns.QuickReply:OpenThread("ch:alliance", true) then
+                return
+            end
             if ns.Chat and ns.Chat.SetActiveThread then
                 ns.Chat:SetActiveThread("ch:alliance")
             end
-            if ns.UI and ns.UI.OpenTab then
+            if ns.UI and ns.UI.ShowHub then
+                if ns.UI.SetChatNavigation then
+                    ns.UI:SetChatNavigation({ chatThreadKey = "ch:alliance" })
+                end
+                ns.UI:ShowHub("chat")
+            elseif ns.UI and ns.UI.OpenTab then
                 ns.UI:OpenTab("chat")
             end
         end
@@ -652,6 +677,8 @@ local ACCOUNT_TUTORIAL_KEYS = {
     "toastTutorialShown",
     "spotterPlateTutorialShown",
     "spotterRadarTutorialShown",
+    "gatherHighlightTutorialShown",
+    "gatherInteractTipExplained",
     "msgPreviewPromptAnswered",
     "themeChosen",
     "dungeonLogPromptShown",
@@ -803,6 +830,21 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.quickReplyNotifyRaidMigrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.quickReplyAlwaysShowV1Migrated ~= true then
+        SocialCentralDB.settings.quickReplyAutoClose = false
+        SocialCentralDB.settings.quickReplyIdleFade = true
+        if tonumber(SocialCentralDB.settings.quickReplyFadeDelay) == nil then
+            SocialCentralDB.settings.quickReplyFadeDelay = 15
+        end
+        SocialCentralDB.settings.quickReplyFadeInCombat = false
+        SocialCentralDB.settings.quickReplyAlwaysShowV1Migrated = true
+    end
+    if SocialCentralDB.settings and SocialCentralDB.settings.quickReplyFade15Migrated ~= true then
+        if tonumber(SocialCentralDB.settings.quickReplyFadeDelay) == 30 then
+            SocialCentralDB.settings.quickReplyFadeDelay = 15
+        end
+        SocialCentralDB.settings.quickReplyFade15Migrated = true
+    end
     if SocialCentralDB.settings and SocialCentralDB.settings.lfgFilterCenterRoleResetV1 ~= true then
         if SocialCentralDB.settings.lfgBrowseRole == "MINE" then
             SocialCentralDB.settings.lfgBrowseRole = "ALL"
@@ -819,6 +861,21 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
             end
         end
         SocialCentralDB.settings.lfgFilterCenterRoleResetV1 = true
+    end
+    if SocialCentralDB.settings and SocialCentralDB.settings.historyLimitsExpandedV2Migrated ~= true then
+        if SocialCentralDB.settings.chatHistoryLimit == 100 then
+            SocialCentralDB.settings.chatHistoryLimit = 300
+        end
+        if SocialCentralDB.settings.guildChatHistoryLimit == 125 then
+            SocialCentralDB.settings.guildChatHistoryLimit = 300
+        end
+        if SocialCentralDB.settings.generalChatHistoryLimit == 150 then
+            SocialCentralDB.settings.generalChatHistoryLimit = 300
+        end
+        if SocialCentralDB.settings.clanRosterHistoryLimit == 50 then
+            SocialCentralDB.settings.clanRosterHistoryLimit = 150
+        end
+        SocialCentralDB.settings.historyLimitsExpandedV2Migrated = true
     end
     ns._accountSettings = SocialCentralDB.settings
     if SocialCentralCharDB.useCharProfile == true then
@@ -854,6 +911,21 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
                 end
                 SocialCentralCharDB.settings.quickReplyNotifyRaidMigrated = true
             end
+            if SocialCentralCharDB.settings.quickReplyAlwaysShowV1Migrated ~= true then
+                SocialCentralCharDB.settings.quickReplyAutoClose = false
+                SocialCentralCharDB.settings.quickReplyIdleFade = true
+                if tonumber(SocialCentralCharDB.settings.quickReplyFadeDelay) == nil then
+                    SocialCentralCharDB.settings.quickReplyFadeDelay = 15
+                end
+                SocialCentralCharDB.settings.quickReplyFadeInCombat = false
+                SocialCentralCharDB.settings.quickReplyAlwaysShowV1Migrated = true
+            end
+            if SocialCentralCharDB.settings.quickReplyFade15Migrated ~= true then
+                if tonumber(SocialCentralCharDB.settings.quickReplyFadeDelay) == 30 then
+                    SocialCentralCharDB.settings.quickReplyFadeDelay = 15
+                end
+                SocialCentralCharDB.settings.quickReplyFade15Migrated = true
+            end
             if SocialCentralCharDB.settings.lfgFilterCenterRoleResetV1 ~= true then
                 if SocialCentralCharDB.settings.lfgBrowseRole == "MINE" then
                     SocialCentralCharDB.settings.lfgBrowseRole = "ALL"
@@ -862,6 +934,21 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
                     SocialCentralCharDB.settings.lfgBrowseRoleV2 = "ALL"
                 end
                 SocialCentralCharDB.settings.lfgFilterCenterRoleResetV1 = true
+            end
+            if SocialCentralCharDB.settings.historyLimitsExpandedV2Migrated ~= true then
+                if SocialCentralCharDB.settings.chatHistoryLimit == 100 then
+                    SocialCentralCharDB.settings.chatHistoryLimit = 300
+                end
+                if SocialCentralCharDB.settings.guildChatHistoryLimit == 125 then
+                    SocialCentralCharDB.settings.guildChatHistoryLimit = 300
+                end
+                if SocialCentralCharDB.settings.generalChatHistoryLimit == 150 then
+                    SocialCentralCharDB.settings.generalChatHistoryLimit = 300
+                end
+                if SocialCentralCharDB.settings.clanRosterHistoryLimit == 50 then
+                    SocialCentralCharDB.settings.clanRosterHistoryLimit = 150
+                end
+                SocialCentralCharDB.settings.historyLimitsExpandedV2Migrated = true
             end
         end
         SocialCentralDB.settings = SocialCentralCharDB.settings
@@ -922,7 +1009,9 @@ function ns:ResetCurrentSettingsToDefaults()
     fresh.toastBelowChatMigrated = true
     fresh.focusUpgradeV1Migrated = true
     fresh.quickReplyNotifyRaidMigrated = true
+    fresh.quickReplyAlwaysShowV1Migrated = true
     fresh.lfgFilterCenterRoleResetV1 = true
+    fresh.historyLimitsExpandedV2Migrated = true
     if ns:IsCharProfileEnabled() then
         SocialCentralCharDB = SocialCentralCharDB or {}
         SocialCentralCharDB.settings = fresh
@@ -1071,7 +1160,7 @@ function ns:SetupOfficialChatConfigToggle()
                     ns.db.settings.addonChatFrames = { [1] = true }
                 end
                 ns.db.settings.addonChatFrames[cid] = self:GetChecked() and true or false
-                ns:Emit("SETTINGS_CHANGED")
+                ns:Emit("SETTINGS_UPDATED")
             end
         end)
         btn:SetScript("OnEnter", function(self)
@@ -1242,6 +1331,10 @@ end
 --- Navigate to a SocialCentral module safely, deferring official Blizzard frame opens if currently in combat.
 function ns:NavigateToModule(modName, opts)
     opts = opts or {}
+    if (modName == "chat" or modName == "rooms") and ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("chat") then
+        ns:Print("%s", L["This module is disabled in Settings."])
+        return false
+    end
     local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
     if inCombat and (modName == "settings" or modName == "lfg") then
         local alreadySame = (pendingNavigation and pendingNavigation.mod == modName)
@@ -1258,8 +1351,11 @@ function ns:NavigateToModule(modName, opts)
     if (opts.socialFilter or opts.socialSearch or opts.watchlistSearch ~= nil) and ns.UI and ns.UI.SetSocialNavigation then
         ns.UI:SetSocialNavigation(opts)
     end
-    if (opts.chatFilter or opts.chatThreadKey) and ns.UI and ns.UI.SetChatNavigation then
-        ns.UI:SetChatNavigation(opts)
+    if (opts.chatFilter or opts.chatThreadKey or opts.threadKey) and ns.UI and ns.UI.SetChatNavigation then
+        ns.UI:SetChatNavigation({
+            chatFilter = opts.chatFilter,
+            chatThreadKey = opts.chatThreadKey or opts.threadKey,
+        })
     end
     if (opts.altSubTab or opts.altBagSource or opts.altSearch ~= nil) and ns.UI and ns.UI.SetAltsNavigation then
         ns.UI:SetAltsNavigation(opts)
@@ -1503,12 +1599,16 @@ if EventRegistry and EventRegistry.RegisterCallback then
                 local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and lookup and ns.Social:GetBNetLinkInfo(lookup)
                 local bnetAccId = bInfo and bInfo.bnetAccountID or nil
                 local bnetName = bInfo and bInfo.bnetName or nil
-                local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(who, bnetAccId)
-                if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
-                    ns:NavigateToModule("chat", {
+                local addonAllowed = (not ns.Compat or not ns.Compat.IsOfficialChatMode or not ns.Compat.IsOfficialChatMode())
+                    and (not ns.Compat or not ns.Compat.IsModuleEnabled or ns.Compat.IsModuleEnabled("chat"))
+                local scConfirmed = addonAllowed and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(who, bnetAccId)
+                if scConfirmed and ns.Chat and ns.Chat.OpenPreferredConversation then
+                    ns.Chat:OpenPreferredConversation({
                         targetName = who,
+                        lookupKey = lookup,
                         bnetAccountID = bnetAccId,
                         bnetName = bnetName,
+                        scConfirmed = true,
                     })
                 elseif ns.Compat and ns.Compat.Whisper then
                     ns.Compat.Whisper(who)

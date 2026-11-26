@@ -898,8 +898,8 @@ local function IsUnitOppositeOrHostile(unit, knownFaction)
     local uFac = knownFaction and Compat.NormalizeFaction and Compat.NormalizeFaction(knownFaction) or nil
     if unit and Safe.Value(Safe.Call(UnitExists, unit)) == true then
         if UnitFactionGroup then
-            local _, rawFac = Safe.Call(UnitFactionGroup, unit)
-            local cleanFac = Safe.String(rawFac)
+            local engFac, rawFac = Safe.Call(UnitFactionGroup, unit)
+            local cleanFac = Safe.String(engFac) or Safe.String(rawFac)
             if cleanFac and cleanFac ~= "" then
                 uFac = (Compat.NormalizeFaction and Compat.NormalizeFaction(cleanFac)) or cleanFac
             end
@@ -1460,18 +1460,30 @@ local function EnsurePlateBadge(plate)
     arrowFrame.sheen = sheen
 
     arrowFrame._animElapsed = 0
+    arrowFrame._animTick = 0
     arrowFrame._animUpdateFn = function(selfA, elapsed)
-        selfA._animElapsed = (selfA._animElapsed or 0) + elapsed
+        local dt = elapsed or 0
+        selfA._animElapsed = (selfA._animElapsed or 0) + dt
+        selfA._animTick = (selfA._animTick or 0) + dt
+        if selfA._animTick < 0.033 then
+            return
+        end
+        selfA._animTick = 0
         local wave = math.sin(selfA._animElapsed * 7.5)
-        local bounce = wave * 4.5
+        local bounce = math.floor((wave * 4.5) * 10 + 0.5) * 0.1
         local pulse = 0.5 + 0.5 * wave
-        selfA.mover:ClearAllPoints()
-        selfA.mover:SetPoint("CENTER", selfA, "CENTER", 0, bounce)
+        if selfA._lastBounceY ~= bounce then
+            selfA._lastBounceY = bounce
+            selfA.mover:ClearAllPoints()
+            selfA.mover:SetPoint("CENTER", selfA, "CENTER", 0, bounce)
+        end
         selfA.glow:SetAlpha(0.35 + pulse * 0.55)
         selfA.sheen:SetAlpha(0.30 + pulse * 0.60)
     end
     arrowFrame:SetScript("OnShow", function(selfA)
         selfA._animElapsed = 0
+        selfA._animTick = 0.04
+        selfA._lastBounceY = nil
         selfA:SetScript("OnUpdate", selfA._animUpdateFn)
     end)
     arrowFrame:SetScript("OnHide", function(selfA)
@@ -1696,22 +1708,25 @@ function Spotter:UpdatePlateBadge(plate, unit, entry)
         local rawLabel = L[labelKey] or labelKey
         local labelTxt = type(rawLabel) == "string" and rawLabel:upper() or rawLabel
 
-        b.bg:SetColorTexture(0.04, 0.05, 0.07, 0.90)
-        b.accent:SetWidth(3)
-        b.accent:SetHeight(18)
-        b.accent:SetColorTexture(c.r, c.g, c.b, 1.0)
-        b.topLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
-        b.botLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
-        b.rightLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
-        if b._lastLabel ~= labelTxt then
-            b._lastLabel = labelTxt
-            b.lbl:SetText(labelTxt)
+        local badgeSig = tostring(stance) .. ":" .. tostring(labelTxt)
+        if b._lastBadgeSig ~= badgeSig then
+            b._lastBadgeSig = badgeSig
+            b.bg:SetColorTexture(0.04, 0.05, 0.07, 0.90)
+            b.accent:SetWidth(3)
+            b.accent:SetHeight(18)
+            b.accent:SetColorTexture(c.r, c.g, c.b, 1.0)
+            b.topLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
+            b.botLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
+            b.rightLine:SetColorTexture(c.r * 0.65, c.g * 0.65, c.b * 0.65, 0.75)
+            if b._lastLabel ~= labelTxt then
+                b._lastLabel = labelTxt
+                b.lbl:SetText(labelTxt)
+            end
+            b.lbl:SetTextColor(c.r, c.g, c.b, 1.0)
+            local textW = b.lbl:GetStringWidth() or 60
+            b:SetWidth(math.max(88, textW + 28))
+            b:SetHeight(18)
         end
-        b.lbl:SetTextColor(c.r, c.g, c.b, 1.0)
-
-        local textW = b.lbl:GetStringWidth() or 60
-        b:SetWidth(math.max(88, textW + 28))
-        b:SetHeight(18)
         b.bg:Show()
         b.accent:Show()
         b.topLine:Show()
@@ -1749,10 +1764,12 @@ function Spotter:UpdateAllPlateBadges()
         HideAllPlateBadges()
         return
     end
+    local updatedPlates = {}
     for unit, plate in pairs(activePlatesByUnit) do
         if plate and IsPlateAccessible(plate) then
             local key = self.visibleUnits[unit]
             local entry = key and self.entries[key] or nil
+            updatedPlates[plate] = (entry ~= nil)
             self:UpdatePlateBadge(plate, unit, entry)
         end
     end
@@ -1761,7 +1778,9 @@ function Spotter:UpdateAllPlateBadges()
         if ok and tPlate and IsPlateAccessible(tPlate) then
             local tGuid = Safe.String(Safe.Call(UnitGUID, "target"))
             local tEntry = tGuid and self.entryByGuid[tGuid] or nil
-            self:UpdatePlateBadge(tPlate, "target", tEntry)
+            if tEntry or not updatedPlates[tPlate] then
+                self:UpdatePlateBadge(tPlate, "target", tEntry)
+            end
         end
     end
 end
@@ -2413,7 +2432,7 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
         return nil
     end
 
-    if (not skipCooldown) and unit == "mouseover" and not trackedByGuid then
+    if unit == "mouseover" and not trackedByGuid then
         if guid and guid == lastMouseoverGuid and (nowClock - lastMouseoverAt) < 0.25 then
             return nil
         end
@@ -2444,7 +2463,9 @@ function Spotter:InspectUnit(unit, isNameplate, fromTicker, skipCooldown, skipSl
     if not trackedByGuid then
         local passedGate, confirmedNoMatch = QuickCandidateGate(unit, guid, rawUnitName)
         if not passedGate then
-            RecordGateMissCooldown(guid, confirmedNoMatch, nowClock)
+            if confirmedNoMatch or (unit ~= "target" and unit ~= "focus" and unit ~= "mouseover") then
+                RecordGateMissCooldown(guid, confirmedNoMatch, nowClock)
+            end
             HidePlateBadge(unit, nil)
             if isNameplate and self.visibleUnits[unit] then
                 self.visibleUnits[unit] = nil
@@ -4092,7 +4113,7 @@ function Spotter:Init()
             elseif event == "PLAYER_FOCUS_CHANGED" then
                 Spotter:InspectUnit("focus", false, false, true)
             elseif event == "UPDATE_MOUSEOVER_UNIT" then
-                Spotter:InspectUnit("mouseover", false, false, false)
+                Spotter:InspectUnit("mouseover", false, false, true)
             elseif event == "PLAYER_SOFT_FRIEND_CHANGED" then
                 Spotter:InspectUnit("softfriend", false, false, false)
             elseif event == "PLAYER_SOFT_ENEMY_CHANGED" then

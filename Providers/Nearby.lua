@@ -507,7 +507,8 @@ local function ScanActiveEnvironment(fromTicker)
                     for step = 0, toScan - 1 do
                         local idx = ((startIdx + step - 1) % total) + 1
                         local plate = plates[idx]
-                        local token = plate and (plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit))
+                        local canReadPlate = plate and (not plate.IsForbidden or not plate:IsForbidden())
+                        local token = canReadPlate and (plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)) or nil
                         if type(token) == "string" and token ~= "" then
                             InspectUnit(token, "nearby", fromTicker)
                             if uiOpen then

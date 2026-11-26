@@ -779,7 +779,7 @@ end
 -- ============================================================================
 -- Dungeon & Raid Group Run History (Event-Driven, Zero CLEU, Zero Polling)
 -- ============================================================================
-local MAX_DUNGEON_HISTORY = 120
+local MAX_DUNGEON_HISTORY = 500
 local MAX_RUN_MEMBERS = 40
 local MAX_RUN_BOSSES = 15
 local EXIT_GRACE_SECONDS = 45
@@ -1039,7 +1039,7 @@ local function ReconcileDamageMeterKeys(run)
         run.dmLastOverallByKey,
         run.dmPullAccumByKey,
     }
-    for tIdx = 1, #dmTables do
+    for tIdx = 1, 5 do
         local tbl = dmTables[tIdx]
         if type(tbl) == "table" then
             local moves = {}
@@ -1430,7 +1430,7 @@ function Group:OnDungeonRunXpUpdate(newLevelFromEvent)
     end
     local curXp = Safe.Number(Safe.Call(UnitXP, "player")) or 0
     local curMax = Safe.Number(Safe.Call(UnitXPMax, "player")) or 0
-    if run._xpRolloverPending and curXp <= (run.lastXp or curXp) then
+    if run._xpRolloverPending then
         local prevRemain = math.max(0, (run.lastXpMax or 0) - (run.lastXp or 0))
         run.xpGained = (run.xpGained or 0) + prevRemain + curXp
         run._xpRolloverPending = nil
@@ -2227,6 +2227,13 @@ local function TryResumePendingDungeonRun(sig, instName, instType, diffName, max
     for _, mem in ipairs(Group.members or {}) do
         if mem and mem.isDead == true and mem.lookupKey then
             Group._activeRun.deadStateByKey[mem.lookupKey] = true
+        end
+    end
+    if IsNativeDamageMeterAvailable() then
+        local sessOverall = (Enum and Enum.DamageMeterSessionType and Enum.DamageMeterSessionType.Overall) or 0
+        local ovMap = ReadDamageMeterSessionByKey(Group._activeRun, sessOverall)
+        if not ovMap or next(ovMap) == nil then
+            FoldDungeonRunOverallIntoReset(Group._activeRun)
         end
     end
     UpdateDungeonRunDamageMeter(Group._activeRun, false)

@@ -224,7 +224,9 @@ local function ResolveSavedRealmFallback()
     local alts = db.alts
     local myRec = (myGuid and type(alts) == "table") and alts["guid:" .. myGuid] or nil
     if type(myRec) == "table" then
-        for _, cand in ipairs({ myRec.realmName, myRec.realmRaw, myRec.realmPool }) do
+        local cands = { myRec.realmName, myRec.realmRaw, myRec.realmPool }
+        for i = 1, 3 do
+            local cand = cands[i]
             if type(cand) == "string" and cand ~= "" and LooksLikeServerRealm(cand) and not IsKnownPlayerSurnameCandidate(cand) then
                 return (cand:gsub("[%s%-]", ""))
             end
@@ -247,7 +249,9 @@ local function ResolveSavedRealmFallback()
     if type(alts) == "table" and myGuild and myGuild ~= "" then
         for _, rec in pairs(alts) do
             if type(rec) == "table" and rec.guild == myGuild and (not myFac or not rec.faction or rec.faction == myFac) then
-                for _, cand in ipairs({ rec.realmName, rec.realmRaw, rec.realmPool }) do
+                local cands = { rec.realmName, rec.realmRaw, rec.realmPool }
+                for i = 1, 3 do
+                    local cand = cands[i]
                     if type(cand) == "string" and cand ~= "" and LooksLikeServerRealm(cand) then
                         return (cand:gsub("[%s%-]", ""))
                     end
@@ -453,13 +457,39 @@ function Compat.CleanChatMessage(text)
     return cleaned
 end
 
--- Sanitize a single-line addon payload field, removing delimiters (~ |) and capping length.
+local function TruncateUtf8String(text, maxBytes)
+    if type(text) ~= "string" then return "" end
+    local cap = tonumber(maxBytes) or #text
+    if cap <= 0 then return "" end
+    if #text <= cap then return text end
+    local cut = cap
+    while cut > 0 do
+        local b = text:byte(cut)
+        if not b then break end
+        if b >= 128 and b <= 191 then
+            cut = cut - 1
+        elseif b >= 194 then
+            local seqLen = (b >= 240 and 4) or (b >= 224 and 3) or 2
+            local endPos = cut + seqLen - 1
+            if endPos <= cap then
+                return text:sub(1, endPos)
+            end
+            return (cut > 1) and text:sub(1, cut - 1) or ""
+        else
+            return text:sub(1, cut)
+        end
+    end
+    return ""
+end
+Compat.TruncateUtf8 = TruncateUtf8String
+
+-- Sanitize a single-line addon payload field, removing delimiters (~ |) and capping length cleanly at UTF-8 boundaries.
 function Compat.CleanPayloadField(text, maxLen)
     local cleaned = Compat.CleanInput(text)
     if not cleaned then return "" end
     cleaned = cleaned:gsub("[~^]", " "):gsub("^%s*(.-)%s*$", "%1"):gsub("%s+", " ")
     if maxLen and #cleaned > maxLen then
-        cleaned = cleaned:sub(1, maxLen)
+        cleaned = TruncateUtf8String(cleaned, maxLen)
     end
     return cleaned
 end
@@ -2388,8 +2418,9 @@ function Compat.ResolveCharacterFaction(nameOrKey, guidHint, bnetAccountID)
         end
     end
 
-    if bnetAccountID and Store and Store.socialDirectoryByKey then
-        local bRow = Store.socialDirectoryByKey["bnet:" .. tostring(bnetAccountID)]
+    if bnetAccountID and Store then
+        local bRow = (Store.socialDirectoryByBNet and (Store.socialDirectoryByBNet[bnetAccountID] or Store.socialDirectoryByBNet[tonumber(bnetAccountID)]))
+            or (Store.socialDirectoryByKey and Store.socialDirectoryByKey["bnet:" .. tostring(bnetAccountID)])
         if type(bRow) == "table" then
             local bf = NormalizeFactionTag(bRow.faction)
             if bf then return bf end
@@ -2444,7 +2475,7 @@ end
 
 function Compat.IsWindowIntegrationEnabled(winKey)
     local s = ns.db and ns.db.settings
-    if winKey == "O" or winKey == "social" then
+    if winKey == "O" or winKey == "social" or winKey == "watchlist" or winKey == "nearby" then
         return not s or s.embedSocialWindow ~= false
     elseif winKey == "I" or winKey == "lfg" then
         return not s or s.embedLfgWindow ~= false
@@ -2578,8 +2609,9 @@ function Compat.IsSenderFavorite(senderKeyOrName, bnetAccountID)
             return true
         end
     end
-    if bnId and Store.socialDirectoryByKey then
-        local bRow = Store.socialDirectoryByKey["bnet:" .. tostring(bnId)]
+    if bnId then
+        local bRow = (Store.socialDirectoryByBNet and (Store.socialDirectoryByBNet[bnId] or Store.socialDirectoryByBNet[tonumber(bnId)]))
+            or (Store.socialDirectoryByKey and Store.socialDirectoryByKey["bnet:" .. tostring(bnId)])
         if type(bRow) == "table" then
             if bRow.favorite == true then
                 return true
@@ -2801,4 +2833,338 @@ function Compat.MaskStreamerBNetName(rawName, seedIdx)
         return (L["BNet #%d"] or "BNet #%d"):format(seedIdx)
     end
     return L["BNet Friend"] or "BNet Friend"
+end
+
+function Compat.TruncateUtf8(text, maxBytes)
+    if type(text) ~= "string" then return "" end
+    local cap = tonumber(maxBytes) or #text
+    if cap <= 0 then return "" end
+    if #text <= cap then return text end
+    local cut = cap
+    while cut > 0 do
+        local b = text:byte(cut)
+        if not b then break end
+        if b >= 128 and b <= 191 then
+            cut = cut - 1
+        elseif b >= 194 then
+            local seqLen = (b >= 240 and 4) or (b >= 224 and 3) or 2
+            local endPos = cut + seqLen - 1
+            if endPos <= cap then
+                return text:sub(1, endPos)
+            end
+            return (cut > 1) and text:sub(1, cut - 1) or ""
+        else
+            return text:sub(1, cut)
+        end
+    end
+    return ""
+end
+
+local UTF8_LOWER_MAP = {
+    ["Á"] = "á", ["À"] = "à", ["Â"] = "â", ["Ã"] = "ã", ["Ä"] = "ä", ["Å"] = "å",
+    ["Æ"] = "æ", ["Ç"] = "ç", ["È"] = "è", ["É"] = "é", ["Ê"] = "ê", ["Ë"] = "ë",
+    ["Ì"] = "ì", ["Í"] = "í", ["Î"] = "î", ["Ï"] = "ï", ["Ð"] = "ð", ["Ñ"] = "ñ",
+    ["Ò"] = "ò", ["Ó"] = "ó", ["Ô"] = "ô", ["Õ"] = "õ", ["Ö"] = "ö", ["Ø"] = "ø",
+    ["Ù"] = "ù", ["Ú"] = "ú", ["Û"] = "û", ["Ü"] = "ü", ["Ý"] = "ý", ["Þ"] = "þ",
+    ["Ÿ"] = "ÿ", ["Œ"] = "œ", ["Š"] = "š", ["Ž"] = "ž",
+}
+
+function Compat.LowerUtf8(text)
+    if type(text) ~= "string" or text == "" then return "" end
+    return (text:gsub("[\194-\244][\128-\191]+", UTF8_LOWER_MAP)):lower()
+end
+
+function Compat.GuildName()
+    if not (Compat.IsInGuild and Compat.IsInGuild()) then
+        return nil
+    end
+    local g = (ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name)
+        or Safe.String(Safe.Call(GetGuildInfo, "player"))
+    if type(g) == "string" and g ~= "" then
+        return g
+    end
+    return nil
+end
+
+function Compat.MyFullName()
+    local resolved = Compat.ResolvePlayerFullName and Compat.ResolvePlayerFullName()
+    if resolved and type(resolved.fullName) == "string" and resolved.fullName ~= "" then
+        return resolved.fullName
+    end
+    return Safe.String(Safe.Call(UnitName, "player")) or "Player"
+end
+
+function Compat.FormatDurationShort(sec)
+    local s = tonumber(sec) or 0
+    if s <= 0 then return "0m" end
+    local days = math.floor(s / 86400)
+    local hrs = math.floor((s % 86400) / 3600)
+    local mins = math.floor((s % 3600) / 60)
+    if days > 0 then return ("%dd %dh"):format(days, hrs) end
+    if hrs > 0 then return ("%dh %dm"):format(hrs, mins) end
+    return ("%dm"):format(math.max(1, mins))
+end
+
+Compat._ENGLISH_CLASS_NAMES = {
+    WARRIOR = "Warrior",
+    PALADIN = "Paladin",
+    HUNTER = "Hunter",
+    ROGUE = "Rogue",
+    PRIEST = "Priest",
+    DEATHKNIGHT = "Death Knight",
+    SHAMAN = "Shaman",
+    MAGE = "Mage",
+    WARLOCK = "Warlock",
+    MONK = "Monk",
+    DRUID = "Druid",
+    DEMONHUNTER = "Demon Hunter",
+    EVOKER = "Evoker",
+}
+
+function Compat.EnglishClassName(classFile)
+    if type(classFile) == "string" and Compat._ENGLISH_CLASS_NAMES[classFile] then
+        return Compat._ENGLISH_CLASS_NAMES[classFile]
+    end
+    local locClass, token = Safe.Call(UnitClass, "player")
+    if type(token) == "string" and Compat._ENGLISH_CLASS_NAMES[token] then
+        return Compat._ENGLISH_CLASS_NAMES[token]
+    end
+    return Safe.String(locClass) or ""
+end
+
+Compat._CLASSIC_ZONE_ID_TO_EN = {
+    [1411] = "Durotar",
+    [1412] = "Mulgore",
+    [1413] = "The Barrens",
+    [1416] = "Alterac Mountains",
+    [1417] = "Arathi Highlands",
+    [1418] = "Badlands",
+    [1419] = "Blasted Lands",
+    [1420] = "Tirisfal Glades",
+    [1421] = "Silverpine Forest",
+    [1422] = "Western Plaguelands",
+    [1423] = "Eastern Plaguelands",
+    [1424] = "Hillsbrad Foothills",
+    [1425] = "The Hinterlands",
+    [1426] = "Dun Morogh",
+    [1427] = "Searing Gorge",
+    [1428] = "Burning Steppes",
+    [1429] = "Elwynn Forest",
+    [1430] = "Deadwind Pass",
+    [1431] = "Duskwood",
+    [1432] = "Loch Modan",
+    [1433] = "Redridge Mountains",
+    [1434] = "Stranglethorn Vale",
+    [1435] = "Swamp of Sorrows",
+    [1436] = "Westfall",
+    [1437] = "Wetlands",
+    [1438] = "Teldrassil",
+    [1439] = "Darkshore",
+    [1440] = "Ashenvale",
+    [1441] = "Thousand Needles",
+    [1442] = "Stonetalon Mountains",
+    [1443] = "Desolace",
+    [1444] = "Feralas",
+    [1445] = "Dustwallow Marsh",
+    [1446] = "Tanaris",
+    [1447] = "Azshara",
+    [1448] = "Felwood",
+    [1449] = "Un'Goro Crater",
+    [1450] = "Moonglade",
+    [1451] = "Silithus",
+    [1452] = "Winterspring",
+    [1453] = "Stormwind City",
+    [1454] = "Orgrimmar",
+    [1455] = "Ironforge",
+    [1456] = "Thunder Bluff",
+    [1457] = "Darnassus",
+    [1458] = "Undercity",
+    [1459] = "Alterac Valley",
+    [1460] = "Warsong Gulch",
+    [1461] = "Arathi Basin",
+    [1941] = "Eversong Woods",
+    [1942] = "Ghostlands",
+    [1943] = "Azuremyst Isle",
+    [1944] = "Hellfire Peninsula",
+    [1946] = "Zangarmarsh",
+    [1947] = "The Exodar",
+    [1948] = "Shadowmoon Valley",
+    [1949] = "Blade's Edge Mountains",
+    [1950] = "Bloodmyst Isle",
+    [1951] = "Nagrand",
+    [1952] = "Terokkar Forest",
+    [1953] = "Netherstorm",
+    [1954] = "Silvermoon City",
+    [1955] = "Shattrath City",
+    [1957] = "Isle of Quel'Danas",
+}
+
+Compat._LOC_ZONE_TO_EN = {
+    -- Portuguese & Spanish Azeroth / Outland / Cities / Dungeons -> Canonical English
+    ["os sertões"] = "The Barrens",
+    ["sertões"] = "The Barrens",
+    ["los baldíos"] = "The Barrens",
+    ["montanhas de alterac"] = "Alterac Mountains",
+    ["montañas de alterac"] = "Alterac Mountains",
+    ["planalto arathi"] = "Arathi Highlands",
+    ["tierras altas de arathi"] = "Arathi Highlands",
+    ["ermos"] = "Badlands",
+    ["tierras inhóspitas"] = "Badlands",
+    ["barreira do inferno"] = "Blasted Lands",
+    ["las tierras devastadas"] = "Blasted Lands",
+    ["clareiras de tirisfal"] = "Tirisfal Glades",
+    ["claros de tirisfal"] = "Tirisfal Glades",
+    ["floresta de pinhaprata"] = "Silverpine Forest",
+    ["bosque de argénteos"] = "Silverpine Forest",
+    ["terras pestilentas ocidentais"] = "Western Plaguelands",
+    ["tierras de la peste del oeste"] = "Western Plaguelands",
+    ["terras pestilentas orientais"] = "Eastern Plaguelands",
+    ["tierras de la peste del este"] = "Eastern Plaguelands",
+    ["contraforte de eira dos montes"] = "Hillsbrad Foothills",
+    ["laderas de trabalomas"] = "Hillsbrad Foothills",
+    ["terras agrestes"] = "The Hinterlands",
+    ["tierras del interior"] = "The Hinterlands",
+    ["garganta abrasadora"] = "Searing Gorge",
+    ["la garganta de fuego"] = "Searing Gorge",
+    ["estepes ardentes"] = "Burning Steppes",
+    ["las estepas ardientes"] = "Burning Steppes",
+    ["floresta de elwynn"] = "Elwynn Forest",
+    ["bosque de elwynn"] = "Elwynn Forest",
+    ["trilha do vento morto"] = "Deadwind Pass",
+    ["paso de la muerte"] = "Deadwind Pass",
+    ["floresta do crepúsculo"] = "Duskwood",
+    ["bosque del ocaso"] = "Duskwood",
+    ["montanhas cristorrubro"] = "Redridge Mountains",
+    ["montañas crestagrana"] = "Redridge Mountains",
+    ["selva do espinhaço"] = "Stranglethorn Vale",
+    ["vega de tuercespina"] = "Stranglethorn Vale",
+    ["pântano das mágoas"] = "Swamp of Sorrows",
+    ["pantano de las penas"] = "Swamp of Sorrows",
+    ["cerro oeste"] = "Westfall",
+    ["páramos de poniente"] = "Westfall",
+    ["pantanal"] = "Wetlands",
+    ["los humedales"] = "Wetlands",
+    ["costa negra"] = "Darkshore",
+    ["costa oscura"] = "Darkshore",
+    ["vale gris"] = "Ashenvale",
+    ["vallefresno"] = "Ashenvale",
+    ["mil agulhas"] = "Thousand Needles",
+    ["las mil agujas"] = "Thousand Needles",
+    ["cordilheira das torres de pedra"] = "Stonetalon Mountains",
+    ["sierra espolón"] = "Stonetalon Mountains",
+    ["desolação"] = "Desolace",
+    ["pântano vadeoso"] = "Dustwallow Marsh",
+    ["marjal revolcafango"] = "Dustwallow Marsh",
+    ["selva maleva"] = "Felwood",
+    ["frondavil"] = "Felwood",
+    ["cratera un'goro"] = "Un'Goro Crater",
+    ["cráter de un'goro"] = "Un'Goro Crater",
+    ["clareira da lua"] = "Moonglade",
+    ["claro de la luna"] = "Moonglade",
+    ["hibérnia"] = "Winterspring",
+    ["cuna del invierno"] = "Winterspring",
+    ["ventobravo"] = "Stormwind City",
+    ["cidade de ventobravo"] = "Stormwind City",
+    ["ciudad de ventormenta"] = "Stormwind City",
+    ["ventormenta"] = "Stormwind City",
+    ["altaforja"] = "Ironforge",
+    ["forjaz"] = "Ironforge",
+    ["penhasco do trovão"] = "Thunder Bluff",
+    ["cima del trueno"] = "Thunder Bluff",
+    ["cidade baixa"] = "Undercity",
+    ["entrañas"] = "Undercity",
+    ["luaprata"] = "Silvermoon City",
+    ["cidade de luaprata"] = "Silvermoon City",
+    ["ciudad de lunargenta"] = "Silvermoon City",
+    ["exodar"] = "The Exodar",
+    ["el exodar"] = "The Exodar",
+    ["shattrath"] = "Shattrath City",
+    ["cidade de shattrath"] = "Shattrath City",
+    ["ciudad de shattrath"] = "Shattrath City",
+    ["floresta do canto eterno"] = "Eversong Woods",
+    ["bosque canción eterna"] = "Eversong Woods",
+    ["terra fantasma"] = "Ghostlands",
+    ["tierras fantasma"] = "Ghostlands",
+    ["ilha névoa azul"] = "Azuremyst Isle",
+    ["isla bruma azur"] = "Azuremyst Isle",
+    ["ilha névoa rubra"] = "Bloodmyst Isle",
+    ["isla bruma de sangre"] = "Bloodmyst Isle",
+    ["península fogo do inferno"] = "Hellfire Peninsula",
+    ["península del fuego infernal"] = "Hellfire Peninsula",
+    ["pântano zíngaro"] = "Zangarmarsh",
+    ["marisma de zangar"] = "Zangarmarsh",
+    ["floresta terokkar"] = "Terokkar Forest",
+    ["bosque de terokkar"] = "Terokkar Forest",
+    ["montanhas da lâmina afiada"] = "Blade's Edge Mountains",
+    ["montañas filoszpada"] = "Blade's Edge Mountains",
+    ["montañas filospada"] = "Blade's Edge Mountains",
+    ["eterna"] = "Netherstorm",
+    ["etormenta"] = "Netherstorm",
+    ["tormenta abisal"] = "Netherstorm",
+    ["vale da lua negra"] = "Shadowmoon Valley",
+    ["valle sombraluna"] = "Shadowmoon Valley",
+    ["ilha de quel'danas"] = "Isle of Quel'Danas",
+    ["isla de quel'danas"] = "Isle of Quel'Danas",
+    ["vale alterac"] = "Alterac Valley",
+    ["valle de alterac"] = "Alterac Valley",
+    ["ravina brado guerreiro"] = "Warsong Gulch",
+    ["garganta grito de guerra"] = "Warsong Gulch",
+    ["bacia arathi"] = "Arathi Basin",
+    ["cuenca de arathi"] = "Arathi Basin",
+    -- Major Classic / Forever Dungeons & Raids
+    ["abismo ígneo"] = "Ragefire Chasm",
+    ["sima ígnea"] = "Ragefire Chasm",
+    ["caverna ululante"] = "Wailing Caverns",
+    ["cuevas de los lamentos"] = "Wailing Caverns",
+    ["minas mortas"] = "The Deadmines",
+    ["las minas de la muerte"] = "The Deadmines",
+    ["baía da angra do butim"] = "Booty Bay",
+    ["bahía del botín"] = "Booty Bay",
+    ["bastilha da presagris"] = "Shadowfang Keep",
+    ["castillo de colmillo oscuro"] = "Shadowfang Keep",
+    ["cárcere"] = "The Stockade",
+    ["las mazmorras"] = "The Stockade",
+    ["profundezas negras"] = "Blackfathom Deeps",
+    ["cavernas de brazanegra"] = "Blackfathom Deeps",
+    ["mosteiro escarlate"] = "Scarlet Monastery",
+    ["monasterio escarlata"] = "Scarlet Monastery",
+    ["kraal urzino"] = "Razorfen Kraul",
+    ["horado rajacieno"] = "Razorfen Kraul",
+    ["urzais urzinos"] = "Razorfen Downs",
+    ["zahúrda rajacieno"] = "Razorfen Downs",
+    ["depósito da rocha negra"] = "Blackrock Depths",
+    ["profundidades de rocanegra"] = "Blackrock Depths",
+    ["pico da rocha negra"] = "Blackrock Spire",
+    ["cumbre de rocanegra"] = "Blackrock Spire",
+    ["gládio cruel"] = "Dire Maul",
+    ["la masacre"] = "Dire Maul",
+    ["núcleo derretido"] = "Molten Core",
+    ["núcleo de magma"] = "Molten Core",
+    ["covil de asa negra"] = "Blackwing Lair",
+    ["guarida alanegra"] = "Blackwing Lair",
+    ["covil de onyxia"] = "Onyxia's Lair",
+    ["guarida de onyxia"] = "Onyxia's Lair",
+    ["ruínas de ahn'qiraj"] = "Ruins of Ahn'Qiraj",
+    ["ruinas de ahn'qiraj"] = "Ruins of Ahn'Qiraj",
+    ["templo de ahn'qiraj"] = "Temple of Ahn'Qiraj",
+    ["templo submerso"] = "The Temple of Atal'Hakkar",
+    ["templo sumergido"] = "The Temple of Atal'Hakkar",
+    ["escola de nigromancia"] = "Scholomance",
+    ["guilnéas"] = "Gilneas",
+    ["enclave escarlate"] = "Scarlet Enclave",
+}
+
+function Compat.EnglishZoneName()
+    local mapID = Safe.Number(Safe.Call(C_Map and C_Map.GetBestMapForUnit, "player"))
+    if mapID and Compat._CLASSIC_ZONE_ID_TO_EN[mapID] then
+        return Compat._CLASSIC_ZONE_ID_TO_EN[mapID]
+    end
+    local curZone = Compat.CurrentZoneName()
+    if type(curZone) == "string" and curZone ~= "" then
+        local low = Compat.LowerUtf8(curZone)
+        if Compat._LOC_ZONE_TO_EN[low] then
+            return Compat._LOC_ZONE_TO_EN[low]
+        end
+    end
+    return curZone or ""
 end
