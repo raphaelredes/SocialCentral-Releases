@@ -3567,8 +3567,9 @@ function Chat:FormatRelativeWhenText(ts)
     return string.format("%s · %s", base, rel)
 end
 
-function Chat:FormatGroupSessionBanner(threadKey, msgIdx, gInfo, fallbackTs)
-    if not (threadKey and msgIdx and gInfo) then
+--- Formats the plain bracketed label, hex color, and RGB triplet for a group session.
+function Chat:FormatGroupSessionLabel(gInfo, fallbackTs)
+    if not gInfo then
         return nil
     end
     local ts = (gInfo.startedAt and gInfo.startedAt > 0 and gInfo.startedAt) or tonumber(fallbackTs) or 0
@@ -3589,11 +3590,119 @@ function Chat:FormatGroupSessionBanner(threadKey, msgIdx, gInfo, fallbackTs)
         parts[#parts + 1] = string.format(L["%d players"], count)
     end
     local hex = (gInfo and gInfo.hex) or "|cff7aaeff"
-    local label = table.concat(parts, " · ")
-    return "|cff7f8a9c—— |r|Haddon:SCentral:grp:" .. tostring(msgIdx) .. ":" .. tostring(threadKey) .. "|h" .. hex .. "[" .. label .. "]|r|h|cff7f8a9c ——|r"
+    local rHex, gHex, bHex = hex:match("^|cff(%x%x)(%x%x)(%x%x)$")
+    local rgb = (rHex and gHex and bHex)
+        and { tonumber(rHex, 16) / 255, tonumber(gHex, 16) / 255, tonumber(bHex, 16) / 255 }
+        or { 0.48, 0.68, 1.0 }
+    local label = "[" .. table.concat(parts, " · ") .. "]"
+    return {
+        label = label,
+        hex = hex,
+        rgb = rgb,
+        colored = hex .. label .. "|r",
+    }
 end
 
-function Chat:SyncGroupRosterSessionState(thread, liveMemberLookupSet)
+function Chat:FormatGroupSessionBanner(threadKey, msgIdx, gInfo, fallbackTs)
+    if not (threadKey and msgIdx and gInfo) then
+        return nil
+    end
+    local info = self:FormatGroupSessionLabel(gInfo, fallbackTs)
+    if not info then
+        return nil
+    end
+    return "|cff7f8a9c— |r|Haddon:SCentral:grp:" .. tostring(msgIdx) .. ":" .. tostring(threadKey) .. "|h" .. info.colored .. "|h"
+end
+
+--- Measures the rendered pixel width of a chat line prefix inside `msgFrame`
+--- using a hidden FontString synced to the frame's active font.
+function Chat:MeasureMessagePrefixWidth(msgFrame, text)
+    if not (msgFrame and msgFrame.CreateFontString) then
+        return 0
+    end
+    local fs = msgFrame._scMeasureFs
+    if not fs then
+        fs = msgFrame:CreateFontString(nil, "ARTWORK")
+        if fs.SetAlpha then fs:SetAlpha(0) end
+        if fs.SetPoint then fs:SetPoint("TOPLEFT", msgFrame, "TOPLEFT", 0, 0) end
+        if fs.SetWordWrap then fs:SetWordWrap(false) end
+        msgFrame._scMeasureFs = fs
+    end
+    local fPath, fSize, fFlags
+    if msgFrame.GetFont then
+        fPath, fSize, fFlags = msgFrame:GetFont()
+    end
+    if (not fPath or not fSize) and _G.ChatFontNormal and _G.ChatFontNormal.GetFont then
+        fPath, fSize, fFlags = _G.ChatFontNormal:GetFont()
+    end
+    if fPath and fSize and fs.SetFont then
+        if fs._scFontPath ~= fPath or fs._scFontSize ~= fSize or fs._scFontFlags ~= fFlags then
+            fs._scFontPath = fPath
+            fs._scFontSize = fSize
+            fs._scFontFlags = fFlags
+            fs:SetFont(fPath, fSize, fFlags or "")
+        end
+    elseif fs.SetFontObject then
+        fs:SetFontObject(_G.ChatFontNormal or _G.GameFontHighlightSmall)
+    end
+    fs:SetText("|")
+    local markerW = (fs.GetUnboundedStringWidth and fs:GetUnboundedStringWidth()) or (fs.GetStringWidth and fs:GetStringWidth()) or 0
+    fs:SetText(tostring(text or "") .. "|")
+    local totalW = (fs.GetUnboundedStringWidth and fs:GetUnboundedStringWidth()) or (fs.GetStringWidth and fs:GetStringWidth()) or 0
+    return math.max(0, totalW - markerW)
+end
+
+--- Formats the leading timestamp (and grouping dot) for a chat message,
+--- hiding repeated `[HH:MM]` timestamps when consecutive messages from the
+--- same sender fall within the same minute while keeping `msgact` clickable
+--- and aligning the message text start vertically with `targetTextX`.
+function Chat:BuildMessageTimestampPrefix(msgTs, msgIdx, threadKey, isStatusNotice, isSameAuthorGroup, prevSenderTs, msgFrame, targetTextX)
+    local tVal = tonumber(msgTs) or 0
+    local prevVal = tonumber(prevSenderTs) or 0
+    local tsStr = (tVal > 0) and date("%H:%M", tVal) or ""
+    if isSameAuthorGroup then
+        local showChangedMin = (tsStr ~= "") and (prevVal > 0) and (tsStr ~= date("%H:%M", prevVal))
+        local dotPlain = "|cff586069·|r "
+        local dotPart
+        if (not isStatusNotice) and msgIdx and threadKey then
+            dotPart = "|Haddon:SCentral:msgact:" .. tostring(msgIdx) .. ":" .. tostring(threadKey) .. "|h|cff586069·|r|h "
+        else
+            dotPart = dotPlain
+        end
+        local tsPart = ""
+        if showChangedMin then
+            local tsTxt = "|cff545c67[" .. tsStr .. "]|r"
+            if (not isStatusNotice) and msgIdx and threadKey then
+                tsPart = "|Haddon:SCentral:msgact:" .. tostring(msgIdx) .. ":" .. tostring(threadKey) .. "|h" .. tsTxt .. "|h "
+            else
+                tsPart = tsTxt .. " "
+            end
+        end
+        local spacer = ""
+        local tgtNum = tonumber(targetTextX) or 0
+        if msgFrame and tgtNum > 0 then
+            local fw = (msgFrame.GetWidth and tonumber(msgFrame:GetWidth())) or 0
+            local clampedX = (fw > 120) and math.min(tgtNum, math.floor(fw * 0.55)) or tgtNum
+            local baseW = self:MeasureMessagePrefixWidth(msgFrame, tsPart .. dotPlain)
+            local spacerW = math.floor(math.max(0, clampedX - baseW) + 0.5)
+            if spacerW >= 1 then
+                spacer = "|TInterface\\AddOns\\SocialCentral\\Media\\dot:1:" .. tostring(spacerW) .. ":0:0:16:16:0:1:0:1|t"
+            end
+        end
+        return tsPart .. spacer .. dotPart
+    end
+    if tsStr == "" then
+        return ""
+    end
+    local tsTxt = "|cff6e7681[" .. tsStr .. "]|r"
+    if (not isStatusNotice) and msgIdx and threadKey then
+        return "|Haddon:SCentral:msgact:" .. tostring(msgIdx) .. ":" .. tostring(threadKey) .. "|h" .. tsTxt .. "|h "
+    end
+    return tsTxt .. " "
+end
+
+--- Collects the current live party/raid lookup keys and whether a real peer exists.
+function Chat:CollectLiveGroupLookupSet(preferRaid)
     local inRaid = (Compat and Compat.IsInRaid and Compat.IsInRaid()) == true
     local numMembers = (_G.GetNumGroupMembers and tonumber(_G.GetNumGroupMembers())) or 0
     local hasRealPeer = inRaid
@@ -3601,41 +3710,183 @@ function Chat:SyncGroupRosterSessionState(thread, liveMemberLookupSet)
         or (UnitExists and (UnitExists("party1") or UnitExists("raid1")))
     local inGrp = inRaid or ((Compat and Compat.IsInGroup and Compat.IsInGroup() == true) and hasRealPeer)
     if not inGrp then
-        self._activeGroupSessionId = nil
-        return nil
+        return false, nil, 0
     end
-    if not self._activeGroupSessionId and thread and type(thread.messages) == "table" and type(thread.groupRosters) == "table" and type(liveMemberLookupSet) == "table" then
-        local myDisp = GetMyInfo()
-        local myLk = myDisp and Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(myDisp)
-        local nowTs = time()
-        local scanned = 0
-        for i = #thread.messages, 1, -1 do
-            local m = thread.messages[i]
-            if type(m) == "table" and m.groupRosterId then
-                scanned = scanned + 1
-                local r = thread.groupRosters[m.groupRosterId]
-                local rTs = tonumber((r and (r.lastAt or r.ts)) or m.ts) or 0
-                if r and (nowTs - rTs) <= 14400 and type(r.members) == "table" then
-                    for _, mem in ipairs(r.members) do
-                        if mem.lk and mem.lk ~= myLk and liveMemberLookupSet[mem.lk] then
-                            local key = self:ExtractGroupSessionKey(m.groupRosterId)
-                            local rawSess = key and key:gsub("^s:", "") or nil
-                            if rawSess and rawSess ~= "" then
-                                self._activeGroupSessionId = rawSess
-                                break
-                            end
-                        end
-                    end
-                end
-                if self._activeGroupSessionId or scanned >= 20 then
-                    break
+    local units = {}
+    if inRaid or preferRaid then
+        local lim = math.min(40, math.max(5, numMembers))
+        for ri = 1, lim do
+            units[#units + 1] = "raid" .. tostring(ri)
+        end
+    else
+        units[#units + 1] = "player"
+        for pi = 1, 4 do
+            units[#units + 1] = "party" .. tostring(pi)
+        end
+    end
+    local seen = {}
+    local count = 0
+    for _, uTok in ipairs(units) do
+        if _G.UnitExists and _G.UnitExists(uTok) then
+            local unitRes = (Compat and Compat.ResolveUnitFullName) and Compat.ResolveUnitFullName(uTok, nil, nil, true) or nil
+            local rawName = (unitRes and unitRes.fullName)
+                or (_G.UnitName and Safe.String(_G.UnitName(uTok)))
+            if rawName and rawName ~= "" then
+                local lk = (Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(rawName)) or rawName:lower()
+                if lk and lk ~= "" and not seen[lk] then
+                    seen[lk] = true
+                    count = count + 1
                 end
             end
         end
     end
+    return count > 0, seen, count
+end
+
+--- Evaluates whether two group member lists (or lookup sets) belong to the same
+--- continuous group session given the time gap in seconds between them.
+function Chat:AreGroupRostersSameSession(membersA, membersB, gapSec, myLk)
+    if type(membersA) ~= "table" or type(membersB) ~= "table" then
+        return false
+    end
+    local function ExtractOtherSet(src)
+        local set = {}
+        local cnt = 0
+        if #src > 0 then
+            for _, mem in ipairs(src) do
+                local lk = (type(mem) == "table" and (mem.lk or mem.n)) or (type(mem) == "string" and mem) or nil
+                if lk and lk ~= "" then
+                    local norm = (Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(lk)) or lk:lower()
+                    if norm ~= "" and norm ~= myLk and not set[norm] then
+                        set[norm] = true
+                        cnt = cnt + 1
+                    end
+                end
+            end
+        else
+            for k, v in pairs(src) do
+                if v and type(k) == "string" and k ~= "" and k ~= myLk and not set[k] then
+                    set[k] = true
+                    cnt = cnt + 1
+                end
+            end
+        end
+        return set, cnt
+    end
+    local setA, cntA = ExtractOtherSet(membersA)
+    local setB, cntB = ExtractOtherSet(membersB)
+    if cntA == 0 or cntB == 0 then
+        return false
+    end
+    local overlap = 0
+    for lk in pairs(setA) do
+        if setB[lk] then
+            overlap = overlap + 1
+        end
+    end
+    if overlap == 0 then
+        return false
+    end
+    local minCnt = math.min(cntA, cntB)
+    local ratio = (minCnt > 0) and (overlap / minCnt) or 0
+    local gap = math.abs(tonumber(gapSec) or 0)
+    if gap <= 900 then
+        return (ratio >= 0.5) or (overlap >= 2) or (minCnt <= 2)
+    elseif gap <= 14400 then
+        return (overlap >= 2 and ratio >= 0.5) or (cntA == 1 and cntB == 1 and overlap == 1)
+    end
+    return false
+end
+
+function Chat:SyncGroupRosterSessionState(thread, liveMemberLookupSet)
+    local liveSet = (type(liveMemberLookupSet) == "table" and next(liveMemberLookupSet) ~= nil) and liveMemberLookupSet or nil
+    local inGrp = false
+    if liveSet then
+        local inRaid = (Compat and Compat.IsInRaid and Compat.IsInRaid()) == true
+        local numMembers = (_G.GetNumGroupMembers and tonumber(_G.GetNumGroupMembers())) or 0
+        local hasRealPeer = inRaid
+            or (numMembers >= 2)
+            or (UnitExists and (UnitExists("party1") or UnitExists("raid1")))
+        inGrp = inRaid or ((Compat and Compat.IsInGroup and Compat.IsInGroup() == true) and hasRealPeer)
+    else
+        inGrp, liveSet = self:CollectLiveGroupLookupSet(thread and thread.kind == "RAID")
+    end
+    if not inGrp or not liveSet then
+        if self._activeGroupSessionId then
+            self._lastEndedGroupSession = {
+                id = self._activeGroupSessionId,
+                endedAt = time(),
+                members = self._activeGroupMembersSet,
+            }
+        end
+        self._activeGroupSessionId = nil
+        self._activeGroupMembersSet = nil
+        return nil
+    end
+
+    self._activeGroupMembersSet = liveSet
+    local myDisp = GetMyInfo()
+    local myLk = myDisp and Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(myDisp) or nil
+    local nowTs = time()
+
+    if (not self._activeGroupSessionId) and self._lastEndedGroupSession then
+        local lastEnd = self._lastEndedGroupSession
+        local endGap = nowTs - (tonumber(lastEnd.endedAt) or 0)
+        if endGap <= 600 and lastEnd.id and lastEnd.members and self:AreGroupRostersSameSession(lastEnd.members, liveSet, endGap, myLk) then
+            self._activeGroupSessionId = lastEnd.id
+        end
+    end
+
+    if not self._activeGroupSessionId and type(self.threads) == "table" then
+        local candidates = {}
+        local seenThr = {}
+        local function AddCand(tObj)
+            if type(tObj) == "table" and not seenThr[tObj] and type(tObj.messages) == "table" and type(tObj.groupRosters) == "table" then
+                seenThr[tObj] = true
+                candidates[#candidates + 1] = tObj
+            end
+        end
+        AddCand(thread)
+        local _, activeKey = self:GetActiveGroupSyncInfo()
+        if activeKey then AddCand(self.threads[activeKey]) end
+        AddCand(self.threads["ch:party"])
+        AddCand(self.threads["ch:raid"])
+        AddCand(self.threads["ch:instance"])
+
+        local bestTs = -1
+        local bestMembers = nil
+        local bestRawSess = nil
+        for _, candThr in ipairs(candidates) do
+            for i = #candThr.messages, math.max(1, #candThr.messages - 80), -1 do
+                local m = candThr.messages[i]
+                local gid = type(m) == "table" and m.groupRosterId or nil
+                if gid then
+                    local r = candThr.groupRosters[gid]
+                    local rTs = tonumber((r and (r.lastAt or r.ts)) or m.ts) or 0
+                    if r and type(r.members) == "table" and rTs > bestTs then
+                        local key = self:ExtractGroupSessionKey(gid)
+                        local rawSess = key and key:gsub("^s:", "") or nil
+                        if rawSess and rawSess ~= "" then
+                            bestTs = rTs
+                            bestMembers = r.members
+                            bestRawSess = rawSess
+                        end
+                    end
+                    break
+                end
+            end
+        end
+        if bestRawSess and bestMembers and (nowTs - bestTs) <= 14400
+            and self:AreGroupRostersSameSession(bestMembers, liveSet, nowTs - bestTs, myLk)
+        then
+            self._activeGroupSessionId = bestRawSess
+        end
+    end
+
+    self._lastEndedGroupSession = nil
     if not self._activeGroupSessionId then
         self._activeGroupSessionSeq = (self._activeGroupSessionSeq or 0) + 1
-        self._activeGroupSessionId = tostring(time()) .. ":" .. tostring(self._activeGroupSessionSeq)
+        self._activeGroupSessionId = tostring(nowTs) .. ":" .. tostring(self._activeGroupSessionSeq)
     end
     return self._activeGroupSessionId
 end
@@ -3765,33 +4016,50 @@ function Chat:GetThreadGroupRenderMap(thread)
         "|cffffa657",
         "|cff79c0ff",
     }
+    local myDisp = GetMyInfo()
+    local myLk = myDisp and Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(myDisp) or nil
     local map = {}
     local bySessKey = {}
+    local aliasToMeta = {}
+    local lastMeta = nil
     local seq = 0
-    for _, m in ipairs(thread.messages) do
+    for msgIdx, m in ipairs(thread.messages) do
         local gid = type(m) == "table" and m.groupRosterId or nil
         local rRaw = gid and thread.groupRosters[gid] or nil
         if gid and rRaw then
             local sKey = self:ExtractGroupSessionKey(gid) or gid
-            local meta = bySessKey[sKey]
+            local meta = aliasToMeta[sKey] or bySessKey[sKey]
+            local mTs = tonumber(m.ts) or 0
+            if (not meta) and lastMeta and lastMeta.sessKey ~= sKey and type(rRaw.members) == "table" then
+                local refPrevTs = tonumber(lastMeta.lastAt) or 0
+                local refCurTs = (mTs > 0 and mTs) or tonumber(rRaw.startedAt or rRaw.ts) or 0
+                local gap = (refPrevTs > 0 and refCurTs > 0) and (refCurTs - refPrevTs) or 999999
+                if gap >= 0 and gap <= 1800 and self:AreGroupRostersSameSession(lastMeta.roster.members, rRaw.members, gap, myLk) then
+                    meta = lastMeta
+                    aliasToMeta[sKey] = lastMeta
+                end
+            end
             if not meta then
                 seq = seq + 1
                 meta = {
                     seq = seq,
                     sessKey = sKey,
+                    firstMsgIdx = msgIdx,
                     hex = colors[((seq - 1) % #colors) + 1],
-                    startedAt = rRaw.startedAt or rRaw.ts or (tonumber(m.ts) or 0),
-                    lastAt = rRaw.lastAt or rRaw.ts or (tonumber(m.ts) or 0),
+                    startedAt = rRaw.startedAt or rRaw.ts or mTs,
+                    lastAt = rRaw.lastAt or rRaw.ts or mTs,
                     roster = {
                         members = {},
                         size = rRaw.size or (rRaw.members and #rRaw.members) or 0,
                         zone = rRaw.zone,
                         ts = rRaw.ts,
-                        startedAt = rRaw.startedAt or rRaw.ts or (tonumber(m.ts) or 0),
+                        startedAt = rRaw.startedAt or rRaw.ts or mTs,
                     },
                     _seenLk = {},
                 }
                 bySessKey[sKey] = meta
+                aliasToMeta[sKey] = meta
+                lastMeta = meta
             end
             if type(rRaw.members) == "table" then
                 for _, mem in ipairs(rRaw.members) do
@@ -3806,7 +4074,6 @@ function Chat:GetThreadGroupRenderMap(thread)
             if rRaw.zone and rRaw.zone ~= "" then
                 meta.roster.zone = rRaw.zone
             end
-            local mTs = tonumber(m.ts) or 0
             if mTs > 0 and (meta.startedAt == 0 or mTs < meta.startedAt) then
                 meta.startedAt = mTs
                 meta.roster.startedAt = mTs
@@ -3846,11 +4113,226 @@ function Chat:GetThreadGroupSnapshot(threadKey, msgIdx)
     return {
         seq = (meta and meta.seq) or 1,
         sessKey = meta and meta.sessKey,
+        firstMsgIdx = meta and meta.firstMsgIdx,
         hex = (meta and meta.hex) or "|cff7aaeff",
         roster = (meta and meta.roster) or roster,
         startedAt = (meta and meta.startedAt) or roster.startedAt or roster.ts or m.ts,
         msgTs = m.ts,
     }
+end
+
+--- Estimates the number of wrapped visual lines a rendered message occupies inside `msgFrame`.
+function Chat:EstimateMessageVisualRows(msgFrame, rawLine, usableWidth)
+    local wMax = tonumber(usableWidth) or 0
+    if wMax <= 40 or type(rawLine) ~= "string" or rawLine == "" then
+        return 1
+    end
+    local plain = rawLine:gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    if #plain <= 28 and not plain:find("|T", 1, true) and not plain:find("\n", 1, true) then
+        return 1
+    end
+    local rows = 0
+    for seg in (plain .. "\n"):gmatch("([^\n]*)\n") do
+        local segW = self:MeasureMessagePrefixWidth(msgFrame, seg)
+        rows = rows + math.max(1, math.ceil(segW / wMax))
+    end
+    return math.max(1, rows)
+end
+
+--- Initializes or refreshes per-frame section & wrapped-row tracking state before rendering messages.
+function Chat:BeginTrackedMessageRender(state, msgFrame, isIncremental)
+    local s = state or {}
+    local fw = (msgFrame and msgFrame.GetWidth and tonumber(msgFrame:GetWidth())) or 380
+    s.usableWidth = math.max(80, fw - 10)
+    if not isIncremental then
+        s.lineVisRows = {}
+        s.sections = {}
+    else
+        s.lineVisRows = s.lineVisRows or {}
+        s.sections = s.sections or {}
+    end
+    return s
+end
+
+--- Appends a message to `msgFrame` while tracking its wrapped line height and section eviction.
+function Chat:AddTrackedMessage(msgFrame, state, text, r, g, b)
+    if not msgFrame then
+        return 0
+    end
+    local prevTotal = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
+    msgFrame:AddMessage(text, r, g, b)
+    local newTotal = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or (prevTotal + 1)
+    if not state then
+        return newTotal
+    end
+    local rows = self:EstimateMessageVisualRows(msgFrame, text, state.usableWidth)
+    local visRows = state.lineVisRows
+    if newTotal <= prevTotal then
+        local dropped = math.max(1, (prevTotal + 1) - newTotal)
+        for k = 1, newTotal - 1 do
+            visRows[k] = visRows[k + dropped] or 1
+        end
+        visRows[newTotal] = rows
+        for k = #visRows, newTotal + 1, -1 do
+            visRows[k] = nil
+        end
+        local kept = {}
+        local lastEvicted = nil
+        for _, sec in ipairs(state.sections) do
+            sec.bannerLineIdx = (sec.bannerLineIdx or 1) - dropped
+            sec.firstMsgLineIdx = (sec.firstMsgLineIdx or 1) - dropped
+            if sec.firstMsgLineIdx >= 1 then
+                if sec.bannerLineIdx < 1 then
+                    sec.bannerLineIdx = 0
+                end
+                kept[#kept + 1] = sec
+            else
+                lastEvicted = sec
+            end
+        end
+        if lastEvicted and (#kept == 0 or (kept[1].firstMsgLineIdx or 1) > 1) then
+            lastEvicted.bannerLineIdx = 0
+            lastEvicted.firstMsgLineIdx = 1
+            table.insert(kept, 1, lastEvicted)
+        end
+        state.sections = kept
+    else
+        visRows[newTotal] = rows
+    end
+    return newTotal
+end
+
+--- Records a section marker (GROUP or DATE) in `state.sections`, letting GROUP upgrade a co-located DATE marker.
+function Chat:RecordTrackedSection(state, sec)
+    if not (state and state.sections and type(sec) == "table") then
+        return
+    end
+    local list = state.sections
+    local last = list[#list]
+    if last and sec.stepId and last.stepId == sec.stepId and sec.kind == "GROUP" then
+        sec.bannerLineIdx = math.min(last.bannerLineIdx or sec.bannerLineIdx or 1, sec.bannerLineIdx or 1)
+        list[#list] = sec
+        return
+    end
+    list[#list + 1] = sec
+end
+
+--- Updates the latest matching GROUP section's cached label/color in O(1) when teammates join.
+function Chat:RefreshTrackedGroupSectionLabel(state, sessKey, gInfo, msgTs)
+    if not (state and state.sections and sessKey and gInfo and self.FormatGroupSessionLabel) then
+        return
+    end
+    local secs = state.sections
+    for idx = #secs, 1, -1 do
+        local s = secs[idx]
+        if s.kind == "GROUP" and s.sessKey == sessKey then
+            local lblInfo = self:FormatGroupSessionLabel(gInfo, msgTs)
+            if lblInfo then
+                s.label = lblInfo.colored
+                s.plainTitle = lblInfo.label
+                s.rgb = lblInfo.rgb
+            end
+            return
+        end
+    end
+end
+
+--- Computes the topmost and bottommost logical message indices visible inside `msgFrame`.
+function Chat:FindTopVisibleLine(msgFrame, lineVisRows)
+    local total = (msgFrame and msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
+    local visLines = (msgFrame and msgFrame.GetNumVisibleLines and msgFrame:GetNumVisibleLines()) or 14
+    local offset = (msgFrame and msgFrame.GetScrollOffset and msgFrame:GetScrollOffset()) or 0
+    local maxRange = 0
+    if msgFrame and msgFrame.GetMaxScrollRange then
+        local okR, rng = pcall(msgFrame.GetMaxScrollRange, msgFrame)
+        if okR and type(rng) == "number" and rng > 0 then
+            maxRange = rng
+        end
+    elseif total > visLines then
+        maxRange = total - visLines
+    end
+    if total <= 0 then
+        return 1, 0, offset, visLines, maxRange
+    end
+    local bottomIdx = math.max(1, math.min(total, total - offset))
+    local topIdx = bottomIdx
+    local acc = 0
+    for idx = bottomIdx, 1, -1 do
+        acc = acc + ((lineVisRows and lineVisRows[idx]) or 1)
+        topIdx = idx
+        if acc >= visLines then
+            break
+        end
+    end
+    return topIdx, bottomIdx, offset, visLines, maxRange
+end
+
+--- Resolves which tracked section corresponds to the top of the current viewport.
+function Chat:ResolveStickySection(msgFrame, state)
+    if not (msgFrame and state and state.sections and #state.sections > 0) then
+        return nil
+    end
+    local topIdx, bottomIdx, offset, visLines, maxRange = self:FindTopVisibleLine(msgFrame, state.lineVisRows)
+    local secs = state.sections
+    local activeIdx = nil
+    for i = 1, #secs do
+        local s = secs[i]
+        local startLine = s.bannerLineIdx or s.firstMsgLineIdx or 1
+        if startLine <= topIdx then
+            activeIdx = i
+        else
+            break
+        end
+    end
+    if not activeIdx and (secs[1].bannerLineIdx or 1) <= bottomIdx then
+        activeIdx = 1
+    end
+    if not activeIdx then
+        return nil
+    end
+    return secs[activeIdx], activeIdx, topIdx, bottomIdx, offset, visLines, maxRange
+end
+
+--- Scrolls `msgFrame` to the start of the active sticky section (exposing 1-2 lines of the prior section),
+--- or jumps up to the previous section if already viewing the start of the active one.
+function Chat:JumpToStickySectionStart(msgFrame, state)
+    local activeSec, activeIdx, topIdx, _, offset, visLines, maxRange = self:ResolveStickySection(msgFrame, state)
+    if not activeSec then
+        return false
+    end
+    local secs = state.sections
+    local total = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or #(state.lineVisRows or {})
+    local function ComputeOffsetForSection(sec)
+        local anchorLine = math.max(1, sec.bannerLineIdx or 1)
+        if anchorLine <= 1 then
+            return maxRange
+        end
+        local prevRows = (state.lineVisRows and state.lineVisRows[anchorLine - 1]) or 1
+        local targetTop = (anchorLine > 2 and prevRows == 1) and (anchorLine - 2) or (anchorLine - 1)
+        local acc = 0
+        local targetBottom = targetTop
+        for li = targetTop, total do
+            acc = acc + ((state.lineVisRows and state.lineVisRows[li]) or 1)
+            targetBottom = li
+            if acc >= visLines then
+                break
+            end
+        end
+        return math.max(0, math.min(maxRange, total - targetBottom))
+    end
+    local targetOff = ComputeOffsetForSection(activeSec)
+    if (activeSec.bannerLineIdx or 0) >= topIdx or math.abs(targetOff - offset) <= 0 then
+        if activeIdx > 1 then
+            targetOff = ComputeOffsetForSection(secs[activeIdx - 1])
+        elseif maxRange > offset then
+            targetOff = maxRange
+        end
+    end
+    if msgFrame.SetScrollOffset then
+        msgFrame:SetScrollOffset(targetOff)
+        return true, targetOff
+    end
+    return false
 end
 
 function Chat:_CleanGuildSysName(rawName)
@@ -11936,11 +12418,14 @@ local function InstallOfficialChatCaptureHooks()
     end
 end
 
-local function SaveOfficialEditHistoryLine(rawLine)
+function Chat:RecordSentInputHistory(rawLine, requireOfficialEmbed)
     if restoringEditHistory then return end
     if Safe.IsSecret(rawLine) then return end
     local st = ns.db and ns.db.settings
-    if st and (st.embedOfficialChat == false or st.officialChatEditHistory == false) then
+    if st and st.officialChatEditHistory == false then
+        return
+    end
+    if requireOfficialEmbed and st and st.embedOfficialChat == false then
         return
     end
     local line = Safe.String(rawLine)
@@ -11976,6 +12461,14 @@ local function SaveOfficialEditHistoryLine(rawLine)
     while #hist > MAX_EDITBOX_HISTORY_LINES do
         table.remove(hist, 1)
     end
+end
+
+function Chat:GetSentInputHistory()
+    return ns.db and ns.db.chatEditHistory or nil
+end
+
+local function SaveOfficialEditHistoryLine(rawLine)
+    Chat:RecordSentInputHistory(rawLine, true)
 end
 
 local function RestoreSavedEditHistory()

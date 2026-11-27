@@ -5,6 +5,13 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.31] - 2026-11-27
+- **SC Chat (`Quick Reply`) & Conversations Hub Overhaul (`UI/Minimap.lua`, `UI/SocialPanels.lua`, `UI/Theme.lua`, `Providers/Chat.lua`, `Core/Init.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**
+  - **Same-Minute Timestamp Deduplication & Vertical Text Alignment:** Hid repeated `[HH:MM]` timestamps on consecutive messages from the same player within the same minute (displaying `[HH:MM]` again only when the minute changes, while preserving exact-time hover tooltips and message actions on `·`) and vertically aligned subsequent grouped lines to start at the exact text column of the speaker's first message across both **SC Chat** and **Conversations**.
+  - **Smart Group Session Continuity & Consolidation:** Prevented spurious new group headers after `/reload`, relogs, instance transitions, or rapid member joins/swaps by matching live teammates against the latest group session and visually merging overlapping consecutive sessions in **Party**, **Raid**, and **Instance** tabs.
+  - **Clickable Sticky Section Headers:** Added a slim clickable sticky header bar at the top of the message viewport in **SC Chat** and **Conversations** that tracks the active Group or Day/Time block as you scroll, dims its backdrop smoothly during idle transparency while keeping text sharp, displays full class/role roster tooltips on hover and whisper/invite actions on right-click, and jumps cleanly to the start of the block (exposing the tail of the prior section above) on left-click.
+  - **In-Chat Search, Scrollbar, Font Size & Composer Polish:** Added inline message search, vertical scrollbar thumb + `v Latest` pill, per-window **Font Size** presets (`Default` / `11` / `13` / `14` / `16`), `+` New Chat shortcut, unread-other-tabs indicator, `General` `/s`/`/y`/channel selector & filter pills, **Show Quick Replies Bar** toggle (Settings & Conversation Options), unified sent-input history, idle foreground contrast handling, and synced `[?]` guides across English, Portuguese, and Spanish.
+
 ## [0.2.30] - 2026-11-27
 - **Top Flight Countdown Bar (`Providers/FlightTimes.lua`, `Core/Init.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**
   - Added a live draggable countdown bar at the top of the screen during Flight Master travel displaying destination, route, remaining arrival time, progress bar, `[?]` guide, `[X]` per-flight dismiss, `/reload` recovery, and safety guards against recording interrupted flights (`Death`/`AcceptProposal`/instance transitions).

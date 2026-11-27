@@ -1979,6 +1979,52 @@ function Theme:InstallEditBoxLinkHook()
     end
 end
 
+--- Populates GameTooltip with a group session's date, zone, member roster, and optional hint lines.
+function Theme:PopulateGroupSnapshotTooltip(owner, snap, hintLines)
+    if not (GameTooltip and snap and snap.roster and type(snap.roster.members) == "table") then
+        return false
+    end
+    GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+    GameTooltip:ClearLines()
+    local count = snap.roster.size or #snap.roster.members
+    local refTs = snap.startedAt or snap.msgTs
+    local whenStr = (refTs and ns.Chat and ns.Chat.FormatWhenLabel) and ns.Chat:FormatWhenLabel(refTs, true) or ""
+    local hdr = (whenStr ~= "")
+        and string.format(L["Group · %s (%d players)"], whenStr, count)
+        or string.format(L["Group (%d players)"], count)
+    if snap.roster.zone and snap.roster.zone ~= "" then
+        hdr = hdr .. " · " .. snap.roster.zone
+    end
+    GameTooltip:AddLine(hdr, 0.48, 0.72, 1.0, true)
+    for _, mem in ipairs(snap.roster.members) do
+        local cHex = (mem.c and ns.Compat and ns.Compat.ClassHex and ns.Compat.ClassHex(mem.c)) or "|cffe6edf3"
+        local roleLbl = nil
+        if mem.r == "TANK" then roleLbl = L["Tank"]
+        elseif mem.r == "HEALER" then roleLbl = L["Healer"]
+        elseif mem.r == "DAMAGER" then roleLbl = L["DPS"]
+        end
+        local isSelf = ns.Compat and ns.Compat.IsMe and ns.Compat.IsMe(mem.n)
+        local leftTxt = cHex .. tostring(mem.n or "?") .. "|r" .. (isSelf and (" |cff8cc2ff(" .. L["You"] .. ")|r") or "")
+        if roleLbl then
+            GameTooltip:AddDoubleLine(leftTxt, roleLbl, 1, 1, 1, 0.72, 0.78, 0.86)
+        else
+            GameTooltip:AddLine(leftTxt, 1, 1, 1, true)
+        end
+    end
+    GameTooltip:AddLine(" ")
+    if type(hintLines) == "table" and #hintLines > 0 then
+        for _, line in ipairs(hintLines) do
+            if type(line) == "string" and line ~= "" then
+                GameTooltip:AddLine(line, 0.65, 0.78, 0.92, true)
+            end
+        end
+    else
+        GameTooltip:AddLine(L["Click to whisper or invite members from this group"], 0.65, 0.78, 0.92, true)
+    end
+    GameTooltip:Show()
+    return true
+end
+
 function Theme:ShowHyperlinkTooltip(owner, link)
     if not owner or type(link) ~= "string" or link == "" then
         return false
@@ -2041,37 +2087,7 @@ function Theme:ShowHyperlinkTooltip(owner, link)
         local idxStr, tKey = link:match("addon:SCentral:grp:(%d+):([^|]+)")
         local snap = (ns.Chat and ns.Chat.GetThreadGroupSnapshot) and ns.Chat:GetThreadGroupSnapshot(tKey, tonumber(idxStr)) or nil
         if snap and snap.roster and type(snap.roster.members) == "table" then
-            GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
-            GameTooltip:ClearLines()
-            local count = snap.roster.size or #snap.roster.members
-            local refTs = snap.startedAt or snap.msgTs
-            local whenStr = (refTs and ns.Chat and ns.Chat.FormatWhenLabel) and ns.Chat:FormatWhenLabel(refTs, true) or ""
-            local hdr = (whenStr ~= "")
-                and string.format(L["Group · %s (%d players)"], whenStr, count)
-                or string.format(L["Group (%d players)"], count)
-            if snap.roster.zone and snap.roster.zone ~= "" then
-                hdr = hdr .. " · " .. snap.roster.zone
-            end
-            GameTooltip:AddLine(hdr, 0.48, 0.72, 1.0, true)
-            for _, mem in ipairs(snap.roster.members) do
-                local cHex = (mem.c and ns.Compat and ns.Compat.ClassHex and ns.Compat.ClassHex(mem.c)) or "|cffe6edf3"
-                local roleLbl = nil
-                if mem.r == "TANK" then roleLbl = L["Tank"]
-                elseif mem.r == "HEALER" then roleLbl = L["Healer"]
-                elseif mem.r == "DAMAGER" then roleLbl = L["DPS"]
-                end
-                local isSelf = ns.Compat and ns.Compat.IsMe and ns.Compat.IsMe(mem.n)
-                local leftTxt = cHex .. tostring(mem.n or "?") .. "|r" .. (isSelf and (" |cff8cc2ff(" .. L["You"] .. ")|r") or "")
-                if roleLbl then
-                    GameTooltip:AddDoubleLine(leftTxt, roleLbl, 1, 1, 1, 0.72, 0.78, 0.86)
-                else
-                    GameTooltip:AddLine(leftTxt, 1, 1, 1, true)
-                end
-            end
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine(L["Click to whisper or invite members from this group"], 0.65, 0.78, 0.92, true)
-            GameTooltip:Show()
-            return true
+            return self:PopulateGroupSnapshotTooltip(owner, snap)
         end
         return false
     elseif link:find("addon:SCentral:msgact:", 1, true) then
@@ -2231,6 +2247,168 @@ function Theme:OpenGroupSnapshotMenu(owner, threadKey, msgIdx)
             end
         end
     end)
+    return true
+end
+
+--- Creates a compact clickable sticky section header bar for chat message viewports.
+function Theme:CreateStickySectionBar(parent, onAfterJump)
+    if not parent then
+        return nil
+    end
+    local bar = CreateFrame("Button", nil, parent)
+    bar:SetHeight(20)
+    bar:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    bar:Hide()
+
+    local bgTex = bar:CreateTexture(nil, "BACKGROUND", nil, -1)
+    bgTex:SetAllPoints()
+    bgTex:SetTexture(WHITE8X8)
+    bgTex:SetVertexColor(0.09, 0.11, 0.15, 0.94)
+    bar.bgTex = bgTex
+
+    local hoverTex = bar:CreateTexture(nil, "HIGHLIGHT")
+    hoverTex:SetAllPoints()
+    hoverTex:SetTexture(WHITE8X8)
+    hoverTex:SetVertexColor(1.0, 1.0, 1.0, 0.08)
+    bar.hoverTex = hoverTex
+
+    local accentBar = bar:CreateTexture(nil, "ARTWORK", nil, 1)
+    accentBar:SetWidth(2)
+    accentBar:SetPoint("TOPLEFT", bar, "TOPLEFT", 1, -2)
+    accentBar:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 1, 2)
+    accentBar:SetTexture(WHITE8X8)
+    accentBar:SetVertexColor(0.48, 0.68, 1.0, 0.95)
+    bar.accentBar = accentBar
+
+    local bottomLine = bar:CreateTexture(nil, "ARTWORK", nil, 1)
+    bottomLine:SetHeight(1)
+    bottomLine:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 0)
+    bottomLine:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 0, 0)
+    bottomLine:SetTexture(WHITE8X8)
+    bottomLine:SetVertexColor(0.32, 0.42, 0.56, 0.42)
+    bar.bottomLine = bottomLine
+
+    local jumpIco = bar:CreateTexture(nil, "OVERLAY", nil, 2)
+    jumpIco:SetSize(12, 12)
+    jumpIco:SetPoint("RIGHT", bar, "RIGHT", -5, 0)
+    jumpIco:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollUp-Up")
+    jumpIco:SetVertexColor(0.75, 0.85, 0.98, 0.9)
+    jumpIco:Hide()
+    bar.jumpIco = jumpIco
+
+    local labelFs = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    labelFs:SetPoint("LEFT", accentBar, "RIGHT", 6, 0)
+    labelFs:SetPoint("RIGHT", jumpIco, "LEFT", -4, 0)
+    labelFs:SetJustifyH("LEFT")
+    labelFs:SetWordWrap(false)
+    if labelFs.SetShadowColor then labelFs:SetShadowColor(0, 0, 0, 0.95) end
+    if labelFs.SetShadowOffset then labelFs:SetShadowOffset(1, -1) end
+    bar.labelFs = labelFs
+
+    local function ShowBarTooltip(selfBar)
+        if not GameTooltip then return end
+        local sec = selfBar._activeSec
+        if not sec then return end
+        if sec.kind == "GROUP" and sec.threadKey and sec.msgIdx and ns.Chat and ns.Chat.GetThreadGroupSnapshot then
+            local snap = ns.Chat:GetThreadGroupSnapshot(sec.threadKey, sec.msgIdx)
+            if snap then
+                local jumpHint = selfBar._canJump
+                    and (selfBar._wouldJumpPrev and L["Left-click: Jump to the previous group"] or L["Left-click: Jump to the start of this group"])
+                    or L["All messages in this view are already visible."]
+                Theme:PopulateGroupSnapshotTooltip(selfBar, snap, {
+                    jumpHint,
+                    L["Right-click: Whisper or invite members"],
+                })
+                return
+            end
+        end
+        GameTooltip:SetOwner(selfBar, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(sec.plainTitle or sec.label or "?", 0.85, 0.90, 0.98, true)
+        GameTooltip:AddLine(
+            selfBar._canJump and L["Left-click: Jump to the start of this section"] or L["All messages in this view are already visible."],
+            0.65, 0.78, 0.92, true
+        )
+        GameTooltip:Show()
+    end
+
+    bar:SetScript("OnEnter", ShowBarTooltip)
+    bar:SetScript("OnLeave", function(selfBar)
+        if GameTooltip and GameTooltip:IsOwned(selfBar) then
+            GameTooltip:Hide()
+        end
+    end)
+    bar:SetScript("OnClick", function(selfBar, mouseBtn)
+        local sec = selfBar._activeSec
+        if not sec then return end
+        if mouseBtn == "RightButton" then
+            if sec.kind == "GROUP" and sec.threadKey and sec.msgIdx then
+                Theme:OpenGroupSnapshotMenu(selfBar, sec.threadKey, sec.msgIdx)
+            end
+            return
+        end
+        if mouseBtn == "LeftButton" and selfBar._msgFrame and selfBar._trackState and ns.Chat and ns.Chat.JumpToStickySectionStart then
+            local jumped = ns.Chat:JumpToStickySectionStart(selfBar._msgFrame, selfBar._trackState)
+            if jumped and type(onAfterJump) == "function" then
+                onAfterJump(selfBar)
+            end
+            if GameTooltip and GameTooltip:IsOwned(selfBar) then
+                ShowBarTooltip(selfBar)
+            end
+        end
+    end)
+
+    return bar
+end
+
+--- Updates a sticky section bar from `msgFrame` scroll state and returns whether it is shown.
+function Theme:SyncStickySectionBar(bar, msgFrame, trackState, isGroupThread, palette)
+    if not (bar and msgFrame and trackState and ns.Chat and ns.Chat.ResolveStickySection) then
+        if bar then
+            bar._activeSec = nil
+            bar:Hide()
+        end
+        return false
+    end
+    local activeSec, activeIdx, topIdx, _, offset, _, maxRange = ns.Chat:ResolveStickySection(msgFrame, trackState)
+    if not activeSec then
+        bar._activeSec = nil
+        bar:Hide()
+        return false
+    end
+    local wantShow = (isGroupThread and (activeSec.kind == "GROUP" or maxRange > 0))
+        or ((not isGroupThread) and maxRange > 0)
+    if not wantShow then
+        bar._activeSec = nil
+        bar:Hide()
+        return false
+    end
+
+    local labelText = activeSec.label or ""
+    local rgb = activeSec.rgb or { 0.50, 0.56, 0.64 }
+
+    local atVeryTop = (offset >= maxRange) and (activeIdx <= 1) and ((activeSec.bannerLineIdx or 0) <= topIdx)
+    local canJump = (maxRange > 0) and (not atVeryTop)
+    local wouldJumpPrev = canJump and ((activeSec.bannerLineIdx or 0) >= topIdx) and (activeIdx > 1)
+
+    bar._activeSec = activeSec
+    bar._msgFrame = msgFrame
+    bar._trackState = trackState
+    bar._canJump = canJump
+    bar._wouldJumpPrev = wouldJumpPrev
+
+    local pal = palette or self:GetPalette()
+    local sBg = (pal and pal.surfaceBg) or { 0.09, 0.11, 0.15 }
+    bar.bgTex:SetVertexColor(sBg[1], sBg[2], sBg[3], 0.94)
+    bar.accentBar:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.95)
+    bar.bottomLine:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.36)
+    bar.jumpIco:SetVertexColor(rgb[1], rgb[2], rgb[3], 0.92)
+    bar.jumpIco:SetShown(canJump)
+    if bar._lastLabel ~= labelText then
+        bar._lastLabel = labelText
+        bar.labelFs:SetText(labelText)
+    end
+    bar:Show()
     return true
 end
 

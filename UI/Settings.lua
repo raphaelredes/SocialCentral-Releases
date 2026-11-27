@@ -3040,8 +3040,20 @@ local function BuildMinimapPreviewSettingsSection(nf, anchorTo, deps, NotifySett
         L["Automatically stays inactive if CTRL-W is already bound in your WoW Keybindings or SocialCentral hotkeys/macros."]
     )
 
+    local qrPingsBarCb = CreateCheckbox(
+        nf, L["Show Quick Replies Bar"], qrCtrlWCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyShowPingsBar ~= false end,
+        function(checked)
+            ns.db.settings.quickReplyShowPingsBar = checked
+            NotifySettingChanged("CHAT_UPDATED")
+        end,
+        L["Help: Show Quick Replies Bar"],
+        L["Shows or hides the 1-click quick-reply phrase strip above the Quick Reply input box."],
+        L["Uncheck to gain extra vertical space for chat messages; you can still open the '...' menu or toggle this anytime from Conversation Options."]
+    )
+
     local qrWhisperCb = CreateCheckbox(
-        nf, L["Quick Reply notifications: Whispers & SocialCentral Chat"], qrCtrlWCb, -8,
+        nf, L["Quick Reply notifications: Whispers & SocialCentral Chat"], qrPingsBarCb, -8,
         function() return not ns.db or not ns.db.settings or ns.db.settings.quickReplyNotifyWhisper ~= false end,
         function(checked)
             ns.db.settings.quickReplyNotifyWhisper = checked

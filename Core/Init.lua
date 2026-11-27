@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.30"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.30" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.31"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.31" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -235,6 +235,9 @@ local DEFAULTS = {
         quickReplyDungeonAutoMode = true, -- auto-open persistent Quick Reply (over Official Chat or dragged spot) in Dungeons & Raids
         quickReplySlashOpen = true, -- auto-open/switch Quick Reply when typing /p, /g, /o, /ra, /i, /al, /r, /w (+ Space)
         quickReplyCtrlWCloseTab = true, -- close active unpinned Quick Reply tab with Ctrl+W when CTRL-W has no external keybind
+        quickReplyShowPingsBar = true,  -- show/hide the bottom 1-click Quick Replies chip bar inside Quick Reply
+        quickReplyFontSize = 0,         -- chat viewport font size override (0 = inherit ChatFontNormal default; 11..16 = explicit pt)
+        chatHubFontSize = 0,            -- Conversations hub chat viewport font size override (0 = inherit ChatFontNormal; 11..16 = explicit pt)
         quickReplyTutorialShown = false, -- one-time account-wide Quick Reply walkthrough tutorial shown on first view
         officialHideGroup = false,      -- opt-in: hide Party/Raid/Instance chat in Blizzard Official Chat while keeping in SocialCentral
         officialHideGuild = false,      -- opt-in: hide Guild/Officer chat in Blizzard Official Chat while keeping in SocialCentral
