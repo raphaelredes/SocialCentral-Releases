@@ -19,29 +19,29 @@ end
 Theme.PALETTES = {
     dark = {
         key = "dark",
-        windowBg = { 0.06, 0.07, 0.09, 1.0 },
-        windowBorder = { 0.20, 0.24, 0.30, 1.0 },
-        headerBg = { 0.09, 0.11, 0.14, 1.0 },
-        surfaceBg = { 0.09, 0.11, 0.15, 1.0 },
-        surfaceBorder = { 0.18, 0.22, 0.28, 1.0 },
-        insetBg = { 0.05, 0.06, 0.08, 1.0 },
-        rowBg = { 0.10, 0.12, 0.16, 0.65 },
-        rowAltBg = { 0.08, 0.09, 0.12, 0.65 },
-        rowHoverBg = { 0.16, 0.21, 0.28, 0.90 },
-        rowSelectedBg = { 0.14, 0.27, 0.42, 0.90 },
-        accent = { 0.22, 0.65, 0.95, 1.0 },
+        windowBg = { 0.055, 0.065, 0.088, 1.0 },
+        windowBorder = { 0.24, 0.30, 0.39, 1.0 },
+        headerBg = { 0.085, 0.105, 0.145, 1.0 },
+        surfaceBg = { 0.085, 0.105, 0.145, 1.0 },
+        surfaceBorder = { 0.21, 0.27, 0.35, 1.0 },
+        insetBg = { 0.045, 0.055, 0.075, 1.0 },
+        rowBg = { 0.10, 0.125, 0.17, 0.68 },
+        rowAltBg = { 0.075, 0.090, 0.125, 0.68 },
+        rowHoverBg = { 0.16, 0.22, 0.30, 0.92 },
+        rowSelectedBg = { 0.14, 0.28, 0.44, 0.92 },
+        accent = { 0.24, 0.68, 0.98, 1.0 },
         accentDim = { 0.13, 0.36, 0.56, 1.0 },
-        accentBorder = { 0.30, 0.72, 1.0, 1.0 },
-        btnBg = { 0.14, 0.17, 0.22, 1.0 },
-        btnHoverBg = { 0.20, 0.25, 0.33, 1.0 },
-        btnBorder = { 0.28, 0.33, 0.41, 1.0 },
+        accentBorder = { 0.34, 0.76, 1.0, 1.0 },
+        btnBg = { 0.14, 0.175, 0.23, 1.0 },
+        btnHoverBg = { 0.20, 0.26, 0.34, 1.0 },
+        btnBorder = { 0.30, 0.36, 0.45, 1.0 },
         dangerBg = { 0.42, 0.14, 0.14, 1.0 },
         dangerHoverBg = { 0.58, 0.18, 0.18, 1.0 },
         dangerBorder = { 0.75, 0.25, 0.25, 1.0 },
-        text = { 0.93, 0.95, 0.98 },
-        textGold = { 0.96, 0.80, 0.34 },
-        textMuted = { 0.62, 0.68, 0.76 },
-        textDim = { 0.44, 0.49, 0.57 },
+        text = { 0.94, 0.96, 0.99 },
+        textGold = { 0.98, 0.82, 0.36 },
+        textMuted = { 0.68, 0.74, 0.82 },
+        textDim = { 0.52, 0.58, 0.66 },
         online = { 0.24, 0.85, 0.45 },
         offline = { 0.52, 0.55, 0.60 },
         unknown = { 0.95, 0.74, 0.22 },
@@ -73,8 +73,8 @@ Theme.PALETTES = {
         dangerBorder = { 0.78, 0.30, 0.26, 1.0 },
         text = { 0.98, 0.94, 0.84 },
         textGold = { 1.0, 0.84, 0.24 },
-        textMuted = { 0.76, 0.70, 0.58 },
-        textDim = { 0.54, 0.49, 0.41 },
+        textMuted = { 0.80, 0.74, 0.62 },
+        textDim = { 0.58, 0.53, 0.45 },
         online = { 0.25, 0.88, 0.42 },
         offline = { 0.56, 0.54, 0.49 },
         unknown = { 0.98, 0.78, 0.24 },
@@ -106,8 +106,8 @@ Theme.PALETTES = {
         dangerBorder = { 0.88, 0.34, 0.26, 1.0 },
         text = { 1.0, 0.95, 0.84 },
         textGold = { 1.0, 0.82, 0.0 },
-        textMuted = { 0.78, 0.74, 0.66 },
-        textDim = { 0.52, 0.49, 0.44 },
+        textMuted = { 0.82, 0.78, 0.70 },
+        textDim = { 0.58, 0.55, 0.49 },
         online = { 0.20, 0.88, 0.38 },
         offline = { 0.54, 0.54, 0.58 },
         unknown = { 0.98, 0.78, 0.24 },
@@ -233,6 +233,11 @@ local function ApplySafeGradient(tex, orient, r1, g1, b1, a1, r2, g2, b2, a2)
     end
 end
 
+--- Apply a zero-allocation horizontal or vertical gradient using shared pooled ColorMixin objects.
+function Theme:ApplySafeGradient(tex, orient, r1, g1, b1, a1, r2, g2, b2, a2)
+    return ApplySafeGradient(tex, orient, r1, g1, b1, a1, r2, g2, b2, a2)
+end
+
 local function SyncDepthPolish(frame, kind, p, isBlizz)
     if not frame then return end
     local fw = frame.GetWidth and frame:GetWidth() or 0
@@ -330,13 +335,28 @@ local function SyncDepthPolish(frame, kind, p, isBlizz)
             frame._scTopBevel = bev
         end
         if isBlizz or p.key == "native" then
-            frame._scTopBevel:SetColorTexture(0.95, 0.80, 0.38, 0.28)
+            frame._scTopBevel:SetColorTexture(0.96, 0.82, 0.42, 0.32)
         else
-            frame._scTopBevel:SetColorTexture(0.65, 0.85, 1.0, 0.20)
+            frame._scTopBevel:SetColorTexture(0.68, 0.88, 1.0, 0.24)
         end
         frame._scTopBevel:Show()
     elseif frame._scTopBevel then
         frame._scTopBevel:Hide()
+    end
+
+    local wantInsetShade = isWideFrame and (kind == "inset")
+    if wantInsetShade then
+        if not frame._scInsetTopShade then
+            local ish = frame:CreateTexture(nil, "BORDER", nil, 1)
+            ish:SetHeight(2)
+            ish:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -2)
+            ish:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
+            frame._scInsetTopShade = ish
+        end
+        frame._scInsetTopShade:SetColorTexture(0, 0, 0, isBlizz and 0.44 or 0.34)
+        frame._scInsetTopShade:Show()
+    elseif frame._scInsetTopShade then
+        frame._scInsetTopShade:Hide()
     end
 
     if wantBotBevel then
@@ -581,10 +601,6 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
     end
     local w = btn._scAutoFitW or (btn:GetWidth() or 0)
     local isCenterBtn = (btn._scCenterLabel == true) or (w > 0 and w <= 28)
-    if btn.SetClipsChildren and not btn._scClipsInit then
-        btn._scClipsInit = true
-        btn:SetClipsChildren(not isCenterBtn)
-    end
     local variant = btn._scVariant or "default"
     local padX
     if w < 26 then
@@ -597,11 +613,8 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
         padX = (w < 50) and 4 or 5
     end
     local parent = btn._textLayer or btn
-    if parent.SetClipsChildren and not parent._scClipsInit then
-        parent._scClipsInit = true
-        parent:SetClipsChildren(not isCenterBtn)
-    end
-    local sig = (isCenterBtn and "C:" or "L:") .. padX .. ":" .. (xOff or 0) .. ":" .. (yOff or 0)
+    local leftPad = btn._scLeftPad or padX
+    local sig = (isCenterBtn and "C:" or "L:") .. padX .. ":" .. leftPad .. ":" .. (xOff or 0) .. ":" .. (yOff or 0)
     if btn._scTextOffsetSig == sig and btn._scTextOffsetParent == parent then
         return
     end
@@ -611,7 +624,7 @@ local function SyncBlizzTextOffset(btn, xOff, yOff)
     if isCenterBtn then
         btn.label:SetPoint("CENTER", parent, "CENTER", xOff or 0, yOff or 0)
     else
-        btn.label:SetPoint("LEFT", parent, "LEFT", padX + (xOff or 0), yOff or 0)
+        btn.label:SetPoint("LEFT", parent, "LEFT", leftPad + (xOff or 0), yOff or 0)
         btn.label:SetPoint("RIGHT", parent, "RIGHT", -padX + (xOff or 0), yOff or 0)
     end
     if not btn._scLabelFmtInit then
@@ -675,9 +688,6 @@ local function EnsureBlizzButtonVisual(btn, isTab)
         local tab = CreateFrame("Frame", nil, btn, "BackdropTemplate")
         tab:SetAllPoints(btn)
         tab:EnableMouse(false)
-        if tab.SetClipsChildren then
-            tab:SetClipsChildren(true)
-        end
         tab._topAccent = tab:CreateTexture(nil, "OVERLAY")
         tab._topAccent:SetPoint("TOPLEFT", tab, "TOPLEFT", 2, -1)
         tab._topAccent:SetPoint("TOPRIGHT", tab, "TOPRIGHT", -2, -1)
@@ -708,12 +718,20 @@ function Theme:SyncButtonLayers(btn)
     end
 end
 
+local function SafeIsForbidden(obj)
+    if not (obj and obj.IsForbidden) then
+        return false
+    end
+    local okF, forb = pcall(obj.IsForbidden, obj)
+    return (not okF) or (forb == true)
+end
+
 local function SyncThemeSubtreeChildren(visitFn, baseLvl, depth, ...)
     local n = select("#", ...)
     for i = 1, n do
         local child = select(i, ...)
         if child
-            and not (child.IsForbidden and child:IsForbidden())
+            and not SafeIsForbidden(child)
             and not child._scSkipLayerSync
             and not child._scIsInternalBtnLayer
             and not child._scIsInputBackdrop
@@ -732,9 +750,10 @@ end
 --- Recursively synchronize frame levels across cards, inputs, scroll lists, and button text layers.
 function Theme:SyncSubtreeLayers(root, depth)
     depth = depth or 10
-    if not root or depth <= 0
-        or (root.IsForbidden and root:IsForbidden())
-        or root._scSkipLayerSync
+    if not root or depth <= 0 or SafeIsForbidden(root) then
+        return
+    end
+    if root._scSkipLayerSync
         or root._scIsInternalBtnLayer
         or root._scIsInputBackdrop
     then
@@ -797,24 +816,52 @@ end
 
 local function ApplyButtonSurfaceGradient(frame, r, g, b, a, hovered, active, isWarm, isTab)
     if not frame then return end
+    local alphaVal = a or 1
+    local hovFlag = hovered and true or false
+    local actFlag = active and true or false
+    local warmFlag = isWarm and true or false
+    local tabFlag = isTab and true or false
+    if frame._scGradBg
+        and frame._scGradBg:IsShown()
+        and frame._scBtnShadow
+        and frame._scBtnShadow:IsShown()
+        and frame._scGradR == r
+        and frame._scGradG == g
+        and frame._scGradB == b
+        and frame._scGradA == alphaVal
+        and frame._scGradHov == hovFlag
+        and frame._scGradAct == actFlag
+        and frame._scGradWarm == warmFlag
+        and frame._scGradTab == tabFlag
+    then
+        return
+    end
+    frame._scGradR = r
+    frame._scGradG = g
+    frame._scGradB = b
+    frame._scGradA = alphaVal
+    frame._scGradHov = hovFlag
+    frame._scGradAct = actFlag
+    frame._scGradWarm = warmFlag
+    frame._scGradTab = tabFlag
     if not frame._scGradBg then
         local gbg = frame:CreateTexture(nil, "ARTWORK", nil, -2)
         gbg:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -1)
         gbg:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
         frame._scGradBg = gbg
     end
-    local topBoost = active and 0.08 or (hovered and 0.07 or 0.045)
-    if isTab then
-        topBoost = active and 0.09 or (hovered and 0.06 or 0.03)
+    local topBoost = actFlag and 0.08 or (hovFlag and 0.07 or 0.045)
+    if tabFlag then
+        topBoost = actFlag and 0.09 or (hovFlag and 0.06 or 0.03)
     end
-    local botShade = active and 0.025 or 0.04
-    local rTop = math.min(1, r + (isWarm and topBoost * 1.1 or topBoost))
+    local botShade = actFlag and 0.025 or 0.04
+    local rTop = math.min(1, r + (warmFlag and topBoost * 1.1 or topBoost))
     local gTop = math.min(1, g + topBoost)
-    local bTop = math.min(1, b + (isWarm and topBoost * 0.7 or topBoost * 1.15))
+    local bTop = math.min(1, b + (warmFlag and topBoost * 0.7 or topBoost * 1.15))
     local rBot = math.max(0, r - botShade)
     local gBot = math.max(0, g - botShade)
     local bBot = math.max(0, b - botShade)
-    ApplySafeGradient(frame._scGradBg, "VERTICAL", rBot, gBot, bBot, (a or 1) * 0.92, rTop, gTop, bTop, (a or 1) * 0.96)
+    ApplySafeGradient(frame._scGradBg, "VERTICAL", rBot, gBot, bBot, alphaVal * 0.92, rTop, gTop, bTop, alphaVal * 0.96)
     frame._scGradBg:Show()
 
     if not frame._scBtnShadow then
@@ -824,7 +871,7 @@ local function ApplyButtonSurfaceGradient(frame, r, g, b, a, hovered, active, is
         sh:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 1)
         frame._scBtnShadow = sh
     end
-    frame._scBtnShadow:SetColorTexture(0, 0, 0, active and 0.48 or 0.36)
+    frame._scBtnShadow:SetColorTexture(0, 0, 0, actFlag and 0.48 or 0.36)
     frame._scBtnShadow:Show()
 end
 
@@ -833,11 +880,62 @@ local function ApplyButtonColors(btn, hovered)
     if not btn.SetBackdrop then
         return
     end
-    if btn.SetClipsChildren then
-        btn:SetClipsChildren(true)
-    end
     local variant = btn._scVariant or "default"
-    local active = btn._scActive
+    local active = btn._scActive and true or false
+    local isHovered = hovered and true or false
+    local isEnabled = (not btn.IsEnabled) or (btn:IsEnabled() == true)
+    local isIconToggle = (btn._scIconToggle == true)
+    local isHelpRing = (btn._scHelpRing == true)
+    local hasNavIcon = (btn._scNavIcon ~= nil)
+    local bw = btn:GetWidth() or 0
+    local bh = btn:GetHeight() or 0
+    local isWideGloss = (bw >= 28 and bh >= 18)
+    local ac = isIconToggle and btn._scToggleActiveCol or nil
+    local acR = ac and ac[1] or -1
+    local acG = ac and ac[2] or -1
+    local acB = ac and ac[3] or -1
+    local icoOpts = btn._scIconOpts
+    local icoCol = icoOpts and icoOpts.color or nil
+    local icoR = icoCol and icoCol[1] or -1
+    local icoG = icoCol and icoCol[2] or -1
+    local icoB = icoCol and icoCol[3] or -1
+    local icoA = icoCol and (icoCol[4] or 1) or -1
+    local icoKeep = (icoOpts and icoOpts.keepColorWhenInactive == true) or false
+    local hasIco = (btn.ico ~= nil)
+
+    if btn._scBtnColorClean
+        and btn._scThemeKey == p.key
+        and btn._scColVar == variant
+        and btn._scColAct == active
+        and btn._scColHov == isHovered
+        and btn._scColEn == isEnabled
+        and btn._scColToggle == isIconToggle
+        and btn._scColHelpRing == isHelpRing
+        and btn._scColNavIco == hasNavIcon
+        and btn._scColWide == isWideGloss
+        and btn._scColAcR == acR and btn._scColAcG == acG and btn._scColAcB == acB
+        and btn._scColHasIco == hasIco
+        and btn._scColIcoKeep == icoKeep
+        and btn._scColIcoR == icoR and btn._scColIcoG == icoG and btn._scColIcoB == icoB and btn._scColIcoA == icoA
+    then
+        Theme:SyncButtonLayers(btn)
+        return
+    end
+
+    btn._scBtnColorClean = true
+    btn._scColVar = variant
+    btn._scColAct = active
+    btn._scColHov = isHovered
+    btn._scColEn = isEnabled
+    btn._scColToggle = isIconToggle
+    btn._scColHelpRing = isHelpRing
+    btn._scColNavIco = hasNavIcon
+    btn._scColWide = isWideGloss
+    btn._scColAcR, btn._scColAcG, btn._scColAcB = acR, acG, acB
+    btn._scColHasIco = hasIco
+    btn._scColIcoKeep = icoKeep
+    btn._scColIcoR, btn._scColIcoG, btn._scColIcoB, btn._scColIcoA = icoR, icoG, icoB, icoA
+
     local isBlizz = Theme:IsBlizzard(p)
     btn._scThemeKey = p.key
 
@@ -1072,6 +1170,7 @@ local function ApplyButtonColors(btn, hovered)
     if variant ~= "ghost" and btn:IsEnabled() and bg and (bg[4] or 1) > 0.1 then
         ApplyButtonSurfaceGradient(btn, bg[1], bg[2], bg[3], bg[4] or 1, hovered, active, isBlizz or p.key == "native", variant == "tab")
     else
+        btn._scGradR = nil
         if btn._scGradBg then btn._scGradBg:Hide() end
         if btn._scBtnShadow then btn._scBtnShadow:Hide() end
     end
@@ -1112,7 +1211,26 @@ function Theme:AutoFitButton(btn, minWidth, padding, maxWidth)
         btn._scAutoMax = maxWidth
     end
     btn._scAutoFit = true
-    local pad = btn._scAutoPadCustom or (self:IsBlizzard() and 22 or 16)
+    local pal = self:GetPalette()
+    local curText = btn.label:GetText() or ""
+    if btn._scLastAutoFitW
+        and btn._scLastAutoText == curText
+        and btn._scLastAutoTheme == (pal and pal.key or "dark")
+        and btn._scLastAutoMin == btn._scAutoMin
+        and btn._scLastAutoPad == (btn._scAutoPadCustom or -1)
+        and btn._scLastAutoMax == (btn._scAutoMax or -1)
+        and btn._scAutoFitW > 0
+        and math.abs((btn:GetWidth() or 0) - btn._scAutoFitW) < 1
+    then
+        ApplyButtonColors(btn, false)
+        return btn._scAutoFitW
+    end
+    btn._scLastAutoText = curText
+    btn._scLastAutoTheme = pal and pal.key or "dark"
+    btn._scLastAutoMin = btn._scAutoMin
+    btn._scLastAutoPad = btn._scAutoPadCustom or -1
+    btn._scLastAutoMax = btn._scAutoMax or -1
+    local pad = btn._scAutoPadCustom or (self:IsBlizzard(pal) and 22 or 16)
     local textW = MeasureLabelWidth(btn)
     local w = math.max(btn._scAutoMin, textW + pad)
     if btn._scAutoMax and w > btn._scAutoMax then
@@ -1120,6 +1238,7 @@ function Theme:AutoFitButton(btn, minWidth, padding, maxWidth)
     end
     w = math.floor(w + 0.5)
     btn._scAutoFitW = w
+    btn._scLastAutoFitW = w
     if w > 0 and math.abs((btn:GetWidth() or 0) - w) >= 1 then
         btn:SetWidth(w)
     end
@@ -1133,6 +1252,7 @@ function Theme:ClearButtonIcon(btn)
     btn._scIconOpts = nil
     btn._scIconToggle = nil
     btn._scToggleActiveCol = nil
+    btn._scBtnColorClean = nil
     if btn._scToggleRing then
         for _, edge in pairs(btn._scToggleRing) do
             edge:Hide()
@@ -1156,10 +1276,104 @@ function Theme:SetIconToggle(btn, active, activeColor)
     ApplyButtonColors(btn, over and enabled)
 end
 
+local ICON_TEXCOORD_EXACT = {
+    ["Interface\\PaperDollInfoFrame\\Character-Plus"] = { 0.14, 0.86, 0.14, 0.86 },
+    ["Interface\\ChatFrame\\UI-ChatIcon-Chat-Up"] = { 0.15, 0.85, 0.15, 0.85 },
+    ["Interface\\ChatFrame\\UI-ChatIcon-BattleNet"] = { 0.14, 0.86, 0.14, 0.86 },
+    ["Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up"] = { 0.18, 0.82, 0.18, 0.82 },
+    ["Interface\\Buttons\\UI-GuildButton-PublicNote-Up"] = { 0.10, 0.88, 0.10, 0.88 },
+    ["Interface\\Buttons\\UI-GuildButton-MOTD-Up"] = { 0.10, 0.88, 0.10, 0.88 },
+    ["Interface\\Buttons\\UI-RefreshButton"] = { 0.14, 0.86, 0.14, 0.86 },
+    ["Interface\\Buttons\\UI-OptionsButton"] = { 0.14, 0.86, 0.14, 0.86 },
+    ["Interface\\Buttons\\UI-GroupLoot-Pass-Up"] = { 0.14, 0.86, 0.14, 0.86 },
+    ["Interface\\Buttons\\UI-GroupLoot-Dice-Up"] = { 0.12, 0.88, 0.12, 0.88 },
+    ["Interface\\GroupFrame\\UI-Group-LeaderIcon"] = { 0.12, 0.88, 0.12, 0.88 },
+    ["Interface\\FriendsFrame\\UI-Toast-FriendOnlineIcon"] = { 0.14, 0.86, 0.14, 0.86 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\bell-on"] = { 0.04, 0.96, 0.00, 0.97 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\bell-on.tga"] = { 0.04, 0.96, 0.00, 0.97 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\bell-off"] = { 0.02, 0.98, 0.00, 1.00 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\bell-off.tga"] = { 0.02, 0.98, 0.00, 1.00 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\lock-closed"] = { 0.12, 0.88, 0.05, 0.95 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\lock-closed.tga"] = { 0.12, 0.88, 0.05, 0.95 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\lock-open"] = { 0.06, 0.79, 0.02, 0.95 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\lock-open.tga"] = { 0.06, 0.79, 0.02, 0.95 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\toast-party"] = { 0.04, 0.96, 0.04, 0.96 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\toast-party.tga"] = { 0.04, 0.96, 0.04, 0.96 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\toast-mail"] = { 0.04, 0.96, 0.04, 0.96 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\toast-mail.tga"] = { 0.04, 0.96, 0.04, 0.96 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\toast-online"] = { 0.04, 0.96, 0.04, 0.96 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\toast-online.tga"] = { 0.04, 0.96, 0.04, 0.96 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\icon"] = { 0.04, 0.96, 0.04, 0.96 },
+    ["Interface\\AddOns\\SocialCentral\\Media\\icon.tga"] = { 0.04, 0.96, 0.04, 0.96 },
+}
+local TC_SPELL_ICON = { 0.08, 0.92, 0.08, 0.92 }
+local TC_READY_ICON = { 0.12, 0.88, 0.12, 0.88 }
+local TC_STATUS_ICON = { 0.10, 0.90, 0.10, 0.90 }
+local TC_BNET_ICON = { 0.14, 0.86, 0.14, 0.86 }
+local TC_CHAT_ICON = { 0.15, 0.85, 0.15, 0.85 }
+local TC_MEDIA_ICON = { 0.04, 0.96, 0.04, 0.96 }
+local TC_BELL_ICON = { 0.04, 0.96, 0.00, 0.97 }
+
+function Theme:ResolveIconTexCoord(tex)
+    if type(tex) == "number" then
+        return TC_SPELL_ICON
+    end
+    if type(tex) ~= "string" then
+        return nil
+    end
+    local exact = ICON_TEXCOORD_EXACT[tex]
+    if exact then
+        return exact
+    end
+    if tex:find("Interface\\Icons\\", 1, true) then
+        return TC_SPELL_ICON
+    elseif tex:find("ReadyCheck-", 1, true) then
+        return TC_READY_ICON
+    elseif tex:find("StatusIcon-", 1, true) then
+        return TC_STATUS_ICON
+    end
+    return nil
+end
+
+function Theme:ResolveThreadIcon(kind, classFile, generalTarget)
+    if (kind == "WHISPER" or kind == "BN_WHISPER") and classFile and CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classFile] then
+        local cc = CLASS_ICON_TCOORDS[classFile]
+        return "Interface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES",
+            { cc[1] + 0.03, cc[2] - 0.03, cc[3] + 0.03, cc[4] - 0.03 },
+            1, 1, 1
+    elseif kind == "BN_WHISPER" then
+        return "Interface\\ChatFrame\\UI-ChatIcon-BattleNet", TC_BNET_ICON, 1, 1, 1
+    elseif kind == "WHISPER" then
+        return "Interface\\Icons\\INV_Letter_15", TC_SPELL_ICON, 1, 1, 1
+    elseif kind == "GUILD" then
+        return "Interface\\Icons\\INV_Shirt_GuildTabard_01", TC_SPELL_ICON, 1, 1, 1
+    elseif kind == "OFFICER" then
+        return "Interface\\Icons\\INV_Crown_01", TC_SPELL_ICON, 1.0, 0.92, 0.65
+    elseif kind == "ALLIANCE" then
+        return "Interface\\Icons\\Achievement_GuildPerk_EverybodysFriend", TC_SPELL_ICON, 1, 1, 1
+    elseif kind == "RAID" then
+        return "Interface\\AddOns\\SocialCentral\\Media\\toast-party", TC_MEDIA_ICON, 1.0, 0.62, 0.24
+    elseif kind == "PARTY" or kind == "INSTANCE_CHAT" then
+        return "Interface\\AddOns\\SocialCentral\\Media\\toast-party", TC_MEDIA_ICON, 0.58, 0.82, 1.0
+    elseif kind == "ROOM" then
+        return "Interface\\AddOns\\SocialCentral\\Media\\icon", TC_MEDIA_ICON, 1, 1, 1
+    elseif kind == "NOTES" then
+        return "Interface\\Icons\\INV_Misc_Note_01", TC_SPELL_ICON, 1, 1, 1
+    elseif kind == "MENTIONS" then
+        return "Interface\\AddOns\\SocialCentral\\Media\\bell-on", TC_BELL_ICON, 1.0, 0.84, 0.28
+    elseif kind == "LOCAL_YELL" or (kind == "GENERAL" and generalTarget and generalTarget.isYell) then
+        return "Interface\\Icons\\Ability_Warrior_BattleShout", TC_SPELL_ICON, 1.0, 0.68, 0.68
+    elseif kind == "PUB_CHANNEL" or (kind == "GENERAL" and generalTarget and generalTarget.channelId) then
+        return "Interface\\Icons\\INV_Misc_Map_01", TC_SPELL_ICON, 1.0, 0.90, 0.84
+    end
+    return "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", TC_CHAT_ICON, 0.84, 0.92, 1.0
+end
+
 --- Configure or update an icon-only button with cropped game textures, disabled dimming, and hover tooltip.
 function Theme:ConfigureIconButton(btn, width, height, tex, opts)
     if not btn then return end
     opts = type(opts) == "table" and opts or {}
+    btn._scBtnColorClean = nil
     self:SyncButtonLayers(btn)
     btn._scAutoFit = false
     if width and height then
@@ -1182,16 +1396,7 @@ function Theme:ConfigureIconButton(btn, width, height, tex, opts)
         btn.ico:SetAtlas(opts.atlas, false)
     else
         btn.ico:SetTexture(tex)
-        local tc = opts.texCoord
-        if not tc and type(tex) == "string" then
-            if tex:find("Interface\\Icons\\", 1, true) then
-                tc = { 0.08, 0.92, 0.08, 0.92 }
-            elseif tex:find("Character-Plus", 1, true) or tex:find("ReadyCheck-", 1, true) then
-                tc = { 0.12, 0.88, 0.12, 0.88 }
-            end
-        elseif not tc and type(tex) == "number" then
-            tc = { 0.08, 0.92, 0.08, 0.92 }
-        end
+        local tc = opts.texCoord or self:ResolveIconTexCoord(tex)
         if tc then
             btn.ico:SetTexCoord(tc[1], tc[2], tc[3], tc[4])
         else
@@ -1249,30 +1454,42 @@ function Theme:ConfigureIconButton(btn, width, height, tex, opts)
     end
 end
 
+local ORB_COL_OFFLINE = { 0.95, 0.32, 0.32 }
+local ORB_COL_ONLINE = { 0.25, 0.88, 0.45 }
+local function OnlineOfflineOrbTooltipFn(selfBtn)
+    local L = ns.L
+    local offOn = (selfBtn._scShowOffline == true)
+    if offOn then
+        return "|cfff54747" .. L["Showing Offline"] .. "|r",
+            L["Click to show online players only"] .. "\n" .. L["Green = Online Only · Red = Showing Offline"]
+    end
+    return "|cff3fb950" .. L["Online Only"] .. "|r",
+        L["Click to show offline players"] .. "\n" .. L["Green = Online Only · Red = Showing Offline"]
+end
+
 --- Apply green (Online Only) vs red (Showing Offline) orb visual to an online/offline toggle button.
 function Theme:ApplyOnlineOfflineOrb(btn, showOffline, width, height)
     if not btn then return end
-    local L = ns.L
     local isShowOff = (showOffline == true)
     btn._scShowOffline = isShowOff
+    local w = width or 24
+    local h = height or 22
+    local palKey = (self.GetThemeName and self:GetThemeName()) or "blizzard"
+    local orbSig = (isShowOff and "1:" or "0:") .. tostring(w) .. "x" .. tostring(h) .. ":" .. palKey
+    if btn._scOrbSig == orbSig then
+        return
+    end
+    btn._scOrbSig = orbSig
     local tex = isShowOff
         and (FRIENDS_TEXTURE_DND or "Interface\\FriendsFrame\\StatusIcon-DnD")
         or (FRIENDS_TEXTURE_ONLINE or "Interface\\FriendsFrame\\StatusIcon-Online")
-    local ringCol = isShowOff and { 0.95, 0.32, 0.32 } or { 0.25, 0.88, 0.45 }
-    self:ConfigureIconButton(btn, width or 24, height or 22, tex, {
+    local ringCol = isShowOff and ORB_COL_OFFLINE or ORB_COL_ONLINE
+    self:ConfigureIconButton(btn, w, h, tex, {
         size = 15,
         toggle = true,
         active = true,
         activeColor = ringCol,
-        tooltipFn = function(selfBtn)
-            local offOn = (selfBtn._scShowOffline == true)
-            if offOn then
-                return "|cfff54747" .. L["Showing Offline"] .. "|r",
-                    L["Click to show online players only"] .. "\n" .. L["Green = Online Only · Red = Showing Offline"]
-            end
-            return "|cff3fb950" .. L["Online Only"] .. "|r",
-                L["Click to show offline players"] .. "\n" .. L["Green = Online Only · Red = Showing Offline"]
-        end,
+        tooltipFn = OnlineOfflineOrbTooltipFn,
     })
 end
 
@@ -1280,23 +1497,29 @@ end
 function Theme:CreateLegendTag(parent, getItemsFn)
     local L = ns.L
     local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
-    btn:SetSize(74, 20)
+    btn:SetSize(78, 20)
     self:ApplyBackdrop(btn, "surface")
+    local pip = btn:CreateTexture(nil, "OVERLAY", nil, 1)
+    pip:SetSize(5, 5)
+    pip:SetPoint("LEFT", btn, "LEFT", 7, 0)
+    pip:SetColorTexture(0.95, 0.78, 0.28, 0.92)
+    btn._pip = pip
     local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    lbl:SetPoint("CENTER", 0, 0)
+    lbl:SetPoint("LEFT", pip, "RIGHT", 4, 0)
     lbl:SetText(L["Legend"])
-    lbl:SetTextColor(0.92, 0.82, 0.48)
+    lbl:SetTextColor(0.94, 0.84, 0.50)
     btn.label = lbl
-    local tw = math.ceil((lbl:GetStringWidth() or 52) + 16)
-    btn:SetWidth(math.max(62, tw))
-    btn._scAutoFitW = math.max(62, tw)
+    local tw = math.ceil((lbl:GetStringWidth() or 48) + 22)
+    btn:SetWidth(math.max(66, tw))
+    btn._scAutoFitW = math.max(66, tw)
     btn:SetScript("OnEnter", function(selfBtn)
         local p = Theme:GetPalette()
         if selfBtn.SetBackdropBorderColor then
             local ac = p.accentBorder or { 0.96, 0.76, 0.22 }
             selfBtn:SetBackdropBorderColor(ac[1], ac[2], ac[3], 1.0)
         end
-        lbl:SetTextColor(1.0, 0.94, 0.70)
+        pip:SetColorTexture(1.0, 0.88, 0.42, 1.0)
+        lbl:SetTextColor(1.0, 0.95, 0.74)
         if not GameTooltip then return end
         local items = type(getItemsFn) == "function" and getItemsFn() or getItemsFn
         if type(items) ~= "table" or #items == 0 then return end
@@ -1322,8 +1545,13 @@ function Theme:CreateLegendTag(parent, getItemsFn)
         GameTooltip:Show()
     end)
     btn:SetScript("OnLeave", function(selfBtn)
-        Theme:ApplyBackdrop(selfBtn, "surface")
-        lbl:SetTextColor(0.92, 0.82, 0.48)
+        local p = Theme:GetPalette()
+        if selfBtn.SetBackdropBorderColor then
+            local br = (Theme:IsBlizzard(p) and { 0.44, 0.36, 0.22, 1.0 }) or (p and p.surfaceBorder) or { 0.35, 0.35, 0.35, 1.0 }
+            selfBtn:SetBackdropBorderColor(br[1], br[2], br[3], 1.0)
+        end
+        pip:SetColorTexture(0.95, 0.78, 0.28, 0.92)
+        lbl:SetTextColor(0.94, 0.84, 0.50)
         if GameTooltip and GameTooltip:IsOwned(selfBtn) then
             GameTooltip:Hide()
         end
@@ -1394,11 +1622,9 @@ end
 function Theme:CreateButton(parent, width, height, text, variant)
     local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
     btn:SetSize(width or 80, height or 24)
-    if btn.SetClipsChildren then btn:SetClipsChildren(true) end
     btn._textLayer = CreateFrame("Frame", nil, btn)
     btn._textLayer:SetAllPoints()
     btn._textLayer._scIsInternalBtnLayer = true
-    if btn._textLayer.SetClipsChildren then btn._textLayer:SetClipsChildren(true) end
     btn._textLayer:SetFrameLevel(math.max(1, btn:GetFrameLevel() + 4))
     btn.label = btn._textLayer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     btn.label:SetText(text or "")
@@ -1685,12 +1911,56 @@ function Theme:ShowHyperlinkTooltip(owner, link)
     end
     owner._scHoveredHyperlink = link
     if not GameTooltip then return false end
-    if link:find("addon:SCentral:w:", 1, true) then
-        local who = link:match("addon:SCentral:w:([^|]+)") or "?"
+    if link:find("addon:SCentral:w:", 1, true) or link:find("addon:SCentral:whisper:", 1, true) then
+        local who = link:match("addon:SCentral:w:([^|]+)") or link:match("addon:SCentral:whisper:([^|]+)") or "?"
+        local shownWho = who
+        if ns.Compat and ns.Compat.IsStreamerMode and ns.Compat.IsStreamerMode() and shownWho:find("#", 1, true) and ns.Compat.MaskStreamerBNetName then
+            shownWho = ns.Compat.MaskStreamerBNetName(shownWho)
+        end
+        local lk = (ns.Compat and ns.Compat.ParseCharacterFields and ns.Compat.ParseCharacterFields(who)) or who:lower()
+        local sRow = (lk and ns.Store and ((ns.Store.socialByLookup and ns.Store.socialByLookup[lk])
+            or (ns.Store.socialDirectoryByLookup and ns.Store.socialDirectoryByLookup[lk]))) or nil
+        local wl = (lk and ns.Watchlist and ns.Watchlist.GetEntry) and ns.Watchlist:GetEntry(lk) or nil
+        local meta = (lk and ns.Store) and ((ns.Store.GetResolvedSocialMeta and ns.Store:GetResolvedSocialMeta(lk)) or (ns.Store.GetSocialMeta and ns.Store:GetSocialMeta(lk))) or nil
+        local clsFile = (sRow and sRow.classFile) or (wl and wl.classFile)
+        local lvl = (sRow and tonumber(sRow.level)) or (wl and tonumber(wl.level)) or 0
+        local guildName = (sRow and sRow.guild) or (wl and wl.guild)
+        local zoneName = (sRow and sRow.area) or (wl and wl.area)
+        local clsHex = (clsFile and ns.Compat and ns.Compat.ClassHex) and ns.Compat.ClassHex(clsFile) or "|cffffe066"
+        local headStr = clsHex .. shownWho .. "|r" .. ((lvl and lvl > 0) and (" |cff9da7b5[" .. L["Lv."] .. tostring(math.floor(lvl)) .. "]|r") or "")
         GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
         GameTooltip:ClearLines()
-        GameTooltip:AddLine(who, 1.0, 0.88, 0.35, true)
-        GameTooltip:AddLine(L["Click: Whisper · Alt+Click: Invite · Ctrl+Click: Social Card · Right-click: Options"], 0.82, 0.88, 0.94, true)
+        GameTooltip:AddLine(headStr, 1.0, 0.88, 0.35, true)
+        if guildName and guildName ~= "" then
+            GameTooltip:AddLine("<" .. guildName .. ">", 0.35, 0.90, 0.48, true)
+        end
+        if zoneName and zoneName ~= "" then
+            GameTooltip:AddLine(zoneName, 0.78, 0.84, 0.92, true)
+        end
+        if meta and meta.flag == "AVOID" then
+            GameTooltip:AddLine("|cfff54747" .. L["AVOID"] .. "|r" .. ((meta.note and meta.note ~= "") and (" — " .. meta.note) or ""), 1.0, 0.40, 0.40, true)
+        elseif meta and meta.note and meta.note ~= "" then
+            GameTooltip:AddLine(L["Note"] .. ": " .. meta.note, 1.0, 0.88, 0.50, true)
+        elseif wl and wl.note and wl.note ~= "" then
+            GameTooltip:AddLine(L["Note"] .. ": " .. wl.note, 1.0, 0.88, 0.50, true)
+        end
+        GameTooltip:AddLine(L["Click: Whisper · Alt+Click: Invite · Ctrl+Click: Social Card · Right-click: Options"], 0.76, 0.84, 0.94, true)
+        GameTooltip:Show()
+        return true
+    elseif link:find("addon:SCentral:lootroll:", 1, true) then
+        local rollResultId = link:match("addon:SCentral:lootroll:([^|]+)")
+        local rec = (ns.LootRoll and ns.LootRoll.GetResultById and rollResultId) and ns.LootRoll:GetResultById(rollResultId) or nil
+        GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["Loot Roll Results"], 1.0, 0.85, 0.25, true)
+        if rec then
+            GameTooltip:AddLine(tostring(rec.name or "?"), 1.0, 1.0, 1.0, true)
+            if rec.winnerName then
+                local rVal = rec.winnerRoll and (" [" .. tostring(rec.winnerRoll) .. "]") or ""
+                GameTooltip:AddLine(string.format(L["Winner: %s"], tostring(rec.winnerName)) .. rVal, 0.45, 0.94, 0.55, true)
+            end
+        end
+        GameTooltip:AddLine(L["Click Results to inspect all teammate rolls"], 0.80, 0.88, 0.96, true)
         GameTooltip:Show()
         return true
     elseif link:find("addon:SCentral:grp:", 1, true) then
@@ -1758,11 +2028,40 @@ function Theme:ShowHyperlinkTooltip(owner, link)
         GameTooltip:AddLine(L["Click to quote, copy, or save to notes."], 0.82, 0.88, 0.94, true)
         GameTooltip:Show()
         return true
+    elseif link:find("addon:SCentral:guildact:", 1, true) then
+        local idxStr, tKey = link:match("addon:SCentral:guildact:(%d+):?([^|]*)")
+        if (not tKey or tKey == "") and ns.Chat then
+            tKey = (ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.activeKey) or ns.Chat.activeThreadKey
+        end
+        local thr = tKey and ns.Chat and ns.Chat.threads and ns.Chat.threads[tKey]
+        local entry = idxStr and thr and thr.messages and thr.messages[tonumber(idxStr) or -1]
+        if type(entry) == "table" and entry.guildEventKind and ns.Chat and ns.Chat.BuildGuildMilestoneReplyText then
+            GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+            GameTooltip:ClearLines()
+            local isPromo = (entry.guildEventKind == "PROMOTE")
+            GameTooltip:AddLine(isPromo and L["Congratulate Guild Member"] or L["Welcome Guild Member"], 0.30, 0.92, 0.48, true)
+            GameTooltip:AddLine('"' .. ns.Chat:BuildGuildMilestoneReplyText(entry) .. '"', 1.0, 1.0, 1.0, true)
+            GameTooltip:AddLine(L["Click: send in Guild chat · Right-click: edit before sending"], 0.78, 0.86, 0.94, true)
+            GameTooltip:Show()
+            return true
+        end
+        return false
     elseif link:find("addon:SCentral:url:", 1, true) then
+        local encoded = link:match("addon:SCentral:url:([^|]+)")
+        local decoded = (encoded and encoded ~= "" and ns.Chat and ns.Chat.DecodeUrlLink) and ns.Chat:DecodeUrlLink(encoded) or encoded
         GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
         GameTooltip:ClearLines()
         GameTooltip:AddLine(L["Copy Link"], 0.40, 0.74, 1.0, true)
+        if decoded and decoded ~= "" then
+            GameTooltip:AddLine(decoded, 1.0, 1.0, 1.0, true)
+        end
         GameTooltip:AddLine(L["Press Ctrl+C to copy this link to your clipboard."], 0.82, 0.88, 0.94, true)
+        GameTooltip:Show()
+        return true
+    elseif link:find("addon:SCentral:delnote:", 1, true) then
+        GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(L["Delete"], 1.0, 0.42, 0.42, true)
         GameTooltip:Show()
         return true
     elseif link:find("^addon:") or link:find("^player") or link:find("^BNplayer") or link:find("^channel:") then
@@ -2474,13 +2773,13 @@ end
 local function IsHandleAttachedToWindow(handle, win)
     if not (handle and win) then return false end
     if win.IsVisible and not win:IsVisible() then return false end
-    if handle == win or handle._scDragWin == win then return true end
+    if handle == win then return true end
     local parent = handle.GetParent and handle:GetParent() or nil
     if not parent or (UIParent and parent == UIParent) then
-        return true
+        return handle._scDragWin == win
     end
     local cur = parent
-    for _ = 1, 10 do
+    for _ = 1, 12 do
         if cur == win then
             return true
         end
@@ -2990,11 +3289,24 @@ function Theme:PrepareTopOverlayModal(m, minLevel, opts)
         bg:SetTexture(WHITE8X8)
         m._solidOpaqueBg = bg
     end
+    local pal = self:GetPalette()
     if m._solidOpaqueBg then
-        local pal = self:GetPalette()
         local wBg = (pal and pal.windowBg) or { 0.08, 0.075, 0.07, 1.0 }
         m._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
         m._solidOpaqueBg:Show()
+    end
+    if not m._scModalTopRim and m.CreateTexture then
+        local rim = m:CreateTexture(nil, "BORDER", nil, 2)
+        rim:SetHeight(1)
+        rim:SetPoint("TOPLEFT", m, "TOPLEFT", 6, -5)
+        rim:SetPoint("TOPRIGHT", m, "TOPRIGHT", -6, -5)
+        m._scModalTopRim = rim
+    end
+    if m._scModalTopRim then
+        local isWarm = pal and (pal.key == "blizzard" or pal.key == "native")
+        local rc = (isWarm and { 0.96, 0.80, 0.34 }) or (pal and pal.accentBorder) or { 0.35, 0.78, 1.0 }
+        m._scModalTopRim:SetColorTexture(rc[1], rc[2], rc[3], isWarm and 0.42 or 0.32)
+        m._scModalTopRim:Show()
     end
     for _, closeKey in ipairs({ "topCloseBtn", "closeBtn", "topClose" }) do
         local cb = m[closeKey]
@@ -3010,6 +3322,44 @@ end
 local CHROMIE_NPC_ID = 10667
 local CHROMIE_DISPLAY_ID = 10008
 local CHROMIE_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_PocketWatch_02"
+local CHROMIE_RESUME_KEYS = {
+    "ChromieResume1", "ChromieResume2", "ChromieResume3", "ChromieResume4",
+    "ChromieResume5", "ChromieResume6", "ChromieResume7", "ChromieResume8",
+}
+local CHROMIE_FLAVOR_KEYS = {
+    "ChromieFlavor1", "ChromieFlavor2", "ChromieFlavor3", "ChromieFlavor4",
+}
+local CHROMIE_PORTRAIT_ANIMS = { 67, 60, 68, 66 }
+local ADAPTED_HEX_CACHE = {}
+
+local function AdaptHexColor(hex)
+    local cached = ADAPTED_HEX_CACHE[hex]
+    if cached then
+        return cached
+    end
+    local r = tonumber(hex:sub(1, 2), 16) or 0
+    local g = tonumber(hex:sub(3, 4), 16) or 0
+    local b = tonumber(hex:sub(5, 6), 16) or 0
+    local lum = (0.299 * r) + (0.587 * g) + (0.114 * b)
+    local out
+    if lum > 125 then
+        out = string.format("|cff%02x%02x%02x", math.floor(r * 0.42), math.floor(g * 0.42), math.floor(b * 0.42))
+    else
+        out = "|cff" .. hex
+    end
+    ADAPTED_HEX_CACHE[hex] = out
+    return out
+end
+
+local function IsGuideTargetForbidden(obj)
+    if obj and obj.IsForbidden then
+        local okF, forb = pcall(obj.IsForbidden, obj)
+        if not okF or forb then
+            return true
+        end
+    end
+    return false
+end
 
 local function CollectGuideTargetObjs(rawTarget, outList, seen)
     if not rawTarget then return end
@@ -3021,7 +3371,7 @@ local function CollectGuideTargetObjs(rawTarget, outList, seen)
         end
         return
     end
-    if rType ~= "table" then return end
+    if rType ~= "table" or IsGuideTargetForbidden(rawTarget) then return end
     if rawTarget.GetLeft then
         if not seen[rawTarget] then
             seen[rawTarget] = true
@@ -3070,6 +3420,24 @@ local function ComputeGuideTargetsRect(rawTarget)
     return minL, minB, maxR, maxT
 end
 
+local function CreateGuideAlphaPulseAg(targetFrame, fromAlpha, toAlpha, duration, looping)
+    if not (targetFrame and targetFrame.CreateAnimationGroup) then return nil, nil end
+    local okAg, ag = pcall(targetFrame.CreateAnimationGroup, targetFrame)
+    if not okAg or not ag then return nil, nil end
+    if looping then
+        pcall(ag.SetLooping, ag, looping)
+    end
+    local okA, anim = pcall(ag.CreateAnimation, ag, "Alpha")
+    if okA and anim then
+        if anim.SetFromAlpha then anim:SetFromAlpha(fromAlpha) end
+        if anim.SetToAlpha then anim:SetToAlpha(toAlpha) end
+        if anim.SetDuration then anim:SetDuration(duration) end
+        if anim.SetSmoothing then anim:SetSmoothing(looping and "IN_OUT" or "OUT") end
+        return ag, anim
+    end
+    return ag, nil
+end
+
 local function EnsureGuideSpotlight()
     if guideSpotlight then
         return guideSpotlight
@@ -3080,35 +3448,68 @@ local function EnsureGuideSpotlight()
     spot:SetFrameLevel(862)
     spot:EnableMouse(false)
 
-    local fill = spot:CreateTexture(nil, "BACKGROUND")
+    local pulseLayer = CreateFrame("Frame", nil, spot)
+    pulseLayer:SetAllPoints(spot)
+    pulseLayer:EnableMouse(false)
+    spot.pulseLayer = pulseLayer
+
+    local fill = pulseLayer:CreateTexture(nil, "BACKGROUND")
     fill:SetAllPoints()
     fill:SetTexture(WHITE8X8)
-    fill:SetVertexColor(1.0, 0.82, 0.24, 0.11)
+    fill:SetVertexColor(1.0, 0.84, 0.26, 0.14)
     spot.fill = fill
 
-    local eTop = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    local eTop = pulseLayer:CreateTexture(nil, "OVERLAY", nil, 6)
     eTop:SetPoint("TOPLEFT", 0, 0)
     eTop:SetPoint("TOPRIGHT", 0, 0)
     eTop:SetHeight(2)
-    local eBot = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    eTop:SetColorTexture(1.0, 0.84, 0.26, 0.98)
+    local eBot = pulseLayer:CreateTexture(nil, "OVERLAY", nil, 6)
     eBot:SetPoint("BOTTOMLEFT", 0, 0)
     eBot:SetPoint("BOTTOMRIGHT", 0, 0)
     eBot:SetHeight(2)
-    local eLeft = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    eBot:SetColorTexture(1.0, 0.84, 0.26, 0.98)
+    local eLeft = pulseLayer:CreateTexture(nil, "OVERLAY", nil, 6)
     eLeft:SetPoint("TOPLEFT", 0, 0)
     eLeft:SetPoint("BOTTOMLEFT", 0, 0)
     eLeft:SetWidth(2)
-    local eRight = spot:CreateTexture(nil, "OVERLAY", nil, 6)
+    eLeft:SetColorTexture(1.0, 0.84, 0.26, 0.98)
+    local eRight = pulseLayer:CreateTexture(nil, "OVERLAY", nil, 6)
     eRight:SetPoint("TOPRIGHT", 0, 0)
     eRight:SetPoint("BOTTOMRIGHT", 0, 0)
     eRight:SetWidth(2)
+    eRight:SetColorTexture(1.0, 0.84, 0.26, 0.98)
     spot.edges = { eTop, eBot, eLeft, eRight }
+    spot.pulseAg = CreateGuideAlphaPulseAg(pulseLayer, 0.58, 1.0, 0.55, "BOUNCE")
 
     local arrow = CreateFrame("Frame", nil, spot)
     arrow:SetSize(36, 36)
     arrow:EnableMouse(false)
 
-    local clipBox = CreateFrame("Frame", nil, arrow)
+    local arrowBody = CreateFrame("Frame", nil, arrow)
+    arrowBody:SetAllPoints(arrow)
+    arrowBody:EnableMouse(false)
+    arrow.body = arrowBody
+
+    local bobAg, bobAnim
+    if arrowBody.CreateAnimationGroup then
+        local okAg, ag = pcall(arrowBody.CreateAnimationGroup, arrowBody)
+        if okAg and ag then
+            pcall(ag.SetLooping, ag, "BOUNCE")
+            local okT, tr = pcall(ag.CreateAnimation, ag, "Translation")
+            if okT and tr then
+                if tr.SetDuration then tr:SetDuration(0.48) end
+                if tr.SetSmoothing then tr:SetSmoothing("IN_OUT") end
+                if tr.SetOffset then tr:SetOffset(0, -5) end
+                bobAnim = tr
+            end
+            bobAg = ag
+        end
+    end
+    arrow.bobAg = bobAg
+    arrow.bobAnim = bobAnim
+
+    local clipBox = CreateFrame("Frame", nil, arrowBody)
     clipBox:SetSize(34, 18)
     if clipBox.SetClipsChildren then
         clipBox:SetClipsChildren(true)
@@ -3131,12 +3532,12 @@ local function EnsureGuideSpotlight()
     headFill:SetRotation(math.pi * 0.25)
     headFill:SetVertexColor(0.995, 0.99, 0.975, 1.0)
 
-    local shaftBorder = arrow:CreateTexture(nil, "ARTWORK", nil, 1)
+    local shaftBorder = arrowBody:CreateTexture(nil, "ARTWORK", nil, 1)
     shaftBorder:SetTexture(WHITE8X8)
     shaftBorder:SetVertexColor(0.14, 0.12, 0.10, 1.0)
 
-    local shaftFrame = CreateFrame("Frame", nil, arrow)
-    shaftFrame:SetAllPoints(arrow)
+    local shaftFrame = CreateFrame("Frame", nil, arrowBody)
+    shaftFrame:SetAllPoints(arrowBody)
     shaftFrame:SetFrameLevel((clipBox:GetFrameLevel() or 864) + 1)
     shaftFrame:EnableMouse(false)
 
@@ -3156,7 +3557,7 @@ local function EnsureGuideSpotlight()
 
         if dir == "DOWN" then
             clipBox:SetSize(34, 18)
-            clipBox:SetPoint("BOTTOM", self, "BOTTOM", 0, 1)
+            clipBox:SetPoint("BOTTOM", arrowBody, "BOTTOM", 0, 1)
             headBorder:SetPoint("CENTER", clipBox, "TOP", 0, 0)
             headShoulder:SetSize(31, 2.5)
             headShoulder:SetPoint("TOP", clipBox, "TOP", 0, 0)
@@ -3165,9 +3566,10 @@ local function EnsureGuideSpotlight()
             shaftBorder:SetPoint("BOTTOM", clipBox, "TOP", 0, -2)
             shaftFill:SetSize(7, 13)
             shaftFill:SetPoint("BOTTOM", clipBox, "TOP", 0, -3.5)
+            if bobAnim and bobAnim.SetOffset then bobAnim:SetOffset(0, -5) end
         elseif dir == "UP" then
             clipBox:SetSize(34, 18)
-            clipBox:SetPoint("TOP", self, "TOP", 0, -1)
+            clipBox:SetPoint("TOP", arrowBody, "TOP", 0, -1)
             headBorder:SetPoint("CENTER", clipBox, "BOTTOM", 0, 0)
             headShoulder:SetSize(31, 2.5)
             headShoulder:SetPoint("BOTTOM", clipBox, "BOTTOM", 0, 0)
@@ -3176,9 +3578,10 @@ local function EnsureGuideSpotlight()
             shaftBorder:SetPoint("TOP", clipBox, "BOTTOM", 0, 2)
             shaftFill:SetSize(7, 13)
             shaftFill:SetPoint("TOP", clipBox, "BOTTOM", 0, 3.5)
+            if bobAnim and bobAnim.SetOffset then bobAnim:SetOffset(0, 5) end
         elseif dir == "LEFT" then
             clipBox:SetSize(18, 34)
-            clipBox:SetPoint("LEFT", self, "LEFT", 1, 0)
+            clipBox:SetPoint("LEFT", arrowBody, "LEFT", 1, 0)
             headBorder:SetPoint("CENTER", clipBox, "RIGHT", 0, 0)
             headShoulder:SetSize(2.5, 31)
             headShoulder:SetPoint("RIGHT", clipBox, "RIGHT", 0, 0)
@@ -3187,9 +3590,10 @@ local function EnsureGuideSpotlight()
             shaftBorder:SetPoint("LEFT", clipBox, "RIGHT", -2, 0)
             shaftFill:SetSize(13, 7)
             shaftFill:SetPoint("LEFT", clipBox, "RIGHT", -3.5, 0)
+            if bobAnim and bobAnim.SetOffset then bobAnim:SetOffset(-5, 0) end
         else -- RIGHT
             clipBox:SetSize(18, 34)
-            clipBox:SetPoint("RIGHT", self, "RIGHT", -1, 0)
+            clipBox:SetPoint("RIGHT", arrowBody, "RIGHT", -1, 0)
             headBorder:SetPoint("CENTER", clipBox, "LEFT", 0, 0)
             headShoulder:SetSize(2.5, 31)
             headShoulder:SetPoint("LEFT", clipBox, "LEFT", 0, 0)
@@ -3198,16 +3602,30 @@ local function EnsureGuideSpotlight()
             shaftBorder:SetPoint("RIGHT", clipBox, "LEFT", 2, 0)
             shaftFill:SetSize(13, 7)
             shaftFill:SetPoint("RIGHT", clipBox, "LEFT", 3.5, 0)
+            if bobAnim and bobAnim.SetOffset then bobAnim:SetOffset(5, 0) end
+        end
+        if bobAg and spot:IsShown() then
+            if bobAg.Stop then pcall(bobAg.Stop, bobAg) end
+            if bobAg.Play then pcall(bobAg.Play, bobAg) end
         end
     end
     arrow:SetDirection("DOWN")
     spot.arrow = arrow
 
+    spot:HookScript("OnShow", function()
+        if spot.pulseAg and spot.pulseAg.Play then pcall(spot.pulseAg.Play, spot.pulseAg) end
+        if arrow.bobAg and arrow.bobAg.Play then pcall(arrow.bobAg.Play, arrow.bobAg) end
+    end)
+    spot:HookScript("OnHide", function()
+        if spot.pulseAg and spot.pulseAg.Stop then pcall(spot.pulseAg.Stop, spot.pulseAg) end
+        if arrow.bobAg and arrow.bobAg.Stop then pcall(arrow.bobAg.Stop, arrow.bobAg) end
+    end)
+
     guideSpotlight = spot
     return spot
 end
 
-local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
+local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec)
     local spot = EnsureGuideSpotlight()
     if not (m and m:IsShown() and stepSpec) then
         spot:Hide()
@@ -3217,14 +3635,16 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
     local tl, tb, tr, tt = ComputeGuideTargetsRect(rawTarget)
     local uiW = (_G.UIParent and _G.UIParent.GetWidth and _G.UIParent:GetWidth()) or 1280
     local uiH = (_G.UIParent and _G.UIParent.GetHeight and _G.UIParent:GetHeight()) or 720
-    local mw = m:GetWidth() or 516
+    local mw = m:GetWidth() or 520
     local mh = m:GetHeight() or 190
 
     if not tl then
         spot:Hide()
-        spot._lastRectSig = nil
-        if not m._userDragged and m._lastDockSig ~= "center" then
-            m._lastDockSig = "center"
+        spot._lastTl = nil
+        if not m._userDragged and m._lastDockMode ~= "center" then
+            m._lastDockMode = "center"
+            m._lastDockDx = nil
+            m._lastDockDy = nil
             m:ClearAllPoints()
             m:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 60)
         end
@@ -3237,37 +3657,34 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
     tt = math.min(uiH - 4, tt)
     if tr <= tl or tt <= tb then
         spot:Hide()
-        spot._lastRectSig = nil
+        spot._lastTl = nil
         return
     end
 
     local spotLvl = math.max(862, (m.GetFrameLevel and m:GetFrameLevel() or 865) - 3)
-    local rectSig = string.format("%.1f:%.1f:%.1f:%.1f:%d", tl, tb, tr, tt, spotLvl)
-    if spot._lastRectSig ~= rectSig or not spot:IsShown() then
-        spot._lastRectSig = rectSig
+    local qtl = math.floor(tl * 10 + 0.5)
+    local qtb = math.floor(tb * 10 + 0.5)
+    local qtr = math.floor(tr * 10 + 0.5)
+    local qtt = math.floor(tt * 10 + 0.5)
+    local rectChanged = spot._lastTl ~= qtl or spot._lastTb ~= qtb or spot._lastTr ~= qtr or spot._lastTt ~= qtt or spot._lastLvl ~= spotLvl
+    if rectChanged or not spot:IsShown() then
+        spot._lastTl, spot._lastTb, spot._lastTr, spot._lastTt, spot._lastLvl = qtl, qtb, qtr, qtt, spotLvl
         spot:ClearAllPoints()
         spot:SetFrameLevel(spotLvl)
         spot:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", tl - 4, tb - 4)
         spot:SetPoint("TOPRIGHT", _G.UIParent, "BOTTOMLEFT", tr + 4, tt + 4)
+        if not spot:IsShown() then
+            spot:Show()
+        end
+    elseif not rectChanged and not m._userDragged and m._lastDockMode == "spot" then
+        return
     end
 
-    local t = nowT or (GetTime and GetTime()) or 0
-    local wave = 0.5 + 0.5 * math.sin(t * 5.8)
-    local edgeA = 0.72 + 0.28 * wave
-    for _, ed in ipairs(spot.edges) do
-        ed:SetColorTexture(1.0, 0.84, 0.26, edgeA)
-    end
-    spot.fill:SetVertexColor(1.0, 0.84, 0.26, 0.07 + 0.09 * wave)
-    if not spot:IsShown() then
-        spot:Show()
-    end
+    local canAbove = (tt + 42 + mh) <= (uiH - 12)
+    local canBelow = (tb - 42 - mh) >= 12
+    local canRight = (tr + 42 + mw) <= (uiW - 12)
+    local canLeft = (tl - 42 - mw) >= 12
 
-    local canAbove = (tt + 26 + mh) <= (uiH - 12)
-    local canBelow = (tb - 26 - mh) >= 12
-    local canRight = (tr + 26 + mw) <= (uiW - 12)
-    local canLeft = (tl - 26 - mw) >= 12
-
-    local bob = math.sin(t * 6.0) * 4
     local arrow = spot.arrow
     local dx, dy = nil, nil
     local cx = (tl + tr) * 0.5
@@ -3276,52 +3693,52 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
 
     if canAbove then
         wantDir = "DOWN"
-        if arrow._lastDir ~= wantDir then
-            arrow._lastDir = wantDir
-            arrow:SetDirection(wantDir)
+        if arrow._lastArrowPtDir ~= wantDir then
+            arrow._lastArrowPtDir = wantDir
+            arrow:SetDirection("DOWN")
+            arrow:ClearAllPoints()
+            arrow:SetPoint("BOTTOM", spot, "TOP", 0, 7)
         end
-        arrow:ClearAllPoints()
-        arrow:SetPoint("BOTTOM", spot, "TOP", 0, 2 + bob)
         dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
-        dy = math.max(12, math.min(uiH - mh - 12, tt + 40))
+        dy = math.max(12, math.min(uiH - mh - 12, tt + 42))
     elseif canRight then
         wantDir = "LEFT"
-        if arrow._lastDir ~= wantDir then
-            arrow._lastDir = wantDir
-            arrow:SetDirection(wantDir)
+        if arrow._lastArrowPtDir ~= wantDir then
+            arrow._lastArrowPtDir = wantDir
+            arrow:SetDirection("LEFT")
+            arrow:ClearAllPoints()
+            arrow:SetPoint("LEFT", spot, "RIGHT", 7, 0)
         end
-        arrow:ClearAllPoints()
-        arrow:SetPoint("LEFT", spot, "RIGHT", 2 + bob, 0)
-        dx = math.max(12, math.min(uiW - mw - 12, tr + 40))
+        dx = math.max(12, math.min(uiW - mw - 12, tr + 42))
         dy = math.max(12, math.min(uiH - mh - 12, cy - mh * 0.5))
     elseif canLeft then
         wantDir = "RIGHT"
-        if arrow._lastDir ~= wantDir then
-            arrow._lastDir = wantDir
-            arrow:SetDirection(wantDir)
+        if arrow._lastArrowPtDir ~= wantDir then
+            arrow._lastArrowPtDir = wantDir
+            arrow:SetDirection("RIGHT")
+            arrow:ClearAllPoints()
+            arrow:SetPoint("RIGHT", spot, "LEFT", -7, 0)
         end
-        arrow:ClearAllPoints()
-        arrow:SetPoint("RIGHT", spot, "LEFT", -2 - bob, 0)
-        dx = math.max(12, math.min(uiW - mw - 12, tl - mw - 40))
+        dx = math.max(12, math.min(uiW - mw - 12, tl - mw - 42))
         dy = math.max(12, math.min(uiH - mh - 12, cy - mh * 0.5))
     elseif canBelow then
         wantDir = "UP"
-        if arrow._lastDir ~= wantDir then
-            arrow._lastDir = wantDir
-            arrow:SetDirection(wantDir)
+        if arrow._lastArrowPtDir ~= wantDir then
+            arrow._lastArrowPtDir = wantDir
+            arrow:SetDirection("UP")
+            arrow:ClearAllPoints()
+            arrow:SetPoint("TOP", spot, "BOTTOM", 0, -7)
         end
-        arrow:ClearAllPoints()
-        arrow:SetPoint("TOP", spot, "BOTTOM", 0, -2 - bob)
         dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
-        dy = math.max(12, math.min(uiH - mh - 12, tb - mh - 40))
+        dy = math.max(12, math.min(uiH - mh - 12, tb - mh - 42))
     else
-        wantDir = "DOWN"
-        if arrow._lastDir ~= wantDir then
-            arrow._lastDir = wantDir
-            arrow:SetDirection(wantDir)
+        wantDir = "DOWN_CLAMP"
+        if arrow._lastArrowPtDir ~= wantDir then
+            arrow._lastArrowPtDir = wantDir
+            arrow:SetDirection("DOWN")
+            arrow:ClearAllPoints()
+            arrow:SetPoint("BOTTOM", spot, "TOP", 0, 7)
         end
-        arrow:ClearAllPoints()
-        arrow:SetPoint("BOTTOM", spot, "TOP", 0, 2 + bob)
         dx = math.max(12, math.min(uiW - mw - 12, cx - mw * 0.5))
         dy = math.max(12, math.min(uiH - mh - 12, uiH - mh - 16))
     end
@@ -3330,20 +3747,38 @@ local function SyncNpcGuideSpotlightAndDock(m, spec, stepSpec, nowT)
     end
 
     if not m._userDragged and dx and dy then
-        local dockSig = string.format("%.1f:%.1f", dx, dy)
-        if m._lastDockSig ~= dockSig then
-            m._lastDockSig = dockSig
+        local qdx = math.floor(dx * 10 + 0.5)
+        local qdy = math.floor(dy * 10 + 0.5)
+        if m._lastDockMode ~= "spot" or m._lastDockDx ~= qdx or m._lastDockDy ~= qdy then
+            m._lastDockMode = "spot"
+            m._lastDockDx = qdx
+            m._lastDockDy = qdy
             m:ClearAllPoints()
             m:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", dx, dy)
         end
     end
 end
 
+local function StopNpcPortraitSpeech(m)
+    if not m then return end
+    m._talkPulseAt = nil
+    m._talkEndAt = nil
+    if m.portTalkAg and m.portTalkAg.Stop then
+        pcall(m.portTalkAg.Stop, m.portTalkAg)
+    end
+    if m.portTalkGlow then
+        m.portTalkGlow:Hide()
+    end
+    if m.model and m.model.SetAnimation then
+        pcall(m.model.SetAnimation, m.model, 0)
+    end
+end
+
 local function TriggerNpcPortraitSpeech(m, animId)
     if not m then return end
     local now = (GetTime and GetTime()) or 0
-    m._talkUntil = now + 4.2
-    m._lastTalkAnimAt = now
+    m._talkPulseAt = now + 1.80
+    m._talkEndAt = now + 3.85
     local mod = m.model
     if mod then
         if not mod._loadedOk and mod.SetDisplayInfo then
@@ -3352,6 +3787,37 @@ local function TriggerNpcPortraitSpeech(m, animId)
         if mod.SetAnimation then
             pcall(mod.SetAnimation, mod, animId or 60)
         end
+    end
+    if m.portTalkGlow then
+        m.portTalkGlow:Show()
+        if m.portTalkAg and m.portTalkAg.Play then
+            pcall(m.portTalkAg.Play, m.portTalkAg)
+        end
+    end
+    if C_Timer and C_Timer.After then
+        if not m._talkPulseFn then
+            m._talkPulseFn = function()
+                if not m:IsShown() or not m._talkPulseAt or not m._talkEndAt then return end
+                local cur = (GetTime and GetTime()) or 0
+                if cur >= (m._talkPulseAt - 0.05) and cur < (m._talkEndAt - 0.1) then
+                    m._talkPulseAt = nil
+                    if m.model and m.model.SetAnimation then
+                        pcall(m.model.SetAnimation, m.model, 60)
+                    end
+                end
+            end
+        end
+        if not m._talkEndFn then
+            m._talkEndFn = function()
+                if not m._talkEndAt then return end
+                local cur = (GetTime and GetTime()) or 0
+                if cur >= (m._talkEndAt - 0.05) then
+                    StopNpcPortraitSpeech(m)
+                end
+            end
+        end
+        C_Timer.After(1.85, m._talkPulseFn)
+        C_Timer.After(3.9, m._talkEndFn)
     end
 end
 
@@ -3387,17 +3853,10 @@ local function AdaptBubbleTextForWhiteBg(text)
     if type(text) ~= "string" or text == "" then
         return text
     end
-    return (text:gsub("|cff(%x%x%x%x%x%x)", function(hex)
-        local r = tonumber(hex:sub(1, 2), 16) or 0
-        local g = tonumber(hex:sub(3, 4), 16) or 0
-        local b = tonumber(hex:sub(5, 6), 16) or 0
-        local lum = (0.299 * r) + (0.587 * g) + (0.114 * b)
-        if lum > 125 then
-            local factor = 0.42
-            return string.format("|cff%02x%02x%02x", math.floor(r * factor), math.floor(g * factor), math.floor(b * factor))
-        end
-        return "|cff" .. hex
-    end))
+    if not text:find("|cff", 1, true) then
+        return text
+    end
+    return (text:gsub("|cff(%x%x%x%x%x%x)", AdaptHexColor))
 end
 
 local function ApplyCircleMaskToTexture(parent, tex)
@@ -3461,6 +3920,15 @@ local function EnsureNpcGuidePopup()
     portBox:EnableMouse(true)
     portBox:RegisterForClicks("LeftButtonUp")
     m.portBox = portBox
+
+    local portTalkGlow = portBox:CreateTexture(nil, "BACKGROUND", nil, -2)
+    portTalkGlow:SetSize(118, 118)
+    portTalkGlow:SetPoint("CENTER", portBox, "CENTER", 0, 0)
+    portTalkGlow:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\toast-glow")
+    portTalkGlow:SetVertexColor(1.0, 0.84, 0.34, 0.42)
+    portTalkGlow:Hide()
+    m.portTalkGlow = portTalkGlow
+    m.portTalkAg = CreateGuideAlphaPulseAg(portTalkGlow, 0.20, 0.68, 0.85, "BOUNCE")
 
     local portGoldRing = portBox:CreateTexture(nil, "BACKGROUND", nil, 1)
     portGoldRing:SetSize(94, 94)
@@ -3527,17 +3995,50 @@ local function EnsureNpcGuidePopup()
     end)
     m.model = model
 
-    portBox:SetScript("OnClick", function()
-        TriggerNpcPortraitSpeech(m, 67)
-    end)
-    portBox:SetScript("OnEnter", function(selfPort)
+    local namePill = CreateFrame("Frame", nil, portBox, "BackdropTemplate")
+    namePill:SetHeight(16)
+    namePill:SetPoint("TOP", portBox, "BOTTOM", 0, 12)
+    namePill:SetFrameLevel((portBox:GetFrameLevel() or 866) + 4)
+    namePill:EnableMouse(false)
+    if namePill.SetBackdrop then
+        namePill:SetBackdrop({
+            bgFile = WHITE8X8,
+            edgeFile = WHITE8X8,
+            edgeSize = 1,
+            insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        })
+        namePill:SetBackdropColor(0.11, 0.08, 0.05, 0.96)
+        namePill:SetBackdropBorderColor(0.76, 0.58, 0.22, 0.95)
+    end
+    local namePillFs = namePill:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    namePillFs:SetPoint("CENTER", namePill, "CENTER", 0, 0)
+    namePillFs:SetText(L["Chromie"])
+    namePillFs:SetTextColor(0.98, 0.84, 0.36)
+    namePill:SetWidth(math.max(54, math.ceil((namePillFs:GetStringWidth() or 42) + 14)))
+    m.namePill = namePill
+
+    local function RenderChromieTooltip(selfPort)
         if not GameTooltip then return end
+        local fIdx = m._flavorIdx or 1
+        local fKey = CHROMIE_FLAVOR_KEYS[fIdx] or "ChromieFlavor1"
         GameTooltip:SetOwner(selfPort, "ANCHOR_TOP")
         GameTooltip:SetText(L["Chromie"], 1.0, 0.85, 0.28)
         GameTooltip:AddLine(L["SocialCentral Interactive Guide"], 0.85, 0.90, 0.96, true)
+        GameTooltip:AddLine(L[fKey], 0.96, 0.84, 0.52, true)
         GameTooltip:AddLine(L["Click portrait to replay greeting."], 0.58, 0.72, 0.88, true)
         GameTooltip:Show()
+    end
+
+    portBox:SetScript("OnClick", function(selfPort)
+        local nextA = ((m._portraitAnimIdx or 0) % #CHROMIE_PORTRAIT_ANIMS) + 1
+        m._portraitAnimIdx = nextA
+        m._flavorIdx = ((m._flavorIdx or 0) % #CHROMIE_FLAVOR_KEYS) + 1
+        TriggerNpcPortraitSpeech(m, CHROMIE_PORTRAIT_ANIMS[nextA])
+        if GameTooltip and GameTooltip:IsOwned(selfPort) then
+            RenderChromieTooltip(selfPort)
+        end
     end)
+    portBox:SetScript("OnEnter", RenderChromieTooltip)
     portBox:SetScript("OnLeave", function()
         if GameTooltip then GameTooltip:Hide() end
     end)
@@ -3565,15 +4066,18 @@ local function EnsureNpcGuidePopup()
     paperGrain:SetTexture("Interface\\AddOns\\SocialCentral\\Media\\parchment.tga")
     paperGrain:SetVertexColor(0.96, 0.91, 0.82, 0.72)
     CreateRoundedBubbleLayer(bubble, "BACKGROUND", 4, 17, 5.5, 0.930, 0.865, 0.730, 0.28)
-    for lineIdx = 1, 7 do
+    m.ruledLines = {}
+    for lineIdx = 1, 11 do
         local ruled = bubble:CreateTexture(nil, "BACKGROUND", nil, 5)
         ruled:SetHeight(1)
         ruled:SetPoint("TOPLEFT", bubble, "TOPLEFT", 20, -(26 + lineIdx * 24))
         ruled:SetPoint("TOPRIGHT", bubble, "TOPRIGHT", -20, -(26 + lineIdx * 24))
         ruled:SetTexture(WHITE8X8)
         ruled:SetVertexColor(0.68, 0.57, 0.40, 0.14)
+        m.ruledLines[lineIdx] = ruled
     end
     m.bubble = bubble
+    m.popupFadeAg = CreateGuideAlphaPulseAg(m, 0.0, 1.0, 0.16, nil)
 
     local tailBorder = bubble:CreateTexture(nil, "ARTWORK", nil, 1)
     tailBorder:SetSize(20, 20)
@@ -3607,6 +4111,15 @@ local function EnsureNpcGuidePopup()
     stepPill:SetTextColor(0.36, 0.42, 0.50)
     m.stepPill = stepPill
 
+    m.stepDots = {}
+    for dIdx = 1, 8 do
+        local dot = bubble:CreateTexture(nil, "OVERLAY", nil, 3)
+        dot:SetSize(6, 6)
+        dot:Hide()
+        dot:SetTexture(WHITE8X8)
+        m.stepDots[dIdx] = dot
+    end
+
     m.title = bubble:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     m.title:SetPoint("TOPLEFT", 18, -12)
     m.title:SetPoint("RIGHT", stepPill, "LEFT", -6, 0)
@@ -3614,15 +4127,21 @@ local function EnsureNpcGuidePopup()
     m.title:SetWordWrap(false)
     m.title:SetShadowColor(0, 0, 0, 0)
 
-    local tagFs = bubble:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    tagFs:SetPoint("TOPLEFT", 18, -32)
-    tagFs:SetPoint("TOPRIGHT", -18, -32)
+    local textFadeLayer = CreateFrame("Frame", nil, bubble)
+    textFadeLayer:SetAllPoints(bubble)
+    textFadeLayer:EnableMouse(false)
+    m.textFadeLayer = textFadeLayer
+    m.textFadeAg = CreateGuideAlphaPulseAg(textFadeLayer, 0.0, 1.0, 0.16, nil)
+
+    local tagFs = textFadeLayer:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    tagFs:SetPoint("TOPLEFT", bubble, "TOPLEFT", 18, -32)
+    tagFs:SetPoint("TOPRIGHT", bubble, "TOPRIGHT", -18, -32)
     tagFs:SetJustifyH("LEFT")
     tagFs:SetWordWrap(false)
     tagFs:SetShadowColor(0, 0, 0, 0)
     m.tagFs = tagFs
 
-    m.body = bubble:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    m.body = textFadeLayer:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     m.body:SetPoint("TOPLEFT", tagFs, "BOTTOMLEFT", 0, -5)
     m.body:SetPoint("RIGHT", bubble, "RIGHT", -18, 0)
     m.body:SetWidth(356)
@@ -3668,12 +4187,59 @@ local function EnsureNpcGuidePopup()
     m.backBtn:SetPoint("RIGHT", m.nextBtn, "LEFT", -6, 0)
     m.closeBtn = m.nextBtn
 
+    m.actionBtn = Theme:CreateButton(bubble, 146, 22, L["Open Options"], "primary")
+    m.actionBtn:SetPoint("LEFT", m.skipBtn, "RIGHT", 6, 0)
+    m.actionBtn:Hide()
+    m.actionBtn:SetScript("OnClick", function()
+        local spec = m._guideSpec
+        local steps = spec and spec.steps
+        local st = steps and steps[m._guideStep or 1]
+        local fn = (st and st.onAction) or (spec and spec.onAction)
+        if type(fn) == "function" then
+            pcall(fn)
+        end
+    end)
+
+    m.midActionBtn = Theme:CreateButton(bubble, 120, 22, L["Open Options"], "default")
+    m.midActionBtn:SetPoint("BOTTOM", bubble, "BOTTOM", 0, 12)
+    m.midActionBtn:Hide()
+    m.midActionBtn:SetScript("OnClick", function()
+        local spec = m._guideSpec
+        local steps = spec and spec.steps
+        local st = steps and steps[m._guideStep or 1]
+        local fn = (st and st.onMidAction) or (spec and spec.onMidAction)
+        if type(fn) == "function" then
+            pcall(fn)
+        end
+    end)
+
     Theme:MakeMovable(m, {
         key = "helpPopup",
         skipAutoRestore = true,
         handles = { portBox, bubble },
         onStop = function() m._userDragged = true end,
     })
+
+    local function NpcGuideOnUpdate(selfFrame, elapsed)
+        selfFrame._spotTickAccum = (selfFrame._spotTickAccum or 0) + (elapsed or 0)
+        if selfFrame._spotTickAccum < 0.15 then
+            return
+        end
+        selfFrame._spotTickAccum = 0
+        local spec = selfFrame._guideSpec
+        local st = spec and spec.steps and spec.steps[selfFrame._guideStep or 1]
+        SyncNpcGuideSpotlightAndDock(selfFrame, spec, st)
+    end
+
+    local function SyncNpcGuideOnUpdate(selfFrame, spec, st)
+        local hasTarget = (st and st.target ~= nil) or (spec and spec.defaultTarget ~= nil)
+        if hasTarget and selfFrame:IsShown() then
+            selfFrame._spotTickAccum = 0
+            selfFrame:SetScript("OnUpdate", NpcGuideOnUpdate)
+        else
+            selfFrame:SetScript("OnUpdate", nil)
+        end
+    end
 
     local function RenderCurrentStep()
         local spec = m._guideSpec
@@ -3687,13 +4253,43 @@ local function EnsureNpcGuidePopup()
         m.title:SetText(st.title or spec.title or L["Help"])
         m.title:ClearAllPoints()
         m.title:SetPoint("TOPLEFT", 18, -12)
+        local showDots = (total > 1 and total <= #m.stepDots)
         if total > 1 then
             m.stepPill:SetText(L["Step %d/%d"]:format(idx, total))
             m.stepPill:Show()
-            m.title:SetPoint("RIGHT", m.stepPill, "LEFT", -6, 0)
+            if showDots then
+                local prevDot = m.stepPill
+                for dIdx = 1, #m.stepDots do
+                    local dot = m.stepDots[dIdx]
+                    local revIdx = total - dIdx + 1
+                    if revIdx >= 1 and dIdx <= total then
+                        dot:ClearAllPoints()
+                        dot:SetPoint("RIGHT", prevDot, "LEFT", (dIdx == 1) and -7 or -3, 0)
+                        if revIdx == idx then
+                            dot:SetSize(8, 6)
+                            dot:SetColorTexture(0.76, 0.44, 0.08, 1.0)
+                        elseif revIdx < idx then
+                            dot:SetSize(5, 5)
+                            dot:SetColorTexture(0.54, 0.36, 0.16, 0.78)
+                        else
+                            dot:SetSize(5, 5)
+                            dot:SetColorTexture(0.56, 0.48, 0.38, 0.38)
+                        end
+                        dot:Show()
+                        prevDot = dot
+                    else
+                        dot:Hide()
+                    end
+                end
+                m.title:SetPoint("RIGHT", prevDot, "LEFT", -6, 0)
+            else
+                for dIdx = 1, #m.stepDots do m.stepDots[dIdx]:Hide() end
+                m.title:SetPoint("RIGHT", m.stepPill, "LEFT", -6, 0)
+            end
         else
             m.stepPill:SetText("")
             m.stepPill:Hide()
+            for dIdx = 1, #m.stepDots do m.stepDots[dIdx]:Hide() end
             m.title:SetPoint("RIGHT", m.topCloseBtn, "LEFT", -6, 0)
         end
 
@@ -3712,9 +4308,18 @@ local function EnsureNpcGuidePopup()
         end
         local hasSkip = (idx < total) or (spec.showSkipOnLast == true) or (type(st.skipLabel or spec.skipLabel) == "string")
         local hasSkipAll = (type(spec.skipAllLabel) == "string" and spec.skipAllLabel ~= "")
+        local actLbl = (st and st.actionLabel) or (spec and spec.actionLabel)
+        local actFn = (st and st.onAction) or (spec and spec.onAction)
+        local hasAction = (type(actFn) == "function" and type(actLbl) == "string" and actLbl ~= "")
+        local midActLbl = (st and st.midActionLabel) or (spec and spec.midActionLabel)
+        local midActFn = (st and st.onMidAction) or (spec and spec.onMidAction)
+        local midActVariant = (st and st.midActionVariant) or (spec and spec.midActionVariant) or "default"
+        local hasMidAction = (type(midActFn) == "function" and type(midActLbl) == "string" and midActLbl ~= "")
         m.backBtn:SetShown(idx > 1)
         m.skipBtn:SetShown(hasSkip)
         m.skipAllBtn:SetShown(hasSkipAll and hasSkip)
+        m.actionBtn:SetShown(hasAction)
+        m.midActionBtn:SetShown(hasMidAction)
         Theme:SetButtonText(m.skipBtn, st.skipLabel or spec.skipLabel or L["Close"])
         if hasSkipAll then
             Theme:SetButtonText(m.skipAllBtn, spec.skipAllLabel)
@@ -3727,19 +4332,49 @@ local function EnsureNpcGuidePopup()
         end
         local skipW = hasSkip and Theme:AutoFitButton(m.skipBtn, 64, 14, 150) or 0
         local skipAllW = (hasSkip and hasSkipAll) and (m.skipAllBtn:GetWidth() or 160) or 0
+        local actionW = 0
+        if hasAction then
+            Theme:SetButtonText(m.actionBtn, actLbl)
+            actionW = Theme:AutoFitButton(m.actionBtn, 110, 16, 240)
+            m.actionBtn:ClearAllPoints()
+            if hasSkip and hasSkipAll then
+                m.actionBtn:SetPoint("LEFT", m.skipAllBtn, "RIGHT", 6, 0)
+            elseif hasSkip then
+                m.actionBtn:SetPoint("LEFT", m.skipBtn, "RIGHT", 6, 0)
+            else
+                m.actionBtn:SetPoint("BOTTOMLEFT", bubble, "BOTTOMLEFT", 16, 12)
+            end
+        end
+        local midActionW = 0
+        if hasMidAction then
+            m.midActionBtn._scNpcVariant = midActVariant
+            Theme:StyleButton(m.midActionBtn, midActVariant)
+            Theme:SetButtonText(m.midActionBtn, midActLbl)
+            midActionW = Theme:AutoFitButton(m.midActionBtn, 96, 16, 200)
+        end
         local backW = (idx > 1) and Theme:AutoFitButton(m.backBtn, 64, 14, 130) or 0
         local nextW = Theme:AutoFitButton(m.nextBtn, 86, 16, 220)
-        local leftGroupW = skipW + ((skipW > 0 and skipAllW > 0) and (6 + skipAllW) or 0)
+        local leftGroupW = skipW
+            + ((skipW > 0 and skipAllW > 0) and (6 + skipAllW) or 0)
+            + ((actionW > 0) and (((skipW > 0 or skipAllW > 0) and 6 or 0) + actionW) or 0)
         local rightGroupW = nextW + ((backW > 0) and (6 + backW) or 0)
-        local neededBubbleW = math.max(396, leftGroupW + rightGroupW + 50)
-        local popupW = math.max(520, math.min(720, neededBubbleW + 122))
+        local midNeedW = (midActionW > 0) and (midActionW + 16) or 0
+        local neededBubbleW = math.max(396, leftGroupW + midNeedW + rightGroupW + 50)
+        local popupW = math.max(520, math.min(720, neededBubbleW + ((midActionW > 0) and 126 or 122)))
         m:SetWidth(popupW)
+        if hasMidAction then
+            local leftUsed = 16 + leftGroupW
+            local rightUsed = 16 + rightGroupW
+            local centerOffsetX = math.floor(((leftUsed - rightUsed) * 0.5) + 0.5)
+            m.midActionBtn:ClearAllPoints()
+            m.midActionBtn:SetPoint("BOTTOM", bubble, "BOTTOM", centerOffsetX, 12)
+        end
         local bodyW = popupW - 164
         m.body:SetWidth(bodyW)
 
         local bodyStr = AdaptBubbleTextForWhiteBg(st.text or "")
         if type(m._combatResumeQuip) == "string" and m._combatResumeQuip ~= "" then
-            bodyStr = "|cff7c2d12" .. m._combatResumeQuip .. "|r\n\n" .. bodyStr
+            bodyStr = "|TInterface\\Icons\\INV_Misc_PocketWatch_02:13:13:0:-1|t |cff7c2d12" .. m._combatResumeQuip .. "|r\n\n" .. bodyStr
         end
         m.body:SetText(bodyStr)
         local bodyH = math.ceil((m.body.GetStringHeight and m.body:GetStringHeight()) or 60)
@@ -3747,9 +4382,23 @@ local function EnsureNpcGuidePopup()
         local bubbleNeedH = math.max(146, math.min(360, extraTop + bodyH + 50))
         local totalH = math.max(154, bubbleNeedH + 8)
         m:SetHeight(totalH)
+        if m.ruledLines then
+            local maxLineY = bubbleNeedH - 46
+            for i = 1, #m.ruledLines do
+                m.ruledLines[i]:SetShown((26 + i * 24) < maxLineY)
+            end
+        end
+        if m.textFadeAg and not (m.popupFadeAg and m.popupFadeAg.IsPlaying and m.popupFadeAg:IsPlaying()) then
+            if m.textFadeAg.Stop then pcall(m.textFadeAg.Stop, m.textFadeAg) end
+            if m.textFadeLayer then m.textFadeLayer:SetAlpha(1) end
+            if m.textFadeAg.Play then pcall(m.textFadeAg.Play, m.textFadeAg) end
+        elseif m.textFadeLayer then
+            m.textFadeLayer:SetAlpha(1)
+        end
 
         TriggerNpcPortraitSpeech(m, (idx == 1 and 67) or 60)
-        SyncNpcGuideSpotlightAndDock(m, spec, st, (GetTime and GetTime()) or 0)
+        SyncNpcGuideSpotlightAndDock(m, spec, st)
+        SyncNpcGuideOnUpdate(m, spec, st)
     end
     m.RenderCurrentStep = RenderCurrentStep
 
@@ -3774,26 +4423,6 @@ local function EnsureNpcGuidePopup()
         end
     end)
 
-    local function NpcGuideOnUpdate(selfFrame, _)
-        local spec = selfFrame._guideSpec
-        local st = spec and spec.steps and spec.steps[selfFrame._guideStep or 1]
-        local nowT = (GetTime and GetTime()) or 0
-        SyncNpcGuideSpotlightAndDock(selfFrame, spec, st, nowT)
-        if selfFrame._talkUntil and nowT < selfFrame._talkUntil then
-            if (nowT - (selfFrame._lastTalkAnimAt or 0)) >= 1.65 then
-                selfFrame._lastTalkAnimAt = nowT
-                if selfFrame.model and selfFrame.model.SetAnimation then
-                    pcall(selfFrame.model.SetAnimation, selfFrame.model, 60)
-                end
-            end
-        elseif selfFrame._talkUntil then
-            selfFrame._talkUntil = nil
-            if selfFrame.model and selfFrame.model.SetAnimation then
-                pcall(selfFrame.model.SetAnimation, selfFrame.model, 0)
-            end
-        end
-    end
-
     local function ApplyNpcGuideTheme()
         local bubbleBorder = { 0.25, 0.17, 0.08, 1.0 }
         local bubbleParchment = { 0.905, 0.835, 0.690, 1.0 }
@@ -3802,6 +4431,9 @@ local function EnsureNpcGuidePopup()
         m:EnableMouse(false)
         if m.model and m.portBox then
             m.model:SetFrameLevel((m.portBox:GetFrameLevel() or 866) + 2)
+        end
+        if m.namePill then
+            m.namePill:SetFrameLevel((m.portBox:GetFrameLevel() or 866) + 5)
         end
         if m.title then
             m.title:SetTextColor(0.28, 0.14, 0.03)
@@ -3829,6 +4461,8 @@ local function EnsureNpcGuidePopup()
         end
         Theme:StyleButton(m.topCloseBtn, "default")
         Theme:StyleButton(m.skipBtn, "default")
+        if m.actionBtn then Theme:StyleButton(m.actionBtn, "primary") end
+        if m.midActionBtn then Theme:StyleButton(m.midActionBtn, m.midActionBtn._scNpcVariant or "default") end
         if m.skipAllBtn then Theme:StyleButton(m.skipAllBtn, "default") end
         Theme:StyleButton(m.backBtn, "default")
         Theme:StyleButton(m.nextBtn, "primary")
@@ -3836,11 +4470,61 @@ local function EnsureNpcGuidePopup()
     m.ApplyNpcGuideTheme = ApplyNpcGuideTheme
 
     m:HookScript("OnShow", function(selfFrame)
-        selfFrame:SetScript("OnUpdate", NpcGuideOnUpdate)
+        if selfFrame.popupFadeAg then
+            if selfFrame.popupFadeAg.Stop then pcall(selfFrame.popupFadeAg.Stop, selfFrame.popupFadeAg) end
+            if selfFrame.popupFadeAg.Play then pcall(selfFrame.popupFadeAg.Play, selfFrame.popupFadeAg) end
+        end
     end)
+    local function SchedulePendingTutorialFlush(selfFrame, delaySec)
+        if not (Theme._pendingTutorialPrompts and next(Theme._pendingTutorialPrompts) ~= nil) then
+            return
+        end
+        selfFrame._combatPromptToken = (selfFrame._combatPromptToken or 0) + 1
+        local pTok = selfFrame._combatPromptToken
+        local function FlushPendingPrompts()
+            if selfFrame._combatPromptToken ~= pTok or IsNpcGuideInCombat() then return end
+            if Theme:IsNpcGuideShown() then return end
+            local pending = Theme._pendingTutorialPrompts
+            if type(pending) ~= "table" then return end
+            for k, pSpec in pairs(pending) do
+                pending[k] = nil
+                if pSpec and not (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown(pSpec.tutorialKey)) then
+                    local visOk = true
+                    if type(pSpec.isWindowVisible) == "function" then
+                        local okV, v = pcall(pSpec.isWindowVisible)
+                        visOk = (okV and v == true)
+                    end
+                    if visOk then
+                        Theme:PromptWindowTutorial(pSpec)
+                        break
+                    end
+                end
+            end
+        end
+        if delaySec and delaySec > 0 and C_Timer and C_Timer.After then
+            C_Timer.After(delaySec, FlushPendingPrompts)
+        else
+            FlushPendingPrompts()
+        end
+    end
+
     m:HookScript("OnHide", function(selfFrame)
         selfFrame:SetScript("OnUpdate", nil)
-        if guideSpotlight then guideSpotlight:Hide() end
+        StopNpcPortraitSpeech(selfFrame)
+        if guideSpotlight then
+            guideSpotlight._lastTl = nil
+            guideSpotlight:Hide()
+        end
+        -- Release Chromie 3D model from GPU VRAM whenever the bubble is hidden.
+        if selfFrame.model then
+            selfFrame.model._loadedOk = false
+            if selfFrame.model.ClearModel then
+                pcall(selfFrame.model.ClearModel, selfFrame.model)
+            end
+        end
+        if selfFrame.fallbackIco then
+            selfFrame.fallbackIco:Show()
+        end
         if selfFrame._hidingForCombat then
             return
         end
@@ -3848,9 +4532,11 @@ local function EnsureNpcGuidePopup()
         selfFrame._suspendedSpec = nil
         selfFrame._combatResumeToken = (selfFrame._combatResumeToken or 0) + 1
         local spec = selfFrame._guideSpec
+        selfFrame._guideSpec = nil
         if spec and type(spec.onClose) == "function" then
             pcall(spec.onClose)
         end
+        SchedulePendingTutorialFlush(selfFrame, 0.7)
     end)
 
     m:RegisterEvent("PLAYER_REGEN_DISABLED")
@@ -3898,33 +4584,7 @@ local function EnsureNpcGuidePopup()
                     TryResumeAfterCombat()
                 end
             elseif Theme._pendingTutorialPrompts and next(Theme._pendingTutorialPrompts) ~= nil then
-                selfFrame._combatPromptToken = (selfFrame._combatPromptToken or 0) + 1
-                local pTok = selfFrame._combatPromptToken
-                local function FlushPendingPrompts()
-                    if selfFrame._combatPromptToken ~= pTok or IsNpcGuideInCombat() then return end
-                    if Theme:IsNpcGuideShown() then return end
-                    local pending = Theme._pendingTutorialPrompts
-                    if type(pending) ~= "table" then return end
-                    for k, pSpec in pairs(pending) do
-                        pending[k] = nil
-                        if pSpec and not (ns.IsAccountTutorialShown and ns:IsAccountTutorialShown(pSpec.tutorialKey)) then
-                            local visOk = true
-                            if type(pSpec.isWindowVisible) == "function" then
-                                local okV, v = pcall(pSpec.isWindowVisible)
-                                visOk = (okV and v == true)
-                            end
-                            if visOk then
-                                Theme:PromptWindowTutorial(pSpec)
-                                break
-                            end
-                        end
-                    end
-                end
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(2.2, FlushPendingPrompts)
-                else
-                    FlushPendingPrompts()
-                end
+                SchedulePendingTutorialFlush(selfFrame, 2.2)
             end
         end
     end)
@@ -3981,18 +4641,12 @@ function Theme:ShowNpcGuide(spec, opts)
         m._combatResumeToken = (m._combatResumeToken or 0) + 1
         m._combatResumeQuip = nil
     else
-        local quips = {
-            L["ChromieResume1"],
-            L["ChromieResume2"],
-            L["ChromieResume3"],
-            L["ChromieResume4"],
-        }
-        local pickIdx = math.random(1, #quips)
-        if m._lastQuipIdx and #quips > 1 and pickIdx == m._lastQuipIdx then
-            pickIdx = (pickIdx % #quips) + 1
+        local pickIdx = math.random(1, #CHROMIE_RESUME_KEYS)
+        if m._lastQuipIdx and #CHROMIE_RESUME_KEYS > 1 and pickIdx == m._lastQuipIdx then
+            pickIdx = (pickIdx % #CHROMIE_RESUME_KEYS) + 1
         end
         m._lastQuipIdx = pickIdx
-        m._combatResumeQuip = quips[pickIdx]
+        m._combatResumeQuip = L[CHROMIE_RESUME_KEYS[pickIdx]]
     end
     m._guideSpec = spec
     m._guideStep = (opts and opts.resumeStep) and tonumber(opts.resumeStep) or 1
@@ -4009,14 +4663,18 @@ function Theme:ShowNpcGuide(spec, opts)
         if m.model.ClearModel then pcall(m.model.ClearModel, m.model) end
         if m.model.SetDisplayInfo then pcall(m.model.SetDisplayInfo, m.model, CHROMIE_DISPLAY_ID) end
         if C_Timer and C_Timer.After then
-            local modRef = m.model
-            C_Timer.After(0.08, function()
-                if not m:IsShown() or modRef._loadedOk then return end
-                local fid = modRef.GetModelFileID and tonumber(modRef:GetModelFileID()) or 0
-                if fid <= 0 and modRef.SetCreature then
-                    pcall(modRef.SetCreature, modRef, CHROMIE_NPC_ID, CHROMIE_DISPLAY_ID)
+            m._modelLoadToken = (m._modelLoadToken or 0) + 1
+            if not m._modelFallbackFn then
+                m._modelFallbackFn = function()
+                    local modRef = m.model
+                    if not m:IsShown() or not modRef or modRef._loadedOk then return end
+                    local fid = modRef.GetModelFileID and tonumber(modRef:GetModelFileID()) or 0
+                    if fid <= 0 and modRef.SetCreature then
+                        pcall(modRef.SetCreature, modRef, CHROMIE_NPC_ID, CHROMIE_DISPLAY_ID)
+                    end
                 end
-            end)
+            end
+            C_Timer.After(0.08, m._modelFallbackFn)
         end
     end
 
@@ -4055,7 +4713,7 @@ function Theme:PromptWindowTutorial(spec)
     end
     local accepted = false
     local winTitle = spec.title or (spec.guideSpec and spec.guideSpec.title) or "SocialCentral"
-    local askBody = spec.askText or string.format(L["First time opening %s! Would you like Chromie's quick tutorial to understand how everything works here?"], winTitle)
+    local askBody = spec.askText or string.format(L["Quick guide for %s?"], winTitle)
     return self:ShowNpcGuide({
         key = "prompt_" .. tostring(spec.tutorialKey),
         title = string.format(L["Chromie — %s"], winTitle),
@@ -4068,8 +4726,8 @@ function Theme:PromptWindowTutorial(spec)
         steps = {
             {
                 title = string.format(L["Chromie — %s"], winTitle),
-                tag = "|cff6b3b09" .. L["First time in this window?"] .. "|r",
-                text = askBody .. "\n\n|cff5c4a35" .. L["Tip: Click any [?] button on any window or option for Chromie's help anytime, or toggle auto-guides in Settings > General."] .. "|r",
+                tag = "|cff6b3b09" .. L["Quick Tour"] .. "|r",
+                text = askBody .. "\n|cff5c4a35" .. L["Click [?] anytime for help."] .. "|r",
             },
         },
         onSkip = function()
@@ -4094,7 +4752,7 @@ function Theme:PromptWindowTutorial(spec)
                 SocialCentralCharDB.settings.tutorialDismissAll = true
             end
             self._pendingTutorialPrompts = nil
-            ns:Print(L["Chromie auto-tutorials disabled for all areas. Click any [?] button or re-enable auto-tutorials in Settings > General anytime."])
+            ns:Print(L["Chromie auto-guides off. Click [?] anytime."])
             if type(spec.onSkip) == "function" then
                 pcall(spec.onSkip)
             end
@@ -4173,59 +4831,147 @@ function Theme:ShowHelpPopup(title, whatText, howText, opts)
 end
 
 local visibleHelpButtons = setmetatable({}, { __mode = "k" })
-local helpPulseDriver = nil
-local helpPulseAccum = 0
-local helpPulseAttached = false
+local allHelpButtons = setmetatable({}, { __mode = "k" })
+local helpCombatListenerRegistered = false
+local helpThemeListenerRegistered = false
 
-local function HelpPulseOnUpdate(_, elapsed)
-    helpPulseAccum = helpPulseAccum + (elapsed or 0)
-    if helpPulseAccum < 0.10 then
+local function EnsureHelpButtonNativePulse(btn)
+    if not btn or btn._scHelpPulseAg then return btn and btn._scHelpPulseAg end
+    local aura = btn._scHelpAura
+    if not (aura and aura.CreateAnimationGroup) then return nil end
+    local okAg, ag = pcall(aura.CreateAnimationGroup, aura)
+    if not okAg or not ag then return nil end
+    pcall(ag.SetLooping, ag, "BOUNCE")
+    local okAnim, alphaAnim = pcall(ag.CreateAnimation, ag, "Alpha")
+    if okAnim and alphaAnim then
+        if alphaAnim.SetFromAlpha then alphaAnim:SetFromAlpha(0.18) end
+        if alphaAnim.SetToAlpha then alphaAnim:SetToAlpha(1.0) end
+        if alphaAnim.SetDuration then alphaAnim:SetDuration(1.75) end
+        if alphaAnim.SetSmoothing then alphaAnim:SetSmoothing("IN_OUT") end
+    end
+    btn._scHelpPulseAg = ag
+    return ag
+end
+
+local function RefreshHelpButtonPulseState(btn)
+    if not btn then return end
+    local aura = btn._scHelpAura
+    local ag = btn._scHelpPulseAg or EnsureHelpButtonNativePulse(btn)
+    if not (btn.IsVisible and btn:IsVisible()) then
+        if ag and ag.Stop then pcall(ag.Stop, ag) end
         return
     end
-    helpPulseAccum = 0
-    if next(visibleHelpButtons) == nil then
-        if helpPulseDriver and helpPulseAttached then
-            helpPulseAttached = false
-            helpPulseDriver:SetScript("OnUpdate", nil)
+    if btn._scHelpHovered then
+        if ag and ag.Stop then pcall(ag.Stop, ag) end
+        if aura then
+            aura:SetAlpha(1)
+            aura:SetVertexColor(0.98, 0.80, 0.28, 0.28)
         end
         return
     end
-    local nowT = (GetTime and GetTime()) or 0
-    local inCombat = IsNpcGuideInCombat()
-    for btn in pairs(visibleHelpButtons) do
-        if btn and btn.IsVisible and btn:IsVisible() then
-            if not btn._scHelpHovered then
-                local w = inCombat and 0.15 or (0.5 + 0.5 * math.sin(nowT * 1.65 + (btn._scHelpPhase or 0)))
-                if btn._scHelpAura then
-                    btn._scHelpAura:SetVertexColor(0.96, 0.78, 0.28, 0.02 + 0.12 * w)
-                end
-                if btn.ico then
-                    btn.ico:SetVertexColor(0.88 + 0.12 * w, 0.86 + 0.12 * w, 0.78 + 0.18 * w, 1)
-                end
-            end
-        else
-            visibleHelpButtons[btn] = nil
+    if IsNpcGuideInCombat() then
+        if ag and ag.Stop then pcall(ag.Stop, ag) end
+        if aura then
+            aura:SetAlpha(1)
+            aura:SetVertexColor(0.96, 0.78, 0.28, 0.04)
         end
+        return
+    end
+    if aura then
+        aura:SetVertexColor(0.96, 0.78, 0.28, 0.14)
+    end
+    if ag and ag.IsPlaying and not ag:IsPlaying() then
+        pcall(ag.Play, ag)
     end
 end
 
 local function SyncHelpButtonPulseDriver(btn, shown)
     if not btn then return end
+    if not helpCombatListenerRegistered and ns.RegisterEvent then
+        helpCombatListenerRegistered = true
+        local helpCombatHost = {}
+        local function OnHelpCombatChange()
+            for b in pairs(visibleHelpButtons) do
+                if b and b.IsVisible and b:IsVisible() then
+                    RefreshHelpButtonPulseState(b)
+                else
+                    visibleHelpButtons[b] = nil
+                end
+            end
+        end
+        ns.RegisterEvent(helpCombatHost, "PLAYER_REGEN_DISABLED", OnHelpCombatChange)
+        ns.RegisterEvent(helpCombatHost, "PLAYER_REGEN_ENABLED", OnHelpCombatChange)
+    end
     if shown then
         visibleHelpButtons[btn] = true
-        if not helpPulseDriver then
-            helpPulseDriver = CreateFrame("Frame", nil, UIParent)
-        end
-        if not helpPulseAttached then
-            helpPulseAttached = true
-            helpPulseAccum = 0.06
-            helpPulseDriver:SetScript("OnUpdate", HelpPulseOnUpdate)
-        end
+        RefreshHelpButtonPulseState(btn)
     else
         visibleHelpButtons[btn] = nil
-        if next(visibleHelpButtons) == nil and helpPulseDriver and helpPulseAttached then
-            helpPulseAttached = false
-            helpPulseDriver:SetScript("OnUpdate", nil)
+        if btn._scHelpPulseAg and btn._scHelpPulseAg.Stop then
+            pcall(btn._scHelpPulseAg.Stop, btn._scHelpPulseAg)
+        end
+    end
+end
+
+local function HelpBtn_OnShow(selfBtn)
+    SyncHelpButtonPulseDriver(selfBtn, true)
+end
+
+local function HelpBtn_OnHide(selfBtn)
+    selfBtn._scHelpHovered = false
+    SyncHelpButtonPulseDriver(selfBtn, false)
+end
+
+local function HelpBtn_OnEnter(selfBtn)
+    selfBtn._scHelpHovered = true
+    RefreshHelpButtonPulseState(selfBtn)
+    if selfBtn.ico then
+        selfBtn.ico:SetVertexColor(1.0, 1.0, 1.0, 1)
+    end
+    GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(selfBtn._scHelpTitle or L["Help"], 0.35, 0.72, 1.0, true)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("|cff58a6ff" .. L["What it does:"] .. "|r " .. (selfBtn._scHelpWhat or ""), 0.92, 0.94, 0.98, true)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("|cff4ade80" .. L["How to use:"] .. "|r " .. (selfBtn._scHelpHow or ""), 0.85, 0.92, 0.88, true)
+    GameTooltip:AddLine(" ")
+    if IsNpcGuideInCombat() then
+        GameTooltip:AddLine("|cffff7b72" .. L["In Combat"] .. ":|r " .. L["Chromie's interactive guide pauses during combat."], 1.0, 0.72, 0.68, true)
+    else
+        GameTooltip:AddLine(L["Click ? to ask Chromie and highlight this control."], 0.58, 0.65, 0.74, true)
+    end
+    GameTooltip:Show()
+end
+
+local function HelpBtn_OnLeave(selfBtn)
+    selfBtn._scHelpHovered = false
+    if selfBtn.ico then
+        selfBtn.ico:SetVertexColor(0.94, 0.90, 0.80, 1)
+    end
+    RefreshHelpButtonPulseState(selfBtn)
+    GameTooltip:Hide()
+end
+
+local function HelpBtn_OnClick(selfBtn)
+    if IsNpcGuideInCombat() then
+        return
+    end
+    GameTooltip:Hide()
+    local curOpts = selfBtn._scHelpOpts
+    local targetRef = ResolveHelpTargetFrame(selfBtn, curOpts)
+    Theme:ShowHelpPopup(selfBtn._scHelpTitle, selfBtn._scHelpWhat, selfBtn._scHelpHow, {
+        target = targetRef,
+        steps = curOpts and curOpts.steps or nil,
+    })
+end
+
+local function HelpBtn_OnThemeChanged()
+    for b in pairs(allHelpButtons) do
+        if b and b.IsVisible and b:IsVisible() then
+            Theme:StyleButton(b, "default")
+        elseif b then
+            b._scThemeKey = nil
         end
     end
 end
@@ -4255,66 +5001,30 @@ function Theme:CreateHelpButton(parent, title, whatText, howText, size, opts)
     if opts and opts.target ~= nil then
         btn._scGuideTarget = opts.target
     end
+    local anc = parent
+    for _ = 1, 6 do
+        if not anc or anc == UIParent then break end
+        if anc.GetObjectType and anc:GetObjectType() == "ScrollFrame" then
+            btn._scScrollViewport = anc
+            break
+        end
+        anc = anc.GetParent and anc:GetParent() or nil
+    end
 
-    btn:HookScript("OnShow", function(selfBtn)
-        SyncHelpButtonPulseDriver(selfBtn, true)
-    end)
-    btn:HookScript("OnHide", function(selfBtn)
-        selfBtn._scHelpHovered = false
-        SyncHelpButtonPulseDriver(selfBtn, false)
-    end)
+    btn:HookScript("OnShow", HelpBtn_OnShow)
+    btn:HookScript("OnHide", HelpBtn_OnHide)
     if btn:IsVisible() then
         SyncHelpButtonPulseDriver(btn, true)
     end
 
-    btn:HookScript("OnEnter", function(selfBtn)
-        selfBtn._scHelpHovered = true
-        aura:SetVertexColor(0.98, 0.80, 0.28, 0.28)
-        if selfBtn.ico then
-            selfBtn.ico:SetVertexColor(1.0, 1.0, 1.0, 1)
-        end
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
-        GameTooltip:ClearLines()
-        GameTooltip:AddLine(selfBtn._scHelpTitle or L["Help"], 0.35, 0.72, 1.0, true)
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("|cff58a6ff" .. L["What it does:"] .. "|r " .. (selfBtn._scHelpWhat or ""), 0.92, 0.94, 0.98, true)
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("|cff4ade80" .. L["How to use:"] .. "|r " .. (selfBtn._scHelpHow or ""), 0.85, 0.92, 0.88, true)
-        GameTooltip:AddLine(" ")
-        if IsNpcGuideInCombat() then
-            GameTooltip:AddLine("|cffff7b72" .. L["In Combat"] .. ":|r " .. L["Chromie's interactive guide pauses during combat."], 1.0, 0.72, 0.68, true)
-        else
-            GameTooltip:AddLine(L["Click ? to ask Chromie and highlight this control."], 0.58, 0.65, 0.74, true)
-        end
-        GameTooltip:Show()
-    end)
-    btn:HookScript("OnLeave", function(selfBtn)
-        selfBtn._scHelpHovered = false
-        aura:SetVertexColor(0.96, 0.78, 0.28, 0.06)
-        if selfBtn.ico then
-            selfBtn.ico:SetVertexColor(0.94, 0.90, 0.80, 1)
-        end
-        GameTooltip:Hide()
-    end)
-    btn:SetScript("OnClick", function(selfBtn)
-        if IsNpcGuideInCombat() then
-            return
-        end
-        GameTooltip:Hide()
-        local curOpts = selfBtn._scHelpOpts
-        local targetRef = ResolveHelpTargetFrame(selfBtn, curOpts)
-        Theme:ShowHelpPopup(selfBtn._scHelpTitle, selfBtn._scHelpWhat, selfBtn._scHelpHow, {
-            target = targetRef,
-            steps = curOpts and curOpts.steps or nil,
-        })
-    end)
-    self:RegisterListener(function()
-        if btn:IsVisible() then
-            self:StyleButton(btn, "default")
-        else
-            btn._scThemeKey = nil
-        end
-    end)
+    btn:HookScript("OnEnter", HelpBtn_OnEnter)
+    btn:HookScript("OnLeave", HelpBtn_OnLeave)
+    btn:SetScript("OnClick", HelpBtn_OnClick)
+    allHelpButtons[btn] = true
+    if not helpThemeListenerRegistered then
+        helpThemeListenerRegistered = true
+        self:RegisterListener(HelpBtn_OnThemeChanged)
+    end
     return btn
 end
 
@@ -4326,6 +5036,15 @@ function Theme:SetHelpButtonInfo(btn, title, whatText, howText, opts)
     btn._scHelpOpts = opts
     if opts and opts.target ~= nil then
         btn._scGuideTarget = opts.target
+    end
+    local anc = btn.GetParent and btn:GetParent() or nil
+    for _ = 1, 6 do
+        if not anc or anc == UIParent then break end
+        if anc.GetObjectType and anc:GetObjectType() == "ScrollFrame" then
+            btn._scScrollViewport = anc
+            break
+        end
+        anc = anc.GetParent and anc:GetParent() or nil
     end
 end
 
@@ -4531,6 +5250,7 @@ function Theme:ShowThemeWelcomePicker()
         m.helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -6, 0)
 
         local function FinishChoice(chosenKey)
+            local wasFirstRun = (ns.db and ns.db.settings and ns.db.settings.themeChosen ~= true)
             if ns.db and ns.db.settings then
                 if chosenKey then
                     ns.db.settings.theme = chosenKey
@@ -4541,7 +5261,9 @@ function Theme:ShowThemeWelcomePicker()
             end
             Theme:NotifyChanged()
             m:Hide()
-            if ns.UI and ns.UI.Show then
+            local settingsOpen = (_G.SettingsPanel and _G.SettingsPanel.IsShown and _G.SettingsPanel:IsShown())
+                or (_G.InterfaceOptionsFrame and _G.InterfaceOptionsFrame.IsShown and _G.InterfaceOptionsFrame:IsShown())
+            if wasFirstRun and not settingsOpen and ns.UI and ns.UI.Show then
                 ns.UI:Show()
             end
         end
@@ -5119,9 +5841,12 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
     local function UpdateTrackColors(hovered)
         local p = Theme:GetPalette()
         local isBlizz = Theme:IsBlizzard(p)
-        local sbSig = tostring(p and p.key or "dark") .. (hovered and ":1" or ":0")
-        if list._scTrackThemeSig ~= sbSig then
-            list._scTrackThemeSig = sbSig
+        local themeKey = tostring(p and p.key or "dark")
+        local hoverSig = themeKey .. (hovered and ":1" or ":0")
+
+        -- Structural geometry, backdrop, empty rule, and row hairline separators only run on theme switch.
+        if list._scTrackThemeSig ~= themeKey then
+            list._scTrackThemeSig = themeKey
             viewport:ClearAllPoints()
             track:ClearAllPoints()
             if scrollUpBtn then scrollUpBtn:Hide() end
@@ -5140,10 +5865,31 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
                 track:SetPoint("BOTTOMRIGHT", -3, 4)
             end
             if track.SetBackdrop then
-                track:SetBackdrop(BACKDROP_SPEC)
+                if track._scAppliedBackdrop ~= BACKDROP_SPEC then
+                    track:SetBackdrop(BACKDROP_SPEC)
+                    track._scAppliedBackdrop = BACKDROP_SPEC
+                end
                 track:SetBackdropColor(p.scrollTrack[1], p.scrollTrack[2], p.scrollTrack[3], p.scrollTrack[4])
-                local br = p.surfaceBorder or { 0.25, 0.25, 0.25, 0.4 }
-                track:SetBackdropBorderColor(br[1], br[2], br[3], 0.42)
+            end
+            emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+            local ac = (isBlizz or p.key == "native") and { 0.88, 0.72, 0.28 } or (p.accentBorder or { 0.35, 0.78, 1.0 })
+            emptyRule:SetColorTexture(ac[1], ac[2], ac[3], 0.35)
+            local sepR, sepG, sepB, sepA = 0.55, 0.78, 1.0, 0.06
+            if isBlizz or p.key == "native" then
+                sepR, sepG, sepB, sepA = 0.78, 0.64, 0.28, 0.085
+            end
+            for _, r in ipairs(list.rows) do
+                if r._scRowSep then
+                    r._scRowSep:SetColorTexture(sepR, sepG, sepB, sepA)
+                end
+            end
+        end
+
+        if list._scThumbHoverSig ~= hoverSig then
+            list._scThumbHoverSig = hoverSig
+            if track.SetBackdropBorderColor then
+                local br = hovered and (p.accentBorder or p.surfaceBorder) or (p.surfaceBorder or { 0.25, 0.25, 0.25, 0.4 })
+                track:SetBackdropBorderColor(br[1], br[2], br[3], hovered and 0.82 or 0.42)
             end
             local c = hovered and p.scrollThumbHover or p.scrollThumb
             local cTopR, cTopG, cTopB = math.min(1, c[1] + 0.14), math.min(1, c[2] + 0.14), math.min(1, c[3] + 0.14)
@@ -5155,19 +5901,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
                 tg:SetPoint("TOPRIGHT", 0, 0)
                 thumb._topGloss = tg
             end
-            thumb._topGloss:SetColorTexture(1, 0.96, 0.88, hovered and 0.45 or 0.24)
-            emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
-            local ac = (isBlizz or p.key == "native") and { 0.88, 0.72, 0.28 } or (p.accentBorder or { 0.35, 0.78, 1.0 })
-            emptyRule:SetColorTexture(ac[1], ac[2], ac[3], 0.35)
-        end
-        local sepR, sepG, sepB, sepA = 0.55, 0.78, 1.0, 0.06
-        if isBlizz or p.key == "native" then
-            sepR, sepG, sepB, sepA = 0.78, 0.64, 0.28, 0.085
-        end
-        for _, r in ipairs(list.rows) do
-            if r._scRowSep then
-                r._scRowSep:SetColorTexture(sepR, sepG, sepB, sepA)
-            end
+            thumb._topGloss:SetColorTexture(1, 0.96, 0.88, hovered and 0.48 or 0.26)
         end
     end
 
@@ -5236,6 +5970,7 @@ function Theme:CreateScrollList(parent, rowHeight, createRowFn, updateRowFn)
 
     function list:RefreshTheme()
         list._scTrackThemeSig = nil
+        list._scThumbHoverSig = nil
         list._scLastContainerLvl = nil
         Theme:ApplyBackdrop(container, "inset")
         SyncScrollListLayers()
@@ -5973,10 +6708,13 @@ function Theme:CreateCounterBadge(parent, opts)
         if not fz then return end
         for i = 1, 6 do
             local lb = fz.lobes[i]
+            lb._vis = false
+            lb._auraVis = false
             lb.outer:Hide()
             lb.inner:Hide()
             lb.aura:Hide()
         end
+        fz._vigVis = false
         fz.vignette:Hide()
         fz.flash:Hide()
     end
@@ -5991,10 +6729,16 @@ function Theme:CreateCounterBadge(parent, opts)
         local bh = b._curH or h
         local coreW = math.max(12, bw - 3)
         local coreH = math.max(12, bh - 3)
-        if fz.mask then
-            fz.mask:SetSize(coreW, coreH)
+        local sizeDirty = (fz._lastW ~= bw or fz._lastH ~= bh or fz._lastPulse ~= b._pulseEnabled)
+        if sizeDirty then
+            fz._lastW = bw
+            fz._lastH = bh
+            fz._lastPulse = b._pulseEnabled
+            if fz.mask then
+                fz.mask:SetSize(coreW, coreH)
+            end
+            fz.vignette:SetSize(coreW * 0.78, coreH * 0.78)
         end
-        fz.vignette:SetSize(coreW * 0.78, coreH * 0.78)
 
         local count = math.min(6, #tones)
         local step = (math.pi * 2) / count
@@ -6011,34 +6755,80 @@ function Theme:CreateCounterBadge(parent, opts)
                 local ang = angleOffset + (i - 1) * step
                 local cosA = math.cos(ang)
                 local sinA = math.sin(ang)
-                local ox = cosA * rx
-                local oy = sinA * ry
-                lb.outer:SetSize(outerW, outerH)
-                lb.outer:ClearAllPoints()
-                lb.outer:SetPoint("CENTER", anim, "CENTER", ox, oy)
-                lb.outer:Show()
-
-                lb.inner:SetSize(innerW, innerH)
-                lb.inner:ClearAllPoints()
-                lb.inner:SetPoint("CENTER", anim, "CENTER", ox, oy)
-                lb.inner:Show()
+                local ox = math.floor(cosA * rx + 0.5)
+                local oy = math.floor(sinA * ry + 0.5)
+                if sizeDirty then
+                    lb.outer:SetSize(outerW, outerH)
+                    lb.inner:SetSize(innerW, innerH)
+                end
+                if sizeDirty or lb._lastOx ~= ox or lb._lastOy ~= oy then
+                    lb._lastOx = ox
+                    lb._lastOy = oy
+                    -- Update single CENTER anchor in-place without rebuilding layout anchors.
+                    lb.outer:SetPoint("CENTER", anim, "CENTER", ox, oy)
+                    lb.inner:SetPoint("CENTER", anim, "CENTER", ox, oy)
+                end
+                if not lb._vis then
+                    lb._vis = true
+                    lb.outer:Show()
+                    lb.inner:Show()
+                end
 
                 if b._pulseEnabled then
-                    lb.aura:SetSize(auraW, auraH)
-                    lb.aura:ClearAllPoints()
-                    lb.aura:SetPoint("CENTER", anim, "CENTER", cosA * 4.5, sinA * 4.5)
-                    lb.aura:SetAlpha(auraAlpha)
-                    lb.aura:Show()
-                else
+                    if sizeDirty then
+                        lb.aura:SetSize(auraW, auraH)
+                        lb.aura:SetAlpha(auraAlpha)
+                    end
+                    local ax = math.floor(cosA * 4.5 + 0.5)
+                    local ay = math.floor(sinA * 4.5 + 0.5)
+                    if sizeDirty or lb._lastAx ~= ax or lb._lastAy ~= ay then
+                        lb._lastAx = ax
+                        lb._lastAy = ay
+                        lb.aura:SetPoint("CENTER", anim, "CENTER", ax, ay)
+                    end
+                    if not lb._auraVis then
+                        lb._auraVis = true
+                        lb.aura:Show()
+                    end
+                elseif lb._auraVis ~= false then
+                    lb._auraVis = false
                     lb.aura:Hide()
                 end
-            else
+            elseif lb._vis ~= false or lb._auraVis ~= false then
+                lb._vis = false
+                lb._auraVis = false
                 lb.outer:Hide()
                 lb.inner:Hide()
                 lb.aura:Hide()
             end
         end
-        fz.vignette:Show()
+        if not fz._vigVis then
+            fz._vigVis = true
+            fz.vignette:Show()
+        end
+    end
+
+    local function EnsureHaloNativePulse()
+        if b._haloPulseAg then return b._haloPulseAg end
+        if not (halo and halo.CreateAnimationGroup) then return nil end
+        local okAg, ag = pcall(halo.CreateAnimationGroup, halo)
+        if not okAg or not ag then return nil end
+        pcall(ag.SetLooping, ag, "BOUNCE")
+        local okAnim, alphaAnim = pcall(ag.CreateAnimation, ag, "Alpha")
+        if okAnim and alphaAnim then
+            if alphaAnim.SetFromAlpha then alphaAnim:SetFromAlpha(0.55) end
+            if alphaAnim.SetToAlpha then alphaAnim:SetToAlpha(1.0) end
+            if alphaAnim.SetDuration then alphaAnim:SetDuration(1.05) end
+            if alphaAnim.SetSmoothing then alphaAnim:SetSmoothing("IN_OUT") end
+        end
+        b._haloPulseAg = ag
+        return ag
+    end
+
+    local function StopHaloNativePulse()
+        if b._haloPulseAg and b._haloPulseAg.Stop then
+            pcall(b._haloPulseAg.Stop, b._haloPulseAg)
+        end
     end
 
     local function StopAnimLoop()
@@ -6049,39 +6839,43 @@ function Theme:CreateCounterBadge(parent, opts)
             b._fusion.flash:Hide()
         end
         if b._isMulti then
+            StopHaloNativePulse()
             halo:Hide()
             PositionFusionLobes(b._swirlAngle or 0.55)
+        elseif b:IsVisible() and b._count > 0 and b._pulseEnabled then
+            halo:SetAlpha(math.max(0.16, math.min(0.92, baseHaloAlpha * 0.95)))
+            local ag = EnsureHaloNativePulse()
+            if ag and ag.IsPlaying and not ag:IsPlaying() then
+                pcall(ag.Play, ag)
+            end
         else
+            StopHaloNativePulse()
             halo:SetAlpha(b._pulseEnabled and baseHaloAlpha or (baseHaloAlpha * 0.65))
         end
     end
 
     local function DriveAnimLoop(_, dt)
-        if not (b:IsShown() and b._count > 0) then
+        if not (b:IsVisible() and b._count > 0) then
             StopAnimLoop()
             return
         end
         local now = (GetTime and GetTime()) or 0
-        local pulsing = b._pulseEnabled == true
         local popping = (b._popUntil or 0) > now
         local bursting = (b._fusionBurstUntil or 0) > now
-        local swirling = b._isMulti == true
-        if not pulsing and not popping and not bursting and not swirling then
+        local swirling = (b._isMulti == true) and (b._pulseEnabled == true)
+        if not popping and not bursting and not swirling then
             StopAnimLoop()
             return
         end
         local stepDt = dt or 0
-        if not popping and not bursting then
-            b._animAccum = (b._animAccum or 0) + stepDt
-            if b._animAccum < 0.04 then
-                return
-            end
-            stepDt = b._animAccum
-            b._animAccum = 0
-        else
-            b._animAccum = 0
+        b._animAccum = (b._animAccum or 0) + stepDt
+        local minStep = (popping or bursting) and 0.033 or 0.15
+        if b._animAccum < minStep then
+            return
         end
-        local delta = math.min(stepDt, 0.08)
+        stepDt = b._animAccum
+        b._animAccum = 0
+        local delta = math.min(stepDt, 0.10)
 
         if popping then
             local popDur = bursting and 0.34 or 0.24
@@ -6093,6 +6887,7 @@ function Theme:CreateCounterBadge(parent, opts)
         end
 
         if swirling then
+            StopHaloNativePulse()
             local spinSpeed = 0.42
             if bursting then
                 local bRem = math.max(0, math.min(1, (b._fusionBurstUntil - now) / 0.56))
@@ -6114,11 +6909,14 @@ function Theme:CreateCounterBadge(parent, opts)
             if b._fusion and b._fusion.flash then
                 b._fusion.flash:Hide()
             end
-            if pulsing then
-                b._pulsePhase = ((b._pulsePhase or 0) + delta * 3.1) % (math.pi * 2)
-                local wave = 0.5 + 0.5 * math.sin(b._pulsePhase)
-                halo:SetAlpha(math.max(0.12, math.min(0.92, baseHaloAlpha * (0.68 + 0.55 * wave))))
+            if b._pulseEnabled then
+                local ag = EnsureHaloNativePulse()
+                if ag and ag.IsPlaying and not ag:IsPlaying() then
+                    halo:SetAlpha(math.max(0.16, math.min(0.92, baseHaloAlpha * 0.95)))
+                    pcall(ag.Play, ag)
+                end
             else
+                StopHaloNativePulse()
                 halo:SetAlpha(baseHaloAlpha * 0.65)
             end
         end
@@ -6126,13 +6924,15 @@ function Theme:CreateCounterBadge(parent, opts)
 
     local function RefreshAnimLoop()
         local now = (GetTime and GetTime()) or 0
-        local needsDrive = b:IsShown() and b._count > 0 and (
-            b._pulseEnabled
-            or b._isMulti
+        local needsScriptDrive = b:IsVisible() and b._count > 0 and (
+            (b._isMulti and b._pulseEnabled)
             or ((b._popUntil or 0) > now)
             or ((b._fusionBurstUntil or 0) > now)
         )
-        if needsDrive then
+        if needsScriptDrive then
+            if b._isMulti then
+                StopHaloNativePulse()
+            end
             if not anim:GetScript("OnUpdate") then
                 anim:SetScript("OnUpdate", DriveAnimLoop)
             end
@@ -6140,6 +6940,9 @@ function Theme:CreateCounterBadge(parent, opts)
             StopAnimLoop()
         end
     end
+
+    b:HookScript("OnShow", RefreshAnimLoop)
+    b:HookScript("OnHide", StopAnimLoop)
 
     local function ApplyMetricLayout(lbl)
         local targetSz = SyncFont(#lbl) or 14
@@ -6490,19 +7293,49 @@ local function IsSocialCentralMenuOwner(owner)
     return false
 end
 
+local function IsSafeAccessibleMenuFrame(frame, allowProtected)
+    if not frame then
+        return false
+    end
+    if frame.IsForbidden then
+        local okF, forb = pcall(frame.IsForbidden, frame)
+        if not okF or forb then
+            return false
+        end
+    end
+    if (not allowProtected) and frame.IsProtected then
+        local okP, prot = pcall(frame.IsProtected, frame)
+        if not okP or prot then
+            return false
+        end
+    end
+    return true
+end
+
+local function IsSafeFrameShown(frame, allowProtected)
+    if not IsSafeAccessibleMenuFrame(frame, allowProtected) then
+        return false
+    end
+    if frame.IsShown then
+        local okS, shown = pcall(frame.IsShown, frame)
+        return okS and shown == true
+    end
+    return false
+end
+
 function Theme:GetHighestShownOverlayLevel()
     local best = 0
     if not self._overlayModals then
         return 0
     end
     for m in pairs(self._overlayModals) do
-        if m and m.IsShown and m:IsShown()
-            and m.GetFrameStrata and m:GetFrameStrata() == "FULLSCREEN_DIALOG"
-            and m.GetFrameLevel
-        then
-            local okLvl, lvl = pcall(m.GetFrameLevel, m)
-            if okLvl and type(lvl) == "number" and lvl > best then
-                best = lvl
+        if IsSafeFrameShown(m, true) and m.GetFrameStrata and m.GetFrameLevel then
+            local okSt, strata = pcall(m.GetFrameStrata, m)
+            if okSt and strata == "FULLSCREEN_DIALOG" then
+                local okLvl, lvl = pcall(m.GetFrameLevel, m)
+                if okLvl and type(lvl) == "number" and lvl > best then
+                    best = lvl
+                end
             end
         end
     end
@@ -6510,11 +7343,7 @@ function Theme:GetHighestShownOverlayLevel()
 end
 
 local function ElevateSingleMenuFrame(mf, minLevel)
-    if not mf then return false end
-    if (mf.IsForbidden and mf:IsForbidden()) or (mf.IsProtected and mf:IsProtected()) then
-        return false
-    end
-    if mf.IsShown and not mf:IsShown() then
+    if not IsSafeFrameShown(mf, false) then
         return false
     end
     if mf.GetFrameStrata and mf:GetFrameStrata() ~= "FULLSCREEN_DIALOG" and mf.SetFrameStrata then
@@ -6542,7 +7371,7 @@ local function ElevateSingleMenuFrame(mf, minLevel)
 end
 
 local function LooksLikeBlizzardMenuContainer(frame, openMenu)
-    if not frame or (frame.IsForbidden and frame:IsForbidden()) or (frame.IsProtected and frame:IsProtected()) then
+    if not IsSafeAccessibleMenuFrame(frame, false) then
         return false
     end
     if openMenu and frame == openMenu then
@@ -6551,25 +7380,40 @@ local function LooksLikeBlizzardMenuContainer(frame, openMenu)
     if type(frame.GetMenuDescription) == "function" or frame.menuDescription ~= nil or type(frame.SetMenuDescription) == "function" then
         return true
     end
-    local name = frame.GetName and frame:GetName() or nil
-    if type(name) == "string" and name:match("^DropDownList%d+$") then
-        return true
+    if frame.GetName then
+        local okN, name = pcall(frame.GetName, frame)
+        if okN and type(name) == "string" and name:match("^DropDownList%d+$") then
+            return true
+        end
     end
     return false
 end
 
 local function ElevateMenuSubtree(rootFrame, baseLevel, depth, seen)
-    if not rootFrame or seen[rootFrame] or depth > 6 then
+    if not IsSafeAccessibleMenuFrame(rootFrame, false) or seen[rootFrame] or depth > 6 then
         return
     end
     seen[rootFrame] = true
     ElevateSingleMenuFrame(rootFrame, baseLevel + (depth * 20))
     if rootFrame.GetChildren then
-        local children = { rootFrame:GetChildren() }
-        for _, child in ipairs(children) do
-            if child and not seen[child] and child.IsShown and child:IsShown() and LooksLikeBlizzardMenuContainer(child, nil) then
-                ElevateMenuSubtree(child, baseLevel, depth + 1, seen)
+        local okC, children = pcall(function() return { rootFrame:GetChildren() } end)
+        if okC and type(children) == "table" then
+            for _, child in ipairs(children) do
+                if child and not seen[child] and IsSafeFrameShown(child, false) and LooksLikeBlizzardMenuContainer(child, nil) then
+                    ElevateMenuSubtree(child, baseLevel, depth + 1, seen)
+                end
             end
+        end
+    end
+end
+
+local function ElevateUiParentChildrenVararg(seen, openMenu, baseLevel, depth, ...)
+    local n = select("#", ...)
+    for i = 1, n do
+        local child = select(i, ...)
+        if child and not seen[child] and IsSafeFrameShown(child, false) and LooksLikeBlizzardMenuContainer(child, openMenu) then
+            ElevateMenuSubtree(child, baseLevel, depth, seen)
+            depth = depth + 1
         end
     end
 end
@@ -6582,29 +7426,23 @@ function Theme:ElevateOpenBlizzardMenus()
     local mgr = _G.Menu and _G.Menu.GetManager and _G.Menu.GetManager() or nil
     local openMenu = (mgr and mgr.GetOpenMenu and mgr:GetOpenMenu()) or nil
 
-    if openMenu and openMenu.IsShown and openMenu:IsShown() then
+    if IsSafeFrameShown(openMenu, false) then
         ElevateMenuSubtree(openMenu, baseLevel, 0, seen)
     end
     if mgr and type(mgr.openMenus) == "table" then
         for idx, om in ipairs(mgr.openMenus) do
-            if om and om.IsShown and om:IsShown() then
+            if IsSafeFrameShown(om, false) then
                 ElevateMenuSubtree(om, baseLevel, math.max(0, idx - 1), seen)
             end
         end
     end
     if _G.UIParent and _G.UIParent.GetChildren then
         local depth = (openMenu and 1) or 0
-        local uChildren = { _G.UIParent:GetChildren() }
-        for _, child in ipairs(uChildren) do
-            if child and not seen[child] and child.IsShown and child:IsShown() and LooksLikeBlizzardMenuContainer(child, openMenu) then
-                ElevateMenuSubtree(child, baseLevel, depth, seen)
-                depth = depth + 1
-            end
-        end
+        ElevateUiParentChildrenVararg(seen, openMenu, baseLevel, depth, _G.UIParent:GetChildren())
     end
     for i = 1, 3 do
         local ddl = _G["DropDownList" .. i]
-        if ddl and ddl.IsShown and ddl:IsShown() then
+        if IsSafeFrameShown(ddl, false) then
             ElevateSingleMenuFrame(ddl, baseLevel + ((i - 1) * 20))
         end
     end

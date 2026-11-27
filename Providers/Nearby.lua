@@ -106,7 +106,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
         if prevRow and prevRow.key and prevRow.key ~= lKey and Store.nearby[prevRow.key] == prevRow then
             local prevHasSurname = type(prevRow.displayName) == "string" and prevRow.displayName:find("%s") ~= nil
             local prevFirst = prevRow.displayName and prevRow.displayName:match("^([^%s%-]+)")
-            if (not sName) and prevHasSurname and prevFirst and fName and prevFirst:lower() == fName:lower() then
+            if (not sName) and prevHasSurname and prevFirst and fName and Compat.LowerUtf8(prevFirst) == Compat.LowerUtf8(fName) then
                 local pLk, pFn, pDn, pSn = Compat.ParseCharacterFields(prevRow.displayName)
                 if pLk then
                     lKey, fName, dName, sName = pLk, pFn, pDn, pSn
@@ -120,7 +120,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
             end
         end
     end
-    local firstLowerKey = sName and fName and fName:lower() or nil
+    local firstLowerKey = sName and fName and Compat.LowerUtf8(fName) or nil
     if firstLowerKey and Store.nearby[firstLowerKey] then
         local oldRow = Store.nearby[firstLowerKey]
         if not (guid and oldRow.guid and oldRow.guid ~= guid) then
@@ -323,12 +323,15 @@ local function InspectUnit(unit, source, fromTicker, bypassCooldown)
                     local wlName = (resolvedOff and resolvedOff.fullName) or (parsedOff and parsedOff.displayName) or offName
                     local wlParsed = Compat.ParseCharacterName and Compat.ParseCharacterName(wlName)
                     local wlEntry = wlParsed and wlParsed.lookupKey and ns.Watchlist:GetEntry(wlParsed.lookupKey)
-                    if wlEntry and wlEntry.status == "online" and wlEntry.source == "group" then
-                        Store:SyncWatchlistObservation(wlEntry.displayName or wlName, {
-                            online = false,
-                            guid = offGuid,
-                            source = "group",
-                        })
+                    if wlEntry then
+                        local hasOtherAltOnline = (wlEntry.watchAllAlts == true and wlEntry.activeAltLookup and wlEntry.activeAltLookup ~= wlParsed.lookupKey and wlEntry.status == "online")
+                        if not hasOtherAltOnline then
+                            Store:SyncWatchlistObservation(wlEntry.displayName or wlName, {
+                                online = false,
+                                guid = offGuid,
+                                source = "group",
+                            })
+                        end
                     end
                 end
             end
@@ -507,9 +510,17 @@ local function ScanActiveEnvironment(fromTicker)
                     for step = 0, toScan - 1 do
                         local idx = ((startIdx + step - 1) % total) + 1
                         local plate = plates[idx]
-                        local canReadPlate = plate and (not plate.IsForbidden or not plate:IsForbidden())
-                        local token = canReadPlate and (plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)) or nil
-                        if type(token) == "string" and token ~= "" then
+                        local canReadPlate = false
+                        if plate then
+                            if plate.IsForbidden then
+                                local okF, forb = pcall(plate.IsForbidden, plate)
+                                canReadPlate = okF and (not forb)
+                            else
+                                canReadPlate = true
+                            end
+                        end
+                        local token = canReadPlate and (Safe.String(plate.namePlateUnitToken) or (plate.UnitFrame and Safe.String(plate.UnitFrame.unit))) or nil
+                        if token and token ~= "" then
                             InspectUnit(token, "nearby", fromTicker)
                             if uiOpen then
                                 InspectUnit(token .. "target", "nearby", fromTicker)
@@ -636,7 +647,7 @@ local function OnChat(_, eventName, text, sender, ...)
     if LOCAL_PROXIMITY_CHAT_EVENTS[eventName] and IsOpposingFactionChatSpeaker(cleanGuid, cleanSender) then
         return
     end
-    local throttleKey = cleanGuid or ("chat:" .. cleanSender:lower())
+    local throttleKey = cleanGuid or ("chat:" .. Compat.LowerUtf8(cleanSender))
     local nowClock = (GetTime and GetTime()) or time()
     if nearbyInspectCooldown[throttleKey] and nowClock < nearbyInspectCooldown[throttleKey] then
         return
@@ -692,7 +703,7 @@ local function OnChat(_, eventName, text, sender, ...)
     if Store.nearby then
         existing = (cleanGuid and nearbyByGuid[cleanGuid]) or Store.nearby[parsed.lookupKey]
         if not existing and parsed.surname and parsed.firstName then
-            local firstLowerKey = parsed.firstName:lower()
+            local firstLowerKey = Compat.LowerUtf8(parsed.firstName)
             local oldRow = Store.nearby[firstLowerKey]
             if oldRow and not (cleanGuid and oldRow.guid and oldRow.guid ~= cleanGuid) then
                 existing = oldRow
@@ -833,18 +844,116 @@ local function ScheduleGroupScan()
     end
 end
 
-function Nearby:Init()
+local NEARBY_CHAT_EVENTS = {
+    "CHAT_MSG_SAY",
+    "CHAT_MSG_YELL",
+    "CHAT_MSG_EMOTE",
+    "CHAT_MSG_TEXT_EMOTE",
+    "CHAT_MSG_WHISPER",
+    "CHAT_MSG_GUILD",
+    "CHAT_MSG_OFFICER",
+    "CHAT_MSG_PARTY",
+    "CHAT_MSG_PARTY_LEADER",
+    "CHAT_MSG_RAID",
+    "CHAT_MSG_RAID_LEADER",
+    "CHAT_MSG_INSTANCE_CHAT",
+    "CHAT_MSG_INSTANCE_CHAT_LEADER",
+}
+local NEARBY_ENV_EVENTS = { "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA", "ZONE_CHANGED_INDOORS", "ZONE_CHANGED" }
+local NEARBY_GRP_EVENTS = { "GROUP_ROSTER_UPDATE", "PARTY_MEMBERS_CHANGED", "RAID_ROSTER_UPDATE", "UNIT_CONNECTION" }
+local NEARBY_UNIT_EVENTS = {
+    "NAME_PLATE_UNIT_ADDED",
+    "FORBIDDEN_NAME_PLATE_UNIT_ADDED",
+    "PLAYER_SOFT_FRIEND_CHANGED",
+    "PLAYER_SOFT_INTERACT_CHANGED",
+    "UPDATE_MOUSEOVER_UNIT",
+    "PLAYER_TARGET_CHANGED",
+    "PLAYER_FOCUS_CHANGED",
+    "UNIT_TARGET",
+    "UNIT_LEVEL",
+}
+
+local function StopNearbyTicker()
+    if Nearby._scanTicker then
+        Nearby._scanTicker:Cancel()
+        Nearby._scanTicker = nil
+    end
+end
+
+local function SyncNearbyTicker()
+    local enabled = not (ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false)
+    if not enabled then
+        StopNearbyTicker()
+        return
+    end
+    local needsTicker = IsMainWindowOpen() or (Compat.IsInGroup and Compat.IsInGroup() == true)
+    if not needsTicker then
+        StopNearbyTicker()
+        return
+    end
+    if Nearby._scanTicker or not (C_Timer and C_Timer.NewTicker) then
+        return
+    end
+    Nearby._scanTicker = C_Timer.NewTicker(8.0, function()
+        if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then
+            StopNearbyTicker()
+            return
+        end
+        if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+            return
+        end
+        local uiOpen = IsMainWindowOpen()
+        if not uiOpen then
+            if not (Compat.IsInGroup and Compat.IsInGroup()) then
+                StopNearbyTicker()
+                return
+            end
+            ScanGroup(true)
+            return
+        end
+        ScanActiveEnvironment(true)
+    end)
+end
+
+function Nearby:SyncActivePolling()
+    SyncNearbyTicker()
+end
+
+function Nearby:SyncEventRegistration()
+    local enabled = not (ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false)
+    if not enabled then
+        if self._eventsActive then
+            self._eventsActive = false
+            for _, ev in ipairs(NEARBY_UNIT_EVENTS) do ns.UnregisterEvent(self, ev) end
+            for _, ev in ipairs(NEARBY_ENV_EVENTS) do ns.UnregisterEvent(self, ev) end
+            for _, ev in ipairs(NEARBY_GRP_EVENTS) do ns.UnregisterEvent(self, ev) end
+            for _, ev in ipairs(NEARBY_CHAT_EVENTS) do ns.UnregisterEvent(self, ev) end
+        end
+        StopNearbyTicker()
+        return
+    end
+    if self._eventsActive then
+        SyncNearbyTicker()
+        return
+    end
+    self._eventsActive = true
     ns.RegisterEvent(self, "NAME_PLATE_UNIT_ADDED", function(_, _, unit)
         if (InCombatLockdown and InCombatLockdown()) or (Compat.IsInRaid() and not IsMainWindowOpen()) then
             return
         end
-        InspectUnit(unit, "nearby")
+        local cleanUnit = Safe.String(unit)
+        if cleanUnit then
+            InspectUnit(cleanUnit, "nearby")
+        end
     end)
     ns.RegisterEvent(self, "FORBIDDEN_NAME_PLATE_UNIT_ADDED", function(_, _, unit)
         if not IsMainWindowOpen() or (InCombatLockdown and InCombatLockdown()) or Compat.IsInRaid() then
             return
         end
-        InspectUnit(unit, "nearby")
+        local cleanUnit = Safe.String(unit)
+        if cleanUnit then
+            InspectUnit(cleanUnit, "nearby")
+        end
     end)
     ns.RegisterEvent(self, "PLAYER_SOFT_FRIEND_CHANGED", function()
         InspectUnit("softfriend", "nearby")
@@ -863,73 +972,61 @@ function Nearby:Init()
         InspectUnit("focus", "nearby")
     end)
     ns.RegisterEvent(self, "UNIT_TARGET", function(_, _, unit)
-        if not unit then return end
-        local isCore = (unit == "player" or unit == "target" or unit == "focus")
-        if not isCore and not IsMainWindowOpen() then
-            return
-        end
-        if UnitExists and UnitExists(unit .. "target") then
-            InspectUnit(unit .. "target", "nearby")
-        end
-    end)
-    ns.RegisterEvent(self, "UNIT_LEVEL", function(_, _, unit)
-        if not unit or unit == "player" then return end
-        local isGroupUnit = unit:match("^party") ~= nil or unit:match("^raid") ~= nil
-        local isCore = isGroupUnit or unit == "target" or unit == "focus" or unit == "mouseover"
+        local cleanUnit = Safe.String(unit)
+        if not cleanUnit then return end
+        local isCore = (cleanUnit == "player" or cleanUnit == "target" or cleanUnit == "focus")
         if not isCore and ((InCombatLockdown and InCombatLockdown()) or not IsMainWindowOpen()) then
             return
         end
-        InspectUnit(unit, isGroupUnit and "group" or "nearby", false, true)
+        if UnitExists and UnitExists(cleanUnit .. "target") then
+            InspectUnit(cleanUnit .. "target", "nearby")
+        end
     end)
-    for _, envEv in ipairs({ "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA", "ZONE_CHANGED_INDOORS", "ZONE_CHANGED" }) do
+    ns.RegisterEvent(self, "UNIT_LEVEL", function(_, _, unit)
+        local cleanUnit = Safe.String(unit)
+        if not cleanUnit or cleanUnit == "player" then return end
+        local isGroupUnit = cleanUnit:sub(1, 5) == "party" or cleanUnit:sub(1, 4) == "raid"
+        local isCore = isGroupUnit or cleanUnit == "target" or cleanUnit == "focus" or cleanUnit == "mouseover"
+        if not isCore and ((InCombatLockdown and InCombatLockdown()) or not IsMainWindowOpen()) then
+            return
+        end
+        InspectUnit(cleanUnit, isGroupUnit and "group" or "nearby", false, true)
+    end)
+    for _, envEv in ipairs(NEARBY_ENV_EVENTS) do
         ns.RegisterEvent(self, envEv, function()
-            ScanActiveEnvironment()
+            SyncNearbyTicker()
+            if C_Timer and C_Timer.After then
+                if not Nearby._envScanPending then
+                    Nearby._envScanPending = true
+                    C_Timer.After(0.15, function()
+                        Nearby._envScanPending = false
+                        if Nearby._eventsActive then
+                            ScanActiveEnvironment()
+                            SyncNearbyTicker()
+                        end
+                    end)
+                end
+            else
+                ScanActiveEnvironment()
+            end
         end)
     end
-    for _, grpEv in ipairs({ "GROUP_ROSTER_UPDATE", "PARTY_MEMBERS_CHANGED", "RAID_ROSTER_UPDATE" }) do
+    for _, grpEv in ipairs(NEARBY_GRP_EVENTS) do
         ns.RegisterEvent(self, grpEv, function()
             ScheduleGroupScan()
+            SyncNearbyTicker()
         end)
     end
-
-    if C_Timer and C_Timer.NewTicker then
-        C_Timer.NewTicker(8.0, function()
-            if (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player")) then
-                return
-            end
-            local uiOpen = IsMainWindowOpen()
-            if not uiOpen then
-                if not Compat.IsInGroup() then
-                    -- Zero CPU idle: reactive events (NAME_PLATE_UNIT_ADDED, PLAYER_TARGET_CHANGED, UPDATE_MOUSEOVER_UNIT, CHAT)
-                    -- capture nearby players with zero timer overhead when the window is closed and player is solo.
-                    return
-                end
-                -- In a group with closed UI, only refresh group member zones/distances.
-                ScanGroup(true)
-                return
-            end
-            ScanActiveEnvironment(true)
-        end)
-    end
-
-    for _, chatEvent in ipairs({
-        "CHAT_MSG_SAY",
-        "CHAT_MSG_YELL",
-        "CHAT_MSG_EMOTE",
-        "CHAT_MSG_TEXT_EMOTE",
-        "CHAT_MSG_WHISPER",
-        "CHAT_MSG_GUILD",
-        "CHAT_MSG_OFFICER",
-        "CHAT_MSG_PARTY",
-        "CHAT_MSG_PARTY_LEADER",
-        "CHAT_MSG_RAID",
-        "CHAT_MSG_RAID_LEADER",
-        "CHAT_MSG_INSTANCE_CHAT",
-        "CHAT_MSG_INSTANCE_CHAT_LEADER",
-    }) do
+    for _, chatEvent in ipairs(NEARBY_CHAT_EVENTS) do
         ns.RegisterEvent(self, chatEvent, OnChat)
     end
+    SyncNearbyTicker()
+end
+
+function Nearby:Init()
+    self:SyncEventRegistration()
     ns:On("SETTINGS_UPDATED", function()
+        Nearby:SyncEventRegistration()
         if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false and Nearby.Clear then
             Nearby:Clear()
         end

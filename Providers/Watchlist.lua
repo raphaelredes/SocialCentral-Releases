@@ -82,19 +82,27 @@ end
 local function CollectWhoListeningFrames(root, depth, out, seen)
     if not root or (depth or 0) <= 0 or seen[root] then return end
     seen[root] = true
+    if not IsSafeWhoFrame(root) then
+        return
+    end
     if not IsOwnAddonWhoFrame(root) and root.IsEventRegistered and root.UnregisterEvent and root.RegisterEvent then
         local ok, reg = pcall(root.IsEventRegistered, root, "WHO_LIST_UPDATE")
         if ok and reg then
             out[#out + 1] = root
         end
     end
-    if root.GetChildren then
-        local okC, children = pcall(function() return { root:GetChildren() } end)
-        if okC and type(children) == "table" then
-            for _, child in ipairs(children) do
-                CollectWhoListeningFrames(child, (depth or 1) - 1, out, seen)
+    if depth > 1 and root.GetChildren then
+        local nextDepth = depth - 1
+        local function ScanChildrenVararg(...)
+            local n = select("#", ...)
+            for ci = 1, n do
+                local child = select(ci, ...)
+                if child then
+                    CollectWhoListeningFrames(child, nextDepth, out, seen)
+                end
             end
         end
+        ScanChildrenVararg(root:GetChildren())
     end
 end
 
@@ -562,6 +570,64 @@ local function LinkKnownCharsPairwise(primaryKey, charsMap)
     end
 end
 
+--- Builds an O(N) map [bnetAccountID] = watchlistEntryId for fast picker rendering (avoids O(N^2) rescans).
+function Watchlist:BuildWatchedBNetMap(bList)
+    local out = {}
+    if type(self._sessionBNetWatched) == "table" then
+        for accId, sess in pairs(self._sessionBNetWatched) do
+            if type(sess) == "table" and sess.id then
+                out[accId] = sess.id
+            end
+        end
+    end
+    local list = Store:GetWatchlistTable()
+    if type(list) ~= "table" or next(list) == nil then
+        return out
+    end
+    if type(bList) == "table" then
+        for i = 1, #bList do
+            local bf = bList[i]
+            local accId = bf and bf.bnetAccountID
+            if accId and not out[accId] then
+                if bf.lookupKey and list[bf.lookupKey] then
+                    out[accId] = bf.lookupKey
+                elseif bf.activeLookupKey and list[bf.activeLookupKey] then
+                    out[accId] = bf.activeLookupKey
+                elseif type(bf.knownChars) == "table" then
+                    for ck in pairs(bf.knownChars) do
+                        if list[ck] then
+                            out[accId] = ck
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if ns.Social and ns.Social.GetBNetLinkInfo then
+        for wlKey, wlEntry in pairs(list) do
+            if type(wlEntry) == "table" then
+                local bInfo = ns.Social:GetBNetLinkInfo(wlEntry.id or wlKey)
+                if bInfo and bInfo.bnetAccountID and not out[bInfo.bnetAccountID] then
+                    out[bInfo.bnetAccountID] = wlKey
+                end
+            end
+        end
+    end
+    return out
+end
+
+function Watchlist:RemoveBNetAccount(bnetAccId)
+    if not bnetAccId then
+        return false
+    end
+    local isW, wlId = self:IsBNetAccountWatched(bnetAccId)
+    if not (isW and wlId) then
+        return false
+    end
+    return self:Remove(wlId)
+end
+
 function Watchlist:IsBNetAccountWatched(bnetAccId)
     if not bnetAccId then
         return false, nil, nil
@@ -941,6 +1007,7 @@ function Watchlist:PinToFriends(id)
 end
 
 local STALE_ONLINE_SECONDS = 300
+local STALE_UNKNOWN_OFFLINE_SECONDS = 900
 local INIT_STALE_ONLINE_SECONDS = 180
 
 local function IsRosterConfirmedOnline(socRow)
@@ -965,7 +1032,8 @@ local function IsEntryLiveConfirmed(entry, now)
     if entry.activeAltLookup and Store and Store.socialByLookup and IsRosterConfirmedOnline(Store.socialByLookup[entry.activeAltLookup]) then
         return true
     end
-    if Compat.IsInMyGroup and Compat.IsInMyGroup(entry.activeAltName or entry.displayName, entry.guid) then
+    local isConnGrp = Compat.IsInMyGroupConnected or Compat.IsInMyGroup
+    if isConnGrp and isConnGrp(entry.activeAltName or entry.displayName, entry.guid) then
         return true
     end
     local nearbyRow = Store and Store.nearby and entry.id and Store.nearby[entry.id]
@@ -986,16 +1054,37 @@ function Watchlist:ExpireStaleOnlineEntries(silentEmit)
     local now = time()
     local changed = false
     for _, entry in pairs(list) do
-        if type(entry) == "table" and entry.status == "online" then
-            if not IsEntryLiveConfirmed(entry, now) then
-                if entry.source == "friend" or entry.source == "guild" or entry.source == "bnet" then
-                    entry.source = nil
+        if type(entry) == "table" and not entry.isSessionBNet then
+            if entry.status == "online" then
+                if not IsEntryLiveConfirmed(entry, now) then
+                    if entry.source == "friend" or entry.source == "guild" or entry.source == "bnet" then
+                        entry.source = nil
+                    end
+                    local lastConfirm = entry.lastSeen or entry.lastChecked or 0
+                    local age = now - lastConfirm
+                    if age >= STALE_UNKNOWN_OFFLINE_SECONDS then
+                        entry.status = "offline"
+                        entry._expiredOnline = nil
+                        entry._staleSettled = true
+                        changed = true
+                    elseif age >= STALE_ONLINE_SECONDS then
+                        entry.status = "unknown"
+                        entry._expiredOnline = true
+                        changed = true
+                        if ns.Chat and ns.Chat.QueuePresenceProbe and entry.id and entry.displayName then
+                            ns.Chat:QueuePresenceProbe(entry.id, entry.displayName, true)
+                        end
+                    end
                 end
-                local lastConfirm = entry.lastSeen or entry.lastChecked or 0
-                if (now - lastConfirm) >= STALE_ONLINE_SECONDS then
-                    entry.status = "unknown"
-                    entry._expiredOnline = true
-                    changed = true
+            elseif entry.status == "unknown" then
+                if not IsEntryLiveConfirmed(entry, now) then
+                    local lastConfirm = entry.lastSeen or entry.lastChecked or 0
+                    if lastConfirm > 0 and (now - lastConfirm) >= STALE_UNKNOWN_OFFLINE_SECONDS then
+                        entry.status = "offline"
+                        entry._expiredOnline = nil
+                        entry._staleSettled = true
+                        changed = true
+                    end
                 end
             end
         end
@@ -1723,8 +1812,9 @@ local function ComputeWatchlistCheckPriority(entry, now)
         return -1
     end
     local dirRow = Store and Store.socialDirectoryByLookup and entry.id and Store.socialDirectoryByLookup[entry.id]
+    local isGuildOff = Store and Store.guildOfflineByLookup and entry.id and Store.guildOfflineByLookup[entry.id] == true
     -- Battle.net being offline never confirms a character is offline in WoW (players may Appear Offline / Invisible on BNet).
-    local isPassiveKnown = (dirRow ~= nil and dirRow.sources ~= nil and (dirRow.sources.friend == true or dirRow.sources.guild == true))
+    local isPassiveKnown = isGuildOff or (dirRow ~= nil and dirRow.sources ~= nil and (dirRow.sources.friend == true or dirRow.sources.guild == true))
     local age = entry.lastChecked and math.max(0, now - entry.lastChecked) or 999999
     local isUnknown = (entry.status == "unknown")
     local needsEnrich = (entry.status == "online" and entry._needsWhoEnrich == true)
@@ -2374,6 +2464,7 @@ local function EnsureOfficialPopupAlertBanner()
                             HideOfficialPopupAlertBanner()
                         end
                     end
+                    ns:Emit("SETTINGS_UPDATED")
                     if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
                 end)
             end
@@ -2383,6 +2474,7 @@ local function EnsureOfficialPopupAlertBanner()
                     ns.db.settings.socialOfficialPopupAlerts = false
                 end
                 HideOfficialPopupAlertBanner()
+                ns:Emit("SETTINGS_UPDATED")
                 if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
                 ns:Print("%s", L["Disabled in this window. Re-enable anytime in Settings (/sc)."])
             end)
@@ -2445,7 +2537,9 @@ local function CheckOfficialPopupAlert(rawName, contextKind)
     end
 
     ns:Print("|cffff4d4d[! %s]|r %s: %s", ctxLabel, disp, reasonStr)
-    if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING and not (Compat.IsFocusSilenced and Compat.IsFocusSilenced()) then
+    local nowSoundMono = (GetTime and GetTime()) or time()
+    if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING and not (Compat.IsFocusSilenced and Compat.IsFocusSilenced()) and (nowSoundMono - (Watchlist._lastPopupAlertSoundAt or 0)) >= 3.0 then
+        Watchlist._lastPopupAlertSoundAt = nowSoundMono
         pcall(PlaySound, SOUNDKIT.RAID_WARNING, "Master")
     end
 
@@ -2459,6 +2553,9 @@ local function CheckOfficialPopupAlert(rawName, contextKind)
         banner:SetPoint("BOTTOM", _G.StaticPopup1, "TOP", 0, 8)
     else
         banner:SetPoint("TOP", UIParent, "TOP", 0, -140)
+    end
+    if banner.closeBtn and ns.Theme and ns.Theme.StyleButton then
+        ns.Theme:StyleButton(banner.closeBtn, "default")
     end
     if banner.quickBtn and banner.quickBtn.RefreshTheme then
         banner.quickBtn:RefreshTheme()
@@ -2493,7 +2590,15 @@ function Watchlist:NormalizeStoredEntries()
             end
             if entry.status == "online" then
                 local lastConfirm = entry.lastSeen or entry.lastChecked or 0
-                if (now - lastConfirm) >= INIT_STALE_ONLINE_SECONDS then
+                local age = now - lastConfirm
+                if age >= STALE_UNKNOWN_OFFLINE_SECONDS then
+                    entry.status = "offline"
+                    entry._expiredOnline = nil
+                    entry._staleSettled = true
+                    if entry.source == "friend" or entry.source == "guild" or entry.source == "bnet" then
+                        entry.source = nil
+                    end
+                elseif age >= INIT_STALE_ONLINE_SECONDS then
                     entry.status = "unknown"
                     entry._expiredOnline = true
                     if entry.source == "friend" or entry.source == "guild" or entry.source == "bnet" then
@@ -2502,12 +2607,15 @@ function Watchlist:NormalizeStoredEntries()
                 end
             elseif entry.status == "offline" then
                 entry._expiredOnline = nil
-                local lastCheck = entry.lastChecked or 0
-                if entry.source == "bnet" or (now - lastCheck) >= INIT_STALE_ONLINE_SECONDS then
-                    entry.status = "unknown"
-                    if entry.source == "bnet" or entry.source == "friend" or entry.source == "guild" then
-                        entry.source = nil
-                    end
+                if entry.source == "bnet" then
+                    entry.source = nil
+                end
+            elseif entry.status == "unknown" then
+                local lastConfirm = entry.lastSeen or entry.lastChecked or 0
+                if lastConfirm > 0 and (now - lastConfirm) >= STALE_UNKNOWN_OFFLINE_SECONDS then
+                    entry.status = "offline"
+                    entry._expiredOnline = nil
+                    entry._staleSettled = true
                 end
             end
         end

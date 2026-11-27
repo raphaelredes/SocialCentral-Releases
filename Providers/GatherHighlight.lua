@@ -5,8 +5,8 @@ local Safe = ns.Safe
 local Compat = ns.Compat
 
 -- Official Blizzard-compliant Collectible & Resource Highlight engine.
--- Uses ONLY official client Soft-Target Interact CVars (restored on disable),
--- native MINIMAP_UPDATE_TRACKING events, and PLAYER_SOFT_INTERACT_CHANGED.
+-- Uses ONLY official client Classic Sparkle / Outline graphics CVars (restored on disable),
+-- native MINIMAP_UPDATE_TRACKING events, and passive Soft-Target observation if enabled by user.
 -- Zero terrain scanning, zero automation, zero nameplate CVar tampering, zero idle CPU.
 local Gather = {
     initialized = false,
@@ -26,17 +26,23 @@ table.insert(ns.modules, Gather)
 local PLAY_SOUND_COOLDOWN = 3.0
 local ALERT_SOUND_ID = 3175 -- UI Quest/Map ping sound (soft, unobtrusive)
 
--- Whitelisted official accessibility/graphics CVars only (NEVER touches nameplate* CVars).
+-- Whitelisted official Soft-Target & sparkle CVars only (NEVER touches nameplateShow* CVars or quest/enemy Outline).
 local MANAGED_CVAR_NAMES = {
     "SoftTargetInteract",
     "SoftTargetInteractArc",
     "SoftTargetInteractRange",
-    "SoftTargetIconInteract",
-    "SoftTargetIconGameObject",
-    "SoftTargetIconSize",
     "SoftTargetNameplateInteract",
+    "SoftTargetIconGameObject",
+    "SoftTargetIconInteract",
+    "SoftTargetIconSize",
+    "SoftTargetNameplateSize",
+    "outlineModeShowLootEffectWhenDisabled",
+}
+
+local LEGACY_OUTLINE_CVARS = {
     "Outline",
     "graphicsOutlineMode",
+    "OutlineEngineMode",
 }
 
 local CLASSIC_TRACKING_TEXTURES = {
@@ -141,17 +147,23 @@ local UTILITY_EXCLUSIONS = {
     "guild vault", "cofre da guilda", "bank", "flight", "hearth",
 }
 
+local GATHER_ACCENT_FOLD = {
+    ["á"] = "a", ["à"] = "a", ["â"] = "a", ["ã"] = "a", ["ä"] = "a",
+    ["é"] = "e", ["ê"] = "e", ["è"] = "e", ["ë"] = "e",
+    ["í"] = "i", ["ì"] = "i", ["î"] = "i", ["ï"] = "i",
+    ["ó"] = "o", ["ô"] = "o", ["õ"] = "o", ["ò"] = "o", ["ö"] = "o",
+    ["ú"] = "u", ["ù"] = "u", ["û"] = "u", ["ü"] = "u",
+    ["ç"] = "c", ["ñ"] = "n",
+}
+
 local function StripLatinAccents(s)
     if type(s) ~= "string" or s == "" then
         return ""
     end
     local lower = (Compat and Compat.LowerUtf8 and Compat.LowerUtf8(s)) or s:lower()
-    lower = lower:gsub("á", "a"):gsub("à", "a"):gsub("â", "a"):gsub("ã", "a"):gsub("ä", "a")
-    lower = lower:gsub("é", "e"):gsub("ê", "e"):gsub("è", "e"):gsub("ë", "e")
-    lower = lower:gsub("í", "i"):gsub("ì", "i"):gsub("î", "i"):gsub("ï", "i")
-    lower = lower:gsub("ó", "o"):gsub("ô", "o"):gsub("õ", "o"):gsub("ò", "o"):gsub("ö", "o")
-    lower = lower:gsub("ú", "u"):gsub("ù", "u"):gsub("û", "u"):gsub("ü", "u")
-    lower = lower:gsub("ç", "c"):gsub("ñ", "n")
+    if lower:find("[\194-\244]") then
+        lower = lower:gsub("[\194-\244][\128-\191]+", GATHER_ACCENT_FOLD)
+    end
     return lower
 end
 
@@ -180,23 +192,32 @@ end
 local function SafeGetCVar(name)
     if not name then return nil end
     if C_CVar and C_CVar.GetCVarInfo then
-        local ok, val, _, _, _, isLocked, _, isReadOnly = pcall(C_CVar.GetCVarInfo, name)
-        if ok and val ~= nil then
-            if isLocked == true or isReadOnly == true then
-                return nil
+        local ok, r1, _, _, _, isLocked, _, isReadOnly = pcall(C_CVar.GetCVarInfo, name)
+        if ok and r1 ~= nil then
+            if type(r1) == "table" then
+                if r1.isLockedFromUser == true or r1.isReadOnly == true then
+                    return nil
+                end
+                if r1.value ~= nil then
+                    return tostring(r1.value)
+                end
+            else
+                if isLocked == true or isReadOnly == true then
+                    return nil
+                end
+                return tostring(r1)
             end
-            return tostring(val)
         end
     end
     if C_CVar and C_CVar.GetCVar then
         local ok, val = pcall(C_CVar.GetCVar, name)
-        if ok and val ~= nil then
+        if ok and val ~= nil and type(val) ~= "table" then
             return tostring(val)
         end
     end
     if GetCVar then
         local ok, val = pcall(GetCVar, name)
-        if ok and val ~= nil then
+        if ok and val ~= nil and type(val) ~= "table" then
             return tostring(val)
         end
     end
@@ -229,13 +250,45 @@ end
 local function SnapshotAndApplySingleCVar(savedMap, name, targetVal)
     local cur = SafeGetCVar(name)
     if cur == nil then
-        return
+        return false
     end
-    if savedMap[name] == nil then
+    if savedMap[name] == nil or tostring(savedMap[name]):find("^table:") then
         savedMap[name] = cur
     end
     if cur ~= tostring(targetVal) then
-        SafeSetCVar(name, targetVal)
+        return SafeSetCVar(name, targetVal)
+    end
+    return false
+end
+
+local function SnapshotAndRaiseMinCVar(savedMap, name, minVal)
+    local cur = SafeGetCVar(name)
+    if cur == nil then
+        return false
+    end
+    if savedMap[name] == nil or tostring(savedMap[name]):find("^table:") then
+        savedMap[name] = cur
+    end
+    if (tonumber(cur) or 0) < minVal then
+        return SafeSetCVar(name, tostring(minVal))
+    end
+    return false
+end
+
+local function RestoreLegacyOutlineCVars(s)
+    if not (s and type(s.gatherHighlightSavedCVars) == "table") then
+        return
+    end
+    for i = 1, #LEGACY_OUTLINE_CVARS do
+        local name = LEGACY_OUTLINE_CVARS[i]
+        local prev = s.gatherHighlightSavedCVars[name]
+        if prev ~= nil and not tostring(prev):find("^table:") then
+            local cur = SafeGetCVar(name)
+            if cur ~= nil and cur ~= tostring(prev) then
+                SafeSetCVar(name, prev)
+            end
+        end
+        s.gatherHighlightSavedCVars[name] = nil
     end
 end
 
@@ -247,10 +300,16 @@ local function RestoreSavedCVars(s)
         Gather.pendingCVarSync = true
         return
     end
+    RestoreLegacyOutlineCVars(s)
     for i = 1, #MANAGED_CVAR_NAMES do
         local name = MANAGED_CVAR_NAMES[i]
         local prev = s.gatherHighlightSavedCVars[name]
-        if prev ~= nil then
+        if prev ~= nil and not tostring(prev):find("^table:") then
+            if name == "SoftTargetInteract" and tostring(prev) == "3" then
+                prev = "1"
+            elseif name == "SoftTargetIconInteract" and tostring(prev) == "0" then
+                prev = "1"
+            end
             local cur = SafeGetCVar(name)
             if cur ~= nil and cur ~= tostring(prev) then
                 SafeSetCVar(name, prev)
@@ -271,9 +330,12 @@ function Gather:SyncOfficialCVars()
     end
     self.pendingCVarSync = false
 
+    -- Always restore any legacy Outline overrides so quest targets and enemies keep normal outlines.
+    RestoreLegacyOutlineCVars(s)
+
     local masterOn = (s.gatherHighlightEnabled == true)
-    local enhanceOn = masterOn and (s.gatherHighlightEnhanceRange ~= false)
-    if not enhanceOn then
+    local detectOn = masterOn and (s.gatherHighlightEnhanceRange ~= false)
+    if not detectOn then
         RestoreSavedCVars(s)
         return
     end
@@ -283,54 +345,28 @@ function Gather:SyncOfficialCVars()
     end
     local saved = s.gatherHighlightSavedCVars
 
-    -- Official WoW Soft-Target Interact CVars (gamepad/accessibility world interact icons, nameplate & cone)
-    SnapshotAndApplySingleCVar(saved, "SoftTargetInteract", "3")
-    SnapshotAndApplySingleCVar(saved, "SoftTargetInteractArc", "2")
-    SnapshotAndApplySingleCVar(saved, "SoftTargetInteractRange", "30")
-    SnapshotAndApplySingleCVar(saved, "SoftTargetIconInteract", "1")
-    SnapshotAndApplySingleCVar(saved, "SoftTargetIconGameObject", "1")
-    SnapshotAndApplySingleCVar(saved, "SoftTargetNameplateInteract", "1")
+    -- Official WoW Soft-Target world-object detection & overhead icon (herbs, ore, fish & chests).
+    -- SoftTargetIconInteract MUST be "1" alongside SoftTargetIconGameObject="1" because Blizzard_NamePlates
+    -- gates softinteract icon rendering on GetCVarBool("SoftTargetIconInteract").
+    local changed = false
+    if SnapshotAndApplySingleCVar(saved, "SoftTargetInteract", "3") then changed = true end
+    if SnapshotAndApplySingleCVar(saved, "SoftTargetInteractArc", "2") then changed = true end
+    if SnapshotAndApplySingleCVar(saved, "SoftTargetInteractRange", "30") then changed = true end
+    if SnapshotAndApplySingleCVar(saved, "SoftTargetNameplateInteract", "1") then changed = true end
+    if SnapshotAndApplySingleCVar(saved, "SoftTargetIconGameObject", "1") then changed = true end
+    if SnapshotAndApplySingleCVar(saved, "SoftTargetIconInteract", "1") then changed = true end
+    if SnapshotAndRaiseMinCVar(saved, "SoftTargetIconSize", 36) then changed = true end
+    if SnapshotAndRaiseMinCVar(saved, "SoftTargetNameplateSize", 32) then changed = true end
+    SnapshotAndApplySingleCVar(saved, "outlineModeShowLootEffectWhenDisabled", "1")
 
-    local curIconSz = SafeGetCVar("SoftTargetIconSize")
-    if curIconSz ~= nil then
-        if saved["SoftTargetIconSize"] == nil then
-            saved["SoftTargetIconSize"] = curIconSz
-        end
-        if (tonumber(curIconSz) or 0) < 28 then
-            SafeSetCVar("SoftTargetIconSize", "28")
-        end
-    end
-
-    if s.gatherHighlightOutline ~= false then
-        local curOutline = SafeGetCVar("Outline")
-        if curOutline ~= nil then
-            if saved["Outline"] == nil then
-                saved["Outline"] = curOutline
+    -- When Soft-Target CVars just switched ON, WoW spawns the softinteract target/plate on the next ticks.
+    if changed and C_Timer and C_Timer.After then
+        C_Timer.After(0.20, function()
+            local curS = ns.db and ns.db.settings
+            if curS and curS.gatherHighlightEnabled == true and curS.gatherHighlightEnhanceRange ~= false then
+                Gather:RefreshSoftInteractNode(nil, nil, true)
             end
-            local numOut = tonumber(curOutline) or 0
-            if numOut < 2 then
-                SafeSetCVar("Outline", "3")
-            end
-        end
-        local curGfxOut = SafeGetCVar("graphicsOutlineMode")
-        if curGfxOut ~= nil then
-            if saved["graphicsOutlineMode"] == nil then
-                saved["graphicsOutlineMode"] = curGfxOut
-            end
-            if (tonumber(curGfxOut) or 0) <= 0 then
-                SafeSetCVar("graphicsOutlineMode", "2")
-            end
-        end
-    else
-        -- Restore outline CVars cleanly if only Outline sub-toggle was turned off.
-        if saved["Outline"] ~= nil then
-            SafeSetCVar("Outline", saved["Outline"])
-            saved["Outline"] = nil
-        end
-        if saved["graphicsOutlineMode"] ~= nil then
-            SafeSetCVar("graphicsOutlineMode", saved["graphicsOutlineMode"])
-            saved["graphicsOutlineMode"] = nil
-        end
+        end)
     end
 end
 
@@ -575,9 +611,11 @@ function Gather:ScanProfessionTracking(promptMode)
 end
 
 function Gather:HandleTrackingSpellCast(spellID)
-    if type(spellID) ~= "number" then
+    local cleanSpellID = Safe and Safe.Number and Safe.Number(spellID) or nil
+    if not cleanSpellID then
         return
     end
+    spellID = cleanSpellID
     local info = TRACKING_SPELL_IDS[spellID]
     local spellName = nil
     if C_Spell and C_Spell.GetSpellName then
@@ -610,6 +648,9 @@ function Gather:MaybePromptFromTracking(trackInfo)
         return
     end
     if s.gatherHighlightEnabled == true or s.gatherHighlightPromptAnswered == true then
+        if ns.GatherHighlightUI and ns.GatherHighlightUI.MaybePromptGatherTutorial then
+            ns.GatherHighlightUI:MaybePromptGatherTutorial()
+        end
         return
     end
     if self.sessionPromptSnoozed then
@@ -638,8 +679,9 @@ function Gather:SetEnabled(enabled, markAnswered)
     if markAnswered == true then
         s.gatherHighlightPromptAnswered = true
     end
+    self:SyncUnitAndNodeEvents()
     self:SyncOfficialCVars()
-    self:RefreshSoftInteractNode()
+    self:RefreshSoftInteractNode(nil, nil, true)
     ns:Emit("SETTINGS_UPDATED")
 end
 
@@ -654,6 +696,7 @@ function Gather:DismissPrompt(permanent)
     else
         self.sessionPromptSnoozed = true
     end
+    self:SyncUnitAndNodeEvents()
 end
 
 local function ClassifyNodeObject(name)
@@ -712,9 +755,73 @@ local function MaybePlaySpotSound(category)
     end
 end
 
-function Gather:RefreshSoftInteractNode(eventNewGuid)
+local function IsSafeSoftInteractPlate(plate)
+    if not plate or type(plate) ~= "table" then
+        return false
+    end
+    if plate.IsForbidden then
+        local okF, forb = pcall(plate.IsForbidden, plate)
+        if not okF or forb then
+            return false
+        end
+    end
+    if plate.IsAnchoringRestricted then
+        local okR, rest = pcall(plate.IsAnchoringRestricted, plate)
+        if not okR or rest then
+            return false
+        end
+    end
+    return true
+end
+
+function Gather:FindSafeSoftInteractPlate(guid, hintUnit)
+    if not C_NamePlate then
+        return nil
+    end
+    if C_NamePlate.GetNamePlateForUnit then
+        local okPl, pl = pcall(C_NamePlate.GetNamePlateForUnit, "softinteract", false)
+        if okPl and IsSafeSoftInteractPlate(pl) then
+            return pl
+        end
+        if type(hintUnit) == "string" and hintUnit ~= "" and hintUnit ~= "softinteract" then
+            local matchesHint = (Safe.Value(Safe.Call(UnitIsUnit, hintUnit, "softinteract")) == true)
+                or (guid ~= nil and Safe.String(Safe.Call(UnitGUID, hintUnit)) == guid)
+            if matchesHint then
+                local okH, hPl = pcall(C_NamePlate.GetNamePlateForUnit, hintUnit, false)
+                if okH and IsSafeSoftInteractPlate(hPl) then
+                    return hPl
+                end
+            end
+        end
+    end
+    if C_NamePlate.GetNamePlates then
+        local okAll, plates = pcall(C_NamePlate.GetNamePlates, false)
+        if okAll and type(plates) == "table" then
+            for i = 1, #plates do
+                local pl = plates[i]
+                if IsSafeSoftInteractPlate(pl) then
+                    local pUnit = Safe.String(pl.namePlateUnitToken)
+                    if (not pUnit or pUnit == "") and pl.UnitFrame then
+                        pUnit = Safe.String(pl.UnitFrame.unit)
+                    end
+                    if pUnit and pUnit ~= "" then
+                        if pUnit == "softinteract"
+                            or Safe.Value(Safe.Call(UnitIsUnit, pUnit, "softinteract")) == true
+                            or (guid ~= nil and Safe.String(Safe.Call(UnitGUID, pUnit)) == guid)
+                        then
+                            return pl
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function Gather:RefreshSoftInteractNode(eventNewGuid, hintUnit, forceEmit)
     local s = ns.db and ns.db.settings
-    if not s or s.gatherHighlightEnabled ~= true then
+    if not s or s.gatherHighlightEnabled ~= true or s.gatherHighlightEnhanceRange == false then
         if self.activeNode ~= nil then
             self.activeNode = nil
             ns:Emit("GATHER_NODE_CHANGED", nil)
@@ -792,13 +899,7 @@ function Gather:RefreshSoftInteractNode(eventNewGuid)
         return
     end
 
-    local plate = nil
-    if C_NamePlate and C_NamePlate.GetNamePlateForUnit then
-        local okPl, pl = pcall(C_NamePlate.GetNamePlateForUnit, "softinteract")
-        if okPl and pl then
-            plate = pl
-        end
-    end
+    local plate = self:FindSafeSoftInteractPlate(guid, hintUnit)
 
     local displayName = name or catLabel or L["Collectible"]
     local node = {
@@ -810,33 +911,56 @@ function Gather:RefreshSoftInteractNode(eventNewGuid)
         plate = plate,
     }
 
+    local prev = self.activeNode
     local isNewNode = (self.lastAnnouncedGuid ~= node.guid)
     if isNewNode then
         self.lastAnnouncedGuid = node.guid
         MaybePlaySpotSound(category)
     end
 
+    local uiHasPlateGlow = (plate == nil)
+        or (ns.GatherHighlightUI and ns.GatherHighlightUI.HasActivePlateGlow and ns.GatherHighlightUI:HasActivePlateGlow(plate) == true)
+    local unchanged = (not forceEmit)
+        and uiHasPlateGlow
+        and prev
+        and prev.guid == node.guid
+        and prev.name == node.name
+        and prev.category == node.category
+        and prev.plate == node.plate
+        and prev.icon == node.icon
     self.activeNode = node
-    ns:Emit("GATHER_NODE_CHANGED", node)
+    if not unchanged then
+        ns:Emit("GATHER_NODE_CHANGED", node)
+    end
 
-    -- GameObject names sometimes populate one frame after PLAYER_SOFT_INTERACT_CHANGED fires.
-    if not name and C_Timer and C_Timer.After then
+    -- GameObject names or nameplates sometimes populate a few frames after PLAYER_SOFT_INTERACT_CHANGED fires.
+    if (not name or not plate) and C_Timer and C_Timer.After then
         local retryGuid = node.guid
-        C_Timer.After(0.08, function()
+        local hadPlate = (plate ~= nil)
+        local hadName = (name ~= nil)
+        local retrySeq = (self._plateRetrySeq or 0) + 1
+        self._plateRetrySeq = retrySeq
+        local function RetryLateNodeInfo()
+            if Gather._plateRetrySeq ~= retrySeq then
+                return
+            end
             if Gather.activeNode and Gather.activeNode.guid == retryGuid then
-                local lateName = Safe.String(Safe.Call(UnitName, "softinteract"))
-                if lateName and lateName ~= "" and lateName ~= UNKNOWNOBJECT then
-                    Gather:RefreshSoftInteractNode(retryGuid)
+                local lateName = (not hadName) and Safe.String(Safe.Call(UnitName, "softinteract")) or nil
+                local latePlate = (not hadPlate) and Gather:FindSafeSoftInteractPlate(retryGuid, nil) or nil
+                if (lateName and lateName ~= "" and lateName ~= UNKNOWNOBJECT) or latePlate then
+                    Gather:RefreshSoftInteractNode(retryGuid, nil, true)
                 end
             end
-        end)
+        end
+        C_Timer.After(0.06, RetryLateNodeInfo)
+        C_Timer.After(0.22, RetryLateNodeInfo)
     end
 end
 
 function Gather:SyncUnitAndNodeEvents()
     local s = ns.db and ns.db.settings
     local enabled = (s ~= nil and s.gatherHighlightEnabled == true)
-    local needPromptEvents = (not enabled) and (not (s and s.gatherHighlightPromptAnswered == true))
+    local needPromptEvents = (not enabled) and (not self.sessionPromptSnoozed) and (not (s and s.gatherHighlightPromptAnswered == true))
 
     if self._evtFrame then
         if enabled then
@@ -889,7 +1013,8 @@ function Gather:Init()
     local unitEvtFrame = CreateFrame("Frame")
     self._unitEvtFrame = unitEvtFrame
     unitEvtFrame:SetScript("OnEvent", function(_, event, arg1, _, arg3)
-        if arg1 ~= "player" then
+        local unitArg = Safe and Safe.String and Safe.String(arg1) or nil
+        if unitArg ~= "player" then
             return
         end
         if event == "UNIT_AURA" then
@@ -898,7 +1023,10 @@ function Gather:Init()
                 Gather:ScanProfessionTracking("new_only")
             end
         elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-            Gather:HandleTrackingSpellCast(arg3)
+            local spellNum = Safe and Safe.Number and Safe.Number(arg3) or nil
+            if spellNum then
+                Gather:HandleTrackingSpellCast(spellNum)
+            end
         end
     end)
 
@@ -925,22 +1053,28 @@ function Gather:Init()
         elseif event == "MINIMAP_UPDATE_TRACKING" then
             Gather:ScanProfessionTracking("new_only")
         elseif event == "PLAYER_SOFT_INTERACT_CHANGED" then
-            Gather.lastEventGuid = (type(arg2) == "string" and arg2 ~= "") and Safe.String(arg2) or nil
+            local cleanGuid = Safe and Safe.String and Safe.String(arg2) or nil
+            Gather.lastEventGuid = (cleanGuid and cleanGuid ~= "") and cleanGuid or nil
             Gather:RefreshSoftInteractNode(Gather.lastEventGuid)
         elseif event == "NAME_PLATE_UNIT_REMOVED" then
-            if C_NamePlate and C_NamePlate.GetNamePlateForUnit and ns.GatherHighlightUI and ns.GatherHighlightUI.HidePlateIfBound then
-                local okPl, pl = pcall(C_NamePlate.GetNamePlateForUnit, arg1)
+            local unitTok = Safe and Safe.String and Safe.String(arg1) or nil
+            if unitTok and C_NamePlate and C_NamePlate.GetNamePlateForUnit and ns.GatherHighlightUI and ns.GatherHighlightUI.HidePlateIfBound then
+                local okPl, pl = pcall(C_NamePlate.GetNamePlateForUnit, unitTok)
                 if okPl and pl then
                     ns.GatherHighlightUI:HidePlateIfBound(pl)
                 end
             end
-            if ns.db and ns.db.settings and ns.db.settings.gatherHighlightEnabled == true and arg1 == "softinteract" then
+            if ns.db and ns.db.settings and ns.db.settings.gatherHighlightEnabled == true and unitTok == "softinteract" then
                 Gather:RefreshSoftInteractNode()
             end
         elseif event == "NAME_PLATE_UNIT_ADDED" then
-            if ns.db and ns.db.settings and ns.db.settings.gatherHighlightEnabled == true then
-                if arg1 == "softinteract" or (Gather.activeNode and Gather.activeNode.guid and Safe.String(Safe.Call(UnitGUID, arg1)) == Gather.activeNode.guid) then
-                    Gather:RefreshSoftInteractNode()
+            local unitTok = Safe and Safe.String and Safe.String(arg1) or nil
+            if unitTok and ns.db and ns.db.settings and ns.db.settings.gatherHighlightEnabled == true then
+                if unitTok == "softinteract"
+                    or Safe.Value(Safe.Call(UnitIsUnit, unitTok, "softinteract")) == true
+                    or (Gather.activeNode and Gather.activeNode.guid and Safe.String(Safe.Call(UnitGUID, unitTok)) == Gather.activeNode.guid)
+                then
+                    Gather:RefreshSoftInteractNode(nil, unitTok, true)
                 end
             end
         elseif event == "PLAYER_REGEN_ENABLED" then

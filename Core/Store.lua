@@ -236,6 +236,21 @@ function Store:GetCurrentAltKey()
                         targetRec.bankFree = legacyRec.bankFree
                         targetRec.bankUpdatedAt = legacyRec.bankUpdatedAt
                     end
+                    if not targetRec.recipes and type(legacyRec.recipes) == "table" then
+                        targetRec.recipes = legacyRec.recipes
+                    end
+                    if not targetRec.craftCooldowns and type(legacyRec.craftCooldowns) == "table" then
+                        targetRec.craftCooldowns = legacyRec.craftCooldowns
+                    end
+                    if not targetRec.reputations and type(legacyRec.reputations) == "table" then
+                        targetRec.reputations = legacyRec.reputations
+                    end
+                    if not targetRec.lockouts and type(legacyRec.lockouts) == "table" then
+                        targetRec.lockouts = legacyRec.lockouts
+                    end
+                    if not targetRec.marks and type(legacyRec.marks) == "table" then
+                        targetRec.marks = legacyRec.marks
+                    end
                     if not targetRec.mailSince and legacyRec.mailSince then
                         targetRec.mailSince = legacyRec.mailSince
                     end
@@ -245,7 +260,13 @@ function Store:GetCurrentAltKey()
                     alts[legacyKey] = nil
                 end
                 if ns.Alts then
+                    if ns.Alts._altBuckets then
+                        ns.Alts._altBuckets[legacyKey] = nil
+                    end
                     ns.Alts._itemIndexBuilt = false
+                    ns.Alts.itemIndex = nil
+                    ns.Alts._recipeSeq = (ns.Alts._recipeSeq or 0) + 1
+                    ns.Alts._recipeIndexCache = nil
                 end
             end
         end
@@ -271,9 +292,10 @@ function Store:CleanupDuplicateSameWorldAlts(curKey, myGuid, fullName, realmPool
     if type(alts) ~= "table" or not curKey or type(fullName) ~= "string" or fullName == "" then
         return 0
     end
-    local targetName = fullName:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+    local lowerFn = (Compat and Compat.LowerUtf8) or string.lower
+    local targetName = lowerFn(fullName:gsub("^%s+", ""):gsub("%s+$", ""))
     if targetName == "" then return 0 end
-    local curPool = (realmPool and Compat.RealmPool and Compat.RealmPool(realmPool))
+    local curPool = (type(realmPool) == "string" and realmPool ~= "" and Compat.RealmPool and Compat.RealmPool(realmPool))
         or (Compat.RealmPool and Compat.RealmPool(Compat.Realm()))
         or realmPool
     local curWorld = worldType or (Compat.DetectWorldType and Compat.DetectWorldType(Compat.Realm())) or nil
@@ -281,15 +303,17 @@ function Store:CleanupDuplicateSameWorldAlts(curKey, myGuid, fullName, realmPool
     local toRemove = nil
     for key, rec in pairs(alts) do
         if key ~= curKey and type(rec) == "table" then
-            local recName = (rec.fullName or rec.name or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+            local recName = lowerFn((rec.fullName or rec.name or ""):gsub("^%s+", ""):gsub("%s+$", ""))
             if recName == targetName then
-                local recPool = (rec.realmName and Compat.RealmPool and Compat.RealmPool(rec.realmName))
-                    or (rec.realmPool and Compat.RealmPool and Compat.RealmPool(rec.realmPool))
-                    or curPool
+                local rName = (type(rec.realmName) == "string" and rec.realmName ~= "") and rec.realmName or nil
+                local rPool = (type(rec.realmPool) == "string" and rec.realmPool ~= "") and rec.realmPool or nil
+                local recPool = (rName and Compat.RealmPool and Compat.RealmPool(rName))
+                    or (rPool and Compat.RealmPool and Compat.RealmPool(rPool))
+                    or nil
                 local recWorld = rec.worldType
-                    or (Compat.DetectWorldType and Compat.DetectWorldType(rec.realmName or rec.realmPool, rec.realmRaw))
-                    or curWorld
-                if recPool == curPool and (not curWorld or not recWorld or recWorld == curWorld) then
+                    or (Compat.DetectWorldType and Compat.DetectWorldType(rName or rPool, rec.realmRaw))
+                    or nil
+                if recPool and recPool == curPool and (not curWorld or not recWorld or recWorld == curWorld) then
                     local recGuid = rec.guid
                     if (not myGuid or myGuid == "") or (not recGuid or recGuid == "" or recGuid ~= myGuid) then
                         toRemove = toRemove or {}
@@ -309,11 +333,16 @@ function Store:CleanupDuplicateSameWorldAlts(curKey, myGuid, fullName, realmPool
                 end
             end
             alts[oldKey] = nil
+            if ns.Alts and ns.Alts._altBuckets then
+                ns.Alts._altBuckets[oldKey] = nil
+            end
             removed = removed + 1
         end
         if removed > 0 and ns.Alts then
             ns.Alts._itemIndexBuilt = false
             ns.Alts.itemIndex = nil
+            ns.Alts._recipeSeq = (ns.Alts._recipeSeq or 0) + 1
+            ns.Alts._recipeIndexCache = nil
         end
     end
     return removed
@@ -347,8 +376,10 @@ local function AltMatchesWorldScope(key, info, currentKey, curPool, curWorldType
     if Compat.GetAltWorldInfo then
         infoWorld, infoPool = Compat.GetAltWorldInfo(info)
     else
-        infoPool = info.realmName and Compat.RealmPool(info.realmName) or (info.realmPool and Compat.RealmPool(info.realmPool)) or curPool
-        infoWorld = info.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(info.realmName or info.realmPool, info.realmRaw))
+        local rName = (type(info.realmName) == "string" and info.realmName ~= "") and info.realmName or nil
+        local rPool = (type(info.realmPool) == "string" and info.realmPool ~= "") and info.realmPool or nil
+        infoPool = (rName and Compat.RealmPool(rName)) or (rPool and Compat.RealmPool(rPool)) or curPool
+        infoWorld = info.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(rName or rPool, info.realmRaw))
     end
     if wantScope:sub(1, 6) == "world:" then
         return infoWorld == wantScope:sub(7)
@@ -402,9 +433,11 @@ function Store:GetRecordedAltWorlds()
             if Compat.GetAltWorldInfo then
                 wt, pool, disp = Compat.GetAltWorldInfo(info)
             else
-                pool = info.realmName and Compat.RealmPool(info.realmName) or (info.realmPool and Compat.RealmPool(info.realmPool)) or curPool
-                wt = info.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(info.realmName or info.realmPool, info.realmRaw))
-                disp = wt or info.realmRaw or info.realmName or pool
+                local rName = (type(info.realmName) == "string" and info.realmName ~= "") and info.realmName or nil
+                local rPool = (type(info.realmPool) == "string" and info.realmPool ~= "") and info.realmPool or nil
+                pool = (rName and Compat.RealmPool(rName)) or (rPool and Compat.RealmPool(rPool)) or curPool
+                wt = info.worldType or (Compat.DetectWorldType and Compat.DetectWorldType(rName or rPool, info.realmRaw))
+                disp = wt or info.realmRaw or rName or pool
             end
             local sKey = (wt and ("world:" .. wt)) or ("pool:" .. tostring(pool or "default"))
             local bucket = byKey[sKey]
@@ -468,7 +501,10 @@ function Store:GetAltsList(scopeMode)
                 return aSame
             end
         end
-        return (a.lastActive or 0) > (b.lastActive or 0)
+        if (a.lastActive or 0) ~= (b.lastActive or 0) then
+            return (a.lastActive or 0) > (b.lastActive or 0)
+        end
+        return tostring(a.key or "") < tostring(b.key or "")
     end)
     return out
 end
@@ -590,6 +626,10 @@ function Store:NotifyWatchlistOnline(entry, opts)
     end
 
     local didAny = false
+    local inCombatNow = ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) == true
+    local silenceCombat = not (ns.db and ns.db.settings and ns.db.settings.msgPreviewSilenceCombat == false)
+    local didVisibleToast = false
+    local didChatPrint = false
     if alerts.toast ~= false and not (opts and opts.suppressToast) then
         ns:Emit("ADDON_MESSAGE_NOTIFY", {
             id = "watchlist:" .. tostring(entry.id or entry.displayName or "?") .. ":" .. tostring(now),
@@ -604,6 +644,9 @@ function Store:NotifyWatchlistOnline(entry, opts)
             priority = 1,
         })
         didAny = true
+        if not (inCombatNow and silenceCombat) then
+            didVisibleToast = true
+        end
     end
 
     if alerts.chat and not (opts and opts.suppressChat) then
@@ -618,12 +661,17 @@ function Store:NotifyWatchlistOnline(entry, opts)
             ns:Print(ns.L["%s is now online!"]:format(label))
         end
         didAny = true
+        didChatPrint = true
     end
 
-    if alerts.sound and not (opts and opts.suppressSound) and PlaySound and SOUNDKIT then
-        local soundId = SOUNDKIT.MAP_PING or 3175
-        if soundId then
-            pcall(PlaySound, soundId, "Master")
+    if alerts.sound and (didVisibleToast or didChatPrint) and not (opts and opts.suppressSound) and PlaySound and SOUNDKIT then
+        local monoNow = (GetTime and GetTime()) or now
+        if (monoNow - (self._lastWatchlistSoundAt or 0)) >= 3.0 then
+            local soundId = SOUNDKIT.MAP_PING or 3175
+            if soundId then
+                self._lastWatchlistSoundAt = monoNow
+                pcall(PlaySound, soundId, "Master")
+            end
         end
         didAny = true
     end
@@ -837,6 +885,13 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
 
         local prevStatus = entry.status
         local obsOnline = data.online
+        if obsOnline == false and entry.watchAllAlts == true and entry.activeAltLookup and entry.activeAltLookup ~= parsed.lookupKey then
+            local altLiveSoc = self.socialByLookup and self.socialByLookup[entry.activeAltLookup]
+            local altLiveGrp = Compat.IsInMyGroupConnected and Compat.IsInMyGroupConnected(entry.activeAltName or entry.activeAltLookup)
+            if (altLiveSoc and altLiveSoc.online == true) or altLiveGrp then
+                return
+            end
+        end
         if obsOnline == true and data.source ~= "bnet" and data.source ~= "friend" and data.source ~= "who" and data.source ~= "probe" and data.source ~= "addon"
             and ns.Social and ns.Social.GetBNetLinkInfo
         then
@@ -849,6 +904,7 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
                     if entry.status == "online" then
                         entry.status = "offline"
                         entry._expiredOnline = nil
+                        entry._staleSettled = nil
                         changed = true
                     end
                     return
@@ -926,6 +982,7 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
         if obsOnline then
             local wasExpired = (entry._expiredOnline == true)
             entry._expiredOnline = nil
+            entry._staleSettled = nil
             entry.lastSeen = now
             entry.lastChecked = now
             local allowUnknown = ((opts and opts.allowUnknownTransition == true) or data.source == "probe" or data.source == "addon" or data.source == "who")
@@ -936,6 +993,11 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
             end
         elseif obsOnline == false then
             entry._expiredOnline = nil
+            entry._staleSettled = nil
+            local obsLastSeen = tonumber(data.lastSeen)
+            if obsLastSeen and obsLastSeen > 0 and obsLastSeen <= now and ((not entry.lastSeen) or entry.lastSeen <= 0 or (obsLastSeen > entry.lastSeen + 3600)) then
+                entry.lastSeen = obsLastSeen
+            end
             if self.liveUnitObs and parsed and parsed.lookupKey then
                 self.liveUnitObs[parsed.lookupKey] = nil
             end
@@ -995,6 +1057,10 @@ end
 
 local function NormalizeMetaKey(rawNameOrKey)
     if type(rawNameOrKey) ~= "string" or rawNameOrKey == "" then return nil end
+    -- Rule #4 privacy gate: never persist BattleTags (#), BNet KStrings (|K), or emails (@) into SavedVariables.
+    if rawNameOrKey:find("#", 1, true) or rawNameOrKey:find("|K", 1, true) or rawNameOrKey:find("|k", 1, true) or rawNameOrKey:find("@", 1, true) then
+        return nil
+    end
     local lookupKey = Compat.ParseCharacterFields and Compat.ParseCharacterFields(rawNameOrKey)
     if lookupKey and lookupKey ~= "" then
         return lookupKey
@@ -1331,6 +1397,85 @@ function Store:GetSocialFolders()
     table.sort(out)
     self._socialFoldersCache = out
     return out
+end
+
+function Store:RenameSocialFolder(oldName, newName)
+    local oldClean = Compat.CleanInput and Compat.CleanInput(oldName) or oldName
+    local newClean = Compat.CleanInput and Compat.CleanInput(newName) or newName
+    if not oldClean or oldClean == "" or not newClean or newClean == "" or oldClean == newClean then
+        return 0
+    end
+    local tbl = self:GetSocialMetaTable()
+    local moved = 0
+    local now = time()
+    for _, rec in pairs(tbl) do
+        if type(rec) == "table" and rec.folder == oldClean then
+            rec.folder = newClean
+            rec.updatedAt = now
+            moved = moved + 1
+        end
+    end
+    if moved > 0 then
+        self._socialFoldersCache = nil
+        ns:Emit("SOCIAL_UPDATED")
+    end
+    return moved
+end
+
+function Store:DeleteSocialFolder(folderName)
+    local clean = Compat.CleanInput and Compat.CleanInput(folderName) or folderName
+    if not clean or clean == "" then
+        return 0
+    end
+    local tbl = self:GetSocialMetaTable()
+    local cleared = 0
+    for key, rec in pairs(tbl) do
+        if type(rec) == "table" and rec.folder == clean then
+            rec.folder = nil
+            if not rec.mainName and not rec.nickname and not rec.note and not rec.flag and not rec.favorite and not rec.notifyMuted and not rec.notifyGuild then
+                tbl[key] = nil
+            else
+                rec.updatedAt = time()
+            end
+            cleared = cleared + 1
+        end
+    end
+    if cleared > 0 then
+        self._socialFoldersCache = nil
+        ns:Emit("SOCIAL_UPDATED")
+    end
+    return cleared
+end
+
+function Store:BatchSetSocialFolder(lookupKeys, folderName)
+    if type(lookupKeys) ~= "table" then
+        return 0
+    end
+    local clean = (type(folderName) == "string" and folderName ~= "") and (Compat.CleanInput and Compat.CleanInput(folderName) or folderName) or nil
+    local tbl = self:GetSocialMetaTable()
+    local changed = 0
+    local now = time()
+    for _, rawKey in ipairs(lookupKeys) do
+        local key = NormalizeMetaKey(rawKey)
+        if key then
+            local rec = tbl[key] or {}
+            if rec.folder ~= clean then
+                rec.folder = clean
+                if not rec.folder and not rec.mainName and not rec.nickname and not rec.note and not rec.flag and not rec.favorite and not rec.notifyMuted and not rec.notifyGuild then
+                    tbl[key] = nil
+                else
+                    rec.updatedAt = now
+                    tbl[key] = rec
+                end
+                changed = changed + 1
+            end
+        end
+    end
+    if changed > 0 then
+        self._socialFoldersCache = nil
+        ns:Emit("SOCIAL_UPDATED")
+    end
+    return changed
 end
 
 function Store:GetLinkedAltsForCharacter(rawNameOrKey)

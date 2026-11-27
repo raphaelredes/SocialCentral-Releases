@@ -5,7 +5,7 @@
 ## Notes-esES: Central social para WoW: Forever — amigos en vivo, hermandad, Battle.net, alts de la cuenta y lista adicional con /who.
 ## Notes-esMX: Central social para WoW: Forever — amigos en vivo, hermandad, Battle.net, alts de la cuenta y lista adicional con /who.
 ## Author: raphaelredes
-## Version: 0.2.27
+## Version: 0.2.28
 ## Category: Social
 ## Category-ptBR: Social
 ## Category-esES: Social
@@ -37,6 +37,7 @@ Providers\ClanSpotter.lua
 Providers\Group.lua
 Providers\LootRoll.lua
 Providers\GatherHighlight.lua
+Providers\FlightTimes.lua
 Providers\Chat.lua
 
 UI\Theme.lua
@@ -49,3 +50,4 @@ UI\MainFrame.lua
 UI\LFGFrameTab.lua
 UI\LootRollFrame.lua
 UI\GatherHighlight.lua
+UI\QuickBar.lua

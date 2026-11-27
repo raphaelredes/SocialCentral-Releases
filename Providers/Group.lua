@@ -204,7 +204,9 @@ function Group:Scan()
                                     noteText = (meta and meta.note and meta.note ~= "") and (L["Note: %s"]:format(meta.note)) or L["In your group! Flagged as Avoid."]
                                 end
                                 ns:Print("|cffff4d4d[!] %s:|r %s (%s) — %s", L["Avoid Warning"], parsed.displayName, item.role or "", noteText)
-                                if PlaySound and SOUNDKIT and (SOUNDKIT.RAID_WARNING or 8959) then
+                                local nowMono = (GetTime and GetTime()) or time()
+                                if PlaySound and SOUNDKIT and (SOUNDKIT.RAID_WARNING or 8959) and (nowMono - (self._lastAvoidSoundAt or 0)) >= 3.0 then
+                                    self._lastAvoidSoundAt = nowMono
                                     pcall(PlaySound, SOUNDKIT.RAID_WARNING or 8959, "Master")
                                 end
                                 ns:Emit("ADDON_MESSAGE_NOTIFY", {
@@ -212,9 +214,12 @@ function Group:Scan()
                                     kind = "AVOID_ALERT",
                                     sourceTag = L["Avoid Warning"],
                                     sender = parsed.displayName,
+                                    senderClass = item.classFile,
+                                    lookupKey = parsed.lookupKey,
                                     text = noteText,
                                     ts = time(),
                                     priority = 2,
+                                    minDuration = 12.0,
                                     totalDuration = 12.0,
                                 })
                             end
@@ -222,8 +227,32 @@ function Group:Scan()
                     end
                 end
 
+                if not isMe and Store and Store.SyncWatchlistObservation and ns.Watchlist and ns.Watchlist.GetEntry then
+                    local wlEntry = ns.Watchlist:GetEntry(parsed.lookupKey)
+                    if wlEntry then
+                        if online == false then
+                            local hasOnlineAlt = (wlEntry.watchAllAlts == true and wlEntry.activeAltLookup and wlEntry.activeAltLookup ~= parsed.lookupKey and wlEntry.status == "online")
+                            if not hasOnlineAlt then
+                                Store:SyncWatchlistObservation(wlEntry.displayName or parsed.displayName, {
+                                    online = false,
+                                    guid = guid,
+                                    source = "group",
+                                })
+                            end
+                        elseif online == true then
+                            Store:SyncWatchlistObservation(parsed.displayName, {
+                                online = true,
+                                guid = guid,
+                                level = item.level,
+                                classFile = classFile,
+                                source = "group",
+                            })
+                        end
+                    end
+                end
+
                 local groupModOn = not (ns.db and ns.db.settings and ns.db.settings.moduleGroupEnabled == false)
-                if groupModOn and not isMe and Store and Store.RecordCompanion then
+                if groupModOn and not isMe and online == true and Store and Store.RecordCompanion then
                     local compKey = guid or parsed.lookupKey
                     local compSig = tostring(role or "") .. "|" .. tostring(currentZone or "") .. "|" .. tostring(item.level or 0)
                     local nowComp = GetTime and GetTime() or 0
@@ -905,23 +934,26 @@ local function ResolveDamageMeterSourceKey(run, src)
         local mem = run.membersByKey and run.membersByKey[gk]
         return gk, (mem and mem.n) or rawName, cls or (mem and mem.c), guid
     end
-    local parsed = (rawName and rawName ~= "" and Compat.ParseCharacterName) and Compat.ParseCharacterName(rawName) or nil
+    local parsedLk, parsedFirst, parsedDisp
+    if rawName and rawName ~= "" and Compat.ParseCharacterFields then
+        parsedLk, parsedFirst, parsedDisp = Compat.ParseCharacterFields(rawName)
+    end
     if guid and Compat.LookupForeverFullName then
-        local looked = Compat.LookupForeverFullName(guid, parsed and parsed.firstName or nil, false)
-        if looked and looked.fullName and Compat.ParseCharacterName then
-            local lp = Compat.ParseCharacterName(looked.fullName)
-            if lp and lp.lookupKey then
-                parsed = lp
+        local looked = Compat.LookupForeverFullName(guid, parsedFirst, false)
+        if looked and looked.fullName and Compat.ParseCharacterFields then
+            local lLk, lFirst, lDisp = Compat.ParseCharacterFields(looked.fullName)
+            if lLk then
+                parsedLk, parsedFirst, parsedDisp = lLk, lFirst, lDisp
             end
         end
     end
-    if parsed and parsed.lookupKey then
-        if run and run.membersByKey and run.membersByKey[parsed.lookupKey] then
-            local mem = run.membersByKey[parsed.lookupKey]
-            return parsed.lookupKey, mem.n or parsed.displayName, cls or mem.c, guid
+    if parsedLk then
+        if run and run.membersByKey and run.membersByKey[parsedLk] then
+            local mem = run.membersByKey[parsedLk]
+            return parsedLk, mem.n or parsedDisp, cls or mem.c, guid
         end
-        if run and run.firstToKey and parsed.firstName then
-            local fk = run.firstToKey[parsed.firstName:lower()]
+        if run and run.firstToKey and parsedFirst then
+            local fk = run.firstToKey[parsedFirst:lower()]
             if fk then
                 local guidConflict = false
                 if guid and guid ~= "" and run.guidToKey then
@@ -934,11 +966,11 @@ local function ResolveDamageMeterSourceKey(run, src)
                 end
                 if not guidConflict then
                     local mem = run.membersByKey and run.membersByKey[fk]
-                    return fk, (mem and mem.n) or parsed.displayName, cls or (mem and mem.c), guid
+                    return fk, (mem and mem.n) or parsedDisp, cls or (mem and mem.c), guid
                 end
             end
         end
-        return parsed.lookupKey, parsed.displayName, cls, guid
+        return parsedLk, parsedDisp, cls, guid
     end
     return nil
 end
@@ -1384,21 +1416,7 @@ function Group:CheckDungeonRunDeaths(targetUnit)
 
     if newlyDied and (now - (run.lastWipeAt or 0)) >= 25 then
         local presentCount, aliveCount = 0, 0
-        local inRaid = Compat.IsInRaid and Compat.IsInRaid()
-        local checkUnits = {}
-        if inRaid then
-            local num = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
-            for i = 1, math.min(num, 40) do
-                checkUnits[#checkUnits + 1] = "raid" .. i
-            end
-        else
-            checkUnits[1] = "player"
-            for i = 1, 4 do
-                checkUnits[#checkUnits + 1] = "party" .. i
-            end
-        end
-        for i = 1, #checkUnits do
-            local cu = checkUnits[i]
+        local function AccumulateUnitState(cu)
             if UnitExists and Safe.Value(UnitExists(cu)) == true and (not UnitIsConnected or Safe.Value(UnitIsConnected(cu)) ~= false) then
                 presentCount = presentCount + 1
                 local cDead = (UnitIsDeadOrGhost and Safe.Value(Safe.Call(UnitIsDeadOrGhost, cu)) == true)
@@ -1406,6 +1424,18 @@ function Group:CheckDungeonRunDeaths(targetUnit)
                 if not cDead then
                     aliveCount = aliveCount + 1
                 end
+            end
+        end
+        local inRaid = Compat.IsInRaid and Compat.IsInRaid()
+        if inRaid then
+            local num = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
+            for i = 1, math.min(num, 40) do
+                AccumulateUnitState("raid" .. i)
+            end
+        else
+            AccumulateUnitState("player")
+            for i = 1, 4 do
+                AccumulateUnitState("party" .. i)
             end
         end
         if presentCount >= 2 and aliveCount == 0 then
@@ -2016,6 +2046,7 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
         end
     end
 
+    self:SyncDungeonRunEvents()
     return true, rec.id
 end
 
@@ -2237,6 +2268,7 @@ local function TryResumePendingDungeonRun(sig, instName, instType, diffName, max
         end
     end
     UpdateDungeonRunDamageMeter(Group._activeRun, false)
+    Group:SyncDungeonRunEvents()
     ns:Emit("GROUP_UPDATED")
     return true
 end
@@ -2244,6 +2276,7 @@ end
 function Group:CheckActiveDungeonRunZone()
     if not self:IsDungeonRunLogEnabled() then
         self._activeRun = nil
+        self:SyncDungeonRunEvents()
         return
     end
     local inInst, instType, instName, mapId, _, diffName, maxPlayers = IsInPartyOrRaidInstanceNow()
@@ -2315,6 +2348,7 @@ function Group:CheckActiveDungeonRunZone()
         }
         self:CaptureActiveRunMembers(true)
         SnapshotDungeonRunDamageMeterBaseline(self._activeRun)
+        self:SyncDungeonRunEvents()
         return
     end
 
@@ -2339,6 +2373,7 @@ function Group:CheckActiveDungeonRunZone()
     if not run.started then
         -- Never pulled an enemy inside the dungeon: discard silently.
         self._activeRun = nil
+        self:SyncDungeonRunEvents()
         return
     end
 
@@ -2397,6 +2432,7 @@ function Group:OnActiveRunRosterUpdated(inGroupNow)
             self:FinalizeActiveDungeonRun("left_group", false)
         else
             self._activeRun = nil
+            self:SyncDungeonRunEvents()
         end
         return
     end
@@ -2561,6 +2597,77 @@ local MANA_CLASSES = {
     PALADIN = true, SHAMAN = true, HUNTER = true,
 }
 
+local function ScanUnitTrackedRaidBuffs(unit, wantFort, wantInt, wantMotw)
+    if not (C_UnitAuras and (C_UnitAuras.GetAuraDataByIndex or C_UnitAuras.GetBuffDataByIndex)) then
+        return true, true, true
+    end
+    local hasFort = not wantFort
+    local hasInt = not wantInt
+    local hasMotw = not wantMotw
+    if hasFort and hasInt and hasMotw then
+        return true, true, true
+    end
+    local fortMap = RAID_BUFF_SPELLS.FORT
+    local intMap = RAID_BUFF_SPELLS.INT
+    local motwMap = RAID_BUFF_SPELLS.MOTW
+    for idx = 1, 40 do
+        local ok, aura
+        if C_UnitAuras.GetAuraDataByIndex then
+            ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, idx, "HELPFUL")
+        else
+            ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, unit, idx)
+        end
+        if not ok or not aura then
+            break
+        end
+        local sid = Safe.Number(aura.spellId)
+        local nm = nil
+        if wantFort and not hasFort then
+            if sid and fortMap and fortMap[sid] then
+                hasFort = true
+            else
+                nm = nm or Safe.String(aura.name)
+                if nm and nm ~= "" then
+                    local low = nm:lower()
+                    if low:find("fortitude", 1, true) or low:find("entereza", 1, true) then
+                        hasFort = true
+                    end
+                end
+            end
+        end
+        if wantInt and not hasInt then
+            if sid and intMap and intMap[sid] then
+                hasInt = true
+            else
+                nm = nm or Safe.String(aura.name)
+                if nm and nm ~= "" then
+                    local low = nm:lower()
+                    if low:find("intellect", 1, true) or low:find("brilliance", 1, true) or low:find("intelecto", 1, true) or low:find("brilho", 1, true) then
+                        hasInt = true
+                    end
+                end
+            end
+        end
+        if wantMotw and not hasMotw then
+            if sid and motwMap and motwMap[sid] then
+                hasMotw = true
+            else
+                nm = nm or Safe.String(aura.name)
+                if nm and nm ~= "" then
+                    local low = nm:lower()
+                    if low:find("wild", 1, true) or low:find("selvagem", 1, true) or low:find("salvaje", 1, true) then
+                        hasMotw = true
+                    end
+                end
+            end
+        end
+        if hasFort and hasInt and hasMotw then
+            break
+        end
+    end
+    return hasFort, hasInt, hasMotw
+end
+
 local function UnitHasTrackedBuff(unit, buffKey)
     if not (C_UnitAuras and (C_UnitAuras.GetAuraDataByIndex or C_UnitAuras.GetBuffDataByIndex)) then
         return true
@@ -2636,13 +2743,15 @@ function Group:GetMissingRaidBuffsAudit()
 
     local missFort, missInt, missMotw = {}, {}, {}
     for _, m in ipairs(roster) do
-        if hasPriest and not UnitHasTrackedBuff(m.unit, "FORT") then
+        local needInt = hasMage and (MANA_CLASSES[m.classFile] == true)
+        local hasFort, hasInt, hasMotw = ScanUnitTrackedRaidBuffs(m.unit, hasPriest, needInt, hasDruid)
+        if hasPriest and not hasFort then
             missFort[#missFort + 1] = m.name
         end
-        if hasMage and MANA_CLASSES[m.classFile] and not UnitHasTrackedBuff(m.unit, "INT") then
+        if needInt and not hasInt then
             missInt[#missInt + 1] = m.name
         end
-        if hasDruid and not UnitHasTrackedBuff(m.unit, "MOTW") then
+        if hasDruid and not hasMotw then
             missMotw[#missMotw + 1] = m.name
         end
     end
@@ -2847,6 +2956,106 @@ local function IsInstanceResetSystemMessage(msg)
     return false
 end
 
+local GROUP_ACTIVE_RUN_EVENTS = {
+    "ENCOUNTER_START",
+    "ENCOUNTER_END",
+    "CHAT_MSG_SYSTEM",
+    "PLAYER_DEAD",
+    "UNIT_FLAGS",
+    "PLAYER_XP_UPDATE",
+    "PLAYER_LEVEL_UP",
+    "PLAYER_MONEY",
+    "ENCOUNTER_LOOT_RECEIVED",
+    "CHAT_MSG_LOOT",
+    "DAMAGE_METER_COMBAT_SESSION_UPDATED",
+    "DAMAGE_METER_RESET",
+}
+
+function Group:SyncDungeonRunEvents()
+    local wantRunEvents = (self._activeRun ~= nil) and self:IsDungeonRunLogEnabled()
+    if wantRunEvents then
+        if self._runEventsActive then return end
+        self._runEventsActive = true
+        ns.RegisterEvent(self, "ENCOUNTER_START", function(_, _, _, encName)
+            Group:OnDungeonRunEncounterStart(Safe.String(encName))
+        end)
+        ns.RegisterEvent(self, "ENCOUNTER_END", function(_, _, _, encName, _, _, success)
+            Group:OnDungeonRunEncounterEnd(Safe.String(encName), success)
+        end)
+        ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, rawMsg)
+            if not (Group._activeRun and Group._activeRun.started) then
+                return
+            end
+            local cleanMsg = Safe.String(rawMsg)
+            if cleanMsg and IsInstanceResetSystemMessage(cleanMsg) then
+                Group:FinalizeActiveDungeonRun("instance_reset", false)
+            end
+        end)
+        ns.RegisterEvent(self, "PLAYER_DEAD", function()
+            if Group._activeRun and Group._activeRun.started then
+                Group:CheckDungeonRunDeaths("player")
+            end
+        end)
+        ns.RegisterEvent(self, "UNIT_FLAGS", function(_, _, unit)
+            if not (Group._activeRun and Group._activeRun.started) then
+                return
+            end
+            local cleanUnit = Safe.String(unit)
+            if not cleanUnit then return end
+            if cleanUnit == "player" or cleanUnit:sub(1, 5) == "party" or cleanUnit:sub(1, 4) == "raid" then
+                Group:CheckDungeonRunDeaths(cleanUnit)
+            end
+        end)
+        ns.RegisterEvent(self, "PLAYER_XP_UPDATE", function()
+            if Group._activeRun and Group._activeRun.started then
+                Group:OnDungeonRunXpUpdate(nil)
+            end
+        end)
+        ns.RegisterEvent(self, "PLAYER_LEVEL_UP", function(_, _, newLevel)
+            if Group._activeRun and Group._activeRun.started then
+                Group:OnDungeonRunXpUpdate(newLevel)
+            end
+        end)
+        ns.RegisterEvent(self, "PLAYER_MONEY", function()
+            if Group._activeRun and Group._activeRun.started then
+                Group:OnDungeonRunMoneyUpdate()
+            end
+        end)
+        ns.RegisterEvent(self, "ENCOUNTER_LOOT_RECEIVED", function(_, _, _, itemID, itemLink, _, playerName)
+            if Group._activeRun and Group._activeRun.started then
+                Group:OnDungeonRunLootEvent(Safe.String(itemLink), Safe.String(playerName), true, itemID)
+            end
+        end)
+        ns.RegisterEvent(self, "CHAT_MSG_LOOT", function(_, _, rawMsg, looterName)
+            if not (Group._activeRun and Group._activeRun.started) then
+                return
+            end
+            local cleanMsg = Safe.String(rawMsg)
+            if cleanMsg and cleanMsg:find("|Hitem:", 1, true) then
+                Group:OnDungeonRunLootEvent(cleanMsg, Safe.String(looterName), false, nil)
+            end
+        end)
+        ns.RegisterEvent(self, "DAMAGE_METER_COMBAT_SESSION_UPDATED", function()
+            local run = Group._activeRun
+            if not (run and run.started) then return end
+            local nowMono = (GetTime and GetTime()) or 0
+            if run._lastDmLivePollAt and (nowMono - run._lastDmLivePollAt) < 2.0 then
+                return
+            end
+            run._lastDmLivePollAt = nowMono
+            UpdateDungeonRunDamageMeter(run, false)
+        end)
+        ns.RegisterEvent(self, "DAMAGE_METER_RESET", function()
+            OnDungeonRunDamageMeterReset()
+        end)
+    elseif self._runEventsActive then
+        self._runEventsActive = false
+        for _, ev in ipairs(GROUP_ACTIVE_RUN_EVENTS) do
+            ns.UnregisterEvent(self, ev)
+        end
+    end
+end
+
 function Group:Init()
     for _, ev in ipairs({
         "GROUP_ROSTER_UPDATE",
@@ -2874,24 +3083,6 @@ function Group:Init()
         Group:OnDungeonRunCombatEnd()
     end)
 
-    ns.RegisterEvent(self, "ENCOUNTER_START", function(_, _, _, encName)
-        Group:OnDungeonRunEncounterStart(Safe.String(encName))
-    end)
-
-    ns.RegisterEvent(self, "ENCOUNTER_END", function(_, _, _, encName, _, _, success)
-        Group:OnDungeonRunEncounterEnd(Safe.String(encName), success)
-    end)
-
-    ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, rawMsg)
-        if not (Group._activeRun and Group._activeRun.started) then
-            return
-        end
-        local cleanMsg = Safe.String(rawMsg)
-        if cleanMsg and IsInstanceResetSystemMessage(cleanMsg) then
-            Group:FinalizeActiveDungeonRun("instance_reset", false)
-        end
-    end)
-
     ns.RegisterEvent(self, "PLAYER_LOGOUT", function()
         local activeRun = Group._activeRun
         if activeRun and activeRun.started then
@@ -2902,65 +3093,10 @@ function Group:Init()
         end
     end)
 
-    ns.RegisterEvent(self, "PLAYER_DEAD", function()
-        if Group._activeRun and Group._activeRun.started then
-            Group:CheckDungeonRunDeaths("player")
-        end
+    ns:On("SETTINGS_UPDATED", function()
+        Group:SyncDungeonRunEvents()
     end)
-
-    ns.RegisterEvent(self, "UNIT_FLAGS", function(_, _, unit)
-        if not (Group._activeRun and Group._activeRun.started) then
-            return
-        end
-        if type(unit) ~= "string" then return end
-        if unit == "player" or unit:sub(1, 5) == "party" or unit:sub(1, 4) == "raid" then
-            Group:CheckDungeonRunDeaths(unit)
-        end
-    end)
-
-    ns.RegisterEvent(self, "PLAYER_XP_UPDATE", function()
-        if Group._activeRun and Group._activeRun.started then
-            Group:OnDungeonRunXpUpdate(nil)
-        end
-    end)
-
-    ns.RegisterEvent(self, "PLAYER_LEVEL_UP", function(_, _, newLevel)
-        if Group._activeRun and Group._activeRun.started then
-            Group:OnDungeonRunXpUpdate(newLevel)
-        end
-    end)
-
-    ns.RegisterEvent(self, "PLAYER_MONEY", function()
-        if Group._activeRun and Group._activeRun.started then
-            Group:OnDungeonRunMoneyUpdate()
-        end
-    end)
-
-    ns.RegisterEvent(self, "ENCOUNTER_LOOT_RECEIVED", function(_, _, _, itemID, itemLink, _, playerName)
-        if Group._activeRun and Group._activeRun.started then
-            Group:OnDungeonRunLootEvent(Safe.String(itemLink), Safe.String(playerName), true, itemID)
-        end
-    end)
-
-    ns.RegisterEvent(self, "CHAT_MSG_LOOT", function(_, _, rawMsg, looterName)
-        if not (Group._activeRun and Group._activeRun.started) then
-            return
-        end
-        local cleanMsg = Safe.String(rawMsg)
-        if cleanMsg and cleanMsg:find("|Hitem:", 1, true) then
-            Group:OnDungeonRunLootEvent(cleanMsg, Safe.String(looterName), false, nil)
-        end
-    end)
-
-    ns.RegisterEvent(self, "DAMAGE_METER_COMBAT_SESSION_UPDATED", function()
-        if Group._activeRun and Group._activeRun.started then
-            UpdateDungeonRunDamageMeter(Group._activeRun, false)
-        end
-    end)
-
-    ns.RegisterEvent(self, "DAMAGE_METER_RESET", function()
-        OnDungeonRunDamageMeterReset()
-    end)
+    self:SyncDungeonRunEvents()
 
     ns.RegisterEvent(self, "READY_CHECK", function()
         Group.readyCheckActive = true
@@ -2981,22 +3117,23 @@ function Group:Init()
     end)
 
     ns.RegisterEvent(self, "READY_CHECK_CONFIRM", function(_, _, unit, confirm)
-        if not unit then return end
-        local guid = Safe.String(Safe.Call(UnitGUID, unit))
+        local cleanUnit = Safe.String(unit)
+        if not cleanUnit then return end
+        local guid = Safe.String(Safe.Call(UnitGUID, cleanUnit))
         local existingName = nil
         if Group.members then
             for i = 1, #Group.members do
                 local m = Group.members[i]
-                if m and ((guid and m.guid == guid) or m.unit == unit) and m.displayName then
+                if m and ((guid and m.guid == guid) or m.unit == cleanUnit) and m.displayName then
                     existingName = m.displayName
                     break
                 end
             end
         end
-        local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, guid, existingName, true)
+        local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(cleanUnit, guid, existingName, true)
         local rawName = (resolved and resolved.fullName)
-            or Safe.String(Safe.Call(GetUnitName, unit, true))
-            or Safe.String(Safe.Call(UnitName, unit))
+            or Safe.String(Safe.Call(GetUnitName, cleanUnit, true))
+            or Safe.String(Safe.Call(UnitName, cleanUnit))
         local parsed = rawName and Compat.ParseCharacterName(rawName)
         local isReady = Safe.Value(confirm) == true
         Group.readyStatesByGuid = Group.readyStatesByGuid or {}

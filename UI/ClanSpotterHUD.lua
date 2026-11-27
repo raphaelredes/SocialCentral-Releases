@@ -1935,16 +1935,20 @@ function SpotterHUD:Refresh()
                         widths[idx] = math.max(58, math.floor(widths[idx] * scale))
                     end
                 end
-                local prevRb = nil
-                for idx, rb in ipairs(rowBtns) do
-                    rb:SetWidth(widths[idx])
-                    rb:ClearAllPoints()
-                    if prevRb then
-                        rb:SetPoint("LEFT", prevRb, "RIGHT", gap, 0)
-                    else
-                        rb:SetPoint("BOTTOMLEFT", 6, 4)
+                local sig = tostring(layoutKey) .. ":" .. tostring(#rowBtns) .. ":" .. table.concat(widths, ",")
+                if f.actionPanel._scBtnLayoutSig ~= sig then
+                    f.actionPanel._scBtnLayoutSig = sig
+                    local prevRb = nil
+                    for idx, rb in ipairs(rowBtns) do
+                        rb:SetWidth(widths[idx])
+                        rb:ClearAllPoints()
+                        if prevRb then
+                            rb:SetPoint("LEFT", prevRb, "RIGHT", gap, 0)
+                        else
+                            rb:SetPoint("BOTTOMLEFT", 6, 4)
+                        end
+                        prevRb = rb
                     end
-                    prevRb = rb
                 end
             end
         end
@@ -1998,11 +2002,11 @@ function SpotterHUD:ShowNameplateTutorial(forceShow)
         steps = {
             {
                 title = L["Nameplate Indicators & Target Arrow"],
-                text = L["SocialCentral marks tracked players and highlights your focused Radar target with a pulsing red arrow whenever nameplates are visible on screen."],
+                text = L["Marks tracked players and points a red arrow on visible nameplates."],
             },
             {
-                title = L["Nameplate Indicators & Target Arrow"],
-                text = "• " .. L["Press |cffffd200Shift + V|r to show/hide Friendly, Guild & Friend nameplates (great for finding allies in cities!)."] .. "\n\n• " .. L["Press |cffffd200V|r to show/hide Enemy nameplates around you."] .. "\n\n" .. L["Tip: Blizzard keeps nameplate shortcuts manual for account safety. Press Shift+V again anytime to restore your normal view."],
+                title = L["Nameplate Shortcuts"],
+                text = L["Shift+V toggles friendly plates · V toggles enemy plates."],
             },
         },
     }
@@ -2066,12 +2070,12 @@ function SpotterHUD:ShowRadarTutorial(forceShow)
         end,
         steps = {
             {
-                title = L["Target Radar & Proximity Tracking"],
-                text = L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates. When a tracked player is detected, a compact HUD appears with click-to-target and range tracking when selected."],
+                title = L["Target Radar"],
+                text = L["Detects nearby Watchlist, Friends, Allies, and Enemies within nameplate range."],
             },
             {
-                title = L["Target Radar & Proximity Tracking"],
-                text = "• " .. L["Proximity Tracking: Tactical detection via sightlines & nameplates (does not display on the World Map)."] .. "\n\n• " .. L["Quick Target: Click the floating Radar HUD anytime outside combat to immediately select the tracked player."] .. "\n\n" .. L["Tip: Watchlist entries are tracked automatically. Right-click any row to toggle Radar tracking on or off."],
+                title = L["Target Radar Controls"],
+                text = L["Click the HUD out of combat to target · Right-click entries to toggle tracking."],
             },
         },
     }

@@ -1465,7 +1465,7 @@ local function EnsurePlateBadge(plate)
         local dt = elapsed or 0
         selfA._animElapsed = (selfA._animElapsed or 0) + dt
         selfA._animTick = (selfA._animTick or 0) + dt
-        if selfA._animTick < 0.033 then
+        if selfA._animTick < 0.05 then
             return
         end
         selfA._animTick = 0
@@ -2177,10 +2177,12 @@ function Spotter:FocusTarget(key)
     if not entry then
         -- Fall back to firstName or normalized key match in case the key was upgraded with a surname.
         local altParsed = Compat.ParseCharacterName(key)
-        local lk = altParsed and altParsed.lookupKey or key:lower()
-        local firstLower = altParsed and altParsed.firstName:lower() or lk
+        local keyLow = (Compat.LowerUtf8 and Compat.LowerUtf8(key)) or key:lower()
+        local lk = altParsed and altParsed.lookupKey or keyLow
+        local firstLower = altParsed and ((Compat.LowerUtf8 and Compat.LowerUtf8(altParsed.firstName)) or altParsed.firstName:lower()) or lk
         for _, candidate in pairs(self.entries) do
-            if candidate.key == lk or (candidate.firstName and candidate.firstName:lower() == firstLower) then
+            local candFirstLow = candidate.firstName and ((Compat.LowerUtf8 and Compat.LowerUtf8(candidate.firstName)) or candidate.firstName:lower()) or nil
+            if candidate.key == lk or (candFirstLow and candFirstLow == firstLower) then
                 entry = candidate
                 break
             end
@@ -2317,7 +2319,9 @@ local function UnitMatchesEntry(unit, entry)
     end
 
     if uName and uName ~= "" then
-        if entry.unitName and uName:lower() == entry.unitName:lower() and not (entry.guid and uGuid and entry.guid ~= uGuid) then
+        local uLow = (Compat.LowerUtf8 and Compat.LowerUtf8(uName)) or uName:lower()
+        local eUnitLow = entry.unitName and ((Compat.LowerUtf8 and Compat.LowerUtf8(entry.unitName)) or entry.unitName:lower()) or nil
+        if eUnitLow and uLow == eUnitLow and not (entry.guid and uGuid and entry.guid ~= uGuid) then
             local rLookupKey, _, _, rSurname
             if Compat.ParseCharacterFields then
                 rLookupKey, _, _, rSurname = Compat.ParseCharacterFields(uName)
@@ -2333,8 +2337,10 @@ local function UnitMatchesEntry(unit, entry)
                     return true
                 end
                 local entryHasSurname = type(entry.displayName) == "string" and entry.displayName:find("%s") ~= nil
+                local pFirstLow = pFirstName and ((Compat.LowerUtf8 and Compat.LowerUtf8(pFirstName)) or pFirstName:lower()) or nil
+                local eFirstLow = entry.firstName and ((Compat.LowerUtf8 and Compat.LowerUtf8(entry.firstName)) or entry.firstName:lower()) or nil
                 if (not pSurname or not entryHasSurname)
-                    and entry.firstName and pFirstName and pFirstName:lower() == entry.firstName:lower() then
+                    and eFirstLow and pFirstLow and pFirstLow == eFirstLow then
                     return true
                 end
             end
@@ -4046,64 +4052,67 @@ function Spotter:Init()
                 return
             end
             if event == "NAME_PLATE_UNIT_ADDED" then
+                local unit = Safe.String(arg1)
+                if not unit then return end
                 local pGuid = nil
                 local addedPlate = nil
-                if arg1 and C_NamePlate and C_NamePlate.GetNamePlateForUnit then
-                    local okP, plate = pcall(C_NamePlate.GetNamePlateForUnit, arg1)
+                if C_NamePlate and C_NamePlate.GetNamePlateForUnit then
+                    local okP, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
                     if okP and IsPlateAccessible(plate) then
                         addedPlate = plate
-                        if not activePlatesByUnit[arg1] then
+                        if not activePlatesByUnit[unit] then
                             activePlateCount = activePlateCount + 1
                         end
-                        activePlatesByUnit[arg1] = plate
-                        pGuid = Safe.String(Safe.Call(UnitGUID, arg1))
+                        activePlatesByUnit[unit] = plate
+                        pGuid = Safe.String(Safe.Call(UnitGUID, unit))
                         if pGuid and pGuid ~= "" then
-                            activePlateUnitByGuid[pGuid] = arg1
+                            activePlateUnitByGuid[pGuid] = unit
                         end
                     end
                 end
-                local insp = Spotter:InspectUnit(arg1, true, false, false, false, pGuid)
+                local insp = Spotter:InspectUnit(unit, true, false, false, false, pGuid)
                 if not insp and pGuid and Spotter.entryByGuid[pGuid] and addedPlate then
                     local knownEntry = Spotter.entryByGuid[pGuid]
                     if Spotter.entries[knownEntry.key] == knownEntry then
-                        Spotter.visibleUnits[arg1] = knownEntry.key
-                        Spotter:UpdatePlateBadge(addedPlate, arg1, knownEntry)
+                        Spotter.visibleUnits[unit] = knownEntry.key
+                        Spotter:UpdatePlateBadge(addedPlate, unit, knownEntry)
                     end
                 end
-                if addedPlate and (insp or Spotter.visibleUnits[arg1] or Safe.Value(Safe.Call(UnitIsUnit, arg1, "target")) == true) and C_Timer and C_Timer.After then
-                    pendingPlateUnits[arg1] = true
+                if addedPlate and (insp or Spotter.visibleUnits[unit] or Safe.Value(Safe.Call(UnitIsUnit, unit, "target")) == true) and C_Timer and C_Timer.After then
+                    pendingPlateUnits[unit] = true
                     if not plateRecheckQueued then
                         plateRecheckQueued = true
                         C_Timer.After(0, FlushPendingPlateRechecks)
                     end
                 end
             elseif event == "FORBIDDEN_NAME_PLATE_UNIT_ADDED" then
-                if arg1 then
-                    if activePlatesByUnit[arg1] then
+                local unit = Safe.String(arg1)
+                if unit then
+                    if activePlatesByUnit[unit] then
                         activePlateCount = math.max(0, activePlateCount - 1)
                     end
-                    activePlatesByUnit[arg1] = nil
-                    HidePlateBadge(arg1, nil)
+                    activePlatesByUnit[unit] = nil
+                    HidePlateBadge(unit, nil)
                 end
-                Spotter:InspectUnit(arg1, false, false, false)
             elseif event == "NAME_PLATE_UNIT_REMOVED" then
-                if arg1 then
-                    local pGuid = Safe.String(Safe.Call(UnitGUID, arg1))
-                    if pGuid and activePlateUnitByGuid[pGuid] == arg1 then
+                local unit = Safe.String(arg1)
+                if unit then
+                    local pGuid = Safe.String(Safe.Call(UnitGUID, unit))
+                    if pGuid and activePlateUnitByGuid[pGuid] == unit then
                         activePlateUnitByGuid[pGuid] = nil
                     end
-                    if activePlatesByUnit[arg1] then
+                    local removedPlate = activePlatesByUnit[unit]
+                    if removedPlate then
                         activePlateCount = math.max(0, activePlateCount - 1)
                     end
-                    local removedPlate = activePlatesByUnit[arg1]
-                    activePlatesByUnit[arg1] = nil
-                    HidePlateBadge(arg1, removedPlate)
-                    if Spotter.targetArrowFrame and (Spotter.targetArrowFrame._boundUnit == arg1 or (removedPlate and Spotter.targetArrowFrame._boundPlate == removedPlate)) then
+                    activePlatesByUnit[unit] = nil
+                    HidePlateBadge(unit, removedPlate)
+                    if Spotter.targetArrowFrame and (Spotter.targetArrowFrame._boundUnit == unit or (removedPlate and Spotter.targetArrowFrame._boundPlate == removedPlate)) then
                         Spotter.targetArrowFrame:Hide()
                         Spotter:UpdateFocusedPlateMarker()
                     end
-                    if Spotter.visibleUnits[arg1] then
-                        Spotter.visibleUnits[arg1] = nil
+                    if Spotter.visibleUnits[unit] then
+                        Spotter.visibleUnits[unit] = nil
                         Spotter:QueueBatchEmit(true)
                     end
                 end

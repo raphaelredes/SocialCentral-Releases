@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.27"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.27" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.28"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.28" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -184,7 +184,18 @@ local DEFAULTS = {
         tutorialDismissAll = false, -- disable automatic first-time Chromie prompts across all areas (manual [?] still works)
         lootRollPromptAnswered = false, -- whether player answered first-roll activation prompt
         lootRollHelperEnabled = false, -- show SocialCentral Group Loot Roll mini-window with live picks & gear comparison
-        lootRollHideOfficial = false, -- opt-in: hide Blizzard's default GroupLootFrame bars when SocialCentral's roll window is active
+        lootRollHideOfficial = true, -- hide Blizzard's default GroupLootFrame bars when SocialCentral's roll window is active
+        lootRollWinnerBanner = false, -- retired top-of-screen winner banner (winners appear on roll card, notification popup & local chat)
+        lootRollWinnerSound = true, -- play subtle celebratory chime when a group loot roll winner is announced
+        lootRollWinnerToast = true, -- show epic celebration splash at top of screen when you win a group drop
+        lootRollWinnerChatAnnounce = true, -- print local clickable winner summary to main chat when a group drop is won
+        lootRollResultsButtonMode = "when_enabled", -- "when_enabled" | "always" | "hidden" fixed floating Roll Results button
+        lootRollResultsButtonLock = false, -- lock fixed floating Roll Results button position against accidental drag
+        lootRollCardLock = false, -- lock active Group Loot Roll card position against accidental drag
+        lootRollDisplayMode = "tabbed", -- "tabbed" | "stacked" active Group Loot Roll layout
+        lootRollAutoHideWithQuickBar = false, -- hide standalone floating dice button when Quick Access Bar already shows Roll Results
+        lootRollShowTooltipsCompare = true, -- automatically attach equipped comparison tooltips when hovering roll items
+        lootRollTrackChatRolls = true, -- track group/raid /roll (1-100) rounds inside the Roll Results window
         toastBelowChatMigrated = false, -- one-time migration placing default toast position directly below ChatFrame1
         addonMsgChatEcho = true,    -- echo clickable [SC] summary line to Blizzard chat windows for incoming addon messages
         addonMsgChatEchoSent = true, -- echo sent [SC] addon messages into Blizzard chat windows immediately
@@ -218,6 +229,7 @@ local DEFAULTS = {
         quickReplyAutoCloseDelay = 10,  -- seconds before Quick Reply auto-closes when auto-close is enabled (default 10s)
         quickReplyIdleFade = true,      -- fade Quick Reply to transparent after inactivity while staying visible
         quickReplyFadeDelay = 15,       -- seconds of inactivity before Quick Reply becomes transparent (default 15s)
+        quickReplyFade15Migrated = false, -- one-time upgrade tightening default idle fade from 30s to 15s
         quickReplyFadeInCombat = false, -- opt-in: hide Quick Reply and pass clicks through during combat (off by default)
         quickReplyAlwaysShowV1Migrated = false, -- one-time upgrade enabling always-open Quick Reply + 15s idle transparency
         quickReplyDungeonAutoMode = true, -- auto-open persistent Quick Reply (over Official Chat or dragged spot) in Dungeons & Raids
@@ -262,6 +274,13 @@ local DEFAULTS = {
         gatherHighlightOutline = true, -- enable official outline highlight on nearby objects when gather highlight is on
         gatherHighlightNameplateGlow = true, -- show animated high-contrast sparkle halo & label over targeted collectible node
         gatherHighlightFloatBeacon = true, -- show non-blocking top indicator capsule when a collectible is detected in front
+        gatherHighlightQuickButton = true, -- show compact movable toggle button to switch Collectibles Highlight ON/OFF in 1 click
+        gatherHighlightQuickButtonLock = false, -- lock position of the floating Collectibles Highlight button
+        flightMapTimesEnabled = true, -- display estimated/recorded flight duration directly inside the Flight Map tooltip alongside location & cost
+        quickBarEnabled = true, -- show customizable floating Quick Access Bar (5-10 buttons, Horizontal/Vertical)
+        quickBarOrientation = "horizontal", -- "horizontal" | "vertical"
+        quickBarLocked = false, -- lock Quick Access Bar position
+        quickBarButtons = { "hub", "quick_reply", "gather_sparkles", "radar", "loot_rolls", "dnd", "settings" },
         gatherHighlightSound = false, -- optional subtle chime when spotting a collectible node
         gatherHighlightPromptAnswered = false, -- true once user answered the Minimap tracking prompt or toggled manually
         gatherHighlightTutorialShown = false, -- one-time Chromie explanation of Collectibles Highlight & native Interact Key
@@ -294,6 +313,7 @@ local DEFAULTS = {
         syncGameDnd = true,            -- automatically treat WoW /dnd (Busy) status as Focus Mode
         dndUntil = 0,                  -- epoch timestamp when timed Do Not Disturb auto-clears (0 = no timer)
         dndUntilLeaveInstance = false, -- auto-clear Do Not Disturb upon leaving the current instance
+        dndUntilLeaveGroup = false,    -- auto-clear Do Not Disturb upon leaving the current party/raid group
         focusUpgradeV1Migrated = false, -- one-time upgrade to single-surface notifications & combat hold defaults
         spotterScoutAlert = true,   -- notify on shared Scout sighting alerts from guildmates
         tooltipItemAlts = true,     -- show alt bag/bank/equipped item counts inside item tooltips
@@ -326,6 +346,7 @@ local DEFAULTS = {
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
         clanRosterHistoryLimit = 150, -- max guild roster join/leave/rank entries retained (25..1000)
         socialGroupByFolder = true,  -- organize O -> Social into collapsible colored folder sections
+        socialCollapsedSections = {}, -- persisted [tabId] = { [sectionKey] = bool } collapse state (section keys only, zero personal data)
         socialOfficialPopupAlerts = true, -- show warning banner on official Invite, Trade & Duel popups from Ignored/Avoid players
         clanOfficialGreenWall = true, -- mirror Alliance Guild chat into Blizzard Official Chat (ChatFrame1)
         groupReadyCheckAudit = true,  -- show missing Raid/Dungeon buff audit alert on Blizzard Ready Check
@@ -342,6 +363,7 @@ local DEFAULTS = {
     watchlist = {},                -- [scopeKey] = { [id] = entry }
     alts = {},                     -- [charKey] = snapshot
     itemCatalog = {},              -- [itemID] = "name\ticon\tquality\tclassID\tsubClassID" shared across all alts
+    flightTimes = {},              -- [srcNodeID][dstNodeID] = recorded base flight seconds (account-wide, zero personal data)
     recipeCatalog = {},            -- [recipeKey] = "name\tprofCode\tprofDisplay\titemID\tspellID\tquality\ticon\treagents" shared across alts
     guildRecipes = {},             -- [guildScopeKey] = bounded observed guildmate recipe matches (character names only)
     clan = {},                     -- [guildScopeKey] = { myTag, myNote, myProf1, myProf2, myCraftNote, peers, events }
@@ -367,6 +389,7 @@ local DEFAULTS = {
     worldBuffsPersonal = {},       -- [charKey] = { saygeAt = ts, saygePlayed = playedSec }
     instanceRuns = {},             -- [i] = { sig, name, instType, enteredAt, charName, classFile }
     dungeonHistory = {},           -- [i] = { id, z, t, st, en, dur, bk, bn, er, ch, cl, rl, m = { ... } } (capped at 80 runs)
+    lootRollHistory = {},          -- [i] = { id, rollID, ts, zone, charName, ... } persistent group loot roll results (capped at 80)
     lfgPresets = {},               -- [i] = { name, state } account-wide saved LFG filter presets (max 20)
 }
 
@@ -387,7 +410,13 @@ local USER_MAP_SETTING_KEYS = {
     lfgWatchedActivities = true,
     lfgBrowseSelectedActivities = true,
     chatQuickReplies = true,
+    chatQuickRepliesByContext = true,
+    quickReplyHotkeys = true,
+    abilityChatMacros = true,
+    chatButtonPositionsByRes = true,
+    quickBarButtons = true,
     addonChatFrames = true,
+    socialCollapsedSections = true,
 }
 
 local function ApplyDefaults(target, defaults, shallowMapKeys)
@@ -577,8 +606,27 @@ local function HandleSlash(raw)
         else
             ns:NavigateToModule("chat", { threadKey = "mentions:radar" })
         end
+    elseif cmd == "rolls" or cmd == "rollresults" or cmd == "lootresults" then
+        if ns.LootRollUI and ns.LootRollUI.OpenResultsWindow then
+            ns.LootRollUI:OpenResultsWindow()
+        elseif ns.LootRoll and ns.LootRoll.RunPreviewSimulation then
+            ns.LootRoll:RunPreviewSimulation("")
+        end
     elseif cmd == "roll" or cmd == "lootroll" or cmd == "needroll" then
-        if ns.LootRoll and ns.LootRoll.RunPreviewSimulation then
+        local sub = type(rest) == "string" and rest:lower():match("^%s*(%S*)") or ""
+        if sub == "" or sub == "results" or sub == "history" or sub == "res" then
+            if ns.LootRollUI and ns.LootRollUI.OpenResultsWindow then
+                ns.LootRollUI:OpenResultsWindow()
+            end
+        elseif sub == "button" or sub == "btn" then
+            if ns.LootRollUI and ns.LootRollUI.ToggleResultsButtonVisibility then
+                ns.LootRollUI:ToggleResultsButtonVisibility()
+            end
+        elseif sub == "preview" or sub == "test" or sub == "sim" then
+            if ns.LootRoll and ns.LootRoll.RunPreviewSimulation then
+                ns.LootRoll:RunPreviewSimulation("")
+            end
+        elseif ns.LootRoll and ns.LootRoll.RunPreviewSimulation then
             ns.LootRoll:RunPreviewSimulation(rest)
         end
     elseif cmd == "ignore" or cmd == "block" then
@@ -620,6 +668,18 @@ local function HandleSlash(raw)
         if ns.QuickReply and ns.QuickReply.OpenPreviewOrLatest then
             ns.QuickReply:OpenPreviewOrLatest()
         end
+    elseif cmd == "bar" or cmd == "quickbar" or cmd == "barra" then
+        if ns.QuickBar then
+            local sub = type(rest) == "string" and rest:lower():match("^%s*(%S*)") or ""
+            if sub == "config" or sub == "custom" or sub == "edit" then
+                ns.QuickBar:OpenCustomizeModal()
+            elseif sub == "rotate" or sub == "flip" or sub == "v" or sub == "h" then
+                ns.QuickBar:ToggleOrientation()
+            else
+                local curOn = not (ns.db and ns.db.settings and ns.db.settings.quickBarEnabled == false)
+                ns.QuickBar:SetEnabled(not curOn)
+            end
+        end
     elseif cmd == "resetpos" or cmd == "reset" then
         if ns.Theme and ns.Theme.ResetAllWindowPositions then
             ns.Theme:ResetAllWindowPositions()
@@ -646,6 +706,7 @@ local function HandleSlash(raw)
         if ModOn("clan") then ns:Print("  |cffffd200/sc clan|r — %s", L["Open Clan"]) end
         if ModOn("alts") then ns:Print("  |cffffd200/sc recipes [item]|r — %s", L["Search Alt & Guild Recipes"]) end
         ns:Print("  |cffffd200/sc hub|r — %s", L["Unified Hub (/sc hub)"])
+        ns:Print("  |cffffd200/sc bar [config|rotate]|r — %s", L["Quick Access Bar"])
         if ModOn("radar") then ns:Print("  |cffffd200/sc radar|r — %s", L["Target Radar"]) end
         ns:Print("  |cffffd200/sc toast [invite|friend|watchlist|buff|queue|clear]|r — %s", L["Test Notification Toast"])
         if ModOn("chat") then
@@ -653,7 +714,8 @@ local function HandleSlash(raw)
             ns:Print("  |cffffd200/sc mentions [config|test]|r — %s", L["Mentions & Keywords Radar"])
             ns:Print("  |cffffd200/sc spam|r — %s", L["Filtered Chat Log"])
         end
-        ns:Print("  |cffffd200/sc roll [prompt|clear]|r — %s", L["Test Group Loot Roll"])
+        ns:Print("  |cffffd200/sc roll [winner|results|prompt|clear]|r — %s", L["Test Group Loot Roll"])
+        ns:Print("  |cffffd200/sc rolls|r — %s", L["Open Loot Roll Results"])
         ns:Print("  |cffffd200/sc copychat [N]|r — %s", L["Copy Official Chat"])
         ns:Print("  |cffffd200/sc ignore [name]|r — %s", L["Account Ignore"])
         ns:Print("  |cffffd200/sc export|r — %s", L["Export / Import Social Data"])
@@ -679,6 +741,12 @@ local ACCOUNT_TUTORIAL_KEYS = {
     "spotterRadarTutorialShown",
     "gatherHighlightTutorialShown",
     "gatherInteractTipExplained",
+    "gatherSparkleTradeoffShown",
+    "gatherClassicSparkleNoticeAck",
+    "gatherSparkleBtnIntroAck",
+    "gatherSoftDetectIntroAck",
+    "quickBarIntroAck",
+    "quickReplyTutorialShown",
     "msgPreviewPromptAnswered",
     "themeChosen",
     "dungeonLogPromptShown",
@@ -877,6 +945,11 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
         end
         SocialCentralDB.settings.historyLimitsExpandedV2Migrated = true
     end
+    if SocialCentralDB.settings and SocialCentralDB.settings.lootRollHideOfficialV1Migrated ~= true then
+        SocialCentralDB.settings.lootRollHideOfficial = true
+        SocialCentralDB.settings.lootRollWinnerBanner = false
+        SocialCentralDB.settings.lootRollHideOfficialV1Migrated = true
+    end
     ns._accountSettings = SocialCentralDB.settings
     if SocialCentralCharDB.useCharProfile == true then
         if type(SocialCentralCharDB.settings) ~= "table" then
@@ -950,6 +1023,11 @@ ns.RegisterEvent(boot, "ADDON_LOADED", function(_, _, loaded)
                 end
                 SocialCentralCharDB.settings.historyLimitsExpandedV2Migrated = true
             end
+            if SocialCentralCharDB.settings.lootRollHideOfficialV1Migrated ~= true then
+                SocialCentralCharDB.settings.lootRollHideOfficial = true
+                SocialCentralCharDB.settings.lootRollWinnerBanner = false
+                SocialCentralCharDB.settings.lootRollHideOfficialV1Migrated = true
+            end
         end
         SocialCentralDB.settings = SocialCentralCharDB.settings
     end
@@ -1010,8 +1088,10 @@ function ns:ResetCurrentSettingsToDefaults()
     fresh.focusUpgradeV1Migrated = true
     fresh.quickReplyNotifyRaidMigrated = true
     fresh.quickReplyAlwaysShowV1Migrated = true
+    fresh.quickReplyFade15Migrated = true
     fresh.lfgFilterCenterRoleResetV1 = true
     fresh.historyLimitsExpandedV2Migrated = true
+    fresh.lootRollHideOfficialV1Migrated = true
     if ns:IsCharProfileEnabled() then
         SocialCentralCharDB = SocialCentralCharDB or {}
         SocialCentralCharDB.settings = fresh
@@ -1194,15 +1274,15 @@ function ns:RequestIdleGcStep(steps, delay)
         return
     end
     local now = (GetTime and GetTime()) or 0
-    if lastIdleGcAt > 0 and (now - lastIdleGcAt) < 18.0 then
+    if lastIdleGcAt > 0 and (now - lastIdleGcAt) < 60.0 then
         return
     end
     if idleGcQueued then
         return
     end
     idleGcQueued = true
-    local stepBudget = math.max(80, math.min(600, tonumber(steps) or 250))
-    C_Timer.After(tonumber(delay) or 0.6, function()
+    local stepBudget = math.max(40, math.min(140, tonumber(steps) or 100))
+    C_Timer.After(tonumber(delay) or 1.2, function()
         idleGcQueued = false
         local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
         if inCombat then
@@ -1241,16 +1321,10 @@ ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
         ns.Compat.SyncRosterForeverNames(false, true)
     end
     if C_Timer and C_Timer.After and type(collectgarbage) == "function" then
-        C_Timer.After(4.5, function()
+        C_Timer.After(9.0, function()
             if not (InCombatLockdown and InCombatLockdown()) then
                 lastIdleGcAt = (GetTime and GetTime()) or 0
-                pcall(collectgarbage, "step", 450)
-            end
-        end)
-        C_Timer.After(11.0, function()
-            if not (InCombatLockdown and InCombatLockdown()) then
-                lastIdleGcAt = (GetTime and GetTime()) or 0
-                pcall(collectgarbage, "step", 350)
+                pcall(collectgarbage, "step", 140)
             end
         end)
     end
@@ -1357,7 +1431,7 @@ function ns:NavigateToModule(modName, opts)
             chatThreadKey = opts.chatThreadKey or opts.threadKey,
         })
     end
-    if (opts.altSubTab or opts.altBagSource or opts.altSearch ~= nil) and ns.UI and ns.UI.SetAltsNavigation then
+    if (opts.altSubTab or opts.altBagSource or opts.altSearch ~= nil or opts.altAllAlts ~= nil or opts.altViewMode) and ns.UI and ns.UI.SetAltsNavigation then
         ns.UI:SetAltsNavigation(opts)
     end
     if opts.clanProfQuery ~= nil and ns.UI and ns.UI.SetClanProfessionQuery then
@@ -1574,6 +1648,11 @@ if EventRegistry and EventRegistry.RegisterCallback then
             if target and target ~= "" and ns.Compat and ns.Compat.Whisper then
                 ns.Compat.Whisper(target)
             end
+        elseif link:find("addon:SCentral:lootroll:", 1, true) then
+            local rollResultId = link:match("addon:SCentral:lootroll:([^|]+)")
+            if ns.LootRollUI and ns.LootRollUI.OpenResultsWindow then
+                ns.LootRollUI:OpenResultsWindow(rollResultId ~= "" and rollResultId or nil)
+            end
         elseif link:find("addon:SCentral:buffaudit", 1, true) then
             if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled("group") then
                 ns:Print("%s", L["This module is disabled in Settings."])
@@ -1595,7 +1674,9 @@ if EventRegistry and EventRegistry.RegisterCallback then
         else
             local who = link:match("addon:SCentral:w:([^|]+)")
             if who and who ~= "" then
-                local lookup = ns.Compat and ns.Compat.ParseCharacterFields and ns.Compat.ParseCharacterFields(who) or who:lower()
+                local lookup = ns.Compat and ns.Compat.ParseCharacterFields and ns.Compat.ParseCharacterFields(who)
+                    or (ns.Compat and ns.Compat.LowerUtf8 and ns.Compat.LowerUtf8(who))
+                    or who:lower()
                 local bInfo = ns.Social and ns.Social.GetBNetLinkInfo and lookup and ns.Social:GetBNetLinkInfo(lookup)
                 local bnetAccId = bInfo and bInfo.bnetAccountID or nil
                 local bnetName = bInfo and bInfo.bnetName or nil

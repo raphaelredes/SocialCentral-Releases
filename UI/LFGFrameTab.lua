@@ -1156,8 +1156,15 @@ local function MaxHierarchyLevel(root, depth)
     if not root or (depth or 0) <= 0 then
         return maxLvl
     end
+    if root.IsForbidden then
+        local okF, forb = pcall(root.IsForbidden, root)
+        if not okF or forb then
+            return maxLvl
+        end
+    end
     if root.GetFrameLevel then
-        local lvl = root:GetFrameLevel() or 0
+        local okL, lvl = pcall(root.GetFrameLevel, root)
+        lvl = (okL and type(lvl) == "number") and lvl or 0
         if lvl > maxLvl then
             maxLvl = lvl
         end
@@ -1284,6 +1291,17 @@ local function UpdateSideTabBadge(tab, count, tone)
     if not tab then return end
     local showBadges = not (ns.db and ns.db.settings and ns.db.settings.addonMsgTabBadges == false)
     local n = math.floor(tonumber(count) or 0)
+    local toneSig
+    if type(tone) == "table" then
+        toneSig = table.concat(tone, ",")
+    else
+        toneSig = tostring(tone or "")
+    end
+    local badgeSig = (showBadges and "1:" or "0:") .. tostring(n) .. ":" .. toneSig
+    if tab._scSideBadgeSig == badgeSig and tab.scUnreadBadge then
+        return
+    end
+    tab._scSideBadgeSig = badgeSig
     if not showBadges or n <= 0 then
         if tab.scUnreadBadge then
             if tab.scUnreadBadge.SetCount then
@@ -1548,9 +1566,10 @@ local function CreateRightSideTab(parent, name, lastNative, tooltipTitle, toolti
                             ns.UI:CloseEmbeddedIfHost(_G.CommunitiesFrame or _G.GuildFrame)
                         elseif winSettingKey == "embedCharacterWindow" and ns.UI and ns.UI.CloseEmbeddedIfHost then
                             ns.UI:CloseEmbeddedIfHost(_G.CharacterFrame)
-                            if _G.CharacterFrameTab1 and _G.CharacterFrameTab1.Click then
-                                pcall(_G.CharacterFrameTab1.Click, _G.CharacterFrameTab1)
+                            if LFGFrameTab.charTab then
+                                LFGFrameTab.charTab:Hide()
                             end
+                            ns:Emit("ALTS_UPDATED")
                         end
                         ns:Emit("SETTINGS_UPDATED")
                         ns:Emit("CLAN_UPDATED")
@@ -2430,8 +2449,17 @@ local function HarvestLfgListingArt(forceRefresh)
         return cache
     end
 
+    local function isNonForbiddenUiObj(obj)
+        if not obj then return false end
+        if obj.IsForbidden then
+            local okF, forb = pcall(obj.IsForbidden, obj)
+            if not okF or forb then return false end
+        end
+        return true
+    end
+
     local function captureTexture(region)
-        if not region or not region.GetObjectType or region:GetObjectType() ~= "Texture" then
+        if not isNonForbiddenUiObj(region) or not region.GetObjectType or region:GetObjectType() ~= "Texture" then
             return nil
         end
         local okAtlas, atlas = pcall(region.GetAtlas, region)
@@ -2465,8 +2493,11 @@ local function HarvestLfgListingArt(forceRefresh)
     end
 
     local function scanContainer(root, depth)
-        if not root or (depth or 0) <= 0 or not root.GetChildren then return end
-        for _, child in ipairs({ root:GetChildren() }) do
+        if not isNonForbiddenUiObj(root) or (depth or 0) <= 0 or not root.GetChildren then return end
+        local okC, children = pcall(function() return { root:GetChildren() } end)
+        if not okC or type(children) ~= "table" then return end
+        for _, child in ipairs(children) do
+            if isNonForbiddenUiObj(child) then
             local objType = child.GetObjectType and child:GetObjectType()
             local w = (child.GetWidth and child:GetWidth()) or 0
             local h = (child.GetHeight and child:GetHeight()) or 0
@@ -2534,16 +2565,21 @@ local function HarvestLfgListingArt(forceRefresh)
                 end
                 local candidateTextures = {}
                 local function collectRegions(frm, rDepth)
-                    if not frm or (rDepth or 0) <= 0 then return end
+                    if not isNonForbiddenUiObj(frm) or (rDepth or 0) <= 0 then return end
                     if frm.GetRegions then
-                        for _, reg in ipairs({ frm:GetRegions() }) do
-                            if reg.GetObjectType and reg:GetObjectType() == "FontString" then
-                                local okT, txt = pcall(reg.GetText, reg)
-                                if okT and type(txt) == "string" and txt ~= "" then
-                                    textStr = textStr .. " " .. txt:lower()
+                        local okR, regs = pcall(function() return { frm:GetRegions() } end)
+                        if okR and type(regs) == "table" then
+                            for _, reg in ipairs(regs) do
+                                if isNonForbiddenUiObj(reg) then
+                                    if reg.GetObjectType and reg:GetObjectType() == "FontString" then
+                                        local okT, txt = pcall(reg.GetText, reg)
+                                        if okT and type(txt) == "string" and txt ~= "" then
+                                            textStr = textStr .. " " .. txt:lower()
+                                        end
+                                    else
+                                        candidateTextures[#candidateTextures + 1] = reg
+                                    end
                                 end
-                            else
-                                candidateTextures[#candidateTextures + 1] = reg
                             end
                         end
                     end
@@ -2553,8 +2589,11 @@ local function HarvestLfgListingArt(forceRefresh)
                         end
                     end
                     if (rDepth or 0) > 1 and frm.GetChildren then
-                        for _, subCh in ipairs({ frm:GetChildren() }) do
-                            collectRegions(subCh, (rDepth or 1) - 1)
+                        local okSC, subKids = pcall(function() return { frm:GetChildren() } end)
+                        if okSC and type(subKids) == "table" then
+                            for _, subCh in ipairs(subKids) do
+                                collectRegions(subCh, (rDepth or 1) - 1)
+                            end
                         end
                     end
                 end
@@ -2613,6 +2652,7 @@ local function HarvestLfgListingArt(forceRefresh)
             end
 
             scanContainer(child, (depth or 1) - 1)
+            end
         end
     end
 
@@ -3331,9 +3371,9 @@ function LFGFrameTab:UpdateViewLayout()
         topOffset = -80
         listTop = -81
     else
-        hdrHeight = 76
-        topOffset = -98
-        listTop = -100
+        hdrHeight = 80
+        topOffset = -102
+        listTop = -104
     end
 
     local useLfgHost = (self.subPanel ~= nil) and (_G.LFGParentFrame ~= nil) and (self.subPanel:GetParent() == _G.LFGParentFrame)
@@ -3343,7 +3383,7 @@ function LFGFrameTab:UpdateViewLayout()
         c.browseHeader:SetShown(isBrowse)
         if c.catDropdown then
             c.catDropdown:ClearAllPoints()
-            c.catDropdown:SetPoint("TOPLEFT", c.browseHeader, "TOPLEFT", useLfgHost and 62 or 10, -24)
+            c.catDropdown:SetPoint("TOPLEFT", c.browseHeader, "TOPLEFT", useLfgHost and 60 or 8, -23)
         end
     end
     if c.activityDropdown and isBrowse then
@@ -3497,16 +3537,18 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
         hasListing = self:HasSelfActiveListing()
     end
 
+    local bodyW = (c.body and c.body.GetWidth and c.body:GetWidth()) or 350
+    local narrowBottom = (bodyW > 0 and bodyW < 420)
     if c.sendMsgBtn then
         if selfSelected then
             c.sendMsgBtn:SetText(L["Edit Listing"])
-            AutoFitNativeButton(c.sendMsgBtn, 96, 16, 152)
+            AutoFitNativeButton(c.sendMsgBtn, narrowBottom and 78 or 96, narrowBottom and 12 or 16, narrowBottom and 104 or 152)
             if c.sendMsgBtn.SetEnabled then
                 c.sendMsgBtn:SetEnabled(not combat)
             end
         else
             c.sendMsgBtn:SetText(L["Send Message"])
-            AutoFitNativeButton(c.sendMsgBtn, 96, 16, 152)
+            AutoFitNativeButton(c.sendMsgBtn, narrowBottom and 78 or 96, narrowBottom and 12 or 16, narrowBottom and 104 or 152)
             local canAct = (sel ~= nil) and (sel.isSelf ~= true) and (sel.secretLeaderName == nil) and (sel.isUnknownLeader ~= true) and not combat
             if c.sendMsgBtn.SetEnabled then
                 c.sendMsgBtn:SetEnabled(canAct)
@@ -3517,7 +3559,7 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     if c.inviteBtn then
         if selfSelected then
             c.inviteBtn:SetText(L["Delete Listing"])
-            AutoFitNativeButton(c.inviteBtn, 90, 14, 140)
+            AutoFitNativeButton(c.inviteBtn, narrowBottom and 76 or 90, narrowBottom and 12 or 14, narrowBottom and 98 or 140)
             c.inviteBtn._scNonLeaderInvite = false
             c.inviteBtn._scLeaderName = nil
             if c.inviteBtn.SetEnabled then
@@ -3525,7 +3567,7 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
             end
         else
             c.inviteBtn:SetText(L["Invite"])
-            AutoFitNativeButton(c.inviteBtn, 78, 14, 112)
+            AutoFitNativeButton(c.inviteBtn, narrowBottom and 66 or 78, narrowBottom and 12 or 14, narrowBottom and 84 or 112)
             local canAct = (sel ~= nil) and (sel.isSelf ~= true) and (sel.secretLeaderName == nil) and (sel.isUnknownLeader ~= true) and not combat
             local canInviteSel = canAct and canInviteGroup and ResolveLfgInviteTarget(sel)
             c.inviteBtn._scNonLeaderInvite = not canInviteGroup
@@ -3536,10 +3578,9 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
         end
     end
 
-    local bodyW = (c.body and c.body.GetWidth and c.body:GetWidth()) or 350
-    local narrowBottom = (bodyW > 0 and bodyW < 420)
     if c.backBtn then
-        AutoFitNativeButton(c.backBtn, narrowBottom and 66 or 92, narrowBottom and 12 or 18, narrowBottom and 82 or 124)
+        local backCap = (narrowBottom and hasListing) and 72 or (narrowBottom and 82 or 124)
+        AutoFitNativeButton(c.backBtn, narrowBottom and 60 or 92, narrowBottom and 10 or 18, backCap)
     end
     if c.browseGroupsBtn then
         AutoFitNativeButton(c.browseGroupsBtn, narrowBottom and 88 or 108, narrowBottom and 14 or 20, narrowBottom and 118 or 152)
@@ -3547,7 +3588,7 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     if c.listGroupBtn then
         local ctaLabel = hasListing and L["Edit Listing"] or (inGroup and L["List Group"] or L["List Self"])
         c.listGroupBtn:SetText(ctaLabel)
-        AutoFitNativeButton(c.listGroupBtn, narrowBottom and 76 or 88, narrowBottom and 12 or 16, narrowBottom and 104 or 134)
+        AutoFitNativeButton(c.listGroupBtn, narrowBottom and 72 or 88, narrowBottom and 10 or 16, narrowBottom and 96 or 134)
         c.listGroupBtn:ClearAllPoints()
         if self.viewMode == "categories" then
             if hasListing and canManage and c.browseGroupsBtn then
@@ -3556,7 +3597,22 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
                 c.listGroupBtn:SetPoint("BOTTOMRIGHT", c.body, "BOTTOMRIGHT", -10, 5)
             end
         else
-            c.listGroupBtn:SetPoint("BOTTOM", c.body, "BOTTOM", 12, 5)
+            local leftW = (c.sendMsgBtn and c.sendMsgBtn:IsShown()) and (c.sendMsgBtn:GetWidth() or 90) or 0
+            local rightW = (c.inviteBtn and c.inviteBtn:IsShown()) and (c.inviteBtn:GetWidth() or 78) or 0
+            if leftW > 0 and rightW > 0 and bodyW > 200 then
+                local gapLeft = 10 + leftW
+                local gapRight = bodyW - 10 - rightW
+                local midW = c.listGroupBtn:GetWidth() or 88
+                local availGap = gapRight - gapLeft - 8
+                if availGap > 40 and midW > availGap and c.listGroupBtn.SetWidth then
+                    c.listGroupBtn:SetWidth(availGap)
+                    midW = availGap
+                end
+                local offsetFromCenter = ((gapLeft + gapRight) * 0.5) - (bodyW * 0.5)
+                c.listGroupBtn:SetPoint("BOTTOM", c.body, "BOTTOM", math.floor(offsetFromCenter + 0.5), 5)
+            else
+                c.listGroupBtn:SetPoint("BOTTOM", c.body, "BOTTOM", 0, 5)
+            end
         end
         c.listGroupBtn._scNonLeader = not canManage
         c.listGroupBtn._scLeaderName = leaderName
@@ -3581,7 +3637,8 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
             postLabel = L["List Self"]
         end
         c.listSelfBtn:SetText(postLabel)
-        AutoFitNativeButton(c.listSelfBtn, narrowBottom and 84 or 100, narrowBottom and 12 or 18, narrowBottom and 116 or 158)
+        local listSelfCap = (narrowBottom and hasListing) and 104 or (narrowBottom and 116 or 158)
+        AutoFitNativeButton(c.listSelfBtn, narrowBottom and 78 or 100, narrowBottom and 10 or 18, listSelfCap)
         c.listSelfBtn._scNonLeader = not canManage
         c.listSelfBtn._scLeaderName = leaderName
         c.listSelfBtn._scNeedsSelection = (not isOfficialBroadcast) and canManage and (self.viewMode == "activities") and (not hasRole or not hasAct)
@@ -3591,12 +3648,13 @@ function LFGFrameTab:UpdateBottomButtons(hasSelfListingOverride)
     end
     if c.unlistBtn then
         c.unlistBtn:SetText(L["Delete Listing"])
-        AutoFitNativeButton(c.unlistBtn, narrowBottom and 76 or 86, narrowBottom and 12 or 16, narrowBottom and 98 or 132)
+        local unlistCap = (narrowBottom and hasListing) and 86 or (narrowBottom and 98 or 132)
+        AutoFitNativeButton(c.unlistBtn, narrowBottom and 68 or 86, narrowBottom and 10 or 16, unlistCap)
         c.unlistBtn:ClearAllPoints()
         if self.viewMode == "categories" then
             c.unlistBtn:SetPoint("BOTTOMRIGHT", c.body, "BOTTOMRIGHT", -10, 5)
         elseif c.listHelpBtn and c.listSelfBtn then
-            c.unlistBtn:SetPoint("RIGHT", c.listHelpBtn, "LEFT", -6, 0)
+            c.unlistBtn:SetPoint("RIGHT", c.listHelpBtn, "LEFT", -4, 0)
         else
             c.unlistBtn:SetPoint("BOTTOM", c.body, "BOTTOM", -8, 5)
         end
@@ -3953,7 +4011,7 @@ function LFGFrameTab:ShowSubPanel(customHost)
                     steps = {
                         {
                             title = L["Browse & Mirror LFG"],
-                            text = L["Switch between Browse (Official + Guild/Allies groups) and My Listing, filter by dungeon/role/favorites, or apply with your customizable Whisper template."],
+                            text = L["Filter Official + Guild/Ally groups by role or favorites and apply in 1 click."],
                             target = function() return (LFGFrameTab.controls and LFGFrameTab.controls.body) or LFGFrameTab.standaloneHost or LFGFrameTab.subPanel end,
                         },
                     },
@@ -4317,7 +4375,7 @@ function LFGFrameTab:OpenWhisperTemplateModal()
     if not m then
         m = CreateFrame("Frame", "SocialCentralLFGWhisperTemplateModal", UIParent, "BackdropTemplate")
         m:Hide()
-        m:SetSize(486, 424)
+        m:SetSize(512, 448)
         m:SetPoint("CENTER")
         m:SetClampedToScreen(true)
         m:EnableMouse(true)
@@ -4413,7 +4471,7 @@ function LFGFrameTab:OpenWhisperTemplateModal()
         local prevPreset = nil
         for _, pr in ipairs(presets) do
             local b = Theme:CreateButton(m, 120, 22, pr.lbl, "default")
-            Theme:AutoFitButton(b, 92, 16, 154)
+            Theme:AutoFitButton(b, 86, 14, 146)
             if not prevPreset then
                 b:SetPoint("TOPLEFT", presetLbl, "BOTTOMLEFT", 0, -5)
             else
@@ -4491,10 +4549,17 @@ function LFGFrameTab:OpenWhisperTemplateModal()
         inviteBox:HookScript("OnTextChanged", RefreshPreview)
         m.inviteBox = inviteBox
 
-        local invitePreviewText = m:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        invitePreviewText:SetPoint("TOPLEFT", inviteBox, "BOTTOMLEFT", 2, -5)
-        invitePreviewText:SetPoint("RIGHT", m, "RIGHT", -16, 0)
+        local invitePreviewBox = CreateFrame("Frame", nil, m, "BackdropTemplate")
+        invitePreviewBox:SetPoint("TOPLEFT", inviteBox, "BOTTOMLEFT", 0, -6)
+        invitePreviewBox:SetPoint("RIGHT", m, "RIGHT", -16, 0)
+        invitePreviewBox:SetHeight(44)
+        m.invitePreviewBox = invitePreviewBox
+
+        local invitePreviewText = invitePreviewBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        invitePreviewText:SetPoint("TOPLEFT", invitePreviewBox, "TOPLEFT", 10, -7)
+        invitePreviewText:SetPoint("BOTTOMRIGHT", invitePreviewBox, "BOTTOMRIGHT", -10, 6)
         invitePreviewText:SetJustifyH("LEFT")
+        invitePreviewText:SetJustifyV("TOP")
         invitePreviewText:SetWordWrap(true)
         invitePreviewText:SetTextColor(0.55, 0.90, 0.65)
         m.invitePreviewText = invitePreviewText
@@ -4556,6 +4621,9 @@ function LFGFrameTab:OpenWhisperTemplateModal()
     Theme:ApplyBackdrop(m, "window", p)
     if m.previewBox then
         Theme:ApplyBackdrop(m.previewBox, "surface", p)
+    end
+    if m.invitePreviewBox then
+        Theme:ApplyBackdrop(m.invitePreviewBox, "surface", p)
     end
     if m.inputBox and Theme.StyleEditBox then
         Theme:StyleEditBox(m.inputBox)
@@ -4714,6 +4782,7 @@ local function CreateNativeDropdown(parent, name, width, height, getTextFn, buil
     arrow:SetSize(16, 16)
     arrow:SetPoint("RIGHT", btn, "RIGHT", -3, 0)
     arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+    arrow:SetTexCoord(0.18, 0.82, 0.18, 0.82)
 
     btn:SetScript("OnClick", function(selfBtn)
         if MenuUtil and MenuUtil.CreateContextMenu then
@@ -5066,8 +5135,10 @@ local function BuildBulletinBoardRows(filteredRows, collapsedBuckets, pendingIte
     end
 
     table.sort(bucketList, function(a, b)
-        if a.selfHere ~= b.selfHere then return a.selfHere end
-        if a.isWatched ~= b.isWatched then return a.isWatched end
+        local aSelf, bSelf = (a.selfHere == true), (b.selfHere == true)
+        if aSelf ~= bSelf then return aSelf end
+        local aWatch, bWatch = (a.isWatched == true), (b.isWatched == true)
+        if aWatch ~= bWatch then return aWatch end
         if a.catOrder ~= b.catOrder then return a.catOrder < b.catOrder end
         if a.minLvl ~= b.minLvl then return a.minLvl < b.minLvl end
         return tostring(a.bucketLabel or "") < tostring(b.bucketLabel or "")
@@ -5245,8 +5316,15 @@ end
 
 local function CreateLfgRow(parent)
     local row = CreateFrame("Button", nil, parent, "BackdropTemplate")
-    row:SetHeight(68)
+    row:SetHeight(74)
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+    local cardBg = row:CreateTexture(nil, "BACKGROUND", nil, 0)
+    cardBg:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -2)
+    cardBg:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -3, 1)
+    cardBg:SetColorTexture(0.08, 0.09, 0.12, 0.90)
+    cardBg:Hide()
+    row.cardBg = cardBg
 
     if HasAtlas("groupfinder-highlightbar") then
         local bgTex = row:CreateTexture(nil, "BACKGROUND", nil, 1)
@@ -5276,13 +5354,13 @@ local function CreateLfgRow(parent)
     row.headerAccentTex = row:CreateTexture(nil, "BACKGROUND", nil, 3)
     row.headerAccentTex:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -3)
     row.headerAccentTex:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -3, 1)
-    row.headerAccentTex:SetColorTexture(0.20, 0.15, 0.08, 0.90)
+    row.headerAccentTex:SetColorTexture(0.20, 0.15, 0.08, 0.92)
     row.headerAccentTex:Hide()
 
     row.relStripe = row:CreateTexture(nil, "OVERLAY", nil, 3)
     row.relStripe:SetWidth(3)
-    row.relStripe:SetPoint("TOPLEFT", row, "TOPLEFT", 1, -2)
-    row.relStripe:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 1, 2)
+    row.relStripe:SetPoint("TOPLEFT", row, "TOPLEFT", 4, -4)
+    row.relStripe:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 4, 3)
     row.relStripe:Hide()
 
     row.SelectedTex = row:CreateTexture(nil, "OVERLAY", nil, 2)
@@ -5299,11 +5377,17 @@ local function CreateLfgRow(parent)
     if row.SelectedTex then
         row.SelectedTex:SetDrawLayer("OVERLAY", 2)
     end
-    row.zebraTex = row:CreateTexture(nil, "BACKGROUND", nil, 0)
+    row.zebraTex = row:CreateTexture(nil, "BACKGROUND", nil, 1)
     row.zebraTex:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -2)
     row.zebraTex:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -3, 1)
-    row.zebraTex:SetColorTexture(0.11, 0.10, 0.09, 0.24)
+    row.zebraTex:SetColorTexture(0.12, 0.13, 0.16, 0.24)
     row.zebraTex:Hide()
+
+    local bottomRule = row:CreateTexture(nil, "ARTWORK", nil, 0)
+    bottomRule:SetHeight(1)
+    bottomRule:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 5, 1)
+    bottomRule:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -5, 1)
+    bottomRule:SetColorTexture(0.45, 0.40, 0.32, 0.22)
 
     row.hl = row:CreateTexture(nil, "HIGHLIGHT")
     row.hl:SetPoint("TOPLEFT", row, "TOPLEFT", 3, -3)
@@ -5316,34 +5400,34 @@ local function CreateLfgRow(parent)
     end
 
     row.partyIcon = row:CreateTexture(nil, "ARTWORK")
-    row.partyIcon:SetSize(19, 19)
-    row.partyIcon:SetPoint("TOPLEFT", row, "TOPLEFT", 9, -8)
+    row.partyIcon:SetSize(16, 16)
+    row.partyIcon:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -28)
     if HasAtlas("groupfinder-icon-leader") then
         row.partyIcon:SetAtlas("groupfinder-icon-leader", false)
     else
         row.partyIcon:SetTexture("Interface\\GroupFrame\\UI-Group-LeaderIcon")
     end
 
-    row.nameFs = row:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-    row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 31, -8)
+    row.nameFs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 30, -29)
     row.nameFs:SetJustifyH("LEFT")
     row.nameFs:SetWordWrap(false)
 
-    row.levelFs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-    row.levelFs:SetPoint("BOTTOMLEFT", row.nameFs, "BOTTOMRIGHT", 6, 1)
+    row.levelFs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    row.levelFs:SetPoint("LEFT", row.nameFs, "RIGHT", 5, 0)
     row.levelFs:SetJustifyH("LEFT")
     row.levelFs:SetWordWrap(false)
     row.levelFs:SetTextColor(0.86, 0.90, 0.95, 1)
 
     row.classIcon = row:CreateTexture(nil, "ARTWORK")
-    row.classIcon:SetSize(20, 20)
-    row.classIcon:SetPoint("LEFT", row.levelFs, "RIGHT", 5, 0)
+    row.classIcon:SetSize(16, 16)
+    row.classIcon:SetPoint("LEFT", row.levelFs, "RIGHT", 4, 0)
     row.classIcon:Hide()
 
     row.infoBadges = {}
     for bi = 1, 6 do
         local bf = CreateFrame("Frame", nil, row)
-        bf:SetSize(15, 15)
+        bf:SetSize(14, 14)
         bf:SetFrameLevel((row:GetFrameLevel() or 2) + 2)
         bf:EnableMouse(true)
         if bf.SetMouseClickEnabled then
@@ -5393,7 +5477,7 @@ local function CreateLfgRow(parent)
     actHl:SetAllPoints()
     actHl:SetColorTexture(1.0, 0.85, 0.25, 0.24)
     local actIcon = row.actionBtn:CreateTexture(nil, "ARTWORK")
-    actIcon:SetSize(20, 20)
+    actIcon:SetSize(22, 22)
     actIcon:SetPoint("CENTER")
     row.actionBtn.Icon = actIcon
     local actCheck = row.actionBtn:CreateTexture(nil, "OVERLAY")
@@ -5454,12 +5538,12 @@ local function CreateLfgRow(parent)
         GameTooltip:Hide()
     end)
 
-    -- Right-aligned native Role Slot Pool (Line 1, fixed grid centers left of actionBtn)
+    -- Right-aligned native Role Slot Pool (Line 1, crisp 20x20 grid left of actionBtn)
     row.roleIcons = {}
     for ri = 5, 1, -1 do
         local ico = row:CreateTexture(nil, "ARTWORK")
-        ico:SetSize(24, 24)
-        ico:SetPoint("CENTER", row.actionBtn, "LEFT", -16 - ((5 - ri) * 24), 19)
+        ico:SetSize(20, 20)
+        ico:SetPoint("CENTER", row.actionBtn, "LEFT", -14 - ((5 - ri) * 21), 20)
         row.roleIcons[ri] = ico
     end
     row.tankIcon = row.roleIcons[1]
@@ -5471,28 +5555,25 @@ local function CreateLfgRow(parent)
     local prevClsIcon = nil
     for ci = 1, 5 do
         local cIco = row:CreateTexture(nil, "ARTWORK")
-        cIco:SetSize(18, 18)
+        cIco:SetSize(17, 17)
         if not prevClsIcon then
-            cIco:SetPoint("RIGHT", row.actionBtn, "LEFT", -6, -20)
+            cIco:SetPoint("RIGHT", row.actionBtn, "LEFT", -6, -19)
         else
-            cIco:SetPoint("RIGHT", prevClsIcon, "LEFT", -3, 0)
+            cIco:SetPoint("RIGHT", prevClsIcon, "LEFT", -2, 0)
         end
         cIco:Hide()
         row.memberClassIcons[ci] = cIco
         prevClsIcon = cIco
     end
 
-    row.activityFs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-    if row.activityFs.SetFontObject and _G.GameFontHighlightMedium then
-        row.activityFs:SetFontObject(_G.GameFontHighlightMedium)
-    end
-    row.activityFs:SetPoint("TOPLEFT", row.nameFs, "BOTTOMLEFT", 0, -7)
+    row.activityFs = row:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    row.activityFs:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -7)
     row.activityFs:SetPoint("RIGHT", row.actionBtn, "LEFT", -8, 0)
     row.activityFs:SetJustifyH("LEFT")
     row.activityFs:SetWordWrap(false)
 
-    row.metaFs = row:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    row.metaFs:SetPoint("TOPLEFT", row.activityFs, "BOTTOMLEFT", 0, -4)
+    row.metaFs = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    row.metaFs:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -50)
     row.metaFs:SetPoint("RIGHT", row.actionBtn, "LEFT", -8, 0)
     row.metaFs:SetJustifyH("LEFT")
     row.metaFs:SetWordWrap(false)
@@ -5576,7 +5657,8 @@ local function CreateLfgRow(parent)
             if it._lockoutInfo then
                 local lk = it._lockoutInfo
                 local prog = (lk.numEncounters and lk.numEncounters > 0) and string.format("%d/%d", lk.encounterProgress or 0, lk.numEncounters) or L["Saved"]
-                GameTooltip:AddLine(string.format(L["Saved Lockout: %s (%s · %s)"], lk.name or "?", prog, ""), 1.0, 0.62, 0.24, true)
+                local resetStr = (Compat.FormatDurationShort and Compat.FormatDurationShort(lk.reset or 0)) or L["Saved"]
+                GameTooltip:AddLine(string.format(L["Saved Lockout: %s (%s · %s)"], lk.name or "?", prog, resetStr), 1.0, 0.62, 0.24, true)
             end
             GameTooltip:AddLine(" ")
             GameTooltip:AddLine(L["Click: Expand / Collapse  |  Right-click: Watch in Chat"], 0.65, 0.72, 0.80, true)
@@ -5724,11 +5806,11 @@ local function BuildLfgRowBadgeSpecs(item, sMeta)
     if item.isClan then
         local gDesc = (item.guildMemberNames and item.guildMemberNames ~= "") and item.guildMemberNames
             or ((item.numGuildMates or 0) > 0 and (L["Guild in group"] .. ": " .. tostring(item.numGuildMates)) or gGuildDesc)
-        cnt = PushBadgeSpec(cnt, nil, "Interface\\GossipFrame\\TabardGossipIcon", TC_FULL, TINT_CLAN, L["Guild Member"], gDesc, TINT_CLAN)
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\Icons\\INV_Shirt_GuildTabard_01", TC_FRIEND, TINT_CLAN, L["Guild Member"], gDesc, TINT_CLAN)
     end
     if item.isAllied then
         local aDesc = (item.alliedMemberNames and item.alliedMemberNames ~= "") and item.alliedMemberNames or gGuildDesc
-        cnt = PushBadgeSpec(cnt, nil, "Interface\\GossipFrame\\TabardGossipIcon", TC_FULL, TINT_ALLY, L["Allied Guild"], aDesc, TINT_ALLY)
+        cnt = PushBadgeSpec(cnt, nil, "Interface\\Icons\\Achievement_GuildPerk_EverybodysFriend", TC_FRIEND, TINT_ALLY, L["Allied Guild"], aDesc, TINT_ALLY)
     end
     if item.isFriend then
         local totalFriends = (item.numBNetFriends or 0) + (item.numCharFriends or 0)
@@ -5764,8 +5846,16 @@ local function UpdateLfgRow(row, item, idx, palette)
     if row.zebraTex then
         row.zebraTex:SetShown((not (item and item._isBulletinHeader)) and ((idx or 0) % 2 == 1))
     end
+    local isBlizzTheme = Theme and Theme.IsBlizzard and Theme:IsBlizzard()
     if item and item._isBulletinHeader then
+        if row.cardBg then row.cardBg:Hide() end
+        if row.nativeBgTex then row.nativeBgTex:Hide() end
         if row.headerAccentTex then
+            if isBlizzTheme then
+                row.headerAccentTex:SetColorTexture(0.20, 0.15, 0.08, 0.92)
+            else
+                row.headerAccentTex:SetColorTexture(0.12, 0.16, 0.22, 0.94)
+            end
             row.headerAccentTex:Show()
         end
         if row.relStripe then
@@ -5799,6 +5889,7 @@ local function UpdateLfgRow(row, item, idx, palette)
                 if row.memberClassIcons[ci] then row.memberClassIcons[ci]:Hide() end
             end
         end
+        local needHeaderLayout = (row._scBadgeAnchorSig ~= "HEADER")
         row._lastLeaderMode = "HEADER"
         row._scBadgeAnchorSig = "HEADER"
         row.partyIcon:Hide()
@@ -5817,11 +5908,13 @@ local function UpdateLfgRow(row, item, idx, palette)
             end
         end
 
-        row.badgeFs:ClearAllPoints()
-        row.badgeFs:SetFontObject(GameFontHighlight)
-        row.badgeFs:SetPoint("TOPRIGHT", row, "TOPRIGHT", -10, -10)
-        row.badgeFs:SetWidth(112)
-        row.badgeFs:SetJustifyH("RIGHT")
+        if needHeaderLayout then
+            row.badgeFs:ClearAllPoints()
+            row.badgeFs:SetFontObject(GameFontHighlightSmall)
+            row.badgeFs:SetPoint("TOPRIGHT", row, "TOPRIGHT", -10, -16)
+            row.badgeFs:SetWidth(112)
+            row.badgeFs:SetJustifyH("RIGHT")
+        end
         local cnt = item.groupCount or 0
         local isPlayersSec = (item.isSectionHeader == true and item.sectionKind == "PLAYERS")
         local cntText
@@ -5832,26 +5925,32 @@ local function UpdateLfgRow(row, item, idx, palette)
         end
         row.badgeFs:SetText((isPlayersSec and "|cff6ec1e4" or "|cff3fb950") .. cntText .. "|r")
 
-        row.nameFs:ClearAllPoints()
-        row.nameFs:SetWidth(0)
-        row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -12)
-        row.nameFs:SetPoint("RIGHT", row.badgeFs, "LEFT", -6, 0)
+        if needHeaderLayout then
+            row.nameFs:ClearAllPoints()
+            row.nameFs:SetFontObject(GameFontNormal)
+            row.nameFs:SetWidth(0)
+            row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -16)
+            row.nameFs:SetPoint("RIGHT", row.badgeFs, "LEFT", -6, 0)
+        end
         if isPlayersSec then
             row.nameFs:SetTextColor(0.43, 0.76, 0.90, 1)
         else
             row.nameFs:SetTextColor(1.0, 0.85, 0.30, 1)
         end
-        local arrowStr = item.isCollapsed and "|cffffd24d[+]|r " or "|cffffd24d[-]|r "
+        local arrowStr = item.isCollapsed and "|cffffd24d> |r" or "|cffffd24dv |r"
         local lvlSpan = (item.minLvl and item.minLvl < 900 and item.maxLvl and item.maxLvl < 900)
             and (" |cff9da7b5[" .. tostring(item.minLvl) .. "-" .. tostring(item.maxLvl) .. "]|r") or ""
         local watchTag = item.isWatched and (" |cff3fb950[" .. L["Watched"] .. "]|r") or ""
         local lockTag = item._lockoutInfo and (" |cffff9b3d[" .. L["Saved"] .. "]|r") or ""
         row.nameFs:SetText(arrowStr .. (item.bucketLabel or L["Dungeon"]) .. lvlSpan .. watchTag .. lockTag)
 
-        row.activityFs:ClearAllPoints()
-        row.activityFs:SetPoint("TOPLEFT", row, "TOPLEFT", 24, -40)
-        row.activityFs:SetPoint("RIGHT", row, "RIGHT", -10, 0)
-        row.activityFs:SetJustifyH("LEFT")
+        if needHeaderLayout then
+            row.activityFs:ClearAllPoints()
+            row.activityFs:SetFontObject(GameFontHighlightSmall)
+            row.activityFs:SetPoint("TOPLEFT", row, "TOPLEFT", 22, -42)
+            row.activityFs:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+            row.activityFs:SetJustifyH("LEFT")
+        end
         if item.isSectionHeader then
             if isPlayersSec then
                 row.activityFs:SetText("|cff90b4d8" .. L["Individual players looking for a group"] .. "|r")
@@ -5903,63 +6002,78 @@ local function UpdateLfgRow(row, item, idx, palette)
         row._lastLeaderMode = isLeaderOrGroup
         row.partyIcon:SetShown(isLeaderOrGroup)
         row.nameFs:ClearAllPoints()
+        row.nameFs:SetFontObject(GameFontHighlight)
         if isLeaderOrGroup then
-            row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 31, -8)
+            row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 30, -29)
         else
-            row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 12, -8)
+            row.nameFs:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -29)
         end
     end
 
-    -- Configure right-side Role Icons + Action Button first so line-1 width bounds never collide.
+    -- Configure right-side Role Icons + Action Button cleanly for Line 1 activity width.
     local isSoloLfg = (item.mode == "LFG" and item.sourceType ~= "EVENT")
     local isRaidLike = (item.categoryKind == "RAIDS")
         or ((item.maxMembers or 0) > 5)
         or (item.categoryKind == "PVP")
     local anchorRoleIcon = row.roleIcons[isRaidLike and 3 or 1]
-    local roleBlockW = ((isRaidLike and 3 or 5) * 24) + 42
 
     if row.actionBtn then
         row.actionBtn:Show()
         if Theme and Theme.ApplyBackdrop then
             Theme:ApplyBackdrop(row.actionBtn, "inset", palette)
         end
+        local actKind
+        local wasAsked = false
         if item.isSelf then
-            row.actionBtn.Icon:SetTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
-            row.actionBtn.Icon:SetTexCoord(0, 1, 0, 1)
-            row.actionBtn.Icon:SetVertexColor(1.0, 0.35, 0.35, 1.0)
-            if row.actionBtn.SetBackdropBorderColor then
-                row.actionBtn:SetBackdropBorderColor(0.95, 0.28, 0.28, 0.92)
-            end
-            row.actionBtn.Check:Hide()
+            actKind = "SELF"
         elseif item.secretLeaderName ~= nil or item.isUnknownLeader == true then
-            row.actionBtn.Icon:SetTexture("Interface\\GossipFrame\\BattleMasterGossipIcon")
-            row.actionBtn.Icon:SetTexCoord(0, 1, 0, 1)
-            row.actionBtn.Icon:SetVertexColor(0.95, 0.82, 0.35, 1.0)
-            if row.actionBtn.SetBackdropBorderColor then
-                row.actionBtn:SetBackdropBorderColor(0.90, 0.72, 0.25, 0.85)
-            end
-            row.actionBtn.Check:Hide()
+            actKind = "SECRET"
         elseif isSoloLfg then
-            row.actionBtn.Icon:SetTexture("Interface\\PaperDollInfoFrame\\Character-Plus")
-            row.actionBtn.Icon:SetTexCoord(0, 1, 0, 1)
-            row.actionBtn.Icon:SetVertexColor(0.35, 0.95, 0.45, 1.0)
-            if row.actionBtn.SetBackdropBorderColor then
-                row.actionBtn:SetBackdropBorderColor(0.28, 0.88, 0.45, 0.90)
-            end
-            row.actionBtn.Check:Hide()
+            actKind = "SOLO"
         else
-            local wasAsked = (ns.LFG and ns.LFG.IsAsked and ns.LFG:IsAsked(item)) == true
-            row.actionBtn.Icon:SetTexture("Interface\\GossipFrame\\PetitionGossipIcon")
-            row.actionBtn.Icon:SetTexCoord(0, 1, 0, 1)
-            row.actionBtn.Icon:SetVertexColor(wasAsked and 0.45 or 1.0, wasAsked and 0.95 or 0.86, wasAsked and 0.55 or 0.40, 1.0)
-            if row.actionBtn.SetBackdropBorderColor then
-                if wasAsked then
-                    row.actionBtn:SetBackdropBorderColor(0.28, 0.92, 0.48, 0.95)
-                else
-                    row.actionBtn:SetBackdropBorderColor(0.76, 0.60, 0.24, 0.85)
+            wasAsked = (ns.LFG and ns.LFG.IsAsked and ns.LFG:IsAsked(item)) == true
+            actKind = wasAsked and "ASKED" or "IDLE"
+        end
+        local actSig = actKind .. ":" .. tostring(palette and palette.key or "dark")
+        if row.actionBtn._scActionSig ~= actSig then
+            row.actionBtn._scActionSig = actSig
+            if actKind == "SELF" then
+                row.actionBtn.Icon:SetTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
+                row.actionBtn.Icon:SetTexCoord(0.14, 0.86, 0.14, 0.86)
+                row.actionBtn.Icon:SetVertexColor(1.0, 0.35, 0.35, 1.0)
+                if row.actionBtn.SetBackdropBorderColor then
+                    row.actionBtn:SetBackdropBorderColor(0.95, 0.28, 0.28, 0.92)
                 end
+                row.actionBtn.Check:Hide()
+            elseif actKind == "SECRET" then
+                row.actionBtn.Icon:SetTexture("Interface\\GossipFrame\\BattleMasterGossipIcon")
+                row.actionBtn.Icon:SetTexCoord(0.10, 0.90, 0.10, 0.90)
+                row.actionBtn.Icon:SetVertexColor(0.95, 0.82, 0.35, 1.0)
+                if row.actionBtn.SetBackdropBorderColor then
+                    row.actionBtn:SetBackdropBorderColor(0.90, 0.72, 0.25, 0.85)
+                end
+                row.actionBtn.Check:Hide()
+            elseif actKind == "SOLO" then
+                row.actionBtn.Icon:SetTexture("Interface\\PaperDollInfoFrame\\Character-Plus")
+                row.actionBtn.Icon:SetTexCoord(0.12, 0.88, 0.12, 0.88)
+                row.actionBtn.Icon:SetVertexColor(0.35, 0.95, 0.45, 1.0)
+                if row.actionBtn.SetBackdropBorderColor then
+                    row.actionBtn:SetBackdropBorderColor(0.28, 0.88, 0.45, 0.90)
+                end
+                row.actionBtn.Check:Hide()
+            else
+                row.actionBtn.Icon:SetTexture("Interface\\GossipFrame\\PetitionGossipIcon")
+                row.actionBtn.Icon:SetTexCoord(0.10, 0.90, 0.10, 0.90)
+                row.actionBtn.Icon:SetVertexColor(wasAsked and 0.45 or 1.0, wasAsked and 0.95 or 0.86, wasAsked and 0.55 or 0.40, 1.0)
+                if row.actionBtn.SetBackdropBorderColor then
+                    if wasAsked then
+                        row.actionBtn:SetBackdropBorderColor(0.28, 0.92, 0.48, 0.95)
+                    else
+                        row.actionBtn:SetBackdropBorderColor(0.76, 0.60, 0.24, 0.85)
+                    end
+                end
+                row.actionBtn.Check:SetShown(wasAsked)
             end
-            row.actionBtn.Check:SetShown(wasAsked)
         end
     end
 
@@ -6012,14 +6126,13 @@ local function UpdateLfgRow(row, item, idx, palette)
         end
         for offset = 1, soloCount do
             local ico = row.roleIcons[startSlot + offset - 1]
-            ico:SetSize(24, 24)
+            ico:SetSize(20, 20)
             SetRoleSlotTexture(ico, soloList[offset])
             ico:SetDesaturated(false)
             ico:SetAlpha(1.0)
             ico:Show()
         end
         anchorRoleIcon = row.roleIcons[startSlot] or row.roleIcons[5]
-        roleBlockW = (soloCount * 24) + 42
     elseif isRaidLike then
         for ri = 1, 2 do
             if row.roleIcons[ri] then row.roleIcons[ri]:Hide() end
@@ -6027,7 +6140,7 @@ local function UpdateLfgRow(row, item, idx, palette)
         for offset = 1, 3 do
             local ico = row.roleIcons[2 + offset]
             local rType = lfgRaidSlots[offset]
-            ico:SetSize(24, 24)
+            ico:SetSize(20, 20)
             SetRoleSlotTexture(ico, rType)
             local openSlot = true
             if item.needT ~= nil or item.needH ~= nil or item.needD ~= nil then
@@ -6092,18 +6205,18 @@ local function UpdateLfgRow(row, item, idx, palette)
             local ico = row.roleIcons[s]
             local isFilled = slotFilled[s] == true
             if isFilled then
-                ico:SetSize(24, 24)
+                ico:SetSize(20, 20)
                 SetRoleSlotTexture(ico, lfgSlotRoles[s])
                 ico:SetDesaturated(false)
                 ico:SetAlpha(1.0)
             elseif HasAtlas("groupfinder-icon-emptyslot") then
                 ico:SetAtlas("groupfinder-icon-emptyslot", false)
                 ico:SetTexCoord(0, 1, 0, 1)
-                ico:SetSize(14, 14)
+                ico:SetSize(13, 13)
                 ico:SetDesaturated(false)
                 ico:SetAlpha(0.78)
             else
-                ico:SetSize(21, 21)
+                ico:SetSize(18, 18)
                 SetRoleSlotTexture(ico, lfgSlotRoles[s])
                 ico:SetDesaturated(true)
                 ico:SetAlpha(0.24)
@@ -6163,12 +6276,13 @@ local function UpdateLfgRow(row, item, idx, palette)
     end
     local badgeSpecs, numBadges = BuildLfgRowBadgeSpecs(item, sMeta)
 
-    local leftStart = isLeaderOrGroup and 31 or 12
+    local leftStart = isLeaderOrGroup and 30 or 11
     local lvlW = (rowW >= 250 and lvlPart ~= "") and ((row.levelFs:GetStringWidth() or 36) + 7) or 0
-    local clsW = hasClassIcon and (isNarrow and 18 or 22) or 0
-    local badgesW = (numBadges > 0) and (numBadges * 17 + 6) or 0
+    local clsW = hasClassIcon and (isNarrow and 18 or 20) or 0
+    local badgesW = (numBadges > 0) and (numBadges * 16 + 6) or 0
     local extraTagW = ((sMeta and sMeta.flag == "AVOID") or item.hasAvoidSignup or item.isEnemyGuild or item._lockoutInfo) and 48 or 0
-    local maxNameW = math.max(isNarrow and 84 or 96, math.min(isNarrow and 220 or 240, rowW - leftStart - roleBlockW - lvlW - clsW - badgesW - extraTagW - (isNarrow and 6 or 8)))
+    local line2RightReserve = 42 -- actionBtn 32 + 10 margin; roleIcons sit safely above on Line 1!
+    local maxNameW = math.max(96, math.min(240, rowW - leftStart - line2RightReserve - lvlW - clsW - badgesW - extraTagW - 6))
     row.nameFs:SetWidth(0)
     local nameStrW = (row.nameFs.GetUnboundedStringWidth and row.nameFs:GetUnboundedStringWidth())
         or row.nameFs:GetStringWidth()
@@ -6231,15 +6345,16 @@ local function UpdateLfgRow(row, item, idx, palette)
         row.badgeFs:SetWidth(0)
         row.badgeFs:SetJustifyH("LEFT")
         row.badgeFs:SetPoint("LEFT", lastAnchor, "RIGHT", 4, 0)
-        row.badgeFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -6, 0)
+        row.badgeFs:SetPoint("RIGHT", row.actionBtn, "LEFT", -8, 0)
         row.activityFs:ClearAllPoints()
+        row.activityFs:SetFontObject(GameFontNormal)
         row.activityFs:SetJustifyH("LEFT")
-        row.activityFs:SetPoint("TOPLEFT", row.nameFs, "BOTTOMLEFT", 0, -7)
-        row.activityFs:SetPoint("RIGHT", row.actionBtn or anchorRoleIcon, "LEFT", -8, 0)
+        row.activityFs:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -7)
+        row.activityFs:SetPoint("RIGHT", anchorRoleIcon, "LEFT", -8, 0)
         if row.metaFs then
             row.metaFs:ClearAllPoints()
             row.metaFs:SetJustifyH("LEFT")
-            row.metaFs:SetPoint("TOPLEFT", row.activityFs, "BOTTOMLEFT", 0, -4)
+            row.metaFs:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -50)
             row.metaFs:SetPoint("RIGHT", firstClassAnchor or row.actionBtn or anchorRoleIcon, "LEFT", -8, 0)
         end
     end
@@ -6323,32 +6438,48 @@ local function UpdateLfgRow(row, item, idx, palette)
     else
         modeTag = "|cff3fb950[" .. L["LFM"] .. "]|r "
     end
-    local relPills = ""
-    if isWatchRow then
-        relPills = relPills .. "|cffffb347[" .. L["Watchlist"] .. "]|r "
+    if row.cardBg then
+        row.cardBg:SetShown(not isBlizzTheme)
     end
-    if item.isClan then
-        relPills = relPills .. "|cffffd24d[" .. L["Guild"] .. "]|r "
-    elseif item.isAllied then
-        relPills = relPills .. "|cff4de680[" .. L["Ally"] .. "]|r "
-    elseif item.hasAddon == true and not item.isSelf then
-        relPills = relPills .. "|cff6ec1e4[" .. L["Addon"] .. "]|r "
+    if row.nativeBgTex then
+        row.nativeBgTex:SetShown(isBlizzTheme)
     end
-    if item.isEnemyGuild then
-        relPills = relPills .. "|cffff5555[" .. L["Enemy"] .. "]|r "
-    end
-    if isAvoidRow then
-        relPills = relPills .. "|cffff4d4d[" .. L["AVOID"] .. "]|r "
-    end
-    local narrowLvlPart = (isNarrow and lvlPart ~= "") and ("  |cff9da7b5·|r " .. lvlPart) or ""
-    local areaPart = (isSoloLfg and item.area and item.area ~= "") and (" |cff90b4d8(" .. item.area .. ")|r") or ""
-    row.activityFs:SetText("|cffede6d6" .. actTxt .. "|r" .. narrowLvlPart .. areaPart)
+
+    local narrowLvlPart = (rowW < 250 and lvlPart ~= "") and ("  |cff9da7b5·|r " .. lvlPart) or ""
+    local areaPart = (isSoloLfg and item.area and item.area ~= "") and ("  |cff90b4d8(" .. item.area .. ")|r") or ""
+    row.activityFs:SetText("|cfff5ebd8" .. actTxt .. "|r" .. narrowLvlPart .. areaPart)
     if row.metaFs then
-        local playPart = (item.playstyleLabel and item.playstyleLabel ~= "") and ("|cff4de680" .. item.playstyleLabel .. "|r ") or ""
-        local notePart = (item.note and item.note ~= "") and (" — " .. item.note) or ""
-        local friendNote = (item.hasFriendOrWatchlistSignup and item.friendOrWatchlistNames and item.friendOrWatchlistNames ~= "")
-            and (" |cffffa633(" .. L["In group"] .. ": " .. item.friendOrWatchlistNames .. ")|r") or ""
-        row.metaFs:SetText(playPart .. modeTag .. relPills .. "|cffb8c0cc" .. notePart .. "|r" .. friendNote)
+        local metaSegs = {}
+        local cleanMode = (type(modeTag) == "string") and modeTag:match("^%s*(.-)%s*$") or ""
+        if cleanMode ~= "" then
+            metaSegs[#metaSegs + 1] = cleanMode
+        end
+        if item.playstyleLabel and item.playstyleLabel ~= "" then
+            metaSegs[#metaSegs + 1] = "|cff4de680" .. item.playstyleLabel .. "|r"
+        end
+        if item.note and item.note ~= "" then
+            metaSegs[#metaSegs + 1] = "|cffc4ccd8" .. item.note .. "|r"
+        end
+        if item.hasFriendOrWatchlistSignup and item.friendOrWatchlistNames and item.friendOrWatchlistNames ~= "" then
+            metaSegs[#metaSegs + 1] = "|cffffa633(" .. L["In group"] .. ": " .. item.friendOrWatchlistNames .. ")|r"
+        end
+        row.metaFs:SetText(table.concat(metaSegs, "  |cff6e7681·|r  "))
+
+        local shownCls = 0
+        if row.memberClassIcons then
+            for ci = 1, 5 do
+                if row.memberClassIcons[ci] and row.memberClassIcons[ci]:IsShown() then
+                    shownCls = shownCls + 1
+                end
+            end
+        end
+        local metaRightPad = 8 + (shownCls > 0 and (shownCls * 19 + 8) or 0)
+        row.metaFs:ClearAllPoints()
+        row.metaFs:SetPoint("TOPLEFT", row, "TOPLEFT", 11, -50)
+        row.metaFs:SetPoint("RIGHT", row.actionBtn, "LEFT", -metaRightPad, 0)
+    end
+    if row.badgeFs and row.actionBtn then
+        row.badgeFs:SetPoint("RIGHT", row.actionBtn, "LEFT", -8, 0)
     end
 
     local selKey = LFGFrameTab.selectedKey
@@ -6370,7 +6501,7 @@ local function CreateRoleCircleButton(parent, def, artInfo)
     local roleArt = artInfo and artInfo.roles and artInfo.roles[def.id]
     local btn = CreateFrame("Button", nil, parent)
     btn:SetSize(52, 52)
-    btn:SetPoint("TOPLEFT", parent, "TOPLEFT", def.x, -23)
+    btn:SetPoint("TOPLEFT", parent, "TOPLEFT", def.x, -20)
 
     -- Soft radial swirl aura matching selected role color
     local swirl = btn:CreateTexture(nil, "BACKGROUND", nil, 1)
@@ -6604,12 +6735,18 @@ local function CreateCategoryBannerButton(parent, catDef, index, artInfo)
     local scrim = btn:CreateTexture(nil, "ARTWORK", nil, 1)
     scrim:SetPoint("TOPLEFT", btn, "TOPLEFT", 3, -3)
     scrim:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -3, 3)
-    scrim:SetTexture(WHITE8X8)
-    if scrim.SetGradient and CreateColor then
-        pcall(scrim.SetGradient, scrim, "HORIZONTAL", CreateColor(0.02, 0.02, 0.02, 0.78), CreateColor(0.02, 0.02, 0.02, 0.04))
+    if Theme and Theme.ApplySafeGradient then
+        Theme:ApplySafeGradient(scrim, "HORIZONTAL", 0.02, 0.02, 0.02, 0.80, 0.02, 0.02, 0.02, 0.04)
     else
+        scrim:SetTexture(WHITE8X8)
         scrim:SetVertexColor(0.03, 0.03, 0.03, 0.36)
     end
+
+    local topRim = btn:CreateTexture(nil, "OVERLAY", nil, 1)
+    topRim:SetHeight(1)
+    topRim:SetPoint("TOPLEFT", btn, "TOPLEFT", 4, -3)
+    topRim:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -4, -3)
+    topRim:SetColorTexture(1.0, 0.86, 0.45, 0.28)
 
     -- Hollow metallic bezel border around the button (leaves artwork 100% visible)
     btn:SetBackdrop({
@@ -6628,8 +6765,15 @@ local function CreateCategoryBannerButton(parent, catDef, index, artInfo)
     end
     hl:SetBlendMode("ADD")
 
+    local arrowFs = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    arrowFs:SetPoint("RIGHT", btn, "RIGHT", -11, 0)
+    arrowFs:SetText("|cffffd24d>|r")
+    arrowFs:SetShadowOffset(1, -1)
+    arrowFs:SetShadowColor(0, 0, 0, 0.95)
+    btn.arrowFs = arrowFs
+
     local countFs = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    countFs:SetPoint("RIGHT", btn, "RIGHT", -14, 0)
+    countFs:SetPoint("RIGHT", arrowFs, "LEFT", -6, 0)
     countFs:SetJustifyH("RIGHT")
     countFs:SetWordWrap(false)
     countFs:SetShadowOffset(1, -1)
@@ -6637,7 +6781,7 @@ local function CreateCategoryBannerButton(parent, catDef, index, artInfo)
     btn.countFs = countFs
     btn._catId = catDef.id
 
-    local label = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    local label = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     label:SetPoint("LEFT", btn, "LEFT", 16, 0)
     label:SetPoint("RIGHT", countFs, "LEFT", -8, 0)
     label:SetJustifyH("LEFT")
@@ -6676,7 +6820,19 @@ end
 
 local function CreateActivityRow(parent)
     local row = CreateFrame("Button", nil, parent)
-    row:SetHeight(22)
+    row:SetHeight(24)
+
+    local zebraBg = row:CreateTexture(nil, "BACKGROUND", nil, 0)
+    zebraBg:SetAllPoints()
+    zebraBg:SetColorTexture(0.14, 0.13, 0.11, 0.22)
+    zebraBg:Hide()
+    row.zebraBg = zebraBg
+
+    local selectedBg = row:CreateTexture(nil, "BACKGROUND", nil, 1)
+    selectedBg:SetAllPoints()
+    selectedBg:SetColorTexture(0.16, 0.56, 0.30, 0.18)
+    selectedBg:Hide()
+    row.selectedBg = selectedBg
 
     local hl = row:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
@@ -6714,9 +6870,16 @@ local function CreateActivityRow(parent)
     return row
 end
 
-local function UpdateActivityRow(row, act)
+local function UpdateActivityRow(row, act, idx)
     row._act = act
-    row.check:SetChecked(LFGFrameTab.selectedActivities[act.id] == true)
+    local isChecked = (LFGFrameTab.selectedActivities[act.id] == true)
+    row.check:SetChecked(isChecked)
+    if row.zebraBg then
+        row.zebraBg:SetShown((idx or 0) % 2 == 1)
+    end
+    if row.selectedBg then
+        row.selectedBg:SetShown(isChecked)
+    end
     local actTitle
     if act.isQuestEntry then
         actTitle = act.directLabel or ""
@@ -7002,9 +7165,12 @@ function LFGFrameTab:ComputeBrowseRows()
 
     local isSearchingOfficial = ns.Clan and (ns.Clan._officialSearchPendingUntil or 0) > GetTime()
     local myCharLvl = (ns.Safe and ns.Safe.Number(UnitLevel and UnitLevel("player"))) or 60
+    local hiddenByFilters = (#rows == 0 and #rawRows > 0) and #rawRows or 0
     local emptyMsg
     if isSearchingOfficial and #rows == 0 then
         emptyMsg = L["Searching official Blizzard, guild & public groups..."]
+    elseif hiddenByFilters > 0 then
+        emptyMsg = "|cffffd24d" .. L["%d active listings are hidden by your current filters. Open 'Filters »' to adjust or click Reset."]:format(hiddenByFilters) .. "|r"
     elseif self.sourceFilter == "OFFICIAL" then
         emptyMsg = L["No official Blizzard Group Finder listings detected yet."]
     elseif self.sourceFilter == "FRIENDS" then
@@ -7222,6 +7388,9 @@ end
 
 local function PopulateWatchedActivitiesSubmenu(watchSub)
     if not watchSub then return end
+    if watchSub.SetScrollMode then
+        watchSub:SetScrollMode(300)
+    end
     if watchSub.CreateTitle then
         watchSub:CreateTitle(L["LFG Watchers in Official Chat"])
     end
@@ -7269,6 +7438,9 @@ local function PopulateWatchedActivitiesSubmenu(watchSub)
     end
     if #others > 0 then
         local allSub = watchSub:CreateButton(L["All Dungeons & Raids"])
+        if allSub and allSub.SetScrollMode then
+            allSub:SetScrollMode(300)
+        end
         for i = 1, #others do
             addWatcherChoice(allSub, others[i])
         end
@@ -7444,6 +7616,9 @@ end
 
 function LFGFrameTab:PopulateActivityMenu(root, onChanged)
     if not root then return end
+    if root.SetScrollMode then
+        root:SetScrollMode(320)
+    end
     local function FireChange()
         LFGFrameTab:SaveBrowseFilters()
         LFGFrameTab:TriggerOfficialBrowseSearch(true)
@@ -7497,6 +7672,7 @@ function LFGFrameTab:PopulateActivityMenu(root, onChanged)
     if #opts > 0 then
         local favSub = root:CreateButton(STAR_TEX .. " " .. L["Favorite Activities"])
         if favSub then
+            if favSub.SetScrollMode then favSub:SetScrollMode(300) end
             if favSub.CreateTitle then favSub:CreateTitle(catLbl) end
             for fi = 1, #opts do
                 local fOpt = opts[fi]
@@ -7759,7 +7935,7 @@ local function CreateBrowseHeaderControls(selfObj, body)
     local catDropdown = CreateNativeDropdown(
         browseHeader,
         "SocialCentralLFGCategoryDropdown",
-        114,
+        92,
         24,
         function()
             return GetCategoryLabel(LFGFrameTab.categoryFilter, true)
@@ -7768,7 +7944,7 @@ local function CreateBrowseHeaderControls(selfObj, body)
             LFGFrameTab:PopulateCategoryMenu(root)
         end
     )
-    catDropdown:SetPoint("TOPLEFT", browseHeader, "TOPLEFT", 62, -24)
+    catDropdown:SetPoint("TOPLEFT", browseHeader, "TOPLEFT", 60, -23)
     selfObj.controls.catDropdown = catDropdown
 
     local helpBtn = Theme:CreateHelpButton(
@@ -7779,7 +7955,7 @@ local function CreateBrowseHeaderControls(selfObj, body)
         16,
         { target = browseHeader }
     )
-    helpBtn:SetPoint("TOPRIGHT", browseHeader, "TOPRIGHT", -10, -27)
+    helpBtn:SetPoint("TOPRIGHT", browseHeader, "TOPRIGHT", -8, -27)
 
     local browseQuickBtn = Theme.CreateOfficialQuickButton and Theme:CreateOfficialQuickButton(browseHeader, {
         name = "SocialCentralLFGBrowseQuickBtn",
@@ -7793,13 +7969,13 @@ local function CreateBrowseHeaderControls(selfObj, body)
         end,
     })
     if browseQuickBtn then
-        browseQuickBtn:SetPoint("RIGHT", helpBtn, "LEFT", -4, 0)
+        browseQuickBtn:SetPoint("RIGHT", helpBtn, "LEFT", -3, 0)
         selfObj.controls.browseQuickBtn = browseQuickBtn
     end
 
     local refreshBtn = CreateFrame("Button", "SocialCentralLFGRefreshButton", browseHeader)
-    refreshBtn:SetSize(26, 26)
-    refreshBtn:SetPoint("RIGHT", browseQuickBtn or helpBtn, "LEFT", -4, 0)
+    refreshBtn:SetSize(24, 24)
+    refreshBtn:SetPoint("RIGHT", browseQuickBtn or helpBtn, "LEFT", -3, 0)
     refreshBtn:SetNormalTexture("Interface\\Buttons\\UI-SquareButton-Up")
     refreshBtn:SetPushedTexture("Interface\\Buttons\\UI-SquareButton-Down")
     refreshBtn:SetDisabledTexture("Interface\\Buttons\\UI-SquareButton-Disabled")
@@ -7808,15 +7984,16 @@ local function CreateBrowseHeaderControls(selfObj, body)
     refHl:SetTexture("Interface\\Buttons\\UI-Common-MouseHilight")
     refHl:SetBlendMode("ADD")
     local refIcon = refreshBtn:CreateTexture(nil, "ARTWORK", nil, 5)
-    refIcon:SetSize(15, 15)
-    refIcon:SetPoint("CENTER", refreshBtn, "CENTER", -1, 0)
+    refIcon:SetSize(16, 16)
+    refIcon:SetPoint("CENTER", refreshBtn, "CENTER", 0, 0)
     refIcon:SetTexture("Interface\\Buttons\\UI-RefreshButton")
+    refIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     refreshBtn.Icon = refIcon
     refreshBtn:SetScript("OnMouseDown", function(selfBtn)
-        selfBtn.Icon:SetPoint("CENTER", selfBtn, "CENTER", -2, -1)
+        selfBtn.Icon:SetPoint("CENTER", selfBtn, "CENTER", -1, -1)
     end)
     refreshBtn:SetScript("OnMouseUp", function(selfBtn)
-        selfBtn.Icon:SetPoint("CENTER", selfBtn, "CENTER", -1, 0)
+        selfBtn.Icon:SetPoint("CENTER", selfBtn, "CENTER", 0, 0)
     end)
     refreshBtn:SetScript("OnEnter", function(selfBtn)
         GameTooltip:SetOwner(selfBtn, "ANCHOR_RIGHT")
@@ -7851,13 +8028,13 @@ local function CreateBrowseHeaderControls(selfObj, body)
             LFGFrameTab:PopulateActivityMenu(root)
         end
     )
-    activityDropdown:SetPoint("LEFT", catDropdown, "RIGHT", 4, 0)
-    activityDropdown:SetPoint("RIGHT", refreshBtn, "LEFT", -4, 0)
+    activityDropdown:SetPoint("LEFT", catDropdown, "RIGHT", 3, 0)
+    activityDropdown:SetPoint("RIGHT", refreshBtn, "LEFT", -3, 0)
     selfObj.controls.activityDropdown = activityDropdown
 
-    local drawerToggleBtn = CreateNativeButton(browseHeader, nil, 96, 23, L["Filters »"])
+    local drawerToggleBtn = CreateNativeButton(browseHeader, nil, 96, 24, L["Filters »"])
     AutoFitNativeButton(drawerToggleBtn, 86, 16, 132)
-    drawerToggleBtn:SetPoint("TOPRIGHT", browseHeader, "TOPRIGHT", -12, -52)
+    drawerToggleBtn:SetPoint("TOPRIGHT", browseHeader, "TOPRIGHT", -12, -51)
     drawerToggleBtn:SetScript("OnClick", function()
         if ns.LFG and ns.LFG.ToggleSideDrawer then
             ns.LFG:ToggleSideDrawer(LFGFrameTab)
@@ -7873,11 +8050,11 @@ local function CreateBrowseHeaderControls(selfObj, body)
     selfObj.controls.drawerToggleBtn = drawerToggleBtn
 
     local searchBox = Theme:CreateEditBox(browseHeader, {
-        height = 23,
+        height = 24,
         clearButton = true,
         placeholder = L["Search dungeon, raid, or player..."],
     })
-    searchBox:SetPoint("TOPLEFT", browseHeader, "TOPLEFT", 62, -52)
+    searchBox:SetPoint("TOPLEFT", browseHeader, "TOPLEFT", 62, -51)
     searchBox:SetPoint("RIGHT", drawerToggleBtn, "LEFT", -6, 0)
     searchBox:SetScript("OnEscapePressed", function(selfBox)
         selfBox:ClearFocus()
@@ -7917,9 +8094,10 @@ local function CreateLeaderNoticePanel(categoryView, controls)
     box:Hide()
 
     local icon = box:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(22, 22)
+    icon:SetSize(24, 24)
     icon:SetPoint("TOPLEFT", box, "TOPLEFT", 14, -14)
     icon:SetTexture("Interface\\GroupFrame\\UI-Group-LeaderIcon")
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
     local noticeHelpBtn = Theme.CreateHelpButton and Theme:CreateHelpButton(
         box,
@@ -7942,8 +8120,14 @@ local function CreateLeaderNoticePanel(categoryView, controls)
     title:SetTextColor(1.0, 0.82, 0.20)
     title:SetText(L["Only the group leader can manage group listings."])
 
+    local noticeRule = box:CreateTexture(nil, "ARTWORK", nil, 1)
+    noticeRule:SetHeight(1)
+    noticeRule:SetPoint("TOPLEFT", icon, "BOTTOMLEFT", 0, -8)
+    noticeRule:SetPoint("TOPRIGHT", box, "TOPRIGHT", -14, -46)
+    noticeRule:SetColorTexture(0.85, 0.65, 0.22, 0.35)
+
     local desc = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    desc:SetPoint("TOPLEFT", icon, "BOTTOMLEFT", 0, -10)
+    desc:SetPoint("TOPLEFT", noticeRule, "BOTTOMLEFT", 0, -10)
     desc:SetPoint("BOTTOMRIGHT", box, "BOTTOMRIGHT", -14, 12)
     desc:SetJustifyH("LEFT")
     desc:SetJustifyV("TOP")
@@ -7959,13 +8143,17 @@ local function CreateLeaderBrowseBar(body, controls)
     local bar = CreateFrame("Frame", nil, body, "BackdropTemplate")
     bar:SetHeight(22)
     Theme:ApplyBackdrop(bar, "surface")
+    if bar.SetBackdropBorderColor then
+        bar:SetBackdropBorderColor(0.85, 0.62, 0.18, 0.72)
+    end
     bar:EnableMouse(true)
     bar:Hide()
 
     local ico = bar:CreateTexture(nil, "ARTWORK")
-    ico:SetSize(14, 14)
+    ico:SetSize(15, 15)
     ico:SetPoint("LEFT", bar, "LEFT", 6, 0)
     ico:SetTexture("Interface\\GroupFrame\\UI-Group-LeaderIcon")
+    ico:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
     local lbl = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     lbl:SetPoint("LEFT", ico, "RIGHT", 5, 0)
@@ -8132,13 +8320,13 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     local roleHeader = CreateFrame("Frame", nil, body)
     roleHeader:SetPoint("TOPLEFT", body, "TOPLEFT", 0, 0)
     roleHeader:SetPoint("TOPRIGHT", body, "TOPRIGHT", 0, 0)
-    roleHeader:SetHeight(98)
+    roleHeader:SetHeight(102)
     roleHeader:Hide()
     self.controls.roleHeader = roleHeader
 
     local divider = roleHeader:CreateTexture(nil, "ARTWORK", nil, 2)
-    divider:SetSize(2, 74)
-    divider:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 235, -22)
+    divider:SetSize(2, 78)
+    divider:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 235, -20)
     divider:SetColorTexture(0.24, 0.18, 0.12, 0.95)
 
     local roleButtons = {}
@@ -8156,9 +8344,9 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     roleHelpBtn:SetPoint("TOPRIGHT", roleHeader, "TOPRIGHT", -8, -25)
     self.controls.roleHelpBtn = roleHelpBtn
 
-    local autoRoleBtn = CreateNativeButton(roleHeader, nil, 86, 16, L["Auto-Select"])
-    AutoFitNativeButton(autoRoleBtn, 86, 16, 148)
-    autoRoleBtn:SetPoint("TOPRIGHT", roleHeader, "TOPRIGHT", -8, -79)
+    local autoRoleBtn = CreateNativeButton(roleHeader, nil, 86, 19, L["Auto-Select"])
+    AutoFitNativeButton(autoRoleBtn, 82, 12, 134)
+    autoRoleBtn:SetPoint("TOPRIGHT", roleHeader, "TOPRIGHT", -8, -80)
     autoRoleBtn:SetScript("OnClick", function()
         LFGFrameTab:ApplyRecommendedRoles(true)
         LFGFrameTab:UpdateViewLayout()
@@ -8166,8 +8354,8 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     self.controls.autoRoleBtn = autoRoleBtn
 
     local roleSuggestLbl = roleHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    roleSuggestLbl:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 54, -81)
-    roleSuggestLbl:SetPoint("TOPRIGHT", autoRoleBtn, "TOPLEFT", -6, -2)
+    roleSuggestLbl:SetPoint("TOPLEFT", roleHeader, "TOPLEFT", 54, -83)
+    roleSuggestLbl:SetPoint("TOPRIGHT", autoRoleBtn, "TOPLEFT", -6, -1)
     roleSuggestLbl:SetHeight(14)
     roleSuggestLbl:SetJustifyH("LEFT")
     roleSuggestLbl:SetWordWrap(false)
@@ -8175,7 +8363,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
 
     -- 3) View A: Category Selection Banners (Masmorras, Raides, Missoes, Campos de Batalha, Guilda & Personalizado)
     local categoryView = CreateFrame("Frame", nil, body)
-    categoryView:SetPoint("TOPLEFT", body, "TOPLEFT", 10, -102)
+    categoryView:SetPoint("TOPLEFT", body, "TOPLEFT", 10, -104)
     categoryView:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", -10, 35)
     categoryView:Hide()
     self.controls.categoryView = categoryView
@@ -8217,7 +8405,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
 
     -- 4) View B: Activity Checklist, Playstyle, Notes & Broadcast View
     local activityView = CreateFrame("Frame", nil, body)
-    activityView:SetPoint("TOPLEFT", body, "TOPLEFT", 12, -102)
+    activityView:SetPoint("TOPLEFT", body, "TOPLEFT", 12, -104)
     activityView:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", -12, 35)
     activityView:Hide()
     self.controls.activityView = activityView
@@ -8225,7 +8413,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     local playstyleDropdown = CreateNativeDropdown(
         activityView,
         "SocialCentralLFGPlaystyleDropdown",
-        176,
+        148,
         24,
         function()
             return GetPlaystyleLabel(LFGFrameTab.playstyle)
@@ -8277,7 +8465,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     local modeDropdown = CreateNativeDropdown(
         activityView,
         "SocialCentralLFGModeDropdown",
-        136,
+        130,
         22,
         function()
             return GetListingModeLabel(LFGFrameTab.listingMode)
@@ -8305,8 +8493,8 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     masterCatLabel:SetTextColor(1.0, 0.82, 0.0)
     self.controls.masterCatLabel = masterCatLabel
 
-    local actList = Theme:CreateScrollList(activityView, 22, CreateActivityRow, UpdateActivityRow)
-    actList.container:SetPoint("TOPLEFT", activityView, "TOPLEFT", 18, -62)
+    local actList = Theme:CreateScrollList(activityView, 24, CreateActivityRow, UpdateActivityRow)
+    actList.container:SetPoint("TOPLEFT", activityView, "TOPLEFT", 14, -65)
     actList.container:SetPoint("BOTTOMRIGHT", activityView, "BOTTOMRIGHT", -4, 98)
     Theme:ApplyBackdrop(actList.container, "none")
     local origActRender = actList.Render
@@ -8361,10 +8549,14 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     commentPlaceholder:SetPoint("TOPRIGHT", commentBox, "TOPRIGHT", -1, -1)
     commentPlaceholder:SetJustifyH("LEFT")
     commentPlaceholder:SetText(L["More details about the group (optional)"])
+    local commentCounter = commentBackdrop:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    commentCounter:SetPoint("BOTTOMRIGHT", commentBackdrop, "BOTTOMRIGHT", -7, 5)
+    commentCounter:SetText("0/90")
     commentBox:SetScript("OnTextChanged", function(selfBox)
         local txt = selfBox:GetText() or ""
         LFGFrameTab.commentText = txt
         commentPlaceholder:SetShown(txt == "")
+        commentCounter:SetText(tostring(#txt) .. "/90")
     end)
     commentBox:SetScript("OnEscapePressed", function(selfBox)
         selfBox:ClearFocus()
@@ -8374,7 +8566,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     local broadcastDropdown = CreateNativeDropdown(
         activityView,
         "SocialCentralLFGBroadcastDropdown",
-        176,
+        162,
         24,
         function()
             return GetBroadcastLabel(LFGFrameTab.broadcastMode)
@@ -8405,7 +8597,7 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     broadcastLbl:SetTextColor(1.0, 0.82, 0.0)
 
     -- 5) View C: Scrollable Native Browse List over groupfinder-background cliff illustration
-    local list = Theme:CreateScrollList(body, 76, CreateLfgRow, UpdateLfgRow)
+    local list = Theme:CreateScrollList(body, 74, CreateLfgRow, UpdateLfgRow)
     list.container:SetPoint("TOPLEFT", body, "TOPLEFT", 12, -81)
     list.container:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", -12, 32)
     list.container:Hide()
@@ -8415,9 +8607,18 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
     Theme:ApplyBackdrop(list.container, "none")
 
     if list.emptyLabel then
+        local emptyCard = CreateFrame("Frame", nil, list.viewport, "BackdropTemplate")
+        emptyCard:SetPoint("TOP", list.viewport, "TOP", 0, -40)
+        emptyCard:SetWidth(308)
+        emptyCard:SetHeight(84)
+        emptyCard:SetFrameLevel(math.max(2, (list.viewport:GetFrameLevel() or 2) + 2))
+        emptyCard:Hide()
+        list._emptyCard = emptyCard
+
+        list.emptyLabel:SetParent(emptyCard)
         list.emptyLabel:ClearAllPoints()
-        list.emptyLabel:SetPoint("TOP", list.viewport, "TOP", 0, -48)
-        list.emptyLabel:SetWidth(308)
+        list.emptyLabel:SetPoint("TOPLEFT", emptyCard, "TOPLEFT", 14, -12)
+        list.emptyLabel:SetPoint("TOPRIGHT", emptyCard, "TOPRIGHT", -14, -12)
         list.emptyLabel:SetFontObject(GameFontNormal)
         list.emptyLabel:SetJustifyH("CENTER")
         list.emptyLabel:SetWordWrap(true)
@@ -8430,8 +8631,14 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
         end
         local p = Theme:GetPalette()
         Theme:ApplyBackdrop(self.container, "none")
-        if self.emptyLabel and p and p.textMuted then
-            self.emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        if self._emptyCard then
+            Theme:ApplyBackdrop(self._emptyCard, "surface", p)
+            if self._emptyCard.SetBackdropColor then
+                self._emptyCard:SetBackdropColor(0.06, 0.06, 0.08, 0.90)
+            end
+        end
+        if self.emptyLabel then
+            self.emptyLabel:SetTextColor(0.94, 0.90, 0.80)
         end
     end
 
@@ -8446,8 +8653,22 @@ function LFGFrameTab:BuildSubPanel(hostFrame)
             origListRender(self)
         end
         local p = Theme:GetPalette()
-        if self.emptyLabel and p and p.textMuted then
-            self.emptyLabel:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+        if self._emptyCard and self.emptyLabel then
+            local showEmpty = self.emptyLabel:IsShown() == true
+            self._emptyCard:SetShown(showEmpty)
+            if showEmpty then
+                Theme:ApplyBackdrop(self._emptyCard, "surface", p)
+                if self._emptyCard.SetBackdropColor then
+                    self._emptyCard:SetBackdropColor(0.06, 0.06, 0.08, 0.90)
+                end
+                local vw = math.max(220, math.min(316, math.floor((self.viewport and self.viewport:GetWidth() or 308) - 16)))
+                self._emptyCard:SetWidth(vw)
+                local txtH = math.max(24, math.ceil(self.emptyLabel:GetStringHeight() or 28))
+                self._emptyCard:SetHeight(txtH + 24)
+            end
+        end
+        if self.emptyLabel then
+            self.emptyLabel:SetTextColor(0.94, 0.90, 0.80)
         end
         local needsScroll = (self.thumb and self.thumb.IsShown and self.thumb:IsShown()) == true
         self._needsScroll = needsScroll
@@ -8647,11 +8868,18 @@ function LFGFrameTab:EnsureNativeBridgeBar()
     end
 
     local statusLbl = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    statusLbl:SetPoint("TOPLEFT", bar, "TOPLEFT", 10, -7)
+    statusLbl:SetPoint("TOPLEFT", bar, "TOPLEFT", 10, -6)
     statusLbl:SetPoint("RIGHT", quickBtn or helpBtn, "LEFT", -6, 0)
     statusLbl:SetJustifyH("LEFT")
     statusLbl:SetWordWrap(false)
     bar.statusLbl = statusLbl
+
+    local rowRule = bar:CreateTexture(nil, "ARTWORK", nil, 1)
+    rowRule:SetHeight(1)
+    rowRule:SetPoint("TOPLEFT", bar, "TOPLEFT", 8, -23)
+    rowRule:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -8, -23)
+    rowRule:SetColorTexture(0.68, 0.56, 0.28, 0.25)
+    bar._rowRule = rowRule
 
     local mirrorDropdown = CreateNativeDropdown(
         bar,
@@ -8835,21 +9063,33 @@ function LFGFrameTab:UpdateNativeBridgeBar()
     local redirectTipActive = (GetTime and GetTime() or 0) < (self._officialRedirectTipUntil or 0)
 
     if isOfficialListingTab then
+        local wantBarH = redirectTipActive and 64 or 54
+        if math.abs((bar:GetHeight() or 54) - wantBarH) >= 1 then
+            bar:SetHeight(wantBarH)
+        end
+        if bar._rowRule then
+            bar._rowRule:ClearAllPoints()
+            bar._rowRule:SetPoint("TOPLEFT", bar, "TOPLEFT", 8, redirectTipActive and -33 or -23)
+            bar._rowRule:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -8, redirectTipActive and -33 or -23)
+        end
+        if bar.statusLbl.SetWordWrap then
+            bar.statusLbl:SetWordWrap(redirectTipActive == true)
+        end
         if redirectTipActive then
             bar.statusLbl:SetText("|cffffd24d" .. L["Select roles & dungeons above, then click Blizzard's List button!"] .. "|r")
         else
             local lfgPart = L["Official + SC: %d groups"]:format(tot)
             local instPart = L["Inst (1h): %d/%d"]:format(usedH, maxH)
-            local lfgColor = (tot > 0) and "|cff3fb950" or "|cffd8dde6"
-            local instColor = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff9da7b5")
-            bar.statusLbl:SetText(lfgColor .. lfgPart .. "|r  ·  " .. instColor .. instPart .. "|r")
+            local lfgColor = (tot > 0) and "|cff4be878" or "|cffdce2ec"
+            local instColor = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff9eb2c8")
+            bar.statusLbl:SetText(lfgColor .. lfgPart .. "|r  |cff6e7681·|r  " .. instColor .. instPart .. "|r")
         end
         bar.viewBtn:SetText(L["View Groups (%d)"]:format(tot))
         StyleNativeButton(bar.viewBtn, tot > 0)
-        AutoFitNativeButton(bar.viewBtn, 72, 10, 98)
         local barW = (bar.GetWidth and bar:GetWidth()) or 326
-        local vbW = (bar.viewBtn.GetWidth and bar.viewBtn:GetWidth()) or 90
-        local ddW = math.max(106, math.min(138, barW - 12 - vbW - 82))
+        AutoFitNativeButton(bar.viewBtn, 74, 10, barW < 360 and 112 or 124)
+        local vbW = (bar.viewBtn.GetWidth and bar.viewBtn:GetWidth()) or 94
+        local ddW = math.max(92, math.min(112, barW - 16 - vbW - 88))
         bar.viewBtn:ClearAllPoints()
         bar.viewBtn:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", -6, 5)
 
@@ -8885,9 +9125,9 @@ function LFGFrameTab:UpdateNativeBridgeBar()
     else
         local lfgPart = L["Clan, Allies & Friends LFG: %d"]:format(tot)
         local instPart = L["Instances (1h): %d/%d"]:format(usedH, maxH)
-        local lfgColor = (tot > 0) and "|cff3fb950" or "|cffd8dde6"
-        local instColor = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff9da7b5")
-        bar.statusLbl:SetText(lfgColor .. lfgPart .. "|r  ·  " .. instColor .. instPart .. "|r")
+        local lfgColor = (tot > 0) and "|cff4be878" or "|cffdce2ec"
+        local instColor = (usedH >= maxH) and "|cffff5555" or ((usedH == maxH - 1) and "|cffffb833" or "|cff9eb2c8")
+        bar.statusLbl:SetText(lfgColor .. lfgPart .. "|r  |cff6e7681·|r  " .. instColor .. instPart .. "|r")
 
         if bar.mirrorDropdown then bar.mirrorDropdown:Hide() end
         if bar.shareGchatBtn then bar.shareGchatBtn:Hide() end
@@ -9422,6 +9662,16 @@ local CHARACTER_NATIVE_TABS = {
 function LFGFrameTab:EnsureCharacterSideTab()
     local parent = _G.CharacterFrame
     if not parent then return end
+    if IsCombatLocked() then
+        if ns.RunAfterCombat then
+            ns:RunAfterCombat("sc_ensure_char_sidetab", function()
+                if _G.CharacterFrame and _G.CharacterFrame.IsShown and _G.CharacterFrame:IsShown() then
+                    LFGFrameTab:EnsureCharacterSideTab()
+                end
+            end)
+        end
+        return
+    end
     if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled("C") then
         if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
         if self.charTab then self.charTab:Hide() end
@@ -9442,6 +9692,7 @@ function LFGFrameTab:EnsureCharacterSideTab()
                 if ns.UI then
                     ns.UI:OpenEmbedded(parent, { "alts" }, "alts")
                 end
+                LFGFrameTab:SyncAllEmbeddedTabStates()
             end,
             "embedCharacterWindow"
         )
@@ -9457,6 +9708,13 @@ function LFGFrameTab:EnsureCharacterSideTab()
         end
     else
         self.charTab:SetPoint("TOPLEFT", parent, "TOPRIGHT", -2, -260)
+    end
+    for _, key in ipairs(CHARACTER_NATIVE_TABS) do
+        local tabObj = parent[key]
+        if tabObj and tabObj ~= self.charTab then
+            tabObj._scCharCloseHooked = true
+            HookNativeHostTab(parent, tabObj, self.charTab, CHARACTER_NATIVE_TABS, false)
+        end
     end
     for _, prefix in ipairs({ "CharacterFrameTab", "CharacterFrameSideTab" }) do
         for idx = 1, 8 do
@@ -9478,9 +9736,10 @@ function LFGFrameTab:AttachCharacterUI()
     self.charHooked = true
 
     local function QueueEnsureCharTab()
+        if IsCombatLocked() then return end
         if C_Timer and C_Timer.After then
             C_Timer.After(0, function()
-                if parent and parent:IsShown() then
+                if not IsCombatLocked() and parent and parent:IsShown() then
                     LFGFrameTab:EnsureCharacterSideTab()
                 end
             end)
@@ -9490,33 +9749,27 @@ function LFGFrameTab:AttachCharacterUI()
     end
 
     parent:HookScript("OnShow", function()
-        if not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent)) then
+        if not IsCombatLocked() and not (ns.UI and ns.UI.IsEmbeddedFor and ns.UI:IsEmbeddedFor(parent)) then
             if ns.UI and ns.UI.CloseEmbeddedIfHost then
                 ns.UI:CloseEmbeddedIfHost(parent)
             end
             if ns.UI and ns.UI.RestoreEmbeddedHostUI then
                 ns.UI:RestoreEmbeddedHostUI(parent)
             end
-            local anyNativeShown = false
-            for _, nName in ipairs({ "PaperDollFrame", "ReputationFrame", "TokenFrame", "PetPaperDollFrame", "SkillFrame", "PVPFrame", "HonorFrame", "StatisticsFrame", "CharacterStatisticsFrame" }) do
-                local nf = _G[nName]
-                if nf and nf.IsShown and nf:IsShown() then
-                    anyNativeShown = true
-                    break
-                end
-            end
-            if not anyNativeShown and _G.PaperDollFrame then
-                for _, coreName in ipairs({ "PaperDollFrame", "CharacterFrameInset", "CharacterFrameInsetRight", "PaperDollSidebarTabs" }) do
-                    local sf = _G[coreName]
-                    if sf and sf.Show then
-                        pcall(sf.Show, sf)
+        end
+        if IsCombatLocked() then
+            if ns.RunAfterCombat then
+                ns:RunAfterCombat("sc_ensure_char_sidetab", function()
+                    if parent and parent:IsShown() then
+                        LFGFrameTab:EnsureCharacterSideTab()
                     end
-                end
+                end)
             end
+            return
         end
         if C_Timer and C_Timer.After then
             C_Timer.After(0, function()
-                if parent and parent:IsShown() then
+                if not IsCombatLocked() and parent and parent:IsShown() then
                     LFGFrameTab:EnsureCharacterSideTab()
                     LFGFrameTab:HandleOfficialShortcutOpen("C", parent)
                 end
@@ -9528,15 +9781,16 @@ function LFGFrameTab:AttachCharacterUI()
     end)
 
     if hooksecurefunc then
+        local function OnNativeCharTabSwitch()
+            if ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
+                ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
+            end
+            if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
+            QueueEnsureCharTab()
+        end
         for _, methodName in ipairs({ "ShowSubFrame", "SelectTab", "SetTab", "OnTabSelected" }) do
             if type(parent[methodName]) == "function" then
-                hooksecurefunc(parent, methodName, function()
-                    if ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
-                        ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
-                    end
-                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                    QueueEnsureCharTab()
-                end)
+                hooksecurefunc(parent, methodName, OnNativeCharTabSwitch)
             end
         end
         for _, layoutMethod in ipairs({ "UpdateTabLayout", "UpdateTabs", "ResetTabs" }) do
@@ -9544,23 +9798,16 @@ function LFGFrameTab:AttachCharacterUI()
                 hooksecurefunc(parent, layoutMethod, QueueEnsureCharTab)
             end
         end
+        if type(_G.CharacterFrame_ShowSubFrame) == "function" then
+            hooksecurefunc("CharacterFrame_ShowSubFrame", OnNativeCharTabSwitch)
+        end
         if type(_G.CharacterFrameTab_OnClick) == "function" then
-            hooksecurefunc("CharacterFrameTab_OnClick", function()
-                if ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
-                    ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
-                end
-                if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                QueueEnsureCharTab()
-            end)
+            hooksecurefunc("CharacterFrameTab_OnClick", OnNativeCharTabSwitch)
         end
         if type(_G.PanelTemplates_SetTab) == "function" then
             hooksecurefunc("PanelTemplates_SetTab", function(targetFrame)
                 if targetFrame == parent then
-                    if ns.UI and ns.UI.ReleaseAlphaHiddenCharacterSubframesForTabClick then
-                        ns.UI:ReleaseAlphaHiddenCharacterSubframesForTabClick()
-                    end
-                    if ns.UI then ns.UI:CloseEmbeddedIfHost(parent) end
-                    QueueEnsureCharTab()
+                    OnNativeCharTabSwitch()
                 end
             end)
         end
@@ -10206,6 +10453,7 @@ function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
     local m = self._shortcutPromptModal
     if not m then
         m = CreateFrame("Frame", "SocialCentralShortcutPromptModal", UIParent, "BackdropTemplate")
+        m:Hide()
         m:SetSize(486, 278)
         m:SetPoint("CENTER")
         if Theme.PrepareTopOverlayModal then
@@ -10384,6 +10632,9 @@ function LFGFrameTab:ShowShortcutAutoOpenPrompt(winKey, hostFrame)
     Theme:StyleButton(m.closeBtn, "default")
     Theme:StyleButton(m.btnAddon, "primary")
     Theme:StyleButton(m.btnOfficial, "default")
+    if m.helpBtn and m.helpBtn.RefreshTheme then
+        m.helpBtn:RefreshTheme()
+    end
 
     local eligibleKeys = {}
     for _, k in ipairs({ "O", "I", "J", "C" }) do
@@ -10438,10 +10689,6 @@ function LFGFrameTab:HandleOfficialShortcutOpen(winKey, hostFrame)
 end
 
 function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
-    if IsCombatLocked() then
-        ns:Print("%s", L["Unavailable during combat."])
-        return
-    end
     local mod = (moduleId or ""):lower()
 
     if ns.Compat and ns.Compat.IsModuleEnabled and not ns.Compat.IsModuleEnabled(mod) then
@@ -10452,6 +10699,18 @@ function LFGFrameTab:OpenOfficialModule(moduleId, forceKeepOpen)
             end
         end
         ns:Print("%s", L["This module is disabled in Settings."])
+        return
+    end
+    if IsCombatLocked() then
+        if mod == "lfg" then
+            ns:Print("%s", L["Unavailable during combat."])
+            return
+        end
+        if ns.UI and ns.UI.ShowHub then
+            ns.UI:ShowHub(mod == "diplomacy" and "clan" or mod)
+            return
+        end
+        ns:Print("%s", L["Unavailable during combat."])
         return
     end
     if ns.Compat and ns.Compat.IsWindowIntegrationEnabled and not ns.Compat.IsWindowIntegrationEnabled(mod) then
@@ -10671,7 +10930,8 @@ function LFGFrameTab:Init()
     end)
 
     ns.RegisterEvent(self, "PLAYER_GUILD_UPDATE", function(_, _, unit)
-        if not unit or unit == "player" then
+        local cleanUnit = (unit ~= nil and Safe and Safe.String) and Safe.String(unit) or nil
+        if unit == nil or cleanUnit == "player" then
             QueueTryAttachAll()
             SyncEmbeddedIfAnyHostShown()
         end

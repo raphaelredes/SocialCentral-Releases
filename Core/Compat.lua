@@ -367,12 +367,15 @@ function Compat.GetAltWorldInfo(alt)
         local curWorld = Compat.DetectWorldType(Compat.Realm(), rawCur)
         return curWorld, curPool, Compat.FormatWorldTypeLabel(curWorld) or Compat.Realm()
     end
-    local detected = Compat.DetectWorldType(alt.realmName or alt.realmPool, alt.realmRaw)
+    local rName = (type(alt.realmName) == "string" and alt.realmName ~= "") and alt.realmName or nil
+    local rPool = (type(alt.realmPool) == "string" and alt.realmPool ~= "") and alt.realmPool or nil
+    local rRaw = (type(alt.realmRaw) == "string" and alt.realmRaw ~= "") and alt.realmRaw or nil
+    local detected = Compat.DetectWorldType(rName or rPool, rRaw)
     local wt = detected or alt.worldType
-    local pool = (alt.realmName and Compat.RealmPool(alt.realmName))
-        or (alt.realmPool and Compat.RealmPool(alt.realmPool))
+    local pool = (rName and Compat.RealmPool(rName))
+        or (rPool and Compat.RealmPool(rPool))
         or Compat.RealmPool(Compat.Realm())
-    local label = Compat.FormatWorldTypeLabel(wt) or alt.realmRaw or alt.realmName or pool
+    local label = Compat.FormatWorldTypeLabel(wt) or rRaw or rName or pool
     return wt, pool, label
 end
 
@@ -557,9 +560,16 @@ end
 
 --- Iterate child frames of a WoW UI container without allocating temporary wrapper tables.
 function Compat.ForEachChild(parent, fn)
-    if parent and parent.GetChildren and type(fn) == "function" then
-        IterChildrenVararg(fn, parent:GetChildren())
+    if not (parent and parent.GetChildren and type(fn) == "function") then
+        return
     end
+    if parent.IsForbidden then
+        local okF, forb = pcall(parent.IsForbidden, parent)
+        if not okF or forb then
+            return
+        end
+    end
+    IterChildrenVararg(fn, parent:GetChildren())
 end
 
 local function CopyCharParsed(entry)
@@ -1634,13 +1644,58 @@ function Compat.Whisper(target, draftText)
     local slashName = clean:gsub("%s+", "-")
     local draft = (Compat.CleanChatMessage and Compat.CleanChatMessage(draftText)) or Compat.CleanInput(draftText)
     local hasDraft = (draft and draft ~= "") and true or false
-    if ns.QuickReply and ns.QuickReply.PrepareTemporaryOfficialEditBox then
+    local combatRedirecting = (ns.QuickReply and ns.QuickReply._redirectingBlizzCombatChat == true)
+    if (not combatRedirecting) and ns.QuickReply and ns.QuickReply.PrepareTemporaryOfficialEditBox then
         ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
+    end
+
+    local function VerifyOrForceWhisperEditBox(forceParse)
+        local activeEb = GetActiveEditableChatBox()
+        if not activeEb then return false end
+        local curType = activeEb.GetChatType and Safe.String(activeEb:GetChatType())
+            or (activeEb.GetAttribute and Safe.String(activeEb:GetAttribute("chatType")))
+            or nil
+        if curType ~= "WHISPER" then
+            if forceParse then
+                local wLine = "/w " .. slashName .. " " .. (draft or "")
+                if activeEb.SetText then
+                    pcall(activeEb.SetText, activeEb, wLine)
+                end
+                if type(activeEb.ParseText) == "function" then
+                    pcall(activeEb.ParseText, activeEb, 0)
+                elseif ChatFrameUtil and type(ChatFrameUtil.ParseText) == "function" then
+                    pcall(ChatFrameUtil.ParseText, activeEb, 0)
+                elseif ChatEdit_ParseText then
+                    pcall(ChatEdit_ParseText, activeEb, 0)
+                end
+                curType = activeEb.GetChatType and Safe.String(activeEb:GetChatType())
+                    or (activeEb.GetAttribute and Safe.String(activeEb:GetAttribute("chatType")))
+                    or nil
+            end
+            if curType ~= "WHISPER" and not (activeEb.IsProtected and activeEb:IsProtected()) then
+                if type(activeEb.SetChatType) == "function" then
+                    pcall(activeEb.SetChatType, activeEb, "WHISPER")
+                end
+                if activeEb.SetAttribute then
+                    pcall(activeEb.SetAttribute, activeEb, "chatType", "WHISPER")
+                    pcall(activeEb.SetAttribute, activeEb, "tellTarget", clean)
+                end
+                if type(activeEb.UpdateHeader) == "function" then
+                    pcall(activeEb.UpdateHeader, activeEb)
+                elseif ChatFrameUtil and type(ChatFrameUtil.UpdateHeader) == "function" then
+                    pcall(ChatFrameUtil.UpdateHeader, activeEb)
+                elseif ChatEdit_UpdateHeader then
+                    pcall(ChatEdit_UpdateHeader, activeEb)
+                end
+            end
+        end
+        return true
     end
 
     if ChatFrameUtil and ChatFrameUtil.SendTell then
         local ok = pcall(ChatFrameUtil.SendTell, clean)
         if ok then
+            VerifyOrForceWhisperEditBox(true)
             if (not hasDraft) or InsertDraftIntoActiveChatBox(draft) then
                 if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                     ns.QuickReply:ShowActiveOfficialEditBox()
@@ -1652,6 +1707,7 @@ function Compat.Whisper(target, draftText)
     if ChatFrame_SendTell then
         local ok = pcall(ChatFrame_SendTell, clean)
         if ok then
+            VerifyOrForceWhisperEditBox(true)
             if (not hasDraft) or InsertDraftIntoActiveChatBox(draft) then
                 if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                     ns.QuickReply:ShowActiveOfficialEditBox()
@@ -1664,6 +1720,7 @@ function Compat.Whisper(target, draftText)
     if ChatFrameUtil and ChatFrameUtil.OpenChat then
         local ok = pcall(ChatFrameUtil.OpenChat, line)
         if ok then
+            VerifyOrForceWhisperEditBox(true)
             if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                 ns.QuickReply:ShowActiveOfficialEditBox()
             end
@@ -1673,6 +1730,7 @@ function Compat.Whisper(target, draftText)
     if ChatFrame_OpenChat then
         local ok = pcall(ChatFrame_OpenChat, line)
         if ok then
+            VerifyOrForceWhisperEditBox(true)
             if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                 ns.QuickReply:ShowActiveOfficialEditBox()
             end
@@ -1690,7 +1748,9 @@ function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
     else
         cleanBNet = Compat.CleanInput(bnetName)
     end
-    if ns.QuickReply and ns.QuickReply.PrepareTemporaryOfficialEditBox then
+    if (not (ns.QuickReply and ns.QuickReply._redirectingBlizzCombatChat == true))
+        and ns.QuickReply and ns.QuickReply.PrepareTemporaryOfficialEditBox
+    then
         ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
     end
     if cleanBNet then
@@ -1721,9 +1781,9 @@ function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
     return false
 end
 
-function Compat.IsInMyGroup(target, guid)
+function Compat.GetMyGroupMemberConnection(target, guid)
     if not (Compat.IsInGroup and Compat.IsInGroup()) then
-        return false
+        return nil
     end
     local cleanGuid = Safe.String(guid)
     local lk, first, _, surname
@@ -1733,35 +1793,69 @@ function Compat.IsInMyGroup(target, guid)
     local members = ns.Group and ns.Group.members
     if type(members) == "table" and #members > 0 then
         for _, m in ipairs(members) do
+            local matched = false
             if cleanGuid and m.guid and cleanGuid == m.guid then
-                return true
-            end
-            if lk and m.lookupKey then
+                matched = true
+            elseif lk and m.lookupKey then
                 if lk == m.lookupKey then
-                    return true
-                end
-                if (not surname) and first and m.displayName then
+                    matched = true
+                elseif (not surname) and first and m.displayName then
                     local _, mFirst = Compat.ParseCharacterFields(m.displayName)
                     if mFirst and mFirst:lower() == first:lower() then
-                        return true
+                        matched = true
                     end
                 end
             end
+            if matched then
+                if m.unit and UnitIsConnected then
+                    local liveConn = Safe.Value(Safe.Call(UnitIsConnected, m.unit))
+                    if liveConn ~= nil then
+                        return liveConn == true
+                    end
+                end
+                return m.online ~= false
+            end
         end
     end
-    if cleanGuid and Compat.IsInRaid then
+    if Compat.IsInRaid then
         local isRaid = Compat.IsInRaid()
         local count = Compat.GetNumGroupMembers and Compat.GetNumGroupMembers() or 0
         local prefix = isRaid and "raid" or "party"
         local limit = isRaid and math.min(40, count) or math.min(4, count)
         for i = 1, limit do
-            local mGuid = Safe.String(Safe.Call(UnitGUID, prefix .. i))
-            if mGuid and mGuid == cleanGuid then
-                return true
+            local unit = prefix .. i
+            if UnitExists and Safe.Value(Safe.Call(UnitExists, unit)) == true then
+                local mGuid = Safe.String(Safe.Call(UnitGUID, unit))
+                local matched = (cleanGuid ~= nil and mGuid ~= nil and mGuid == cleanGuid)
+                if not matched and lk then
+                    local resolved = Compat.ResolveUnitFullName and Compat.ResolveUnitFullName(unit, mGuid, nil, true)
+                    local uName = (resolved and resolved.fullName) or Safe.String(Safe.Call(UnitName, unit))
+                    local uLk, uFirst = nil, nil
+                    if uName and uName ~= "" then
+                        uLk, uFirst = Compat.ParseCharacterFields(uName)
+                    end
+                    if uLk == lk or ((not surname) and first and uFirst and uFirst:lower() == first:lower()) then
+                        matched = true
+                    end
+                end
+                if matched then
+                    if UnitIsConnected then
+                        return Safe.Value(Safe.Call(UnitIsConnected, unit)) == true
+                    end
+                    return true
+                end
             end
         end
     end
-    return false
+    return nil
+end
+
+function Compat.IsInMyGroupConnected(target, guid)
+    return Compat.GetMyGroupMemberConnection(target, guid) == true
+end
+
+function Compat.IsInMyGroup(target, guid)
+    return Compat.GetMyGroupMemberConnection(target, guid) ~= nil
 end
 
 local function FindOnlineBNetGameForInvite(bnetAccountID, cleanCharName)
@@ -1928,6 +2022,32 @@ function Compat.SetBNetFriendFavorite(bnetAccountID, isFav)
     end
     if BNSetFriendFavorite then
         local ok = pcall(BNSetFriendFavorite, accId, fav)
+        if ok then return true end
+    end
+    return false
+end
+
+function Compat.SendBNetFriendInvite(tagOrEmail, noteText)
+    if IsInCombatNow() then return false end
+    local clean = Compat.Trim and Compat.Trim(tagOrEmail or "") or tostring(tagOrEmail or "")
+    clean = clean:gsub("[%c]", "")
+    if clean == "" or (not clean:find("#", 1, true) and not clean:find("@", 1, true)) then
+        return false
+    end
+    local cleanNote = Compat.CleanPayloadField(noteText or "", 127)
+    if BNSendFriendInvite then
+        local ok = pcall(BNSendFriendInvite, clean, cleanNote ~= "" and cleanNote or nil)
+        if ok then return true end
+    end
+    return false
+end
+
+function Compat.RemoveBNetFriend(bnetAccountID)
+    if IsInCombatNow() then return false end
+    local accId = Safe.Number(bnetAccountID)
+    if not accId then return false end
+    if BNRemoveFriend then
+        local ok = pcall(BNRemoveFriend, accId)
         if ok then return true end
     end
     return false
@@ -2350,9 +2470,11 @@ function Compat.ResolveCharacterFaction(nameOrKey, guidHint, bnetAccountID)
             local surnameLow = (surname and surname ~= "") and surname:lower() or nil
             local altFacMatch, altFirstCount, altFirstFac = nil, 0, nil
             for _, alt in pairs(altsTbl) do
-                if type(alt) == "table" and alt.faction then
-                    local altPool = (alt.realmName and Compat.RealmPool(alt.realmName))
-                        or (alt.realmPool and Compat.RealmPool(alt.realmPool))
+                if type(alt) == "table" and alt.faction and not (cleanGuid and alt.guid and alt.guid ~= cleanGuid) then
+                    local rName = (type(alt.realmName) == "string" and alt.realmName ~= "") and alt.realmName or nil
+                    local rPool = (type(alt.realmPool) == "string" and alt.realmPool ~= "") and alt.realmPool or nil
+                    local altPool = (rName and Compat.RealmPool(rName))
+                        or (rPool and Compat.RealmPool(rPool))
                         or curPool
                     if altPool == curPool then
                         local altParsedKey, altFirst, _, altSurname = Compat.ParseCharacterFields(alt.fullName or alt.name or "")
@@ -2643,7 +2765,9 @@ function Compat.CheckExpiredDnd(scheduleTimerIfPending, deferEmit)
             s.doNotDisturb = false
             s.dndUntil = 0
             s.dndUntilLeaveInstance = false
+            s.dndUntilLeaveGroup = false
             s.dndInstanceEntered = nil
+            s.dndGroupEntered = nil
             cleared = true
         elseif scheduleTimerIfPending then
             ScheduleTimedDndCheck((s.dndUntil - now) + 0.5)
@@ -2657,7 +2781,23 @@ function Compat.CheckExpiredDnd(scheduleTimerIfPending, deferEmit)
             s.doNotDisturb = false
             s.dndUntil = 0
             s.dndUntilLeaveInstance = false
+            s.dndUntilLeaveGroup = false
             s.dndInstanceEntered = nil
+            s.dndGroupEntered = nil
+            cleared = true
+        end
+    end
+    if (not cleared) and s.dndUntilLeaveGroup == true then
+        local inGrp = Compat.IsInGroup()
+        if inGrp then
+            s.dndGroupEntered = true
+        elseif s.dndGroupEntered == true then
+            s.doNotDisturb = false
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndUntilLeaveGroup = false
+            s.dndInstanceEntered = nil
+            s.dndGroupEntered = nil
             cleared = true
         end
     end
@@ -2705,7 +2845,7 @@ function Compat.CheckExpiredDnd(scheduleTimerIfPending, deferEmit)
     return cleared
 end
 
-function Compat.SetDoNotDisturb(state, durationSec, untilLeaveInstance)
+function Compat.SetDoNotDisturb(state, durationSec, untilLeaveInstance, untilLeaveGroup)
     local s = ns.db and ns.db.settings
     if not s then return end
     local prevReason = Compat.GetFocusSilenceReason()
@@ -2715,23 +2855,38 @@ function Compat.SetDoNotDisturb(state, durationSec, untilLeaveInstance)
         if type(durationSec) == "number" and durationSec > 0 then
             s.dndUntil = time() + math.floor(durationSec + 0.5)
             s.dndUntilLeaveInstance = false
+            s.dndUntilLeaveGroup = false
             s.dndInstanceEntered = nil
+            s.dndGroupEntered = nil
             ScheduleTimedDndCheck(durationSec + 0.5)
         elseif untilLeaveInstance == true then
             s.dndUntil = 0
             s.dndUntilLeaveInstance = true
+            s.dndUntilLeaveGroup = false
             s.dndInstanceEntered = IsCurrentlyInInstance() and true or false
+            s.dndGroupEntered = nil
+            Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
+        elseif untilLeaveGroup == true then
+            s.dndUntil = 0
+            s.dndUntilLeaveInstance = false
+            s.dndUntilLeaveGroup = true
+            s.dndInstanceEntered = nil
+            s.dndGroupEntered = Compat.IsInGroup() and true or false
             Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
         else
             s.dndUntil = 0
             s.dndUntilLeaveInstance = false
+            s.dndUntilLeaveGroup = false
             s.dndInstanceEntered = nil
+            s.dndGroupEntered = nil
             Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
         end
     else
         s.dndUntil = 0
         s.dndUntilLeaveInstance = false
+        s.dndUntilLeaveGroup = false
         s.dndInstanceEntered = nil
+        s.dndGroupEntered = nil
         Compat._dndTimerGen = (Compat._dndTimerGen or 0) + 1
     end
     local curReason = Compat.GetFocusSilenceReason()
@@ -2791,6 +2946,7 @@ function Compat.InitFocusWatcher()
             ns.RegisterEvent(focusWatcherHost, "PLAYER_FLAGS_CHANGED", HandleFocusEnvChange)
             ns.RegisterEvent(focusWatcherHost, "PLAYER_ENTERING_WORLD", HandleFocusEnvChange)
             ns.RegisterEvent(focusWatcherHost, "ZONE_CHANGED_NEW_AREA", HandleFocusEnvChange)
+            ns.RegisterEvent(focusWatcherHost, "GROUP_ROSTER_UPDATE", HandleFocusEnvChange)
         end
     end
 end

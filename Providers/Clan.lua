@@ -54,8 +54,13 @@ local function PlayClanAlertSound(self, kit)
     if Compat.IsFocusSilenced and Compat.IsFocusSilenced() then
         return
     end
+    local s = ns.db and ns.db.settings
+    local inCombat = ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) == true
+    if inCombat and (not s or s.msgPreviewSilenceCombat ~= false) then
+        return
+    end
     local nowMono = GetTime and GetTime() or time()
-    if (nowMono - (self.lastClanSoundAt or 0)) < 2.5 then
+    if (nowMono - (self.lastClanSoundAt or 0)) < 3.0 then
         return
     end
     local resolvedKit = kit or (SOUNDKIT and (SOUNDKIT.MAP_PING or 3175)) or 3175
@@ -1012,16 +1017,19 @@ function Clan:NoteRemoteVersion(senderDisplay, senderLookupKey, remoteVer, chatT
         end
         if Clan.notifiedVersion ~= remoteVer then
             Clan.notifiedVersion = remoteVer
-            local linkText = "|Haddon:SCentral:update|h|cff35c4ff[" .. L["GitHub Releases"] .. "]|r|h"
-            ns:Print(L["New version v%s detected (you have v%s)! Click %s to update."]:format(remoteVer, ns.version, linkText))
-            ns:Emit("ADDON_MESSAGE_NOTIFY", {
-                kind = "VERSION_UPDATE",
-                sourceTag = L["Update Available"],
-                sender = "SocialCentral v" .. tostring(remoteVer),
-                text = L["Version v%s is available (you have v%s). Click to update!"]:format(remoteVer, ns.version or "0.0.0"),
-                priority = 2,
-                ts = time(),
-            })
+            local sVer = ns.db and ns.db.settings
+            if not sVer or sVer.versionCheck ~= false then
+                local linkText = "|Haddon:SCentral:update|h|cff35c4ff[" .. L["GitHub Releases"] .. "]|r|h"
+                ns:Print(L["New version v%s detected (you have v%s)! Click %s to update."]:format(remoteVer, ns.version, linkText))
+                ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                    kind = "VERSION_UPDATE",
+                    sourceTag = L["Update Available"],
+                    sender = "SocialCentral v" .. tostring(remoteVer),
+                    text = L["Version v%s is available (you have v%s). Click to update!"]:format(remoteVer, ns.version or "0.0.0"),
+                    priority = 2,
+                    ts = time(),
+                })
+            end
             ns:Emit("VERSION_UPDATE_FOUND", remoteVer)
         end
     end
@@ -2178,11 +2186,13 @@ function Clan:GetGuildMembersWithAllianceStatus()
     end
 
     table.sort(out, function(a, b)
-        if a.isManager ~= b.isManager then
-            return a.isManager
+        local aMgr, bMgr = (a.isManager == true), (b.isManager == true)
+        if aMgr ~= bMgr then
+            return aMgr
         end
-        if a.authorized ~= b.authorized then
-            return a.authorized
+        local aAuth, bAuth = (a.authorized == true), (b.authorized == true)
+        if aAuth ~= bAuth then
+            return aAuth
         end
         return (a.displayName or "") < (b.displayName or "")
     end)
@@ -3469,7 +3479,8 @@ function Clan:GetPeersList()
     end
 
     table.sort(out, function(a, b)
-        if a.online ~= b.online then return a.online end
+        local aOn, bOn = (a.online == true), (b.online == true)
+        if aOn ~= bOn then return aOn end
         return (a.updatedAt or 0) > (b.updatedAt or 0)
     end)
     return out
@@ -3975,13 +3986,8 @@ local function FoldProfText(str)
     if not str:find("[\128-\255]") then
         return str:lower()
     end
-    local out = str
-    for k, v in pairs(UTF8_ACCENT_FOLD) do
-        if out:find(k, 1, true) then
-            out = out:gsub(k, v)
-        end
-    end
-    return out:lower()
+    local lower = (Compat and Compat.LowerUtf8 and Compat.LowerUtf8(str)) or str:lower()
+    return (lower:gsub("[\194-\244][\128-\191]+", UTF8_ACCENT_FOLD))
 end
 
 local function NormalizeProfId(val)
@@ -4665,7 +4671,7 @@ function Clan:GetProfessionsList(query, profFilter, sourceFilter)
                     local foundAlt = (entry.altKey and ns.db.alts[entry.altKey]) or ns.db.alts[entry.lookupKey]
                     if not foundAlt then
                         for _, aRec in pairs(ns.db.alts) do
-                            if type(aRec) == "table" then
+                            if type(aRec) == "table" and (not Store or not Store.AltMatchesWorldScope or Store:AltMatchesWorldScope(aRec, "pool")) then
                                 local aLk = Compat.ParseCharacterFields and Compat.ParseCharacterFields(aRec.fullName or aRec.name)
                                 if (aLk and aLk == entry.lookupKey)
                                     or (aRec.fullName and aRec.fullName:lower() == entry.lookupKey)
@@ -4718,21 +4724,26 @@ function Clan:GetProfessionsList(query, profFilter, sourceFilter)
                     elseif entry.isAlt and ns.Alts and ns.Alts.SearchAllRecipes then
                         if not altRecipesByDisp then
                             altRecipesByDisp = {}
-                            local altGroups = ns.Alts:SearchAllRecipes(query, nil, Compat.PlayerFaction and Compat.PlayerFaction() or nil)
+                            local altGroups = ns.Alts:SearchAllRecipes(query, nil, Compat.PlayerFaction and Compat.PlayerFaction() or nil, "pool")
                             for _, ag in ipairs(altGroups or {}) do
-                                if ag.displayName and ag.items and ag.items[1] then
-                                    altRecipesByDisp[ag.displayName:lower()] = ag.items[1]
+                                if ag.displayName and type(ag.items) == "table" and #ag.items > 0 then
+                                    altRecipesByDisp[ag.displayName:lower()] = ag.items
                                 end
                             end
                         end
-                        local firstItem = entry.displayName and altRecipesByDisp[entry.displayName:lower()]
-                        if firstItem and (not pf or firstItem._profCode == pf) then
-                            matchedRecipeObj = {
-                                name = firstItem.name,
-                                itemID = firstItem.itemID,
-                                profCode = firstItem._profCode,
-                                reagents = firstItem._reagentsSummary,
-                            }
+                        local altItems = entry.displayName and altRecipesByDisp[entry.displayName:lower()]
+                        if type(altItems) == "table" then
+                            for _, it in ipairs(altItems) do
+                                if it and (not pf or it._profCode == pf) then
+                                    matchedRecipeObj = {
+                                        name = it.name,
+                                        itemID = it.itemID,
+                                        profCode = it._profCode,
+                                        reagents = it._reagentsSummary,
+                                    }
+                                    break
+                                end
+                            end
                         end
                     elseif type(bucket.recipesCache) == "table" then
                         for _, recItem in pairs(bucket.recipesCache) do
@@ -4986,15 +4997,16 @@ function Clan:MaybeNotifyClanLFG(lookupKey, displayName, classFile, summaryText,
     local hex = Compat.ClassHex(classFile)
     local nameCol = hex .. displayName .. "|r"
     local cleanMsg = Compat.CleanPayloadField(summaryText ~= "" and summaryText or activityText or "LFG", 90)
+    local focusSilenced = (Compat.IsFocusSilenced and Compat.IsFocusSilenced(lookupKey or displayName)) == true
     local wLink = "|Haddon:SCentral:w:" .. displayName .. "|h|cff58a6ff[" .. L["Chat"] .. "]|r|h"
     local cLink = "|Haddon:SCentral:clanlfg:" .. tostring(lookupKey or "") .. "|h|cfff2c94c[" .. badgeLabel .. "]|r|h"
-    ns:Print(("|cff3fb950[%s]|r %s: %s %s %s"):format(L["Dungeon LFG Alert"], nameCol, cleanMsg, wLink, cLink))
-
-    if s.clanLfgAlertSound ~= false then
-        PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+    if not focusSilenced then
+        ns:Print(("|cff3fb950[%s]|r %s: %s %s %s"):format(L["Dungeon LFG Alert"], nameCol, cleanMsg, wLink, cLink))
+        if s.clanLfgAlertSound ~= false then
+            PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+        end
+        self:IncrementNotificationCount(1)
     end
-
-    self:IncrementNotificationCount(1)
     ns:Emit("CLAN_LFG_ALERT", {
         lookupKey = lookupKey,
         displayName = displayName,
@@ -5143,13 +5155,14 @@ function Clan:MaybeTriggerLfgWatcher(item, sourceType)
     local actLabel = Compat.CleanPayloadField(matchedLabel or canonicalLabel or item.activity or L["Dungeon"], 40)
     local cleanActLink = actLabel:gsub("[|:\r\n]", " ")
     local cleanWhoLink = displayName:gsub("[|:\r\n]", "")
+    local silenceCombat = (Compat.IsFocusSilenced and Compat.IsFocusSilenced(lookupKey or displayName)) == true
     local applyLink = "|Haddon:SCentral:lfgapply:" .. cleanWhoLink .. ":" .. cleanActLink .. "|h|cff58a6ff[" .. L["Apply (/w)"] .. "]|r|h"
     local lfgLink = "|Haddon:SCentral:clanlfg:" .. tostring(lookupKey) .. "|h|cfff2c94c[" .. L["View in LFG"] .. "]|r|h"
-    ns:Print(("|cff3fb950[%s]|r |cffffd24d[%s]|r %s: %s %s %s"):format(L["LFG Watcher Alert"], actLabel, nameCol, cleanMsg, applyLink, lfgLink))
-
-    local silenceCombat = Compat.IsFocusSilenced and Compat.IsFocusSilenced(lookupKey or displayName)
-    if s.clanLfgAlertSound ~= false and not silenceCombat then
-        PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+    if not silenceCombat then
+        ns:Print(("|cff3fb950[%s]|r |cffffd24d[%s]|r %s: %s %s %s"):format(L["LFG Watcher Alert"], actLabel, nameCol, cleanMsg, applyLink, lfgLink))
+        if s.clanLfgAlertSound ~= false then
+            PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+        end
     end
 
     ns:Emit("ADDON_MESSAGE_NOTIFY", {
@@ -5487,7 +5500,8 @@ function Clan:GetAllLockouts()
     end
 
     table.sort(out, function(a, b)
-        if a.isSelf ~= b.isSelf then return a.isSelf end
+        local aSelf, bSelf = (a.isSelf == true), (b.isSelf == true)
+        if aSelf ~= bSelf then return aSelf end
         if a.charName ~= b.charName then return (a.charName or "") < (b.charName or "") end
         return (a.reset or 0) < (b.reset or 0)
     end)
@@ -5699,7 +5713,8 @@ function Clan:GetActiveGroupQuests()
     end
 
     table.sort(out, function(a, b)
-        if a.isComplete ~= b.isComplete then return not a.isComplete end
+        local aComp, bComp = (a.isComplete == true), (b.isComplete == true)
+        if aComp ~= bComp then return not aComp end
         if (a.suggestedGroup or 0) ~= (b.suggestedGroup or 0) then
             return (a.suggestedGroup or 0) > (b.suggestedGroup or 0)
         end
@@ -9045,7 +9060,8 @@ function Clan:GetMergedGuildMembers(query, opts)
     end
 
     table.sort(out, function(a, b)
-        if a.online ~= b.online then return a.online end
+        local aOn, bOn = (a.online == true), (b.online == true)
+        if aOn ~= bOn then return aOn end
         if sortBy == "rank" then
             local ra, rb = a.rankIndex or 99, b.rankIndex or 99
             if ra ~= rb then return ra < rb end
@@ -9997,18 +10013,24 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 local didLfg = Clan:MaybeNotifyClanLFG(effCreatorKey, effCreator, nil, title .. " (" .. (whenText ~= "" and whenText or L["Now"]) .. ")", title, isDng, "EVT", nil, srcOv)
                 local s = ns.db and ns.db.settings
                 if not didLfg and s and s.clanEventAlertEnabled == true and not Compat.IsMe(effCreator) then
+                    local evtFocusSil = (Compat.IsFocusSilenced and Compat.IsFocusSilenced(effCreatorKey or effCreator)) == true
                     local evtWhen = whenText ~= "" and whenText or L["Now"]
                     local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
-                    ns:Print("%s", ("|cff58a6ff[%s]|r %s: %s (%s) %s"):format(srcOv or L["Guild Event"], effCreator, title, evtWhen, openLink))
-                    if s.clanLfgAlertSound ~= false then
-                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+                    if not evtFocusSil then
+                        ns:Print("%s", ("|cff58a6ff[%s]|r %s: %s (%s) %s"):format(srcOv or L["Guild Event"], effCreator, title, evtWhen, openLink))
+                        if s.clanLfgAlertSound ~= false then
+                            PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+                        end
+                        Clan:IncrementNotificationCount(1)
                     end
-                    Clan:IncrementNotificationCount(1)
+                    local evtCreatorRow = effCreatorKey and ns.Store and ((ns.Store.socialByLookup and ns.Store.socialByLookup[effCreatorKey]) or (ns.Store.socialDirectoryByLookup and ns.Store.socialDirectoryByLookup[effCreatorKey])) or nil
                     ns:Emit("ADDON_MESSAGE_NOTIFY", {
                         id = "clanevt:" .. eventId,
                         kind = "CLAN_EVENT",
                         sourceTag = srcOv or L["Guild Event"],
                         sender = effCreator,
+                        senderClass = evtCreatorRow and evtCreatorRow.classFile or nil,
+                        lookupKey = effCreatorKey,
                         text = title .. " (" .. evtWhen .. ")",
                         eventId = eventId,
                         ts = now,
@@ -10185,21 +10207,25 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
                 end
                 if (monoNow - (Clan.signupAlertCooldowns[cdKey] or 0)) >= 15 then
                     Clan.signupAlertCooldowns[cdKey] = monoNow
+                    local sigFocusSil = (Compat.IsFocusSilenced and Compat.IsFocusSilenced(signerKey or signerName)) == true
                     local roleLbl = L[role] or role
                     local evtName = (evt.title and evt.title ~= "") and evt.title or eventId
                     local msgBody = string.format(L["%s signed (%s): %s"], signerName, roleLbl, evtName)
                     local openLink = "|Haddon:SCentral:clanevt:" .. eventId .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h"
-                    ns:Print("%s", "|cff3fb950[" .. L["Event Signup"] .. "]|r " .. msgBody .. " " .. openLink)
-                    if s.chatSound ~= false then
-                        PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+                    if not sigFocusSil then
+                        ns:Print("%s", "|cff3fb950[" .. L["Event Signup"] .. "]|r " .. msgBody .. " " .. openLink)
+                        if s.chatSound ~= false then
+                            PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+                        end
+                        Clan:IncrementNotificationCount(1)
                     end
-                    Clan:IncrementNotificationCount(1)
                     ns:Emit("ADDON_MESSAGE_NOTIFY", {
                         id = "sig:" .. cdKey .. ":" .. tostring(now),
                         kind = "CLAN_SIGNUP",
                         sourceTag = L["Event Signup"],
                         sender = signerName,
                         senderClass = classFile ~= "" and classFile or nil,
+                        lookupKey = signerKey,
                         text = msgBody,
                         eventId = eventId,
                         ts = now,
@@ -10486,25 +10512,42 @@ local function OnAddonMessage(_, _, prefix, text, chatType, sender)
         if targetName ~= "" then
             local s = ns.db and ns.db.settings
             if not s or s.spotterScoutAlert ~= false then
-                local guildTag = targetGuild ~= "" and (" <" .. targetGuild .. ">") or ""
-                local lvlTag = lvl > 0 and (" (Lv " .. lvl .. ")") or ""
-                local locTag = (zone ~= "" and coords ~= "") and (" - " .. zone .. " (" .. coords .. ")") or ""
-                local radarLink = "|Haddon:SCentral:spotter|h|cff58a6ff[" .. L["Target Radar"] .. "]|r|h"
-                ns:Print("%s", string.format("|cffff4444[SocialCentral Scout] %s%s%s%s (%s)|r %s", targetName, guildTag, lvlTag, locTag, parsed.displayName, radarLink))
-                if not s or s.spotterSound ~= false then
-                    PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.INTERFACE_SOUND_LOST_TARGET_UNIT or 180))
+                local sctKey = targetName:lower()
+                local monoSct = (GetTime and GetTime()) or time()
+                Clan.scoutAlertCooldowns = Clan.scoutAlertCooldowns or {}
+                for sk, sAt in pairs(Clan.scoutAlertCooldowns) do
+                    if type(sAt) ~= "number" or (monoSct - sAt) > 60 then
+                        Clan.scoutAlertCooldowns[sk] = nil
+                    end
                 end
-                Clan:IncrementNotificationCount(1)
-                ns:Emit("ADDON_MESSAGE_NOTIFY", {
-                    id = "sct:" .. targetName .. ":" .. tostring(now),
-                    kind = "SCOUT",
-                    sourceTag = L["Scout Alert"],
-                    sender = parsed.displayName,
-                    senderClass = classFile ~= "" and classFile or nil,
-                    text = targetName .. guildTag .. locTag,
-                    ts = now,
-                    priority = 3,
-                })
+                if (monoSct - (Clan.scoutAlertCooldowns[sctKey] or 0)) >= 15 then
+                    Clan.scoutAlertCooldowns[sctKey] = monoSct
+                    local sctFocusSil = (Compat.IsFocusSilenced and Compat.IsFocusSilenced(parsed.lookupKey or parsed.displayName)) == true
+                    local guildTag = targetGuild ~= "" and (" <" .. targetGuild .. ">") or ""
+                    local lvlTag = lvl > 0 and (" (Lv " .. lvl .. ")") or ""
+                    local locTag = (zone ~= "" and coords ~= "") and (" - " .. zone .. " (" .. coords .. ")") or ""
+                    local radarLink = "|Haddon:SCentral:spotter|h|cff58a6ff[" .. L["Target Radar"] .. "]|r|h"
+                    if not sctFocusSil then
+                        ns:Print("%s", string.format("|cffff4444[SocialCentral Scout] %s%s%s%s (%s)|r %s", targetName, guildTag, lvlTag, locTag, parsed.displayName, radarLink))
+                        if not s or s.spotterSound ~= false then
+                            PlayClanAlertSound(Clan, SOUNDKIT and (SOUNDKIT.INTERFACE_SOUND_LOST_TARGET_UNIT or 180))
+                        end
+                        Clan:IncrementNotificationCount(1)
+                    end
+                    local scoutRow = parsed.lookupKey and ns.Store and ((ns.Store.socialByLookup and ns.Store.socialByLookup[parsed.lookupKey]) or (ns.Store.socialDirectoryByLookup and ns.Store.socialDirectoryByLookup[parsed.lookupKey])) or nil
+                    local scoutClass = (scoutRow and scoutRow.classFile) or nil
+                    ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                        id = "sct:" .. targetName .. ":" .. tostring(now),
+                        kind = "SCOUT",
+                        sourceTag = L["Scout Alert"],
+                        sender = parsed.displayName,
+                        senderClass = scoutClass,
+                        lookupKey = parsed.lookupKey,
+                        text = targetName .. guildTag .. locTag,
+                        ts = now,
+                        priority = 3,
+                    })
+                end
             end
         end
 
@@ -10741,15 +10784,15 @@ local function CapturePassiveGuildProfession(rawMsg, cleanMsg, parsed)
 
     -- 2) Craft offer / service mention alongside a profession keyword in /g
     if p1 == "NONE" and type(cleanMsg) == "string" then
-        local low = cleanMsg:lower()
-        local hasOfferVerb = low:find("%f[%w]faco%f[%W]")
-            or low:find("faço")
-            or low:find("%f[%w]craft")
-            or low:find("%f[%w]hago%f[%W]")
-            or low:find("%f[%w]mats%f[%W]")
-            or low:find("%f[%w]wts%f[%W]")
-            or low:find("%f[%w]gratis%f[%W]")
-            or low:find("%f[%w]free%f[%W]")
+        local padded = " " .. ((Compat and Compat.LowerUtf8 and Compat.LowerUtf8(cleanMsg)) or cleanMsg:lower()) .. " "
+        local hasOfferVerb = padded:find("[^%a]faco[^%a]")
+            or padded:find("faço", 1, true)
+            or padded:find("[^%a]craft")
+            or padded:find("[^%a]hago[^%a]")
+            or padded:find("[^%a]mats[^%a]")
+            or padded:find("[^%a]wts[^%a]")
+            or padded:find("[^%a]gratis[^%a]")
+            or padded:find("[^%a]free[^%a]")
         if hasOfferVerb then
             local dp1, dp2 = Clan:ParseProfessionsFromNote(cleanMsg)
             if dp1 ~= "NONE" then
@@ -11169,12 +11212,15 @@ function Clan:CheckUpcomingEventReminders()
         end
         self._remindedEventStages[remKey] = stage
 
+        local remFocusSil = (Compat.IsFocusSilenced and Compat.IsFocusSilenced()) == true
         local timeLabel = (minsUntil <= 1) and L["Starting now!"] or L["Starts in ~%d min"]:format(math.max(1, math.ceil(minsUntil)))
         local evtLink = eventId
             and ("|Haddon:SCentral:clanevt:" .. tostring(eventId) .. "|h|cff58a6ff[" .. L["Open"] .. "]|r|h")
             or ("|Haddon:SCentral:clanevt:calendar|h|cff58a6ff[" .. L["Open"] .. "]|r|h")
-        ns:Print("|cfff2c94c[%s]|r %s — %s %s", L["Event Reminder"], title, timeLabel, evtLink)
-        PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+        if not remFocusSil then
+            ns:Print("|cfff2c94c[%s]|r %s — %s %s", L["Event Reminder"], title, timeLabel, evtLink)
+            PlayClanAlertSound(self, SOUNDKIT and (SOUNDKIT.MAP_PING or 3175))
+        end
         ns:Emit("ADDON_MESSAGE_NOTIFY", {
             id = "evrem:" .. remKey .. ":" .. tostring(stage),
             kind = "CLAN_EVENT",
@@ -11482,6 +11528,26 @@ local function UpdateGuildRosterHistory()
     end
 end
 
+local CLAN_EXTERNAL_CHAT_EVENTS = { "CHAT_MSG_CHANNEL", "CHAT_MSG_SAY", "CHAT_MSG_YELL" }
+
+function Clan:SyncExternalChatEvents()
+    local s = ns.db and ns.db.settings
+    local wantExternal = (not s) or (s.embedLfgWindow ~= false) or (s.clanLfgAlertEnabled ~= false)
+    if wantExternal then
+        if not self._externalChatEventsOn then
+            self._externalChatEventsOn = true
+            for _, ev in ipairs(CLAN_EXTERNAL_CHAT_EVENTS) do
+                ns.RegisterEvent(self, ev, OnExternalChatPassive)
+            end
+        end
+    elseif self._externalChatEventsOn then
+        self._externalChatEventsOn = false
+        for _, ev in ipairs(CLAN_EXTERNAL_CHAT_EVENTS) do
+            ns.UnregisterEvent(self, ev)
+        end
+    end
+end
+
 function Clan:Init()
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
         pcall(C_ChatInfo.RegisterAddonMessagePrefix, self.PREFIX)
@@ -11490,9 +11556,10 @@ function Clan:Init()
     end
     ns.RegisterEvent(self, "CHAT_MSG_ADDON", OnAddonMessage)
     ns.RegisterEvent(self, "CHAT_MSG_GUILD", OnGuildChatPassive)
-    ns.RegisterEvent(self, "CHAT_MSG_CHANNEL", OnExternalChatPassive)
-    ns.RegisterEvent(self, "CHAT_MSG_SAY", OnExternalChatPassive)
-    ns.RegisterEvent(self, "CHAT_MSG_YELL", OnExternalChatPassive)
+    self:SyncExternalChatEvents()
+    ns:On("SETTINGS_UPDATED", function()
+        Clan:SyncExternalChatEvents()
+    end)
     ns.RegisterEvent(self, "CALENDAR_UPDATE_EVENT_LIST", function()
         Clan:RefreshGameCalendar(false)
         QueueClanEmit(1.0)
@@ -11620,7 +11687,8 @@ function Clan:Init()
         Clan:AutoDetectMyProfessions(false)
     end)
     ns.RegisterEvent(self, "PLAYER_GUILD_UPDATE", function(_, _, unit)
-        if unit and unit ~= "player" then return end
+        local cleanUnit = (unit ~= nil and Safe and Safe.String) and Safe.String(unit) or nil
+        if unit ~= nil and cleanUnit ~= "player" then return end
         local newTok = ComputeGuildScopeToken()
         if newTok ~= Clan.activeScopeToken then
             Clan.activeScopeToken = newTok

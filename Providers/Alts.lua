@@ -369,8 +369,9 @@ local function SnapshotProfessions(prevProfs)
                 if pId then
                     local ok, name, icon, rank, maxRank = pcall(GetProfessionInfo, pId)
                     name = ok and Safe.String(name) or nil
-                    if name and name ~= "" and not seen[name:lower()] then
-                        seen[name:lower()] = true
+                    local nameKey = name and ((Compat and Compat.LowerUtf8 and Compat.LowerUtf8(name)) or name:lower()) or nil
+                    if name and name ~= "" and not seen[nameKey] then
+                        seen[nameKey] = true
                         out[#out + 1] = {
                             name = name,
                             rank = Safe.Number(rank) or 0,
@@ -392,21 +393,25 @@ local function SnapshotProfessions(prevProfs)
             if ok then
                 sName = Safe.String(sName)
                 if Safe.Value(isHeader) then
-                    currentHeader = sName and sName:lower() or ""
-                elseif sName and sName ~= "" and not seen[sName:lower()] then
-                    local inProfHeader = currentHeader:find("profiss", 1, true)
-                        or currentHeader:find("profession", 1, true)
-                        or currentHeader:find("profesion", 1, true)
-                    local abandonable = (Safe.Value(isAbandonable) == true) or (Safe.Number(isAbandonable) == 1)
-                    local secondary = IsSecondarySkillName(sName)
-                    if inProfHeader or abandonable or secondary then
-                        seen[sName:lower()] = true
-                        out[#out + 1] = {
-                            name = sName,
-                            rank = Safe.Number(sRank) or 0,
-                            maxRank = Safe.Number(sMaxRank) or 0,
-                            isPrimary = (abandonable or (inProfHeader and not secondary)) and true or false,
-                        }
+                    currentHeader = sName and ((Compat and Compat.LowerUtf8 and Compat.LowerUtf8(sName)) or sName:lower()) or ""
+                elseif sName and sName ~= "" then
+                    local sNameKey = (Compat and Compat.LowerUtf8 and Compat.LowerUtf8(sName)) or sName:lower()
+                    if not seen[sNameKey] then
+                        local inProfHeader = currentHeader:find("profiss", 1, true)
+                            or currentHeader:find("profession", 1, true)
+                            or currentHeader:find("profesion", 1, true)
+                            or currentHeader:find("profesi\195\179n", 1, true)
+                        local abandonable = (Safe.Value(isAbandonable) == true) or (Safe.Number(isAbandonable) == 1)
+                        local secondary = IsSecondarySkillName(sName)
+                        if inProfHeader or abandonable or secondary then
+                            seen[sNameKey] = true
+                            out[#out + 1] = {
+                                name = sName,
+                                rank = Safe.Number(sRank) or 0,
+                                maxRank = Safe.Number(sMaxRank) or 0,
+                                isPrimary = (abandonable or (inProfHeader and not secondary)) and true or false,
+                            }
+                        end
                     end
                 end
             end
@@ -525,14 +530,43 @@ local function SnapshotMarksFromStorage(bags, bank)
     local function scanList(list)
         if type(list) ~= "table" then return end
         for _, it in ipairs(list) do
-            local iid = type(it) == "table" and tonumber(it.id)
+            local iid, cnt, name, icon = nil, 1, nil, nil
+            if Alts.ParseItemRaw then
+                local pId, pCnt, _, pName, pIcon = Alts:ParseItemRaw(it)
+                iid = pId
+                cnt = pCnt or 1
+                name = pName
+                icon = pIcon
+            elseif type(it) == "string" then
+                local p1, p2 = strsplit("\t", it)
+                iid = tonumber(p1)
+                cnt = math.max(1, tonumber(p2) or 1)
+            elseif type(it) == "table" then
+                iid = tonumber(it.itemID or it.id)
+                cnt = math.max(1, tonumber(it.count) or 1)
+                name = it.name
+                icon = it.icon
+            end
             if iid and TRACKED_MARK_ITEM_IDS[iid] then
+                if (not name or name == "") and C_Item and C_Item.GetItemNameByID then
+                    name = Safe.String(Safe.Call(C_Item.GetItemNameByID, iid))
+                end
+                if (not icon) and C_Item and C_Item.GetItemIconByID then
+                    icon = Safe.Value(Safe.Call(C_Item.GetItemIconByID, iid))
+                end
                 local rec = byId[iid]
                 if not rec then
-                    rec = { id = iid, name = it.name or ("Item #" .. tostring(iid)), count = 0, icon = it.icon }
+                    rec = { id = iid, name = name or ("Item #" .. tostring(iid)), count = 0, icon = icon }
                     byId[iid] = rec
+                else
+                    if (not rec.name or rec.name:find("^Item #")) and name and name ~= "" then
+                        rec.name = name
+                    end
+                    if not rec.icon and icon then
+                        rec.icon = icon
+                    end
                 end
-                rec.count = rec.count + (tonumber(it.count) or 1)
+                rec.count = rec.count + (tonumber(cnt) or 1)
             end
         end
     end
@@ -894,11 +928,12 @@ function Alts:Snapshot(includeBank, force)
         rested = 0
     end
     local money = Safe.Number(Safe.Call(GetMoney)) or 0
-    local guild = Safe.String(Safe.Call(GetGuildInfo, "player"))
-    if (not guild or guild == "") and ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name then
+    local inGuildNow = Safe.Value(IsInGuild and IsInGuild()) == true
+    local guild = inGuildNow and Safe.String(Safe.Call(GetGuildInfo, "player")) or nil
+    if inGuildNow and (not guild or guild == "") and ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.inGuild ~= false and ns.Store.guildInfo.name then
         guild = ns.Store.guildInfo.name
     end
-    if (not guild or guild == "") and type(prev) == "table" and prev.guild and prev.guild ~= "" and Safe.Value(IsInGuild and IsInGuild()) == true then
+    if inGuildNow and (not guild or guild == "") and type(prev) == "table" and prev.guild and prev.guild ~= "" then
         guild = prev.guild
     end
     guild = guild or ""
@@ -951,7 +986,12 @@ function Alts:Snapshot(includeBank, force)
         local bItems, bFree, bTot = SnapshotContainerRange(bankBags)
         if bTot > 0 then
             local bankPacked, bankSig = PackContainerList(bItems)
-            local prevBankSig = (type(prev) == "table" and type(prev.bank) == "table") and select(2, PackContainerList(prev.bank)) or nil
+            self._lastBankSigByChar = self._lastBankSigByChar or {}
+            local prevBankSig = self._lastBankSigByChar[key]
+            if not prevBankSig and type(prev) == "table" and type(prev.bank) == "table" then
+                prevBankSig = select(2, PackContainerList(prev.bank))
+            end
+            self._lastBankSigByChar[key] = bankSig
             bankChanged = (bankSig ~= prevBankSig) or (bFree ~= bankFree) or (bTot ~= bankTotal)
             bank = bankPacked
             bankFree = bFree
@@ -2462,6 +2502,9 @@ function Alts:CompactSavedAlts()
     for cid in pairs(ns.db.itemCatalog) do
         if not usedIds[cid] then
             ns.db.itemCatalog[cid] = nil
+            if catalogParsedCache then
+                catalogParsedCache[cid] = nil
+            end
         end
     end
     if anyChanged then
@@ -3070,7 +3113,7 @@ local function EnsureMailRecipientPicker()
         local btn = ns.Theme:CreateButton(mailComposeFrame, 78, 18, L["Alts"] .. " v", "default")
         btn:SetFrameLevel(math.max(10, (mailComposeFrame:GetFrameLevel() or 1) + 12))
         btn:SetPoint("BOTTOMRIGHT", recipientInput, "TOPRIGHT", -22, 3)
-        btn:SetScript("OnEnter", function(selfBtn)
+        btn:HookScript("OnEnter", function(selfBtn)
             if not GameTooltip then return end
             GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
             GameTooltip:ClearLines()
@@ -3078,7 +3121,7 @@ local function EnsureMailRecipientPicker()
             GameTooltip:AddLine(L["Pick one of your saved characters on this world & faction to fill the recipient field in 1 click."], 0.85, 0.88, 0.94, true)
             GameTooltip:Show()
         end)
-        btn:SetScript("OnLeave", function(selfBtn)
+        btn:HookScript("OnLeave", function(selfBtn)
             if GameTooltip and GameTooltip:IsOwned(selfBtn) then GameTooltip:Hide() end
         end)
         btn:SetScript("OnClick", function(selfBtn)
@@ -3164,6 +3207,9 @@ local function EnsureMailRecipientPicker()
         mailQuickBtn = qBtn
     end
     if mailPickerBtn then
+        if ns.Theme and ns.Theme.StyleButton then
+            ns.Theme:StyleButton(mailPickerBtn, "default")
+        end
         if ns.Theme and ns.Theme.AutoFitButton then
             ns.Theme:AutoFitButton(mailPickerBtn, 62, 12, 118)
             mailPickerBtn:SetHeight(18)
@@ -3179,7 +3225,7 @@ end
 function Alts:RemoveAlt(altKey)
     if not (ns.db and ns.db.alts and altKey) then return false end
     if altKey == CurrentAltKey() then
-        ns:Print(L["Cannot remove the currently logged-in character."])
+        ns:Print("%s", L["Cannot remove the currently logged-in character."])
         return false
     end
     if ns.db.alts[altKey] then
@@ -3285,13 +3331,14 @@ function Alts:Init()
     end)
 
     ns.RegisterEvent(self, "PLAYER_GUILD_UPDATE", function(_, _, unit)
-        if not unit or unit == "player" then
+        local cleanUnit = (unit ~= nil and Safe and Safe.String) and Safe.String(unit) or unit
+        if (unit == nil) or cleanUnit == "player" then
             self:QueueSnapshot(false, 1.5)
         end
     end)
 
     ns.RegisterEvent(self, "PLAYER_EQUIPMENT_CHANGED", function(_, _, slotId)
-        local sid = tonumber(slotId)
+        local sid = (Safe and Safe.Number) and Safe.Number(slotId) or tonumber(slotId)
         if sid and sid >= 1 and sid <= EQUIP_SLOT_COUNT then
             self._dirtyEquipSlots = self._dirtyEquipSlots or {}
             self._dirtyEquipSlots[sid] = true
@@ -3362,7 +3409,7 @@ function Alts:Init()
             return
         end
         self._sawBagUpdateEvent = true
-        local b = tonumber(bagId)
+        local b = (Safe and Safe.Number) and Safe.Number(bagId) or tonumber(bagId)
         if b and b >= 0 and b <= 4 then
             self._dirtyBags = self._dirtyBags or {}
             self._dirtyBags[b] = true
@@ -3428,7 +3475,8 @@ function Alts:Init()
 
     ns.RegisterEvent(self, "PLAYER_INTERACTION_MANAGER_FRAME_SHOW", function(_, _, interactionType)
         local bankerType = Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.Banker
-        if bankerType and interactionType == bankerType then
+        local cleanType = (Safe and Safe.Number) and Safe.Number(interactionType) or nil
+        if bankerType and cleanType and cleanType == bankerType then
             self._bankOpen = true
             self:QueueSnapshot(true, 0.35)
         end
@@ -3436,7 +3484,8 @@ function Alts:Init()
 
     ns.RegisterEvent(self, "PLAYER_INTERACTION_MANAGER_FRAME_HIDE", function(_, _, interactionType)
         local bankerType = Enum and Enum.PlayerInteractionType and Enum.PlayerInteractionType.Banker
-        if bankerType and interactionType == bankerType then
+        local cleanType = (Safe and Safe.Number) and Safe.Number(interactionType) or nil
+        if bankerType and cleanType and cleanType == bankerType then
             self._bankOpen = false
         end
     end)

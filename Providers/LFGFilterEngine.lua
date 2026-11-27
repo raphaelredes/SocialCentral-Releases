@@ -773,6 +773,27 @@ local function SoloOffersRole(item, roleKey)
     return true
 end
 
+local function PassesGroupRoleFilter(want, filled, need, dpsCap, isRaidGroup, hasNeeds, hasStructuredCounts, numMembers, maxM)
+    if want == 1 then
+        if isRaidGroup then
+            if hasNeeds and need ~= nil then
+                if (need or 0) <= 0 then return false end
+            elseif numMembers and maxM > 0 and numMembers >= maxM then
+                return false
+            end
+        elseif hasNeeds and need ~= nil then
+            if (need or 0) <= 0 then return false end
+        elseif hasStructuredCounts and filled ~= nil then
+            if (filled or 0) >= dpsCap then return false end
+        end
+    elseif want == 2 then
+        if hasStructuredCounts and filled ~= nil then
+            if (filled or 0) < 1 then return false end
+        end
+    end
+    return true
+end
+
 function LFG:MatchesAdvancedFilters(item)
     if not item then return false end
     if item.isSelf then return true end
@@ -824,31 +845,14 @@ function LFG:MatchesAdvancedFilters(item)
         local isRaidGroup = maxM > 5
         local hasStructuredCounts = (item.filledT ~= nil or item.filledH ~= nil or item.filledD ~= nil)
         local hasNeeds = (item.needT ~= nil or item.needH ~= nil or item.needD ~= nil)
-        local rolePairs = {
-            { rk = "TANK", filled = item.filledT, need = item.needT },
-            { rk = "HEALER", filled = item.filledH, need = item.needH },
-            { rk = "DPS", filled = item.filledD, need = item.needD },
-        }
-        for _, rp in ipairs(rolePairs) do
-            local want = rs[rp.rk] or 0
-            if want == 1 then
-                if isRaidGroup then
-                    if hasNeeds and rp.need ~= nil then
-                        if (rp.need or 0) <= 0 then return false end
-                    elseif item.numMembers and maxM > 0 and item.numMembers >= maxM then
-                        return false
-                    end
-                elseif hasNeeds and rp.need ~= nil then
-                    if (rp.need or 0) <= 0 then return false end
-                elseif hasStructuredCounts and rp.filled ~= nil then
-                    local cap = (rp.rk == "DPS") and 3 or 1
-                    if (rp.filled or 0) >= cap then return false end
-                end
-            elseif want == 2 then
-                if hasStructuredCounts and rp.filled ~= nil then
-                    if (rp.filled or 0) < 1 then return false end
-                end
-            end
+        if not PassesGroupRoleFilter(rs.TANK or 0, item.filledT, item.needT, 1, isRaidGroup, hasNeeds, hasStructuredCounts, item.numMembers, maxM) then
+            return false
+        end
+        if not PassesGroupRoleFilter(rs.HEALER or 0, item.filledH, item.needH, 1, isRaidGroup, hasNeeds, hasStructuredCounts, item.numMembers, maxM) then
+            return false
+        end
+        if not PassesGroupRoleFilter(rs.DPS or 0, item.filledD, item.needD, 3, isRaidGroup, hasNeeds, hasStructuredCounts, item.numMembers, maxM) then
+            return false
         end
 
         local exCnt = CountBoolSet(st.groupExcludedClasses)
@@ -2326,12 +2330,26 @@ local function BuildDrawerOfficialMode(drawer, parent)
             LFG:NotifySideDrawerChange(false)
         end
     end)
+    avoidMyClsBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine(selfBtn:GetText() or L["No My Class"], 1.0, 0.85, 0.25)
+        GameTooltip:AddLine(L["Filters out groups and solo applicants of your own class so you have less competition on armor and class gear drops."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    avoidMyClsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     drawer.avoidMyClsBtn = avoidMyClsBtn
 
     local exclDropBtn = Theme:CreateButton(c2, 264, 26, L["Exclude Other Classes..."], "default")
     SetDrawerBtnFont(exclDropBtn, _G.GameFontHighlight)
     exclDropBtn:SetPoint("TOPRIGHT", c2, "TOPRIGHT", -6, -95)
     exclDropBtn:SetScript("OnClick", function(selfBtn) OpenExcludeClassesContextMenu(selfBtn) end)
+    exclDropBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine(selfBtn:GetText() or L["Exclude Other Classes..."], 1.0, 0.85, 0.25)
+        GameTooltip:AddLine(L["Exclude specific classes you prefer not to share loot or party slots with when searching for groups."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    exclDropBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     drawer.exclDropBtn = exclDropBtn
 
     -- Card 3: Smart Player Recruiting
@@ -2381,8 +2399,8 @@ local function BuildDrawerOfficialMode(drawer, parent)
     end
 
     local minBox = Theme:CreateEditBox(c3, { height = 26, font = _G.GameFontHighlight, maxLetters = 3, numeric = true, placeholder = "1" })
-    minBox:SetWidth(56)
-    minBox:SetPoint("TOPLEFT", c3, "TOPLEFT", 416, -27)
+    minBox:SetWidth(48)
+    minBox:SetPoint("TOPLEFT", c3, "TOPLEFT", 418, -27)
     drawer.soloMinBox = minBox
 
     local dashFs = c3:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
@@ -2390,7 +2408,7 @@ local function BuildDrawerOfficialMode(drawer, parent)
     dashFs:SetText("-")
 
     local maxBox = Theme:CreateEditBox(c3, { height = 26, font = _G.GameFontHighlight, maxLetters = 3, numeric = true, placeholder = "60" })
-    maxBox:SetWidth(56)
+    maxBox:SetWidth(48)
     maxBox:SetPoint("LEFT", dashFs, "RIGHT", 4, 0)
     drawer.soloMaxBox = maxBox
 
@@ -2501,12 +2519,26 @@ local function BuildDrawerOfficialMode(drawer, parent)
     SetDrawerBtnFont(langBtn, _G.GameFontHighlight)
     langBtn:SetPoint("TOPLEFT", c4, "TOPLEFT", 6, -37)
     langBtn:SetScript("OnClick", function(selfBtn) OpenLanguagesContextMenu(selfBtn) end)
+    langBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine(L["Languages"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Filter listings by preferred realm or group languages."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    langBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     drawer.langBtn = langBtn
 
     local soloSortBtn = Theme:CreateButton(c4, 129, 26, L["Sort"], "default")
     SetDrawerBtnFont(soloSortBtn, _G.GameFontHighlight)
     soloSortBtn:SetPoint("LEFT", langBtn, "RIGHT", 6, 0)
     soloSortBtn:SetScript("OnClick", function(selfBtn) OpenSoloSortContextMenu(selfBtn) end)
+    soloSortBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine(selfBtn:GetText() or L["Sort"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Choose how browse results and solo applicants are sorted."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    soloSortBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     drawer.soloSortBtn = soloSortBtn
 
     local hideFullBtn = Theme:CreateButton(c4, 129, 26, L["Hide Full"], "default")
@@ -2519,6 +2551,13 @@ local function BuildDrawerOfficialMode(drawer, parent)
             LFG:NotifySideDrawerChange(false)
         end
     end)
+    hideFullBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine(L["Hide Full Groups"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Hides dungeon and raid groups whose slots are already full."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    hideFullBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     drawer.hideFullBtn = hideFullBtn
 
     local suitLevelBtn = Theme:CreateButton(c4, 129, 26, L["My Level"], "default")
@@ -2536,6 +2575,13 @@ local function BuildDrawerOfficialMode(drawer, parent)
         end
         LFG:NotifySideDrawerChange(true)
     end)
+    suitLevelBtn:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine(L["Suitable for My Level"], 1.0, 0.82, 0.0)
+        GameTooltip:AddLine(L["Filters Browse activities to dungeons and content within your character's recommended level range."], 0.88, 0.90, 0.94, true)
+        GameTooltip:Show()
+    end)
+    suitLevelBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     drawer.suitLevelBtn = suitLevelBtn
 
     local foot = CreateFrame("Frame", nil, m1, "BackdropTemplate")
@@ -2572,9 +2618,9 @@ local function BuildDrawerSocialMode(drawer, parent)
     banFs:SetText("|cff3fb950[" .. L["Guild & Addon Only"] .. "]|r " .. L["Exclusive SocialCentral tools — synced with your Guild, Allied Guilds, Friends, Watchlist, and other addon users."])
 
     local srcCard = CreateFrame("Frame", nil, m2, "BackdropTemplate")
-    srcCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -50)
-    srcCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -50)
-    srcCard:SetHeight(128)
+    srcCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -48)
+    srcCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -48)
+    srcCard:SetHeight(120)
     drawer.srcCard = srcCard
 
     local srcHdr = srcCard:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -2582,21 +2628,21 @@ local function BuildDrawerSocialMode(drawer, parent)
     srcHdr:SetText(L["Search Sources (Official vs Guild / Addon)"])
 
     local srcDefs = {
-        { id = "ALL",         label = L["All (Official + Guild)"] },
-        { id = "OFFICIAL",    label = L["Official Only"] .. " |cff6ec1e4[" .. L["Official"] .. "]|r" },
-        { id = "CLAN",        label = L["My Guild"] .. " |cffffd24d[" .. L["Guild/Addon"] .. "]|r" },
-        { id = "SC_USERS",    label = L["Addon Users Only"] .. " |cff3fb950[" .. L["Addon"] .. "]|r" },
-        { id = "FRIENDS",     label = L["Friends & Watchlist"] .. " |cffd2a8ff[" .. L["Addon"] .. "]|r" },
-        { id = "PUBLIC_CHAT", label = L["Global Chat / LFG"] .. " |cffb8c0cc[" .. L["Chat"] .. "]|r" },
+        { id = "ALL",         label = L["All (Official + Guild)"], desc = L["Shows all groups and solo players from Official Blizzard LFG, Global Chat, Guild, Allies, and Friends."] },
+        { id = "OFFICIAL",    label = L["Official Only"] .. " |cff6ec1e4[" .. L["Official"] .. "]|r", desc = L["Shows only public groups listed in Blizzard's Official Group Finder."] },
+        { id = "CLAN",        label = L["My Guild"] .. " |cffffd24d[" .. L["Guild/Addon"] .. "]|r", desc = L["Shows groups and solo listings shared by members of your Guild and Allied Guilds."] },
+        { id = "SC_USERS",    label = L["Addon Users Only"] .. " |cff3fb950[" .. L["Addon"] .. "]|r", desc = L["Shows only groups and players running SocialCentral [SC] for rich role, class, and status sync."] },
+        { id = "FRIENDS",     label = L["Friends & Watchlist"] .. " |cffd2a8ff[" .. L["Addon"] .. "]|r", desc = L["Shows groups and solo listings involving your Friends list or Watchlist players."] },
+        { id = "PUBLIC_CHAT", label = L["Global Chat / LFG"] .. " |cffb8c0cc[" .. L["Chat"] .. "]|r", desc = L["Shows group calls captured passively from World and Global chat channels."] },
     }
     drawer.srcBtns = {}
     for si, sd in ipairs(srcDefs) do
         local col = (si - 1) % 2
         local rowIdx = math.floor((si - 1) / 2)
-        local sb = Theme:CreateButton(srcCard, 264, 28, sd.label, "default")
+        local sb = Theme:CreateButton(srcCard, 264, 26, sd.label, "default")
         SetDrawerBtnFont(sb, _G.GameFontHighlight)
         sb._srcId = sd.id
-        sb:SetPoint("TOPLEFT", srcCard, "TOPLEFT", 6 + (col * 272), -29 - (rowIdx * 32))
+        sb:SetPoint("TOPLEFT", srcCard, "TOPLEFT", 6 + (col * 272), -27 - (rowIdx * 30))
         sb:SetScript("OnClick", function()
             local tab = LFG._sideDrawerHost or ns.LFGFrameTab
             if not tab then return end
@@ -2607,23 +2653,30 @@ local function BuildDrawerSocialMode(drawer, parent)
             LFG:RefreshSideDrawer(tab)
             ns:Emit("LFG_BROWSE_STATE_CHANGED")
         end)
+        sb:SetScript("OnEnter", function(selfBtn)
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:AddLine(sd.label, 1.0, 0.85, 0.25)
+            GameTooltip:AddLine(sd.desc, 0.88, 0.90, 0.94, true)
+            GameTooltip:Show()
+        end)
+        sb:SetScript("OnLeave", function() GameTooltip:Hide() end)
         drawer.srcBtns[si] = sb
     end
 
     local favCard = CreateFrame("Frame", nil, m2, "BackdropTemplate")
-    favCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -184)
-    favCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -184)
-    favCard:SetHeight(86)
+    favCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -174)
+    favCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -174)
+    favCard:SetHeight(82)
     drawer.favCard = favCard
 
     local favTitle = favCard:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     favTitle:SetPoint("TOPLEFT", 8, -7)
     favTitle:SetText(STAR_TEX .. " " .. L["Favorite Activities"] .. " |cff3fb950[SocialCentral]|r")
 
-    local favManageBtn = Theme:CreateButton(favCard, 156, 24, L["Manage Favorites"], "default")
+    local favManageBtn = Theme:CreateButton(favCard, 156, 22, L["Manage Favorites"], "default")
     SetDrawerBtnFont(favManageBtn, _G.GameFontHighlight)
     Theme:AutoFitButton(favManageBtn, 128, 16, 196)
-    favManageBtn:SetPoint("TOPRIGHT", -6, -5)
+    favManageBtn:SetPoint("TOPRIGHT", -6, -4)
     favManageBtn:SetScript("OnClick", function(selfBtn)
         local tab = LFG._sideDrawerHost or ns.LFGFrameTab
         if not (MenuUtil and MenuUtil.CreateContextMenu and tab and tab.GetBrowseActivityOptions) then return end
@@ -2647,7 +2700,7 @@ local function BuildDrawerSocialMode(drawer, parent)
     drawer.favManageBtn = favManageBtn
 
     local favEmptyFs = favCard:CreateFontString(nil, "OVERLAY", "GameFontDisable")
-    favEmptyFs:SetPoint("TOPLEFT", 8, -32)
+    favEmptyFs:SetPoint("TOPLEFT", 8, -28)
     favEmptyFs:SetPoint("BOTTOMRIGHT", -8, 6)
     favEmptyFs:SetJustifyH("LEFT")
     favEmptyFs:SetJustifyV("MIDDLE")
@@ -2659,17 +2712,17 @@ local function BuildDrawerSocialMode(drawer, parent)
     for fi = 1, 4 do
         local col = (fi - 1) % 2
         local rowIdx = math.floor((fi - 1) / 2)
-        local fb = Theme:CreateButton(favCard, 262, 24, "", "default")
+        local fb = Theme:CreateButton(favCard, 262, 23, "", "default")
         SetDrawerBtnFont(fb, _G.GameFontHighlight)
-        fb:SetPoint("TOPLEFT", favCard, "TOPLEFT", 8 + (col * 270), -32 - (rowIdx * 26))
+        fb:SetPoint("TOPLEFT", favCard, "TOPLEFT", 8 + (col * 270), -29 - (rowIdx * 25))
         fb:Hide()
         drawer.favPills[fi] = fb
     end
 
     local orgCard = CreateFrame("Frame", nil, m2, "BackdropTemplate")
-    orgCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -276)
-    orgCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -276)
-    orgCard:SetHeight(116)
+    orgCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -262)
+    orgCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -262)
+    orgCard:SetHeight(110)
     drawer.orgCard = orgCard
 
     local orgHdr = orgCard:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -2677,12 +2730,12 @@ local function BuildDrawerSocialMode(drawer, parent)
     orgHdr:SetText(L["Organization & Safety"] .. " |cff3fb950[SocialCentral]|r")
 
     local orgDefs = {
-        { id = "sep",   lbl = L["Separate Groups & Players"], w = 264, x = 6,   y = -29, fn = function()
+        { id = "sep",   lbl = L["Separate Groups & Players"], desc = L["Separates formed Groups ([LFM]) and solo Players Looking ([Looking]) into two distinct collapsible sections."], w = 264, x = 6,   y = -27, fn = function()
             if ns.db and ns.db.settings then
                 ns.db.settings.lfgSplitGroupsAndPlayers = not (ns.db.settings.lfgSplitGroupsAndPlayers ~= false)
             end
         end },
-        { id = "bul",   lbl = L["Group by Dungeon (Bulletin)"], w = 264, x = 278, y = -29, fn = function()
+        { id = "bul",   lbl = L["Group by Dungeon (Bulletin)"], desc = L["Clusters listings under collapsible Dungeon and Raid headers with slot summaries."], w = 264, x = 278, y = -27, fn = function()
             if ns.db and ns.db.settings then
                 local curBull = (ns.db.settings.lfgSplitGroupsAndPlayers == false) and (ns.db.settings.lfgBulletinMode ~= false)
                 local targetBull = not curBull
@@ -2690,22 +2743,22 @@ local function BuildDrawerSocialMode(drawer, parent)
                 ns.db.settings.lfgSplitGroupsAndPlayers = not targetBull
             end
         end },
-        { id = "saved", lbl = L["Hide Saved Lockouts"], w = 264, x = 6,   y = -58, fn = function()
+        { id = "saved", lbl = L["Hide Saved Lockouts"], desc = L["Hides dungeon and raid listings for instances where your character already has a saved lockout."], w = 264, x = 6,   y = -55, fn = function()
             if ns.db and ns.db.settings then
                 ns.db.settings.lfgHideSavedLockouts = not (ns.db.settings.lfgHideSavedLockouts == true)
             end
         end },
-        { id = "avoid", lbl = L["Hide Avoid / Enemy"], w = 264, x = 278, y = -58, fn = function()
+        { id = "avoid", lbl = L["Hide Avoid / Enemy"], desc = L["Automatically hides listings containing Avoid-flagged players or Enemy Guild members."], w = 264, x = 278, y = -55, fn = function()
             if ns.db and ns.db.settings then
                 ns.db.settings.lfgHideAvoidEnemy = not (ns.db.settings.lfgHideAvoidEnemy == true)
             end
         end },
-        { id = "cls",   lbl = L["Show member class icons"], w = 264, x = 6,   y = -87, fn = function()
+        { id = "cls",   lbl = L["Show member class icons"], desc = L["Displays class icons for current party/raid members on the bottom right of each Browse card."], w = 264, x = 6,   y = -83, fn = function()
             if ns.db and ns.db.settings then
                 ns.db.settings.lfgShowClassIconsOnRows = not (ns.db.settings.lfgShowClassIconsOnRows ~= false)
             end
         end },
-        { id = "autoopen", lbl = L["Auto-open on Listing"], w = 264, x = 278, y = -87, fn = function()
+        { id = "autoopen", lbl = L["Auto-open on Listing"], desc = L["Automatically switches to the SocialCentral Browse tab whenever you publish a new listing on Official Tab 1."], w = 264, x = 278, y = -83, fn = function()
             if ns.db and ns.db.settings then
                 ns.db.settings.lfgAutoOpenOnList = not (ns.db.settings.lfgAutoOpenOnList ~= false)
             end
@@ -2713,7 +2766,7 @@ local function BuildDrawerSocialMode(drawer, parent)
     }
     drawer.orgBtns = {}
     for oi, od in ipairs(orgDefs) do
-        local ob = Theme:CreateButton(orgCard, od.w, 26, od.lbl, "default")
+        local ob = Theme:CreateButton(orgCard, od.w, 25, od.lbl, "default")
         SetDrawerBtnFont(ob, _G.GameFontHighlight)
         ob._orgId = od.id
         ob:SetPoint("TOPLEFT", orgCard, "TOPLEFT", od.x, od.y)
@@ -2722,12 +2775,19 @@ local function BuildDrawerSocialMode(drawer, parent)
             if ns.Settings and ns.Settings.Refresh then ns.Settings:Refresh() end
             LFG:NotifySideDrawerChange(false)
         end)
+        ob:SetScript("OnEnter", function(selfBtn)
+            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            GameTooltip:AddLine(od.lbl, 1.0, 0.85, 0.25)
+            GameTooltip:AddLine(od.desc, 0.88, 0.90, 0.94, true)
+            GameTooltip:Show()
+        end)
+        ob:SetScript("OnLeave", function() GameTooltip:Hide() end)
         drawer.orgBtns[oi] = ob
     end
 
     local rateCard = CreateFrame("Frame", nil, m2, "BackdropTemplate")
-    rateCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -398)
-    rateCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -398)
+    rateCard:SetPoint("TOPLEFT", m2, "TOPLEFT", 0, -378)
+    rateCard:SetPoint("TOPRIGHT", m2, "TOPRIGHT", 0, -378)
     rateCard:SetPoint("BOTTOM", m2, "BOTTOM", 0, 4)
     drawer.rateCard = rateCard
 
@@ -2765,13 +2825,22 @@ end
 
 local function RefreshDrawerOfficialMode(d, tab)
     local Theme = ns.Theme
-    if Theme and Theme.ApplyBackdrop then
-        for _, card in ipairs({ d.goalCard, d.compCard, d.recruitCard, d.miscCard }) do
-            if card then Theme:ApplyBackdrop(card, "surface") end
+    local pKey = (Theme and Theme.GetThemeName and Theme:GetThemeName()) or "blizzard"
+    if d._lastOfficialThemeKey ~= pKey then
+        d._lastOfficialThemeKey = pKey
+        if Theme and Theme.ApplyBackdrop then
+            for _, card in ipairs({ d.goalCard, d.compCard, d.recruitCard, d.miscCard }) do
+                if card then Theme:ApplyBackdrop(card, "surface") end
+            end
+            if d.offFooter then Theme:ApplyBackdrop(d.offFooter, "inset") end
+            for _, rc in ipairs(d.roleMatrixCards or {}) do
+                Theme:ApplyBackdrop(rc, "inset")
+            end
         end
-        if d.offFooter then Theme:ApplyBackdrop(d.offFooter, "inset") end
-        for _, rc in ipairs(d.roleMatrixCards or {}) do
-            Theme:ApplyBackdrop(rc, "inset")
+        if Theme and Theme.StyleButton then
+            Theme:StyleButton(d.searchBtn, "primary")
+            Theme:StyleButton(d.resetBtn, "danger")
+            Theme:StyleButton(d.roleCheckBtn, "default")
         end
     end
     local curType = LFG:GetListingType()
@@ -2779,11 +2848,8 @@ local function RefreshDrawerOfficialMode(d, tab)
         for _, ib in ipairs(d.intentBtns or {}) do
             Theme:StyleButton(ib, (ib._typeId == curType) and "primary" or "default")
         end
-        Theme:StyleButton(d.searchBtn, "primary")
         Theme:StyleButton(d.preBtn, "default")
         Theme:SetButtonText(d.preBtn, (#LFG:GetPresets() > 0) and (L["Presets"] .. " (" .. #LFG:GetPresets() .. ")") or L["Presets"])
-        Theme:StyleButton(d.resetBtn, "danger")
-        Theme:StyleButton(d.roleCheckBtn, "default")
     end
 
     local gQuests = (ns.Clan and ns.Clan.GetActiveGroupQuests) and ns.Clan:GetActiveGroupQuests() or {}
