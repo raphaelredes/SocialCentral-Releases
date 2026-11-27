@@ -6187,7 +6187,7 @@ function SocialPanels:CreateChatPanel(parent)
                 {
                     title = L["Conversation List"],
                     tag = "2/4 · " .. L["Threads"],
-                    text = L["Select a chat on the left, drag to reorder, or right-click to Pin/Mute."],
+                    text = L["Select a chat on the left, drag to reorder, or right-click to Pin, Mute, or filter General."],
                     target = function()
                         return (panel._leftCard and panel._leftCard:IsShown() and panel._leftCard) or panel._rightCard or panel
                     end,
@@ -6724,6 +6724,12 @@ function SocialPanels:CreateChatPanel(parent)
                             end
                         end
                         root:CreateTitle(menuTitle)
+                        if key == "ch:general" and ns.Chat and ns.Chat.AttachGeneralFilterSubmenu then
+                            ns.Chat:AttachGeneralFilterSubmenu(root, function()
+                                panel:Refresh()
+                            end)
+                            root:CreateDivider()
+                        end
                         local hasOrgItems = false
                         if key ~= "notes:self" and ns.Chat.ToggleThreadPinned then
                             local isPinned = ns.Chat:IsThreadPinned(key)
@@ -7255,43 +7261,46 @@ function SocialPanels:CreateChatPanel(parent)
         if not act or not (act.messages and #act.messages > 0) then return end
         local buf = {}
         local lastPairKey = nil
+        local isGeneralCopy = (k == "ch:general")
         for _, entry in ipairs(act.messages) do
-            local ts = entry.ts and entry.ts > 0 and date("[%H:%M] ", entry.ts) or ""
-            local rawTxt = tostring(entry.text or "")
-            rawTxt = rawTxt:gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T.-|t", "")
-            local shortSender = entry.sender or ""
-            if (act.kind == "WHISPER" or act.kind == "BN_WHISPER") and not entry.isStatusNotice and not entry.isSystem then
-                if entry.targetChar and entry.targetChar ~= "" then
-                    local sLk, sFirst
-                    if Compat.ParseCharacterFields then
-                        sLk, sFirst = Compat.ParseCharacterFields(entry.sender)
-                    end
-                    sLk = sLk or tostring(entry.sender):lower()
-                    local tLk = Compat.ParseCharacterFields and Compat.ParseCharacterFields(entry.targetChar) or tostring(entry.targetChar):lower()
-                    local pKey = (sLk < tLk) and (sLk .. "|" .. tLk) or (tLk .. "|" .. sLk)
-                    if pKey ~= lastPairKey then
-                        lastPairKey = pKey
-                        local myC = entry.incoming and entry.targetChar or entry.sender
-                        local peerC = entry.incoming and entry.sender or entry.targetChar
-                        if Compat.IsStreamerMode and Compat.IsStreamerMode() and (act.kind == "BN_WHISPER" or tostring(peerC or ""):find("#", 1, true)) and Compat.MaskStreamerBNetName then
-                            peerC = Compat.MaskStreamerBNetName(peerC)
+            if (not isGeneralCopy) or (not ns.Chat.IsGeneralEntryVisible) or ns.Chat:IsGeneralEntryVisible(entry) then
+                local ts = entry.ts and entry.ts > 0 and date("[%H:%M] ", entry.ts) or ""
+                local rawTxt = tostring(entry.text or "")
+                rawTxt = rawTxt:gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T.-|t", "")
+                local shortSender = entry.sender or ""
+                if (act.kind == "WHISPER" or act.kind == "BN_WHISPER") and not entry.isStatusNotice and not entry.isSystem then
+                    if entry.targetChar and entry.targetChar ~= "" then
+                        local sLk, sFirst
+                        if Compat.ParseCharacterFields then
+                            sLk, sFirst = Compat.ParseCharacterFields(entry.sender)
                         end
-                        table.insert(buf, ("—— %s & %s ——"):format(myC or "?", peerC or "?"))
-                    end
-                    if sFirst and sFirst ~= "" then
-                        shortSender = sFirst
-                    end
-                elseif Compat.ParseCharacterFields then
-                    local _, sFirst = Compat.ParseCharacterFields(shortSender)
-                    if sFirst and sFirst ~= "" then
-                        shortSender = sFirst
+                        sLk = sLk or tostring(entry.sender):lower()
+                        local tLk = Compat.ParseCharacterFields and Compat.ParseCharacterFields(entry.targetChar) or tostring(entry.targetChar):lower()
+                        local pKey = (sLk < tLk) and (sLk .. "|" .. tLk) or (tLk .. "|" .. sLk)
+                        if pKey ~= lastPairKey then
+                            lastPairKey = pKey
+                            local myC = entry.incoming and entry.targetChar or entry.sender
+                            local peerC = entry.incoming and entry.sender or entry.targetChar
+                            if Compat.IsStreamerMode and Compat.IsStreamerMode() and (act.kind == "BN_WHISPER" or tostring(peerC or ""):find("#", 1, true)) and Compat.MaskStreamerBNetName then
+                                peerC = Compat.MaskStreamerBNetName(peerC)
+                            end
+                            table.insert(buf, ("—— %s & %s ——"):format(myC or "?", peerC or "?"))
+                        end
+                        if sFirst and sFirst ~= "" then
+                            shortSender = sFirst
+                        end
+                    elseif Compat.ParseCharacterFields then
+                        local _, sFirst = Compat.ParseCharacterFields(shortSender)
+                        if sFirst and sFirst ~= "" then
+                            shortSender = sFirst
+                        end
                     end
                 end
+                if Compat.IsStreamerMode and Compat.IsStreamerMode() and (act.kind == "BN_WHISPER" or tostring(shortSender):find("#", 1, true)) and Compat.MaskStreamerBNetName then
+                    shortSender = Compat.MaskStreamerBNetName(shortSender)
+                end
+                table.insert(buf, ts .. shortSender .. ": " .. rawTxt)
             end
-            if Compat.IsStreamerMode and Compat.IsStreamerMode() and (act.kind == "BN_WHISPER" or tostring(shortSender):find("#", 1, true)) and Compat.MaskStreamerBNetName then
-                shortSender = Compat.MaskStreamerBNetName(shortSender)
-            end
-            table.insert(buf, ts .. shortSender .. ": " .. rawTxt)
         end
         if ns.UI and ns.UI.OpenCopyModal then
             local copyTitle = act.title or ""
@@ -7315,6 +7324,12 @@ function SocialPanels:CreateChatPanel(parent)
             return
         end
         MenuUtil.CreateContextMenu(selfBtn, function(_, root)
+            if k == "ch:general" and ns.Chat and ns.Chat.AttachGeneralFilterSubmenu then
+                ns.Chat:AttachGeneralFilterSubmenu(root, function()
+                    panel:Refresh()
+                end)
+                root:CreateDivider()
+            end
             local isPinned = ns.Chat and ns.Chat.IsThreadPinned and ns.Chat:IsThreadPinned(k)
             root:CreateButton(isPinned and L["Unpin Conversation"] or L["Pin Conversation"], function()
                 if ns.Chat and ns.Chat.ToggleThreadPinned then
@@ -8489,7 +8504,10 @@ function SocialPanels:CreateChatPanel(parent)
         local lineCount = lines and #lines or 0
         local streamerFlag = (Compat.IsStreamerMode and Compat.IsStreamerMode()) and "S1|" or "S0|"
         local urlsFlag = (not ns.db or not ns.db.settings or ns.db.settings.chatClickableUrls ~= false) and "U1|" or "U0|"
-        local delivSig = streamerFlag .. urlsFlag .. tostring((ns.Chat and ns.Chat._guildActionRev) or 0) .. "|"
+        local isGeneralAct = (activeKey == "ch:general")
+        local genFilterSig = (isGeneralAct and ns.Chat and ns.Chat.GetGeneralFilterSignature)
+            and ns.Chat:GetGeneralFilterSignature() or ""
+        local delivSig = streamerFlag .. urlsFlag .. tostring((ns.Chat and ns.Chat._guildActionRev) or 0) .. "|GF:" .. genFilterSig .. "|"
         if active and lines and lineCount > 0 then
             local startScan = math.max(1, lineCount - 7)
             for i = startScan, lineCount do
@@ -8500,10 +8518,12 @@ function SocialPanels:CreateChatPanel(parent)
             end
         end
         local prevSameThread = (panel._renderedMsgActiveKey == activeKey) and (not resetScroll)
+        local filterChangedNow = isGeneralAct and (panel._renderedGeneralFilterSig ~= genFilterSig)
         local prevMsgCount = panel._renderedMsgCount or 0
         local incStartMsgIdx = nil
         if (not themeChanged)
             and (not resetScroll)
+            and (not panel._showingEmptyGeneralHint)
             and active ~= nil
             and prevSameThread
             and (panel._renderedMsgNil == false)
@@ -8537,9 +8557,9 @@ function SocialPanels:CreateChatPanel(parent)
             or panel._renderedMsgDelivSig ~= delivSig
             or panel._renderedSearchFold ~= qFold
         local wasAtBottom = (not msgFrame.AtBottom) or (msgFrame:AtBottom() ~= false)
-        local savedScrollOff = (prevSameThread and (not wasAtBottom) and msgFrame.GetScrollOffset) and (msgFrame:GetScrollOffset() or 0) or 0
+        local savedScrollOff = (prevSameThread and (not filterChangedNow) and (not wasAtBottom) and msgFrame.GetScrollOffset) and (msgFrame:GetScrollOffset() or 0) or 0
         local prevRenderedLines = (prevSameThread and msgFrame.GetNumMessages) and (msgFrame:GetNumMessages() or 0) or 0
-        panel._pendingRestoreScrollOffset = (prevSameThread and (not wasAtBottom) and savedScrollOff > 0) and savedScrollOff or nil
+        panel._pendingRestoreScrollOffset = (prevSameThread and (not filterChangedNow) and (not wasAtBottom) and savedScrollOff > 0) and savedScrollOff or nil
         panel._pendingRestorePrevLines = prevRenderedLines
         if needMsgRebuild then
             panel._renderedMsgActiveKey = activeKey
@@ -8548,8 +8568,10 @@ function SocialPanels:CreateChatPanel(parent)
             panel._renderedMsgFirst = lines and lines[1] or nil
             panel._renderedMsgLast = (lines and lineCount > 0) and lines[lineCount] or nil
             panel._renderedMsgDelivSig = delivSig
+            panel._renderedGeneralFilterSig = genFilterSig
             panel._renderedSearchFold = qFold
             if not canIncrementalAppend then
+                panel._showingEmptyGeneralHint = nil
                 panel._renderedLastDayKey = nil
                 panel._renderedLastPairKey = nil
                 panel._renderedLastGroupKey = nil
@@ -8941,12 +8963,27 @@ function SocialPanels:CreateChatPanel(parent)
                     local unreadTargetEntry = active.lastReadBannerEntry or active.firstUnreadEntry
                     local unreadTargetTs = active.lastReadBannerTs or active.firstUnreadTs
                     local unreadBannerShown = canIncrementalAppend and (panel._renderedUnreadBannerShown == true) or false
+                    local maxRenderLines = (qFold ~= "") and 1000 or 400
                     if msgFrame.SetMaxLines then
-                        msgFrame:SetMaxLines((qFold ~= "") and 1000 or 400)
+                        msgFrame:SetMaxLines(maxRenderLines)
                     end
                     local startMsgIdx = canIncrementalAppend and incStartMsgIdx or ((qFold ~= "") and 1 or math.max(1, #lines - 399))
-                    for msgIdx = startMsgIdx, #lines do
-                        local entry = lines[msgIdx]
+                    local visIdx = nil
+                    local iterCount = math.max(0, #lines - startMsgIdx + 1)
+                    if isGeneralAct and (not canIncrementalAppend) and ns.Chat and ns.Chat.CollectGeneralVisibleIndices then
+                        panel._genVisIdxScratch = panel._genVisIdxScratch or {}
+                        visIdx = ns.Chat:CollectGeneralVisibleIndices(lines, maxRenderLines, panel._genVisIdxScratch)
+                        iterCount = #visIdx
+                    end
+                    if isGeneralAct and (not canIncrementalAppend) and #lines > 0 and iterCount == 0 then
+                        panel._showingEmptyGeneralHint = true
+                        msgFrame:AddMessage("|cff7f8a9c" .. L["All current messages in General are hidden by your tab filters. Right-click the General tab to customize."] .. "|r")
+                    else
+                        panel._showingEmptyGeneralHint = nil
+                        for msgStep = 1, iterCount do
+                            local msgIdx = visIdx and visIdx[msgStep] or (startMsgIdx + msgStep - 1)
+                            local entry = lines[msgIdx]
+                            if entry and ((not isGeneralAct) or (not ns.Chat) or (not ns.Chat.IsGeneralEntryVisible) or ns.Chat:IsGeneralEntryVisible(entry)) then
                         local eTs = tonumber(entry.ts) or 0
                         local showedBreakLine = false
                         if eTs > 0 then
@@ -9107,6 +9144,8 @@ function SocialPanels:CreateChatPanel(parent)
                             end
                             local senderDisp = sFacIco .. hex .. shortSender .. "|r" .. msgLvlTag
                             msgFrame:AddMessage(ts .. searchHitTag .. mentionPrefix .. addonTag .. senderDisp .. ": " .. bodyTxt .. tick)
+                        end
+                            end
                         end
                     end
                     panel._renderedLastDayKey = lastDayKey

@@ -771,6 +771,7 @@ end
 
 -- Cross-pollinate Watchlist rows whenever live Social or Nearby detects a watched player.
 function Store:SyncWatchlistObservation(rawName, data, opts)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     if ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false then return end
     local list = self:GetWatchlistTable()
     if next(list) == nil then return end

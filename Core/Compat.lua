@@ -2567,6 +2567,11 @@ function Compat.IsInGuild()
 end
 
 function Compat.ShouldShowGuildFeatures()
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive()
+        and ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.inGuild
+    then
+        return true
+    end
     local s = ns.db and ns.db.settings
     if not s or s.hideGuildFeaturesWhenNoGuild ~= false then
         return Compat.IsInGuild()

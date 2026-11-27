@@ -5542,7 +5542,9 @@ local function BuildFilteredRows()
         end)
         return InjectExpandedDetail(grouped)
     elseif activeTab == "watchlist" and #out > 0 and watchlistGroupFilter == "all" then
-        local inGuild = Compat.IsInGuild and Compat.IsInGuild()
+        local inGuild = (Compat.ShouldShowGuildFeatures and Compat.ShouldShowGuildFeatures())
+            or (Compat.IsInGuild and Compat.IsInGuild())
+        local demoActive = ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive()
         local myGuildName = inGuild and ((ns.Store and ns.Store.guildInfo and ns.Store.guildInfo.name) or (GetGuildInfo and Safe.String(Safe.Call(GetGuildInfo, "player")))) or nil
         local myGuildLower = (type(myGuildName) == "string" and myGuildName ~= "") and ((Compat.LowerUtf8 and Compat.LowerUtf8(myGuildName)) or myGuildName:lower()) or ""
         return UI._BuildGroupedSectionRows(out, "watchlist", function(it)
@@ -5551,8 +5553,10 @@ local function BuildFilteredRows()
             local wKey = it.id or it.lookupKey
             local isFav = (it.favorite == true) or (wKey ~= nil and ns.Store and ns.Store.IsSocialFavorite and ns.Store:IsSocialFavorite(wKey) == true)
             local itemGuildLow = (type(it.guild) == "string" and it.guild ~= "") and ((Compat.LowerUtf8 and Compat.LowerUtf8(it.guild)) or it.guild:lower()) or ""
-            local isGuild = inGuild and it.sameFaction ~= false and ((Compat.IsGuildMember and Compat.IsGuildMember(nil, it.guid, it.displayName))
-                or (myGuildLower ~= "" and itemGuildLow == myGuildLower))
+            local isGuild = inGuild and it.sameFaction ~= false and (
+                ((not demoActive) and Compat.IsGuildMember and Compat.IsGuildMember(nil, it.guid, it.displayName))
+                or (myGuildLower ~= "" and itemGuildLow == myGuildLower)
+            )
             if isFav then
                 return "__fav", L["Favorites"], false
             elseif type(it.group) == "string" and it.group ~= "" then

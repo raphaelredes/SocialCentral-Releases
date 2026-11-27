@@ -5,6 +5,14 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.30] - 2026-11-27
+- **Top Flight Countdown Bar (`Providers/FlightTimes.lua`, `Core/Init.lua`, `UI/Settings.lua`, `Locales/Locale.lua`):**
+  - Added a live draggable countdown bar at the top of the screen during Flight Master travel displaying destination, route, remaining arrival time, progress bar, `[?]` guide, `[X]` per-flight dismiss, `/reload` recovery, and safety guards against recording interrupted flights (`Death`/`AcceptProposal`/instance transitions).
+- **General Tab Notification Filters (`Providers/Chat.lua`, `Core/Init.lua`, `UI/Minimap.lua`, `UI/SocialPanels.lua`, `Locales/Locale.lua`):**
+  - Added a `Show Notifications` filter submenu in the `General` (`ch:general`) right-click menu across Quick Reply and Conversations so players can selectively hide or show Loot, Achievements, World/Bosses/NPCs, System/Notices, Public Channels (`/1`, `/2`...), and Say/Yell/Emotes live without losing non-filtered chat.
+- **All-in-One Screenshot Demo Showcase (`/sc demo` & `/sc demo clear`) (`Providers/DemoShowcase.lua`, `Core/Init.lua`, `SocialCentral.toc`, `Locales/Locale.lua`):**
+  - Added `/sc demo` to populate clean in-memory hypothetical showcase data across every window and widget in a single command (Social, Watchlist, Nearby, Target Radar HUD, Guild Hub/Events/Diplomacy/Professions, LFG Browse, Group/Synergy/Dungeon History, Account Alts & World Buffs, Conversations/Quick Reply/Mentions, Minimap Previews & Fusion Badge, Notification Toasts, QuickBar, and Group Loot Rolls + `/roll`), plus `/sc demo clear` (and automatic `PLAYER_LOGOUT` cleanup) to wipe 100% of demo data without altering real saved records.
+
 ## [0.2.29] - 2026-11-27
 - **Message Button & Reply Focus Consistency Audit (`UI/LootRollFrame.lua`, `UI/Minimap.lua`, `UI/SocialPanels.lua`, `UI/NotificationToast.lua`, `Providers/Chat.lua`, `Core/Init.lua`):**
   - Fixed broken `Ask about item (/w)` menu actions in both Group Loot Roll quick cards and Roll Results so they properly open conversations pre-filled and ready to type via the player's active chat mode instead of failing silently.

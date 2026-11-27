@@ -3932,6 +3932,10 @@ local function MpOpenReplyChat(item)
             return
         end
     end
+    if (not officialOnly) and item.threadKey and ns.NavigateToModule then
+        ns:NavigateToModule("chat", { threadKey = item.threadKey, focusInput = true })
+        return
+    end
     if MpIsInCombat() then
         ns:Print("%s", L["Unavailable during combat."])
         return
@@ -10200,6 +10204,16 @@ local function OpenQuickReplyPinsMenu(anchorBtn, threadKey, threadTitle)
     MenuUtil.CreateContextMenu(anchorBtn, function(_, root)
         if threadKey == "ch:general" then
             root:CreateTitle(L["General"] .. " (" .. L["Always Fixed"] .. ")")
+            if ns.Chat.AttachGeneralFilterSubmenu then
+                ns.Chat:AttachGeneralFilterSubmenu(root, function()
+                    QuickReply._menuActionPicked = true
+                    QuickReply._forceMsgRebuild = true
+                    if QuickReply.frame and QuickReply.frame:IsShown() then
+                        QuickReply:Refresh()
+                    end
+                end)
+                root:CreateDivider()
+            end
             if ns.Chat.GetJoinedOfficialChannels then
                 root:CreateTitle(L["Send Channel inside General (/s, /y, /1, /2, /3...)"])
                 local gTarget = ns.Chat.GetGeneralTargetInfo and ns.Chat:GetGeneralTargetInfo() or nil
@@ -11385,7 +11399,7 @@ function QuickReply:EnsureChipButton(idx)
             end
         end
         if selfBtn._threadKey == "ch:general" then
-            GameTooltip:AddLine(L["Always fixed first tab: Say, Yell, Emotes, World & Public Channels (/1, /2, /3...) · Right-click to pick /s, /y, /1, /2, /3."], 0.65, 0.72, 0.82, true)
+            GameTooltip:AddLine(L["Always fixed first tab: Say, Yell, Emotes, World, Loot & Public Channels (/1, /2, /3...) · Right-click to choose send channel or filter which notifications appear."], 0.65, 0.72, 0.82, true)
         elseif selfBtn._threadKey == "notes:self" then
             GameTooltip:AddLine(L["Saved privately on this character · Never sent to chat"], 0.65, 0.72, 0.82, true)
         elseif selfBtn._threadKey == "mentions:radar" then
@@ -11560,7 +11574,7 @@ local QUICK_REPLY_TUTORIAL_STEPS = {
         titleKey = "General & Channels",
         target = "tabs",
         badgesKey = "TOUR_TABS_BADGES",
-        captionKey = "General combines /s, /y & public channels. Type /s, /y, /1 + Space to switch.",
+        captionKey = "General combines /s, /y, loot & channels. Right-click General to filter notifications or pick /s, /y, /1.",
     },
     {
         titleKey = "Quick Replies & Links",
@@ -12650,7 +12664,7 @@ function QuickReply:EnsureFrame()
     local btnHelp = Theme:CreateHelpButton(
         header,
         L["Quick Reply Guide"],
-        L["General keeps Say, Yell, Emotes & Public Channels (/1, /2, /3...) unified and tagged inline, while Official WoW Chat messages are also saved to History. Switching tabs keeps your keys free; press ENTER or click the typing field to start typing, and sending a message releases focus automatically just like Official Chat."],
+        L["General keeps Say, Yell, Emotes & Public Channels (/1, /2, /3...) unified and tagged inline, and lets you filter notifications from General's right-click menu. Switching tabs keeps your keys free; press ENTER or click the typing field to start typing, and sending a message releases focus automatically just like Official Chat."],
         L["Click '?' anytime to reopen Chromie's step-by-step Quick Reply tour."],
         20
     )
@@ -12983,7 +12997,7 @@ function QuickReply:EnsureFrame()
             GameTooltip:AddDoubleLine(L["Note"], hm.noteText, 0.72, 0.78, 0.86, 1.0, 0.90, 0.55)
         end
         if QuickReply.activeKey == "ch:general" then
-            GameTooltip:AddLine(L["Right-click here or on General to switch /s, /y, /1, /2, /3..."], 0.65, 0.78, 0.92, true)
+            GameTooltip:AddLine(L["Right-click here or on General to filter notifications or switch /s, /y, /1, /2, /3..."], 0.65, 0.78, 0.92, true)
         elseif QuickReply.activeKey == "ch:party" or QuickReply.activeKey == "ch:raid" or QuickReply.activeKey == "ch:instance" then
             GameTooltip:AddLine(L["Messages are separated by day and group session — click any group header or hover any timestamp to see date and teammates."], 0.65, 0.78, 0.92, true)
         end
@@ -13780,20 +13794,49 @@ function QuickReply:EnsureFrame()
                     local lastAct = math.max(QuickReply._lastOpaqueActivityAt or 0, QuickReply._lastInteractAt or 0, QuickReply.lastInputAt or 0, QuickReply.openedAt or 0)
                     local rem = fadeDelay - (now - lastAct)
                     if rem > 0.05 and C_Timer and C_Timer.After then
-                        QuickReply._idleWakeSeq = (QuickReply._idleWakeSeq or 0) + 1
-                        QuickReply._idleWakeExpectedSeq = QuickReply._idleWakeSeq
-                        if not QuickReply._idleWakeTimerFn then
-                            QuickReply._idleWakeTimerFn = function()
-                                if QuickReply._idleWakeSeq == QuickReply._idleWakeExpectedSeq and QuickReply.frame and QuickReply.frame:IsShown() then
-                                    QuickReply:WakeOnUpdate()
+                        local wantWakeAt = now + rem
+                        QuickReply._idleWakeTargetAt = wantWakeAt
+                        if (not QuickReply._idleWakeNextScheduledAt)
+                            or (wantWakeAt > QuickReply._idleWakeNextScheduledAt + 0.15)
+                            or (wantWakeAt < QuickReply._idleWakeNextScheduledAt - 0.25)
+                            or (now >= QuickReply._idleWakeNextScheduledAt)
+                        then
+                            if QuickReply._idleWakeHandle and QuickReply._idleWakeHandle.Cancel then
+                                QuickReply._idleWakeHandle:Cancel()
+                                QuickReply._idleWakeHandle = nil
+                            end
+                            QuickReply._idleWakeNextScheduledAt = wantWakeAt + 0.06
+                            if not QuickReply._idleWakeTimerFn then
+                                QuickReply._idleWakeTimerFn = function()
+                                    QuickReply._idleWakeHandle = nil
+                                    local tNow = (GetTime and GetTime()) or 0
+                                    if QuickReply.frame and QuickReply.frame:IsShown()
+                                        and QuickReply._idleWakeTargetAt
+                                        and (not QuickReply._combatFaded)
+                                        and tNow >= (QuickReply._idleWakeTargetAt - 0.05)
+                                    then
+                                        QuickReply._idleWakeTargetAt = nil
+                                        QuickReply._idleWakeNextScheduledAt = nil
+                                        QuickReply:WakeOnUpdate()
+                                    end
                                 end
                             end
+                            if C_Timer.NewTimer then
+                                QuickReply._idleWakeHandle = C_Timer.NewTimer(rem + 0.06, QuickReply._idleWakeTimerFn)
+                            else
+                                C_Timer.After(rem + 0.06, QuickReply._idleWakeTimerFn)
+                            end
                         end
-                        C_Timer.After(rem + 0.06, QuickReply._idleWakeTimerFn)
                         selfFrame:SetScript("OnUpdate", nil)
                         return
                     end
                 elseif not hoveringNow then
+                    if QuickReply._idleWakeHandle and QuickReply._idleWakeHandle.Cancel then
+                        QuickReply._idleWakeHandle:Cancel()
+                        QuickReply._idleWakeHandle = nil
+                    end
+                    QuickReply._idleWakeTargetAt = nil
+                    QuickReply._idleWakeNextScheduledAt = nil
                     selfFrame:SetScript("OnUpdate", nil)
                     if (QuickReply._refreshesSinceGc or 0) >= 8 and ns.RequestIdleGcStep then
                         QuickReply._refreshesSinceGc = 0
@@ -15068,6 +15111,9 @@ function QuickReply:Refresh()
     local clickableUrls = (not ns.db or not ns.db.settings or ns.db.settings.chatClickableUrls ~= false)
     local streamerNow = (ns.Compat and ns.Compat.IsStreamerMode and ns.Compat.IsStreamerMode()) == true
     local curGuildActionRev = (ns.Chat and ns.Chat._guildActionRev) or 0
+    local isGeneralThread = (self.activeKey == "ch:general" or t.kind == "GENERAL")
+    local genFilterSig = (isGeneralThread and ns.Chat and ns.Chat.GetGeneralFilterSignature)
+        and ns.Chat:GetGeneralFilterSignature() or ""
     local delivSig = ""
     if msgCount > 0 then
         local scanStart = math.max(1, msgCount - 7)
@@ -15080,9 +15126,10 @@ function QuickReply:Refresh()
     end
     local curRenderedMsgs = (f.msgFrame.GetNumMessages and f.msgFrame:GetNumMessages()) or 0
 
+    local filterChangedNow = isGeneralThread and (self._renderedGeneralFilterSig ~= genFilterSig)
     local incrementalStart = nil
     local noMsgChange = false
-    if sameThread and not self._forceMsgRebuild and msgCount == 0 and prevMsgCount == 0 and curRenderedMsgs == 0 then
+    if sameThread and not self._forceMsgRebuild and self._renderedGeneralFilterSig == genFilterSig and msgCount == 0 and prevMsgCount == 0 and curRenderedMsgs == 0 then
         noMsgChange = true
     elseif sameThread
         and not self._forceMsgRebuild
@@ -15094,20 +15141,23 @@ function QuickReply:Refresh()
         and self._renderedStreamerMode == streamerNow
         and self._renderedDelivSig == delivSig
         and self._renderedGuildActionRev == curGuildActionRev
+        and self._renderedGeneralFilterSig == genFilterSig
     then
         if msgCount == prevMsgCount and self._renderedMsgFirst == msgs[1] and self._renderedMsgLast == msgs[msgCount] then
             noMsgChange = true
-        elseif msgCount > prevMsgCount and self._renderedMsgFirst == msgs[1] and self._renderedMsgLast == msgs[prevMsgCount] then
-            incrementalStart = prevMsgCount + 1
-        elseif self._renderedMsgLast and msgCount >= prevMsgCount then
-            for backIdx = msgCount, math.max(1, msgCount - 10), -1 do
-                if msgs[backIdx] == self._renderedMsgLast then
-                    if backIdx == msgCount then
-                        noMsgChange = true
-                    else
-                        incrementalStart = backIdx + 1
+        elseif not self._showingEmptyGeneralHint then
+            if msgCount > prevMsgCount and self._renderedMsgFirst == msgs[1] and self._renderedMsgLast == msgs[prevMsgCount] then
+                incrementalStart = prevMsgCount + 1
+            elseif self._renderedMsgLast and msgCount >= prevMsgCount then
+                for backIdx = msgCount, math.max(1, msgCount - 10), -1 do
+                    if msgs[backIdx] == self._renderedMsgLast then
+                        if backIdx == msgCount then
+                            noMsgChange = true
+                        else
+                            incrementalStart = backIdx + 1
+                        end
+                        break
                     end
-                    break
                 end
             end
         end
@@ -15117,8 +15167,8 @@ function QuickReply:Refresh()
         local canIncrementalAppend = (incrementalStart ~= nil and incrementalStart <= msgCount)
         local wasAtBottom = (not f.msgFrame.AtBottom) or (f.msgFrame:AtBottom() ~= false)
         local deltaAdded = canIncrementalAppend and (msgCount - incrementalStart + 1) or math.max(0, msgCount - prevMsgCount)
-        local prevScroll = (sameThread and (not wasAtBottom) and f.msgFrame.GetScrollOffset) and (f.msgFrame:GetScrollOffset() or 0) or 0
-        if sameThread and (not wasAtBottom) and deltaAdded > 0 and prevScroll > 0 then
+        local prevScroll = ((sameThread and (not filterChangedNow) and (not wasAtBottom) and f.msgFrame.GetScrollOffset) and (f.msgFrame:GetScrollOffset() or 0) or 0)
+        if prevScroll > 0 and deltaAdded > 0 then
             prevScroll = prevScroll + deltaAdded
         end
 
@@ -15131,10 +15181,12 @@ function QuickReply:Refresh()
         self._renderedStreamerMode = streamerNow
         self._renderedDelivSig = delivSig
         self._renderedGuildActionRev = curGuildActionRev
+        self._renderedGeneralFilterSig = genFilterSig
         self._forceMsgRebuild = nil
 
         if not canIncrementalAppend then
             f.msgFrame:Clear()
+            self._showingEmptyGeneralHint = nil
             self._renderedLastDayKey = nil
             self._renderedLastGroupSessKey = nil
             self._renderedLastMsgTs = nil
@@ -15142,7 +15194,18 @@ function QuickReply:Refresh()
         end
 
         local startIdx = canIncrementalAppend and incrementalStart or math.max(1, msgCount - 149)
-        if startIdx <= msgCount then
+        local visIdx = nil
+        local iterCount = math.max(0, msgCount - startIdx + 1)
+        if isGeneralThread and (not canIncrementalAppend) and ns.Chat and ns.Chat.CollectGeneralVisibleIndices then
+            self._genVisIdxScratch = self._genVisIdxScratch or {}
+            visIdx = ns.Chat:CollectGeneralVisibleIndices(msgs, 150, self._genVisIdxScratch)
+            iterCount = #visIdx
+        end
+        if isGeneralThread and (not canIncrementalAppend) and msgCount > 0 and iterCount == 0 then
+            self._showingEmptyGeneralHint = true
+            f.msgFrame:AddMessage("|cff7f8a9c" .. L["All current messages in General are hidden by your tab filters. Right-click the General tab to customize."] .. "|r")
+        elseif iterCount > 0 then
+            self._showingEmptyGeneralHint = nil
             local grpRenderMap = ((t.kind == "PARTY" or t.kind == "RAID" or t.kind == "INSTANCE_CHAT") and ns.Chat and ns.Chat.GetThreadGroupRenderMap)
                 and ns.Chat:GetThreadGroupRenderMap(t)
                 or nil
@@ -15153,9 +15216,10 @@ function QuickReply:Refresh()
             local lastGroupSessKey = canIncrementalAppend and self._renderedLastGroupSessKey or nil
             local lastMsgTs = canIncrementalAppend and self._renderedLastMsgTs or nil
             local bannerShown = canIncrementalAppend and (self._renderedBannerShown == true) or false
-            for i = startIdx, msgCount do
+            for step = 1, iterCount do
+                local i = visIdx and visIdx[step] or (startIdx + step - 1)
                 local m = msgs[i]
-                if type(m) == "table" and m.text then
+                if type(m) == "table" and m.text and ((not isGeneralThread) or (not ns.Chat) or (not ns.Chat.IsGeneralEntryVisible) or ns.Chat:IsGeneralEntryVisible(m)) then
                     local mTs = tonumber(m.ts) or 0
                     local showedBreakLine = false
                     if mTs > 0 then

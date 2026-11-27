@@ -288,6 +288,7 @@ local function RecordSighting(rawName, guid, level, classFile, area, source, gui
 end
 
 local function InspectUnit(unit, source, fromTicker, bypassCooldown)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then return end
     if not unit then return end
     local exists = Safe.Value(Safe.Call(UnitExists, unit))
@@ -639,6 +640,7 @@ local function IsOpposingFactionChatSpeaker(cleanGuid, cleanSender)
 end
 
 local function OnChat(_, eventName, text, sender, ...)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     if ns.db and ns.db.settings and ns.db.settings.moduleNearbyEnabled == false then return end
     local cleanSender = Safe.String(sender)
     if not cleanSender then return end
@@ -767,6 +769,7 @@ local function OnChat(_, eventName, text, sender, ...)
 end
 
 function Nearby:Prune(silent)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     local retentionSec = ((ns.db and ns.db.settings and ns.db.settings.nearbyRetentionMin) or 15) * 60
     local cutoff = time() - retentionSec
     local removed = false

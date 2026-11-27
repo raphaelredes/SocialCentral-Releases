@@ -4360,14 +4360,17 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
     local flightMapHeader = AddSectionHeader(
         rd, L["Flight Map & Travel"], posBeaconBtn, -14,
         L["Help: Flight Map & Travel"],
-        L["Displays the estimated or recorded flight time directly inside the Flight Map tooltip alongside each destination's name and cost."],
-        L["Hover any reachable flight point on the Flight Map to see its duration (including WoW Forever routes and automatic learning whenever you fly)."]
+        L["Displays the estimated or recorded flight time in the Flight Map tooltip and shows a live arrival countdown bar at the top of the screen while flying."],
+        L["Hover any reachable flight point on the Flight Map to see its duration, then take off to watch the draggable top countdown bar count down to your destination."]
     )
     local flightMapTimesCb = CreateCheckbox(
         rd, L["Show flight duration on the Flight Map tooltip"], flightMapHeader, -6,
         function() return not ns.db or not ns.db.settings or ns.db.settings.flightMapTimesEnabled ~= false end,
         function(checked)
             ns.db.settings.flightMapTimesEnabled = checked
+            if ns.FlightTimes and ns.FlightTimes.RefreshTimerVisibility then
+                ns.FlightTimes:RefreshTimerVisibility()
+            end
             NotifySettingChanged()
         end,
         L["Help: Flight Map Duration"],
@@ -4375,9 +4378,24 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
         L["Preloaded with Eastern Kingdoms, Kalimdor, Riverglades, and Mount Hyjal routes; automatically adjusts for the Frequent Flier perk and records exact times as you fly."]
     )
 
+    local flightTimerBarCb = CreateCheckbox(
+        rd, L["Show flight countdown timer at the top of the screen"], flightMapTimesCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.flightTimerBarEnabled ~= false end,
+        function(checked)
+            ns.db.settings.flightTimerBarEnabled = checked
+            if ns.FlightTimes and ns.FlightTimes.RefreshTimerVisibility then
+                ns.FlightTimes:RefreshTimerVisibility()
+            end
+            NotifySettingChanged()
+        end,
+        L["Help: Flight Countdown Bar"],
+        L["Displays a compact live countdown bar at the top of the screen whenever you fly with a Flight Master, showing the destination, remaining arrival time, and progress bar."],
+        L["Drag the countdown bar to reposition it anywhere, click '?' for help, or click X to hide it for the current flight only (flight time recording continues automatically)."]
+    )
+
     local resetRadarTabBtn = ns.Theme:CreateButton(rd, 190, 22, L["Restore Defaults (This Tab)"], "default")
     ns.Theme:AutoFitButton(resetRadarTabBtn, 160, 16, 250)
-    resetRadarTabBtn:SetPoint("TOPLEFT", flightMapTimesCb, "BOTTOMLEFT", 0, -12)
+    resetRadarTabBtn:SetPoint("TOPLEFT", flightTimerBarCb, "BOTTOMLEFT", 0, -12)
     resetRadarTabBtn:SetScript("OnClick", function()
         local function DoReset()
             local s = ns.db and ns.db.settings
@@ -4406,6 +4424,13 @@ local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBefore
                 s.gatherHighlightSound = false
                 s.gatherHighlightPromptAnswered = false
                 s.flightMapTimesEnabled = true
+                s.flightTimerBarEnabled = true
+                if ns.Theme and ns.Theme.ResetWindowPosition then
+                    ns.Theme:ResetWindowPosition("flight_timer", true)
+                end
+                if ns.FlightTimes and ns.FlightTimes.RefreshTimerVisibility then
+                    ns.FlightTimes:RefreshTimerVisibility()
+                end
                 if ns.GatherHighlight and ns.GatherHighlight.SetEnabled then
                     ns.GatherHighlight:SetEnabled(false, false)
                 else

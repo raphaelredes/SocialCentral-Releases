@@ -2112,7 +2112,9 @@ function Clan:SetMemberAllianceAccess(lookupKey, allowed, asManager)
 end
 
 function Clan:IsMemberAllianceAuthorized(lookupKey)
-    if not (IsInGuild and IsInGuild()) then
+    local demoInGuild = ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive()
+        and Store and Store.guildInfo and Store.guildInfo.inGuild
+    if not (demoInGuild or (IsInGuild and IsInGuild())) then
         return false
     end
     local bucket = Store:GetClanScopeData()
@@ -11400,6 +11402,7 @@ local function UnpackPackedRosterSnapshot(prevSnap, dest)
 end
 
 local function UpdateGuildRosterHistory()
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     if not (IsInGuild and IsInGuild()) then return end
     local nowClock = (GetTime and GetTime()) or 0
     if Clan._lastRosterHistoryAt and (nowClock - Clan._lastRosterHistoryAt) < 60 then

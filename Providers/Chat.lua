@@ -2032,6 +2032,7 @@ local function PersistWhisperLine(threadKey, entry, unreadCount, threadObj)
         sourceThreadKey = entry.sourceThreadKey,
         groupRosterId = entry.groupRosterId,
         generalTag = entry.generalTag,
+        msgKind = entry.msgKind,
         noSenderColon = entry.noSenderColon and true or nil,
         isStatusNotice = (threadKey == "ch:general" and entry.isStatusNotice) and true or nil,
         channelId = entry.channelId,
@@ -2125,6 +2126,7 @@ local function RewriteThreadHistory(thread)
                 sourceThreadKey = m.sourceThreadKey,
                 groupRosterId = m.groupRosterId,
                 generalTag = m.generalTag,
+                msgKind = m.msgKind,
                 noSenderColon = m.noSenderColon and true or nil,
                 isStatusNotice = (thread.key == "ch:general" and m.isStatusNotice) and true or nil,
                 channelId = m.channelId,
@@ -2762,12 +2764,235 @@ function Chat:IsChatHistoryCaptureEnabled()
     return not ns.db or not ns.db.settings or ns.db.settings.moduleChatEnabled ~= false
 end
 
+Chat.GENERAL_FEED_FILTERS = {
+    { key = "loot", labelKey = "Loot" },
+    { key = "achievement", labelKey = "Achievements" },
+    { key = "monster", labelKey = "World, Bosses & NPCs" },
+    { key = "system", labelKey = "System & Notices" },
+    { key = "public", labelKey = "Public Channels (/1, /2...)" },
+    { key = "sayYell", labelKey = "Say, Yell & Emotes (/s, /y, /e)" },
+}
+
+function Chat:GetGeneralFilterTable()
+    local s = ns.db and ns.db.settings
+    if not s then return nil end
+    if type(s.generalFeedFilters) ~= "table" then
+        s.generalFeedFilters = {
+            loot = true,
+            achievement = true,
+            monster = true,
+            system = true,
+            public = true,
+            sayYell = true,
+        }
+    end
+    return s.generalFeedFilters
+end
+
+function Chat:IsGeneralCategoryEnabled(catKey)
+    if not catKey then return true end
+    local tbl = self:GetGeneralFilterTable()
+    if tbl and tbl[catKey] == false then
+        return false
+    end
+    return true
+end
+
+function Chat:GetGeneralFilterCounts()
+    local total = #self.GENERAL_FEED_FILTERS
+    local enabled = 0
+    for i = 1, total do
+        if self:IsGeneralCategoryEnabled(self.GENERAL_FEED_FILTERS[i].key) then
+            enabled = enabled + 1
+        end
+    end
+    return enabled, total
+end
+
+function Chat:GetGeneralFilterSignature()
+    local buf = self._genFilterSigScratch
+    if not buf then
+        buf = {}
+        self._genFilterSigScratch = buf
+    else
+        wipe(buf)
+    end
+    for i = 1, #self.GENERAL_FEED_FILTERS do
+        local def = self.GENERAL_FEED_FILTERS[i]
+        buf[i] = def.key .. (self:IsGeneralCategoryEnabled(def.key) and "1" or "0")
+    end
+    return table.concat(buf, ";")
+end
+
+function Chat:SetGeneralCategoryEnabled(catKey, enabled)
+    if not catKey then return end
+    local tbl = self:GetGeneralFilterTable()
+    if tbl then
+        tbl[catKey] = (enabled ~= false)
+    end
+    ns:Emit("CHAT_UPDATED")
+end
+
+function Chat:ResetGeneralFeedFilters()
+    local tbl = self:GetGeneralFilterTable()
+    if tbl then
+        for i = 1, #self.GENERAL_FEED_FILTERS do
+            tbl[self.GENERAL_FEED_FILTERS[i].key] = true
+        end
+    end
+    ns:Emit("CHAT_UPDATED")
+end
+
+function Chat:ClassifyGeneralEntry(entryOrKind, text, customTag)
+    local msgKind = (type(entryOrKind) == "table") and entryOrKind.msgKind or entryOrKind
+    if msgKind == "LOOT" then
+        return "loot"
+    elseif msgKind == "ACHIEVEMENT" then
+        return "achievement"
+    elseif msgKind == "MONSTER" then
+        return "monster"
+    elseif msgKind == "PUB_CHANNEL" then
+        return "public"
+    elseif msgKind == "LOCAL_SAY" or msgKind == "LOCAL_YELL" then
+        return "sayYell"
+    elseif msgKind == "SYSTEM" or msgKind == "XP" then
+        return "system"
+    end
+    local rawTag = (type(entryOrKind) == "table" and entryOrKind.generalTag) or customTag or ""
+    local plainTag = tostring(rawTag):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("^%[", ""):gsub("%]$", "")
+    local lowerFn = (Compat and Compat.LowerUtf8) or nil
+    local plainTagLow = lowerFn and lowerFn(plainTag) or plainTag:lower()
+    if plainTagLow ~= "" then
+        local lootLow = lowerFn and lowerFn(L["Loot"] or "Loot") or tostring(L["Loot"] or "Loot"):lower()
+        local achLow = lowerFn and lowerFn(L["Achievement"] or "Achievement") or tostring(L["Achievement"] or "Achievement"):lower()
+        local worldLow = lowerFn and lowerFn(L["World"] or "World") or tostring(L["World"] or "World"):lower()
+        local sysLow = lowerFn and lowerFn(L["System"] or "System") or tostring(L["System"] or "System"):lower()
+        local sayLow = lowerFn and lowerFn(L["Say"] or "Say") or tostring(L["Say"] or "Say"):lower()
+        local yellLow = lowerFn and lowerFn(L["Yell"] or "Yell") or tostring(L["Yell"] or "Yell"):lower()
+        local emoteLow = lowerFn and lowerFn(L["Emote"] or "Emote") or tostring(L["Emote"] or "Emote"):lower()
+        if plainTagLow == lootLow or plainTagLow == "loot" or plainTagLow == "saque" or plainTagLow == "botín" or plainTagLow == "botin" then
+            return "loot"
+        elseif plainTagLow == achLow or plainTagLow == "achievement" or plainTagLow == "conquista" or plainTagLow == "logro" then
+            return "achievement"
+        elseif plainTagLow == worldLow or plainTagLow == "world" or plainTagLow == "mundo" then
+            return "monster"
+        elseif plainTagLow == sayLow or plainTagLow == yellLow or plainTagLow == emoteLow
+            or plainTagLow == "say" or plainTagLow == "yell" or plainTagLow == "emote"
+            or plainTagLow == "dizer" or plainTagLow == "decir" or plainTagLow == "gritar"
+            or plainTagLow == "expressão" or plainTagLow == "expressao" or plainTagLow == "emoción" or plainTagLow == "emocion"
+        then
+            return "sayYell"
+        elseif plainTagLow == sysLow or plainTagLow == "sc" or plainTagLow == "system" or plainTagLow == "sistema" then
+            return "system"
+        end
+    end
+    if type(entryOrKind) == "table" then
+        if entryOrKind.channelId ~= nil then
+            return "public"
+        end
+        local txt = tostring(entryOrKind.text or text or "")
+        if entryOrKind.isStatusNotice then
+            if txt:sub(1, 10) == "|cff47ef66" then
+                return "loot"
+            elseif txt:sub(1, 10) == "|cffffd24d" then
+                return "achievement"
+            end
+            return "system"
+        end
+    end
+    return "public"
+end
+
+function Chat:IsGeneralEntryVisible(entry)
+    if type(entry) ~= "table" then
+        return true
+    end
+    local cat = self:ClassifyGeneralEntry(entry)
+    return self:IsGeneralCategoryEnabled(cat)
+end
+
+function Chat:CollectGeneralVisibleIndices(msgs, maxKeep, scratch)
+    local out = scratch or {}
+    wipe(out)
+    local total = type(msgs) == "table" and #msgs or 0
+    if total <= 0 then
+        return out
+    end
+    local limit = (type(maxKeep) == "number" and maxKeep > 0) and maxKeep or total
+    for idx = total, 1, -1 do
+        local m = msgs[idx]
+        if type(m) == "table" and m.text and self:IsGeneralEntryVisible(m) then
+            out[#out + 1] = idx
+            if #out >= limit then
+                break
+            end
+        end
+    end
+    local n = #out
+    for i = 1, math.floor(n / 2) do
+        out[i], out[n - i + 1] = out[n - i + 1], out[i]
+    end
+    return out
+end
+
+function Chat:PopulateGeneralFilterMenu(subMenu, afterToggleFn)
+    if not subMenu or not subMenu.CreateCheckbox then
+        return
+    end
+    if subMenu.CreateTitle then
+        subMenu:CreateTitle(L["Choose which notifications appear in General"])
+    end
+    for i = 1, #self.GENERAL_FEED_FILTERS do
+        local def = self.GENERAL_FEED_FILTERS[i]
+        subMenu:CreateCheckbox(L[def.labelKey], function()
+            return self:IsGeneralCategoryEnabled(def.key)
+        end, function()
+            local nextState = not self:IsGeneralCategoryEnabled(def.key)
+            self:SetGeneralCategoryEnabled(def.key, nextState)
+            if afterToggleFn then
+                afterToggleFn()
+            end
+        end)
+    end
+    local enCnt, totCnt = self:GetGeneralFilterCounts()
+    if enCnt < totCnt and subMenu.CreateButton then
+        if subMenu.CreateDivider then
+            subMenu:CreateDivider()
+        end
+        subMenu:CreateButton(L["Show All"], function()
+            self:ResetGeneralFeedFilters()
+            if afterToggleFn then
+                afterToggleFn()
+            end
+        end)
+    end
+end
+
+function Chat:AttachGeneralFilterSubmenu(root, afterToggleFn)
+    if not (root and root.CreateButton) then
+        return nil
+    end
+    local enCnt, totCnt = self:GetGeneralFilterCounts()
+    local filterLbl = L["Show Notifications"]
+    if totCnt > 0 and enCnt < totCnt then
+        filterLbl = filterLbl .. " (" .. tostring(enCnt) .. "/" .. tostring(totCnt) .. ")"
+    end
+    local filterSub = root:CreateButton(filterLbl)
+    self:PopulateGeneralFilterMenu(filterSub, afterToggleFn)
+    return filterSub
+end
+
 function Chat:RecordGeneralMessage(kind, senderDisp, text, isMe, resolvedClass, customTag, extraFields)
     if not self:IsChatHistoryCaptureEnabled() then
         return nil
     end
     local cleanText = Safe.String(text)
     if not cleanText or cleanText == "" then
+        return nil
+    end
+    local msgKind = kind or "PUB_CHANNEL"
+    local catKey = self:ClassifyGeneralEntry(msgKind, cleanText, customTag)
+    if not self:IsGeneralCategoryEnabled(catKey) then
         return nil
     end
     local genMeta = STATIC_CHANNEL_ORDER["ch:general"]
@@ -2848,6 +3073,7 @@ function Chat:RecordGeneralMessage(kind, senderDisp, text, isMe, resolvedClass, 
         isStatusNotice = isNotice,
         noSenderColon = noColon,
         generalTag = tagMarkup,
+        msgKind = msgKind,
         channelId = extraFields and extraFields.channelId or nil,
         mentionTerm = extraFields and extraFields.mentionTerm or nil,
         _dedupSig = dedupNorm,
@@ -3154,13 +3380,31 @@ function Chat:RecordGeneralOfficialFrameLine(rawMsg, r, g, b, skipEmit, allowCha
         and Compat.IsAddonChatMode and Compat.IsAddonChatMode()
         and not self:_WasRecentlyWorldOnlyNotice(msg)
     then
-        self:RecordGeneralMessage("SYSTEM", L["System"], outText, false, nil, nil, {
-            noTag = true,
-            noSenderColon = true,
-            isStatusNotice = true,
-            isBackfill = allowChannelBackfill == true,
-            skipImmediateEmit = skipEmit == true,
-        })
+        local isLootFallback = type(normPlain) == "string" and (
+            normPlain:find("recebe o saque:", 1, true)
+            or normPlain:find("receive loot:", 1, true)
+            or normPlain:find("recibes el bot", 1, true)
+            or normPlain:find("recibes bot", 1, true)
+            or normPlain:find("você saqueia ", 1, true)
+            or normPlain:find("you loot ", 1, true)
+            or normPlain:find("saqueas ", 1, true)
+            or rawLow:find("|hloot:", 1, true)
+        )
+        self:RecordGeneralMessage(
+            isLootFallback and "LOOT" or "SYSTEM",
+            isLootFallback and L["Loot"] or L["System"],
+            outText,
+            false,
+            nil,
+            isLootFallback and L["Loot"] or nil,
+            {
+                noTag = not isLootFallback,
+                noSenderColon = true,
+                isStatusNotice = true,
+                isBackfill = allowChannelBackfill == true,
+                skipImmediateEmit = skipEmit == true,
+            }
+        )
         didGeneralAdded = true
         if not skipEmit then
             ns:Emit("CHAT_UPDATED")
@@ -4569,6 +4813,7 @@ function Chat:LoadSavedHistory()
                         isStatusNotice = line.isStatusNotice and true or false,
                         noSenderColon = line.noSenderColon and true or false,
                         generalTag = line.generalTag,
+                        msgKind = line.msgKind,
                         channelId = line.channelId,
                         mentionTerm = line.mentionTerm,
                         _dedupSig = normTxt,
@@ -5685,6 +5930,16 @@ function Chat:GetThreadsList(kindFilter)
 
         if include then
             local lastMsg = (t._hydrated == false) and t._savedLastLine or (t.messages and t.messages[#t.messages])
+            if key == "ch:general" and t._hydrated ~= false and type(t.messages) == "table" then
+                lastMsg = nil
+                for gi = #t.messages, 1, -1 do
+                    local gm = t.messages[gi]
+                    if type(gm) == "table" and self:IsGeneralEntryVisible(gm) then
+                        lastMsg = gm
+                        break
+                    end
+                end
+            end
             local isMuted = self:IsThreadMuted(key)
             local item = t._listItem
             if not item then

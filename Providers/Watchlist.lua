@@ -1047,6 +1047,7 @@ local function IsEntryLiveConfirmed(entry, now)
 end
 
 function Watchlist:ExpireStaleOnlineEntries(silentEmit)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return false end
     local list = Store:GetWatchlistTable()
     if type(list) ~= "table" or next(list) == nil then
         return false

@@ -3671,7 +3671,17 @@ function Spotter:CleanupAbsentTargets(silent)
     return changed, nextDelay
 end
 
+function Spotter:MarkDemoDirty()
+    countsSynced = false
+    sortedTargetsDirty = true
+    RecomputeOnScreenFlags()
+    MarkTargetsDirty()
+end
+
 function Spotter:Prune(silent)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then
+        return false
+    end
     local changed = self:CleanupAbsentTargets(silent)
     return changed
 end
@@ -4001,6 +4011,7 @@ function Spotter:UnregisterEvents()
 end
 
 local function ScheduleReindexRefresh(allowVisiblePlateRefresh)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     MarkPositiveIndexDirty()
     InvalidateBystanderCache()
     if not Spotter:IsEnabled() then return end
@@ -4008,7 +4019,7 @@ local function ScheduleReindexRefresh(allowVisiblePlateRefresh)
     Spotter._socialRefreshQueued = true
     C_Timer.After(0.20, function()
         Spotter._socialRefreshQueued = false
-        if not Spotter:IsEnabled() then return end
+        if (ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive()) or not Spotter:IsEnabled() then return end
         if next(Spotter.entries) ~= nil then
             Spotter:ReclassifyActiveEntries()
         elseif allowVisiblePlateRefresh and not (InCombatLockdown and InCombatLockdown()) then
@@ -4048,7 +4059,7 @@ function Spotter:Init()
     if not self._eventFrame then
         local ef = CreateFrame("Frame")
         ef:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, _, _, _, _, _, _, _, _, arg12)
-            if not Spotter:IsEnabled() then
+            if (ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive()) or not Spotter:IsEnabled() then
                 return
             end
             if event == "NAME_PLATE_UNIT_ADDED" then
@@ -4227,7 +4238,7 @@ function Spotter:Init()
     if not self._unitFrame then
         local uf = CreateFrame("Frame")
         uf:SetScript("OnEvent", function(_, ev, unitTarget, _, arg3)
-            if not Spotter:IsEnabled() then return end
+            if (ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive()) or not Spotter:IsEnabled() then return end
             if ev == "UNIT_SPELLCAST_SUCCEEDED" then
                 if unitTarget == "player" then
                     local spellId = Safe.Number(arg3)

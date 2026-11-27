@@ -877,6 +877,7 @@ function Alts:GetArmoryURL(altEntry)
 end
 
 function Alts:Snapshot(includeBank, force)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     if not (ns.db and ns.db.alts) then return end
     local monoNow = GetTime and GetTime() or 0
     if not includeBank and not force and self._lastSnapshotAt and (monoNow - self._lastSnapshotAt) < 0.5 then
@@ -1177,6 +1178,7 @@ end
 
 --- Lightweight O(1) update for currency, XP, level, and zone without scanning containers or skills.
 function Alts:UpdateScalars()
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     if ns.db and ns.db.settings and ns.db.settings.embedCharacterWindow == false then return end
     if not (ns.db and ns.db.alts) then return end
     local key = CurrentAltKey()
@@ -1992,6 +1994,9 @@ function Alts:SearchAllRecipes(queryText, onlyAltKey, factionFilter, worldScope)
 end
 
 function Alts:ScanLearnedRecipes(isCraftFrame)
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then
+        return false
+    end
     if ns.db and ns.db.settings and ns.db.settings.embedProfessionWindow == false then
         return false
     end

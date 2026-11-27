@@ -53,6 +53,7 @@ local function NormalizeRole(rawRole)
 end
 
 function Group:Scan()
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     local nextList = {}
     local inGroup = Compat.IsInGroup()
     if not inGroup then

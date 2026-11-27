@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.29"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.29" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.30"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.30" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -247,6 +247,14 @@ local DEFAULTS = {
         quickReplyNotifyGuild = false,  -- include Guild / Officer chat in Quick Reply notifications
         quickReplyNotifySay = false,    -- opt-in: include Say & Yell in Quick Reply unread notifications / Enter shortcut
         quickReplyRecordSay = true,     -- record nearby Say & Yell session logs in Quick Reply tabs & Quick History
+        generalFeedFilters = {          -- per-category display/capture toggles for General (ch:general) right-click menu
+            loot = true,
+            achievement = true,
+            monster = true,
+            system = true,
+            public = true,
+            sayYell = true,
+        },
         msgPreviewMaxVisible = 3,       -- max simultaneous minimap preview rows (1..3); extras wait in FIFO queue
         msgPreviewDefault6Migrated = false, -- one-time upgrade from initial 5s default to 6s default
         spotterEnabled = true,      -- lightweight event-driven radar (0ms idle CPU)
@@ -316,6 +324,8 @@ local DEFAULTS = {
         dndUntilLeaveGroup = false,    -- auto-clear Do Not Disturb upon leaving the current party/raid group
         focusUpgradeV1Migrated = false, -- one-time upgrade to single-surface notifications & combat hold defaults
         spotterScoutAlert = true,   -- notify on shared Scout sighting alerts from guildmates
+        flightMapTimesEnabled = true, -- show estimated & recorded durations in Flight Map tooltip
+        flightTimerBarEnabled = true, -- show live flight arrival countdown bar at the top of the screen
         tooltipItemAlts = true,     -- show alt bag/bank/equipped item counts inside item tooltips
         tooltipPlayerNotes = true,  -- show Social Card notes, red flags & companion context inside player tooltips
         globalChatLfgScan = true,   -- passively index dungeon/raid LFG posts from public chat channels
@@ -684,6 +694,19 @@ local function HandleSlash(raw)
         if ns.Theme and ns.Theme.ResetAllWindowPositions then
             ns.Theme:ResetAllWindowPositions()
         end
+    elseif cmd == "demo" or cmd == "showcase" or cmd == "cleardemo" then
+        local sub = (cmd == "cleardemo") and "clear" or (type(rest) == "string" and rest:lower():match("^%s*(%S*)") or "")
+        if not (ns.DemoShowcase and ns.DemoShowcase.Enable) then
+            ns:Print("|cffffb833%s|r", L["Restart World of Warcraft completely to load Demo Mode."])
+            return
+        end
+        if sub == "clear" or sub == "off" or sub == "hide" or sub == "reset" or sub == "stop" or sub == "limpar" then
+            ns.DemoShowcase:Clear()
+        elseif sub == "toggle" then
+            ns.DemoShowcase:Toggle()
+        else
+            ns.DemoShowcase:Enable()
+        end
     elseif cmd == "config" or cmd == "settings" then
         if ns.Settings and ns.Settings.Toggle then
             ns.Settings:Toggle()
@@ -724,6 +747,7 @@ local function HandleSlash(raw)
             ns:Print("  |cffffd200/sc check [name]|r — %s", L["Check Watchlist character"])
         end
         ns:Print("  |cffffd200/sc resetpos|r — %s", L["Reset Window Positions"])
+        ns:Print("  |cffffd200/sc demo [clear]|r — %s", L["Populate or clear hypothetical demo data across all windows"])
     else
         if ns.Settings and ns.Settings.Toggle then
             ns.Settings:Toggle()
@@ -1112,6 +1136,9 @@ function ns:ResetCurrentSettingsToDefaults()
 end
 
 ns.RegisterEvent(boot, "PLAYER_LOGOUT", function()
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then
+        pcall(ns.DemoShowcase.Clear, ns.DemoShowcase, true)
+    end
     SyncAccountWideTutorialFlags()
     if ns._accountSettings and SocialCentralDB then
         SocialCentralDB.settings = ns._accountSettings

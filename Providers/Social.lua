@@ -1145,6 +1145,7 @@ function Social:EnsureFullGuildScan()
 end
 
 function Social:Scan()
+    if ns.DemoShowcase and ns.DemoShowcase.IsActive and ns.DemoShowcase:IsActive() then return end
     lastScanAt = (GetTime and GetTime()) or 0
     if Compat.SyncRosterForeverNames then
         Compat.SyncRosterForeverNames(false, true)

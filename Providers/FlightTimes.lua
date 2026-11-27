@@ -546,10 +546,35 @@ local pendingDstID = nil
 local pendingSince = nil
 local flightStartAt = nil
 local confirmedOnTaxi = false
+local pendingSrcName = nil
+local pendingDstName = nil
+local pendingEstSec = nil
+local pendingQuality = nil
+local pendingCanSave = false
+
+local timerBar = nil
+local activeFlightInfo = nil
+local demoFlightActive = false
+local demoFlightStartAt = 0
+local demoFlightEstSec = 285
+local barDismissedForFlight = false
+
+local TIMER_BAR_W = 336
+local TIMER_BAR_H = 46
+local ICON_FLIGHT_GRYPHON = "Interface\\Icons\\Ability_Mount_Gryphon_01"
+local WHITE8X8_TEX = "Interface\\Buttons\\WHITE8X8"
 
 local function IsFeatureEnabled()
     local s = ns.db and ns.db.settings
     if s and s.flightMapTimesEnabled == false then
+        return false
+    end
+    return true
+end
+
+local function IsTimerBarEnabled()
+    local s = ns.db and ns.db.settings
+    if s and s.flightTimerBarEnabled == false then
         return false
     end
     return true
@@ -1098,6 +1123,439 @@ local function EnsureFlightMapHooks()
     end
 end
 
+local function ClearSavedActiveFlight()
+    if ns.db and ns.db.activeFlightTimer ~= nil then
+        ns.db.activeFlightTimer = nil
+    end
+end
+
+local function PersistActiveFlight(info)
+    if not (ns.db and type(info) == "table") then
+        return
+    end
+    local curCharKey = (Compat and Compat.CharacterKey and Compat.CharacterKey()) or nil
+    ns.db.activeFlightTimer = {
+        charKey = curCharKey,
+        srcID = info.srcID,
+        dstID = info.dstID,
+        srcName = info.srcName,
+        dstName = info.dstName,
+        estSec = info.estSec,
+        quality = info.quality,
+        startedUnix = info.startedUnix,
+        canSave = info.canSave == true,
+    }
+end
+
+local function GetFlightClockColors()
+    local Theme = ns.Theme
+    local p = Theme and Theme.GetPalette and Theme:GetPalette() or nil
+    local gold = (p and (p.textGold or p.accent)) or { 1.0, 0.82, 0.24, 1.0 }
+    local text = (p and p.text) or { 0.94, 0.95, 0.98, 1.0 }
+    local muted = (p and p.textMuted) or { 0.66, 0.72, 0.80, 1.0 }
+    local accent = (p and p.accent) or { 0.35, 0.78, 1.0, 1.0 }
+    return p, gold, text, muted, accent
+end
+
+local function ApplyTimerBarTheme()
+    local f = timerBar
+    if not f then
+        return
+    end
+    local Theme = ns.Theme
+    local p, gold, text, muted, accent = GetFlightClockColors()
+    if Theme and Theme.ApplyBackdrop then
+        Theme:ApplyBackdrop(f, "window", p)
+    end
+    if f.topRule then
+        f.topRule:SetColorTexture(gold[1], gold[2], gold[3], 0.88)
+    end
+    if f.crestBox and Theme and Theme.ApplyBackdrop then
+        Theme:ApplyBackdrop(f.crestBox, "inset", p)
+    end
+    if f.destFs then
+        f.destFs:SetTextColor(text[1], text[2], text[3], 1.0)
+    end
+    if f.routeFs then
+        f.routeFs:SetTextColor(muted[1], muted[2], muted[3], 1.0)
+    end
+    if f.statusBar then
+        if demoFlightActive or not (activeFlightInfo and activeFlightInfo.quality == "estimate") then
+            f.statusBar:SetStatusBarColor(gold[1], gold[2], gold[3], 0.95)
+        else
+            f.statusBar:SetStatusBarColor(accent[1], accent[2], accent[3], 0.95)
+        end
+    end
+    if f.helpBtn and f.helpBtn.RefreshTheme then
+        f.helpBtn:RefreshTheme()
+    end
+    if f.closeBtn and Theme and Theme.StyleButton then
+        Theme:StyleButton(f.closeBtn, "danger")
+    end
+    f._lastRenderedTimeStr = nil
+    f._lastTimeColorTag = nil
+    f._lastBarColTag = nil
+end
+
+local function GetTimerDisplayMetrics()
+    local nowMono = (GetTime and GetTime()) or 0
+    if demoFlightActive then
+        local elapsed = math.max(0, nowMono - (demoFlightStartAt or nowMono))
+        if elapsed >= demoFlightEstSec then
+            demoFlightStartAt = nowMono - 63
+            elapsed = 63
+        end
+        return true, elapsed, demoFlightEstSec, "known", "Vento Bravo", "Karrath, Ermos"
+    end
+    if activeFlightInfo then
+        local elapsed = math.max(0, nowMono - (activeFlightInfo.startedMono or nowMono))
+        return true, elapsed, activeFlightInfo.estSec, activeFlightInfo.quality, activeFlightInfo.srcName, activeFlightInfo.dstName
+    end
+    return false, 0, nil, nil, nil, nil
+end
+
+local function UpdateTimerBarContent()
+    local f = timerBar
+    if not f then
+        return
+    end
+    local valid, elapsed, estSec, quality, srcName, dstName = GetTimerDisplayMetrics()
+    if not valid then
+        return
+    end
+
+    local _, gold, _, muted, accent = GetFlightClockColors()
+    local rawDest = (type(dstName) == "string" and dstName ~= "") and dstName or L["In Flight"]
+    local destStr = rawDest
+    if #rawDest > 22 then
+        local shortHead = rawDest:match("^([^,]+),")
+        if shortHead and shortHead ~= "" then
+            destStr = shortHead:match("^%s*(.-)%s*$") or shortHead
+        end
+    end
+    if f._lastRenderedDestStr ~= destStr then
+        f._lastRenderedDestStr = destStr
+        f.destFs:SetText(destStr)
+    end
+
+    local routeStr
+    if type(srcName) == "string" and srcName ~= "" and srcName ~= rawDest then
+        local shortSrc = srcName:match("^([^,]+),") or srcName
+        shortSrc = shortSrc:match("^%s*(.-)%s*$") or shortSrc
+        routeStr = shortSrc .. " -> " .. rawDest
+    elseif quality == "estimate" then
+        routeStr = L["Estimated arrival"]
+    elseif quality == "recorded" then
+        routeStr = L["Exact recorded route"]
+    else
+        routeStr = L["In Flight"]
+    end
+    if f._lastRenderedRouteStr ~= routeStr then
+        f._lastRenderedRouteStr = routeStr
+        f.routeFs:SetText(routeStr)
+    end
+
+    local isEstimated = (quality == "estimate")
+    local timeStr
+    local fillPct = 0.02
+    local tr, tg, tb = gold[1], gold[2], gold[3]
+    local br, bg, bb = tr, tg, tb
+
+    if type(estSec) == "number" and estSec > 0 then
+        local rem = estSec - elapsed
+        if rem > 0.05 then
+            local remStr = FormatDuration(math.ceil(rem)) or "1s"
+            timeStr = isEstimated and ("~" .. remStr) or remStr
+            fillPct = math.min(1.0, math.max(0.02, elapsed / estSec))
+            if isEstimated then
+                tr, tg, tb = 0.84, 0.92, 1.0
+                br, bg, bb = accent[1], accent[2], accent[3]
+            end
+        else
+            timeStr = L["Arriving soon..."]
+            fillPct = 1.0
+            tr, tg, tb = 1.0, 0.68, 0.25
+            br, bg, bb = 1.0, 0.68, 0.25
+        end
+    else
+        timeStr = FormatDuration(math.max(1, math.floor(elapsed + 0.5))) or "1s"
+        fillPct = 0.45 + 0.40 * math.sin(elapsed * 2.2)
+        tr, tg, tb = muted[1], muted[2], muted[3]
+        br, bg, bb = accent[1], accent[2], accent[3]
+    end
+
+    if f._lastRenderedTimeStr ~= timeStr or f._lastTimeColorTag ~= (tostring(tr) .. ":" .. tostring(tg)) then
+        f._lastRenderedTimeStr = timeStr
+        f._lastTimeColorTag = tostring(tr) .. ":" .. tostring(tg)
+        f.timeFs:SetText(timeStr)
+        f.timeFs:SetTextColor(tr, tg, tb, 1.0)
+    end
+    if f.statusBar then
+        f.statusBar:SetValue(fillPct)
+        if f._lastBarColTag ~= f._lastTimeColorTag then
+            f._lastBarColTag = f._lastTimeColorTag
+            f.statusBar:SetStatusBarColor(br, bg, bb, 0.95)
+        end
+    end
+end
+
+local function StopTimerOnUpdate(f)
+    if not f then
+        return
+    end
+    f:SetScript("OnUpdate", nil)
+    f._scOnUpdateActive = false
+end
+
+local function SyncTimerOnUpdate(f)
+    if not f then
+        return
+    end
+    if not f:IsShown() then
+        StopTimerOnUpdate(f)
+        return
+    end
+    if not f._scOnUpdateFn then
+        f._scOnUpdateElapsed = 0
+        f._scOnUpdateFn = function(selfFrame, dt)
+            if not (demoFlightActive or activeFlightInfo) then
+                StopTimerOnUpdate(selfFrame)
+                selfFrame:Hide()
+                return
+            end
+            selfFrame._scOnUpdateElapsed = (selfFrame._scOnUpdateElapsed or 0) + (dt or 0)
+            if selfFrame._scOnUpdateElapsed < 0.1 then
+                return
+            end
+            selfFrame._scOnUpdateElapsed = 0
+            UpdateTimerBarContent()
+        end
+    end
+    if not f._scOnUpdateActive then
+        f._scOnUpdateElapsed = 0
+        f._scOnUpdateActive = true
+        f:SetScript("OnUpdate", f._scOnUpdateFn)
+    end
+end
+
+local function EnsureTimerBar()
+    if timerBar then
+        return timerBar
+    end
+    local Theme = ns.Theme
+    local uiParent = _G.UIParent
+    local f = CreateFrame("Frame", "SocialCentralFlightTimerFrame", uiParent, "BackdropTemplate")
+    f:SetSize(TIMER_BAR_W, TIMER_BAR_H)
+    f:SetPoint("TOP", uiParent, "TOP", 0, -18)
+    f:SetFrameStrata("HIGH")
+    f:SetFrameLevel(85)
+    f:SetClampedToScreen(true)
+    if f.SetClipsChildren then
+        f:SetClipsChildren(true)
+    end
+
+    local topRule = f:CreateTexture(nil, "OVERLAY", nil, 3)
+    topRule:SetHeight(2)
+    topRule:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -1)
+    topRule:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -1)
+    f.topRule = topRule
+
+    local crestBox = CreateFrame("Frame", nil, f, "BackdropTemplate")
+    crestBox:SetSize(28, 28)
+    crestBox:SetPoint("TOPLEFT", f, "TOPLEFT", 7, -6)
+    f.crestBox = crestBox
+
+    local icon = crestBox:CreateTexture(nil, "ARTWORK")
+    icon:SetPoint("TOPLEFT", crestBox, "TOPLEFT", 2, -2)
+    icon:SetPoint("BOTTOMRIGHT", crestBox, "BOTTOMRIGHT", -2, 2)
+    icon:SetTexture(ICON_FLIGHT_GRYPHON)
+    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    f.icon = icon
+
+    local closeBtn
+    if Theme and Theme.CreateButton then
+        closeBtn = Theme:CreateButton(f, 18, 18, "X", "danger")
+    else
+        closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+        closeBtn:SetSize(18, 18)
+    end
+    closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -5)
+    closeBtn:SetFrameLevel(f:GetFrameLevel() + 12)
+    closeBtn:SetScript("OnClick", function()
+        if demoFlightActive then
+            demoFlightActive = false
+        else
+            barDismissedForFlight = true
+        end
+        StopTimerOnUpdate(f)
+        f:Hide()
+    end)
+    f.closeBtn = closeBtn
+
+    local rightTextAnchor = closeBtn
+    if Theme and Theme.CreateHelpButton then
+        local helpBtn = Theme:CreateHelpButton(
+            f,
+            L["Help: Flight Countdown Bar"],
+            L["Displays a compact live countdown bar at the top of the screen whenever you fly with a Flight Master, showing the destination, remaining arrival time, and progress bar."],
+            L["Drag the countdown bar to reposition it anywhere, click '?' for help, or click X to hide it for the current flight only (flight time recording continues automatically)."],
+            18,
+            { target = f }
+        )
+        helpBtn:SetPoint("RIGHT", closeBtn, "LEFT", -3, 0)
+        helpBtn:SetFrameLevel(closeBtn:GetFrameLevel())
+        f.helpBtn = helpBtn
+        rightTextAnchor = helpBtn
+    end
+
+    local timeFs = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    timeFs:SetPoint("TOPRIGHT", rightTextAnchor, "TOPLEFT", -6, -1)
+    timeFs:SetJustifyH("RIGHT")
+    timeFs:SetWordWrap(false)
+    f.timeFs = timeFs
+
+    local destFs = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    destFs:SetPoint("TOPLEFT", crestBox, "TOPRIGHT", 7, 0)
+    destFs:SetPoint("TOPRIGHT", timeFs, "TOPLEFT", -6, 0)
+    destFs:SetJustifyH("LEFT")
+    destFs:SetWordWrap(false)
+    f.destFs = destFs
+
+    local routeFs = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    routeFs:SetPoint("BOTTOMLEFT", crestBox, "BOTTOMRIGHT", 7, 1)
+    routeFs:SetPoint("RIGHT", f, "RIGHT", -8, 0)
+    routeFs:SetJustifyH("LEFT")
+    routeFs:SetWordWrap(false)
+    f.routeFs = routeFs
+
+    local trackBg = f:CreateTexture(nil, "BACKGROUND", nil, 1)
+    trackBg:SetHeight(4)
+    trackBg:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 6, 4)
+    trackBg:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 4)
+    trackBg:SetColorTexture(0.02, 0.03, 0.04, 0.72)
+
+    local sb = CreateFrame("StatusBar", nil, f)
+    sb:SetPoint("TOPLEFT", trackBg, "TOPLEFT", 0, 0)
+    sb:SetPoint("BOTTOMRIGHT", trackBg, "BOTTOMRIGHT", 0, 0)
+    sb:SetStatusBarTexture(WHITE8X8_TEX)
+    sb:SetMinMaxValues(0, 1)
+    sb:SetValue(0)
+    sb:SetFrameLevel(f:GetFrameLevel() + 4)
+    f.statusBar = sb
+
+    f:SetScript("OnEnter", function(selfFrame)
+        if selfFrame._scDragging or not _G.GameTooltip then
+            return
+        end
+        local valid, elapsed, estSec, quality, srcName, dstName = GetTimerDisplayMetrics()
+        if not valid then
+            return
+        end
+        _G.GameTooltip:SetOwner(selfFrame, "ANCHOR_BOTTOM")
+        _G.GameTooltip:ClearLines()
+        _G.GameTooltip:AddLine(dstName or L["In Flight"], 1.0, 0.85, 0.25)
+        if type(srcName) == "string" and srcName ~= "" and srcName ~= dstName then
+            _G.GameTooltip:AddLine(srcName .. " -> " .. (dstName or ""), 0.88, 0.91, 0.96, true)
+        end
+        if type(estSec) == "number" and estSec > 0 then
+            local rem = math.max(0, math.ceil(estSec - elapsed))
+            local remTxt = (rem > 0) and (FormatDuration(rem) or "1s") or L["Arriving soon..."]
+            local totTxt = FormatDuration(estSec) or "-"
+            local elTxt = FormatDuration(math.max(1, math.floor(elapsed + 0.5))) or "1s"
+            _G.GameTooltip:AddDoubleLine(L["Route duration"], (quality == "estimate" and "~" or "") .. totTxt, 0.72, 0.78, 0.86, 1.0, 1.0, 1.0)
+            _G.GameTooltip:AddDoubleLine(L["Remaining: %s"]:format(remTxt), L["Elapsed: %s"]:format(elTxt), 0.35, 0.92, 0.62, 0.76, 0.82, 0.90)
+        else
+            local elTxt = FormatDuration(math.max(1, math.floor(elapsed + 0.5))) or "1s"
+            _G.GameTooltip:AddLine(L["Elapsed: %s"]:format(elTxt), 0.88, 0.91, 0.96, true)
+        end
+        _G.GameTooltip:AddLine(L["Drag to move · Click X to hide this flight"], 0.62, 0.70, 0.80, true)
+        _G.GameTooltip:Show()
+    end)
+    f:SetScript("OnLeave", function()
+        if _G.GameTooltip then
+            _G.GameTooltip:Hide()
+        end
+    end)
+
+    if Theme and Theme.MakeMovable then
+        Theme:MakeMovable(f, {
+            key = "flight_timer",
+            anchor = "TOP",
+            combatLock = false,
+            handles = { f },
+            onStart = function()
+                if _G.GameTooltip and _G.GameTooltip:IsOwned(f) then
+                    _G.GameTooltip:Hide()
+                end
+            end,
+            onReset = function(win)
+                win:ClearAllPoints()
+                win:SetPoint("TOP", _G.UIParent, "TOP", 0, -18)
+            end,
+        })
+    end
+
+    f:HookScript("OnShow", function(selfFrame)
+        ApplyTimerBarTheme()
+        UpdateTimerBarContent()
+        SyncTimerOnUpdate(selfFrame)
+    end)
+    f:HookScript("OnHide", function(selfFrame)
+        StopTimerOnUpdate(selfFrame)
+    end)
+
+    f:Hide()
+    timerBar = f
+    ApplyTimerBarTheme()
+    return f
+end
+
+local function ShowTimerBarIfAllowed()
+    if not demoFlightActive then
+        if not IsTimerBarEnabled() then
+            if timerBar and timerBar:IsShown() then
+                timerBar:Hide()
+            end
+            return
+        end
+        if not activeFlightInfo or barDismissedForFlight then
+            return
+        end
+    end
+    local f = EnsureTimerBar()
+    if f:IsShown() then
+        ApplyTimerBarTheme()
+        UpdateTimerBarContent()
+        SyncTimerOnUpdate(f)
+    else
+        f:Show()
+    end
+end
+
+local function HideTimerBar()
+    if timerBar then
+        StopTimerOnUpdate(timerBar)
+        if timerBar:IsShown() then
+            timerBar:Hide()
+        end
+    end
+end
+
+local function ResolveTaxiNodeDisplayName(slot)
+    if not (slot and _G.TaxiNodeName) then
+        return nil
+    end
+    local okNm, nm = pcall(_G.TaxiNodeName, slot)
+    if not okNm then
+        return nil
+    end
+    local clean = (Safe and Safe.String) and Safe.String(nm) or (type(nm) == "string" and nm or nil)
+    if clean and clean ~= "" then
+        return clean
+    end
+    return nil
+end
+
 local function StopFlightRecording()
     if flightTicker then
         flightTicker:Cancel()
@@ -1108,6 +1566,17 @@ local function StopFlightRecording()
     pendingSince = nil
     flightStartAt = nil
     confirmedOnTaxi = false
+    pendingSrcName = nil
+    pendingDstName = nil
+    pendingEstSec = nil
+    pendingQuality = nil
+    pendingCanSave = false
+    activeFlightInfo = nil
+    barDismissedForFlight = false
+    ClearSavedActiveFlight()
+    if not demoFlightActive then
+        HideTimerBar()
+    end
 end
 
 local function IsPlayerOnTaxi()
@@ -1124,8 +1593,41 @@ local function IsPlayerOnTaxi()
     return val == true
 end
 
+local function ActivateCountdownNow(nowMono)
+    flightStartAt = nowMono
+    confirmedOnTaxi = true
+    pendingSince = nil
+    barDismissedForFlight = false
+    activeFlightInfo = {
+        srcID = pendingSrcID,
+        dstID = pendingDstID,
+        srcName = pendingSrcName,
+        dstName = pendingDstName,
+        estSec = pendingEstSec,
+        quality = pendingQuality,
+        startedMono = nowMono,
+        startedUnix = time(),
+        canSave = pendingCanSave,
+    }
+    PersistActiveFlight(activeFlightInfo)
+    ShowTimerBarIfAllowed()
+end
+
 local function SaveCompletedFlight()
-    if not (flightStartAt and pendingSrcID and pendingDstID and pendingSrcID ~= pendingDstID) then
+    local abortedMidFlight = false
+    if _G.UnitIsDeadOrGhost then
+        local okDead, isDead = pcall(_G.UnitIsDeadOrGhost, "player")
+        if okDead and Safe and Safe.Value and Safe.Value(isDead) == true then
+            abortedMidFlight = true
+        end
+    end
+    if not abortedMidFlight and _G.IsInInstance then
+        local okInst, inInst = pcall(_G.IsInInstance)
+        if okInst and Safe and Safe.Value and Safe.Value(inInst) == true then
+            abortedMidFlight = true
+        end
+    end
+    if abortedMidFlight or not (flightStartAt and pendingCanSave and pendingSrcID and pendingDstID and pendingSrcID ~= pendingDstID) then
         StopFlightRecording()
         return
     end
@@ -1146,9 +1648,7 @@ local function PollFlightRecorder()
     local onTaxi = IsPlayerOnTaxi()
     if pendingSince and not flightStartAt then
         if onTaxi == true then
-            flightStartAt = now
-            confirmedOnTaxi = true
-            pendingSince = nil
+            ActivateCountdownNow(now)
         elseif (now - pendingSince) > TAKEOFF_TIMEOUT_SEC then
             StopFlightRecording()
             return
@@ -1170,20 +1670,104 @@ end
 
 local function BeginFlightRecording(slot)
     StopFlightRecording()
-    if not currentNodeID then
+    if not (currentNodeID or currentSlot) then
         RefreshTaxiSlotCache()
     end
     local dstID = ResolveNodeID(slot)
-    if not (currentNodeID and dstID and currentNodeID ~= dstID) then
-        return
-    end
+    local dstName = ResolveTaxiNodeDisplayName(slot)
+    local srcName = ResolveTaxiNodeDisplayName(currentSlot)
+        or (Compat and Compat.CurrentZoneName and Compat.CurrentZoneName())
+        or nil
+    local estSec, quality = FlightTimes:ResolveDuration(currentNodeID, dstID, slot)
     pendingSrcID = currentNodeID
     pendingDstID = dstID
+    pendingSrcName = srcName
+    pendingDstName = dstName
+    pendingEstSec = estSec
+    pendingQuality = quality
+    pendingCanSave = (currentNodeID ~= nil and dstID ~= nil and currentNodeID ~= dstID)
     pendingSince = (GetTime and GetTime()) or 0
     flightStartAt = nil
     confirmedOnTaxi = false
     if _G.C_Timer and _G.C_Timer.NewTicker then
         flightTicker = _G.C_Timer.NewTicker(FLIGHT_POLL_INTERVAL, PollFlightRecorder)
+    end
+end
+
+local function TryResumeMidFlightFromSaved()
+    if activeFlightInfo or pendingSince then
+        return
+    end
+    local saved = ns.db and ns.db.activeFlightTimer
+    if type(saved) ~= "table" then
+        return
+    end
+    local curCharKey = (Compat and Compat.CharacterKey and Compat.CharacterKey()) or nil
+    if saved.charKey and curCharKey and saved.charKey ~= curCharKey then
+        return
+    end
+    local onTaxi = IsPlayerOnTaxi()
+    if onTaxi ~= true then
+        ClearSavedActiveFlight()
+        return
+    end
+    local elapsedUnix = math.max(0, time() - (tonumber(saved.startedUnix) or 0))
+    local maxReasonable = (tonumber(saved.estSec) or 1800) + 180
+    local nowMono = (GetTime and GetTime()) or 0
+    local isExpired = (elapsedUnix > maxReasonable)
+    if isExpired then
+        ClearSavedActiveFlight()
+    end
+    pendingSrcID = saved.srcID
+    pendingDstID = saved.dstID
+    pendingSrcName = saved.srcName
+    pendingDstName = saved.dstName
+    pendingEstSec = isExpired and nil or saved.estSec
+    pendingQuality = isExpired and nil or saved.quality
+    pendingCanSave = (not isExpired) and (saved.canSave == true)
+    flightStartAt = isExpired and nowMono or (nowMono - elapsedUnix)
+    confirmedOnTaxi = true
+    activeFlightInfo = {
+        srcID = saved.srcID,
+        dstID = saved.dstID,
+        srcName = saved.srcName,
+        dstName = saved.dstName,
+        estSec = pendingEstSec,
+        quality = pendingQuality,
+        startedMono = flightStartAt,
+        startedUnix = isExpired and time() or saved.startedUnix,
+        canSave = pendingCanSave,
+    }
+    if _G.C_Timer and _G.C_Timer.NewTicker then
+        flightTicker = _G.C_Timer.NewTicker(FLIGHT_POLL_INTERVAL, PollFlightRecorder)
+    end
+    ShowTimerBarIfAllowed()
+end
+
+function FlightTimes:RefreshTimerVisibility()
+    if demoFlightActive then
+        ShowTimerBarIfAllowed()
+        return
+    end
+    if activeFlightInfo and not barDismissedForFlight and IsTimerBarEnabled() then
+        ShowTimerBarIfAllowed()
+    else
+        HideTimerBar()
+    end
+end
+
+function FlightTimes:SetDemoPreview(enabled)
+    if enabled then
+        demoFlightActive = true
+        demoFlightStartAt = ((GetTime and GetTime()) or 0) - 63
+        ShowTimerBarIfAllowed()
+    else
+        demoFlightActive = false
+        if activeFlightInfo and not barDismissedForFlight and IsTimerBarEnabled() then
+            ShowTimerBarIfAllowed()
+        else
+            HideTimerBar()
+        end
     end
 end
 
@@ -1221,6 +1805,9 @@ function FlightTimes:Init()
         if _G.C_SummonInfo and type(_G.C_SummonInfo.ConfirmSummon) == "function" then
             hooksecurefunc(_G.C_SummonInfo, "ConfirmSummon", StopFlightRecording)
         end
+        if type(_G.AcceptProposal) == "function" then
+            hooksecurefunc("AcceptProposal", StopFlightRecording)
+        end
     end
 
     EnsureFlightMapHooks()
@@ -1246,6 +1833,12 @@ function FlightTimes:Init()
         TryBind(0)
     end)
 
+    ns.RegisterEvent(self, "PLAYER_CONTROL_LOST", function()
+        if pendingSince and not flightStartAt and IsPlayerOnTaxi() == true then
+            ActivateCountdownNow((GetTime and GetTime()) or 0)
+        end
+    end)
+
     ns.RegisterEvent(self, "PLAYER_CONTROL_GAINED", function()
         if flightStartAt then
             local onTaxi = IsPlayerOnTaxi()
@@ -1253,5 +1846,21 @@ function FlightTimes:Init()
                 SaveCompletedFlight()
             end
         end
+    end)
+
+    ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        if _G.C_Timer and _G.C_Timer.After then
+            _G.C_Timer.After(0.6, TryResumeMidFlightFromSaved)
+        else
+            TryResumeMidFlightFromSaved()
+        end
+    end)
+
+    ns:On("THEME_CHANGED", function()
+        ApplyTimerBarTheme()
+    end)
+
+    ns:On("SETTINGS_UPDATED", function()
+        FlightTimes:RefreshTimerVisibility()
     end)
 end
