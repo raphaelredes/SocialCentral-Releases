@@ -5791,12 +5791,15 @@ local function ThreadMatchesFilterIdForUnread(th, fid)
     return false
 end
 
-local function CollectUnreadBadgeSummary(filterDefs)
+local function CollectUnreadBadgeSummary(filterDefs, tonesBuf, seenBuf, byFilterBuf)
     local allThreads = FilterChatThreadsByType("all", true)
     local totalUnread = 0
-    local tones = {}
-    local seenTones = {}
-    local byFilter = {}
+    local tones = tonesBuf or {}
+    if tonesBuf then wipe(tones) end
+    local seenTones = seenBuf or {}
+    if seenBuf then wipe(seenTones) end
+    local byFilter = byFilterBuf or {}
+    if byFilterBuf then wipe(byFilter) end
     if type(filterDefs) == "table" then
         for i = 1, #filterDefs do
             byFilter[filterDefs[i].id] = 0
@@ -5822,7 +5825,7 @@ local function CollectUnreadBadgeSummary(filterDefs)
             end
         end
     end
-    return totalUnread, tones, byFilter
+    return totalUnread, tones, byFilter, allThreads
 end
 
 local function SetupChatThreadDragReorder(threadsScroll, panel)
@@ -7619,34 +7622,26 @@ function SocialPanels:CreateChatPanel(parent)
     pinnedBannerText:SetWordWrap(false)
 
     local replyInput
-    local msgFrame = CreateFrame("ScrollingMessageFrame", nil, rightCard)
-    msgFrame:SetClipsChildren(true)
+    local UpdateChatMsgScrollbar
+    local SyncHubScrollBottomPill
+    local msgFrame = Theme:CreateChatStreamViewport(rightCard, {
+        defaultWidth = 460,
+        fontObj = ChatFontNormal,
+        handleWheel = true,
+        dragScroll = true,
+        onDragScrollUpdate = function()
+            if SyncHubScrollBottomPill then SyncHubScrollBottomPill(false) end
+            if UpdateChatMsgScrollbar then UpdateChatMsgScrollbar() end
+            if panel._syncHubStickyHeader then panel._syncHubStickyHeader() end
+        end,
+        onLayoutChanged = function()
+            if SyncHubScrollBottomPill then SyncHubScrollBottomPill(false) end
+            if UpdateChatMsgScrollbar then UpdateChatMsgScrollbar() end
+            if panel._syncHubStickyHeader then panel._syncHubStickyHeader() end
+        end,
+    })
     msgFrame:SetPoint("TOPLEFT", 10, -60)
     msgFrame:SetPoint("BOTTOMRIGHT", -16, 40)
-    msgFrame:SetFontObject(ChatFontNormal)
-    msgFrame:SetJustifyH("LEFT")
-    if msgFrame.SetShadowColor then
-        msgFrame:SetShadowColor(0, 0, 0, 0.95)
-    end
-    if msgFrame.SetShadowOffset then
-        msgFrame:SetShadowOffset(1, -1)
-    end
-    if msgFrame.SetSpacing then
-        msgFrame:SetSpacing(3)
-    end
-    msgFrame:SetFading(false)
-    msgFrame:SetMaxLines(400)
-    if msgFrame.SetIndentedWordWrap then
-        msgFrame:SetIndentedWordWrap(true)
-    end
-    if msgFrame.SetInsertMode then
-        msgFrame:SetInsertMode("BOTTOM")
-    end
-    msgFrame:EnableMouse(true)
-    msgFrame:EnableMouseWheel(true)
-    if msgFrame.SetHyperlinksEnabled then
-        msgFrame:SetHyperlinksEnabled(true)
-    end
     msgFrame:SetScript("OnHyperlinkClick", function(selfFrame, link, text, button)
         if type(link) ~= "string" then return end
         if link:find("addon:SCentral:delnote:", 1, true) then
@@ -7757,7 +7752,9 @@ function SocialPanels:CreateChatPanel(parent)
                     then
                         titleSender = Compat.MaskStreamerBNetName(titleSender)
                     end
-                    root:CreateTitle(titleSender)
+                    local mTsVal = tonumber(entry.ts) or 0
+                    local menuTitle = (mTsVal > 0) and (titleSender .. " · " .. date("%H:%M", mTsVal)) or titleSender
+                    root:CreateTitle(menuTitle)
                     if t.kind ~= "MENTIONS" then
                         root:CreateButton(L["Quote Reply"], function()
                             local snippet = (Compat.TruncateUtf8 and Compat.TruncateUtf8(rawPlain, 45))
@@ -7823,18 +7820,29 @@ function SocialPanels:CreateChatPanel(parent)
     msgScrollThumb._tex = thumbTex
     msgScrollTrack:Hide()
 
-    local function UpdateChatMsgScrollbar()
-        local numMsgs = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
+    UpdateChatMsgScrollbar = function()
         local maxRange = 0
-        if msgFrame.GetMaxScrollRange then
-            local okR, rng = pcall(msgFrame.GetMaxScrollRange, msgFrame)
-            if okR and type(rng) == "number" and rng > 0 then
-                maxRange = rng
+        local off = 0
+        local visFrac = nil
+        if msgFrame._isStreamViewport and msgFrame.GetScrollMetrics then
+            local pxOff, pxMax, vpH, totH = msgFrame:GetScrollMetrics()
+            off = pxOff or 0
+            maxRange = pxMax or 0
+            if totH and totH > 0 and vpH and vpH > 0 then
+                visFrac = math.max(0.08, math.min(1.0, vpH / totH))
             end
-        elseif numMsgs > 12 then
-            maxRange = numMsgs - 12
+        else
+            local numMsgs = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
+            if msgFrame.GetMaxScrollRange then
+                local okR, rng = pcall(msgFrame.GetMaxScrollRange, msgFrame)
+                if okR and type(rng) == "number" and rng > 0 then
+                    maxRange = rng
+                end
+            elseif numMsgs > 12 then
+                maxRange = numMsgs - 12
+            end
+            off = (msgFrame.GetScrollOffset and msgFrame:GetScrollOffset()) or 0
         end
-        local off = (msgFrame.GetScrollOffset and msgFrame:GetScrollOffset()) or 0
         if maxRange <= 0 and off <= 0 then
             msgScrollTrack:Hide()
             return
@@ -7846,9 +7854,14 @@ function SocialPanels:CreateChatPanel(parent)
             return
         end
         msgScrollTrack:Show()
-        local visLines = (msgFrame.GetNumVisibleLines and msgFrame:GetNumVisibleLines()) or 14
-        local totalEst = math.max(effMax + visLines, 1)
-        local thumbH = math.max(18, math.min(trackH, math.floor(trackH * (visLines / totalEst) + 0.5)))
+        local thumbH
+        if visFrac then
+            thumbH = math.max(18, math.min(trackH, math.floor(trackH * visFrac + 0.5)))
+        else
+            local visLines = (msgFrame.GetNumVisibleLines and msgFrame:GetNumVisibleLines()) or 14
+            local totalEst = math.max(effMax + visLines, 1)
+            thumbH = math.max(18, math.min(trackH, math.floor(trackH * (visLines / totalEst) + 0.5)))
+        end
         if math.abs((msgScrollThumb:GetHeight() or 0) - thumbH) >= 1 then
             msgScrollThumb:SetHeight(thumbH)
         end
@@ -7860,7 +7873,7 @@ function SocialPanels:CreateChatPanel(parent)
     end
 
     local btnScrollBottom
-    local function SyncHubScrollBottomPill(resetCount)
+    SyncHubScrollBottomPill = function(resetCount)
         if not btnScrollBottom then return end
         local atBot = (not msgFrame.AtBottom) or (msgFrame:AtBottom() ~= false)
         if resetCount or atBot then
@@ -7959,7 +7972,8 @@ function SocialPanels:CreateChatPanel(parent)
         local scale = msgScrollTrack:GetEffectiveScale() or 1
         local startY = curY / scale
         local startOff = (msgFrame.GetScrollOffset and msgFrame:GetScrollOffset()) or 0
-        local maxR = (msgFrame.GetMaxScrollRange and msgFrame:GetMaxScrollRange()) or math.max(1, ((msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 12) - 12)
+        local maxR = (msgFrame.GetMaxScrollRange and msgFrame:GetMaxScrollRange()) or 1
+        if maxR < 1 then maxR = 1 end
         local trackH = math.max(20, msgScrollTrack:GetHeight() or 100)
         local travel = math.max(1, trackH - (msgScrollThumb:GetHeight() or 24))
         msgScrollThumb._dragging = true
@@ -7986,7 +8000,7 @@ function SocialPanels:CreateChatPanel(parent)
     btnScrollBottom._scLastPillTxt = "v " .. L["Latest"]
     btnScrollBottom:SetPoint("BOTTOMRIGHT", msgFrame, "BOTTOMRIGHT", -4, 4)
     btnScrollBottom._scLevelOffset = 5
-    btnScrollBottom:SetFrameLevel((msgFrame:GetFrameLevel() or 2) + 4)
+    btnScrollBottom:SetFrameLevel((msgFrame:GetFrameLevel() or 2) + 5)
     btnScrollBottom:Hide()
     btnScrollBottom:SetScript("OnEnter", function(selfBtn)
         if not GameTooltip then return end
@@ -8005,83 +8019,6 @@ function SocialPanels:CreateChatPanel(parent)
         UpdateChatMsgScrollbar()
         if panel._syncHubStickyHeader then panel._syncHubStickyHeader() end
     end)
-
-    msgFrame:SetScript("OnMouseWheel", function(self, delta)
-        if IsShiftKeyDown and IsShiftKeyDown() then
-            if delta > 0 and self.ScrollToTop then
-                self:ScrollToTop()
-            elseif delta < 0 and self.ScrollToBottom then
-                self:ScrollToBottom()
-            end
-        elseif IsControlKeyDown and IsControlKeyDown() then
-            for _ = 1, 4 do
-                if delta > 0 and self.PageUp then
-                    self:PageUp()
-                elseif delta < 0 and self.PageDown then
-                    self:PageDown()
-                elseif delta > 0 and self.ScrollUp then
-                    self:ScrollUp()
-                elseif delta < 0 and self.ScrollDown then
-                    self:ScrollDown()
-                end
-            end
-        else
-            if delta > 0 and self.ScrollUp then
-                self:ScrollUp()
-            elseif delta < 0 and self.ScrollDown then
-                self:ScrollDown()
-            end
-        end
-        SyncHubScrollBottomPill(false)
-        UpdateChatMsgScrollbar()
-        if panel._syncHubStickyHeader then panel._syncHubStickyHeader() end
-    end)
-
-    local dragScrollActive = false
-    local dragLastY = 0
-    local DRAG_STEP_PX = 14
-    local function StopMsgDrag()
-        dragScrollActive = false
-        msgFrame:SetScript("OnUpdate", nil)
-    end
-    local function OnMsgDragUpdate()
-        if not dragScrollActive or not IsMouseButtonDown("LeftButton") then
-            StopMsgDrag()
-            return
-        end
-        local _, cursorY = GetCursorPosition()
-        local scale = msgFrame:GetEffectiveScale() or 1
-        local curY = cursorY / scale
-        local dy = curY - dragLastY
-        local moved = false
-        while dy >= DRAG_STEP_PX do
-            if msgFrame.ScrollDown then msgFrame:ScrollDown() end
-            dragLastY = dragLastY + DRAG_STEP_PX
-            dy = curY - dragLastY
-            moved = true
-        end
-        while dy <= -DRAG_STEP_PX do
-            if msgFrame.ScrollUp then msgFrame:ScrollUp() end
-            dragLastY = dragLastY - DRAG_STEP_PX
-            dy = curY - dragLastY
-            moved = true
-        end
-        if moved then
-            SyncHubScrollBottomPill(false)
-            UpdateChatMsgScrollbar()
-            if panel._syncHubStickyHeader then panel._syncHubStickyHeader() end
-        end
-    end
-    msgFrame:SetScript("OnMouseDown", function(_, button)
-        if button ~= "LeftButton" or msgFrame._scHoveredHyperlink ~= nil then return end
-        local _, cursorY = GetCursorPosition()
-        local scale = msgFrame:GetEffectiveScale() or 1
-        dragLastY = cursorY / scale
-        dragScrollActive = true
-        msgFrame:SetScript("OnUpdate", OnMsgDragUpdate)
-    end)
-    msgFrame:SetScript("OnMouseUp", StopMsgDrag)
-    msgFrame:SetScript("OnHide", StopMsgDrag)
 
     local composer = CreateFrame("Frame", nil, rightCard)
     composer:SetPoint("BOTTOMLEFT", 8, 6)
@@ -8192,6 +8129,12 @@ function SocialPanels:CreateChatPanel(parent)
             cw = (panel.GetWidth and panel:GetWidth() or 0) - 20
         end
         local useText = (cw <= 0) or (cw >= 260)
+        local palNow = Theme and Theme.GetPalette and Theme:GetPalette()
+        local visSig = (useText and "T" or (btnSend._isBNetSend and "BN" or "SC")) .. ":" .. tostring(palNow and palNow.key or "")
+        if btnSend._scSendVisSig == visSig then
+            return
+        end
+        btnSend._scSendVisSig = visSig
         if useText then
             if btnSend.ico then btnSend.ico:Hide() end
             Theme:SetButtonText(btnSend, L["Send"])
@@ -8565,6 +8508,9 @@ function SocialPanels:CreateChatPanel(parent)
         if panel._syncHubStickyHeader then
             panel._syncHubStickyHeader(p)
         end
+        if msgFrame and msgFrame.SetThemePalette then
+            msgFrame:SetThemePalette(p)
+        end
         panel._lastThemeKey = p.key
     end
 
@@ -8673,7 +8619,15 @@ function SocialPanels:CreateChatPanel(parent)
         end
 
         SyncFilterDropdownVisual()
-        local totalUnread, badgeTones = CollectUnreadBadgeSummary(filterDefs)
+        panel._unreadTonesScratch = panel._unreadTonesScratch or {}
+        panel._unreadSeenScratch = panel._unreadSeenScratch or {}
+        panel._unreadByFilterScratch = panel._unreadByFilterScratch or {}
+        local totalUnread, badgeTones, _, allThreadsCached = CollectUnreadBadgeSummary(
+            filterDefs,
+            panel._unreadTonesScratch,
+            panel._unreadSeenScratch,
+            panel._unreadByFilterScratch
+        )
         self._lastTotalUnread = totalUnread
         if totalUnread > 0 then
             filterUnreadBadge:SetAlpha(1)
@@ -8696,7 +8650,11 @@ function SocialPanels:CreateChatPanel(parent)
         end
 
         local showChatOff = not (ns.db and ns.db.settings and ns.db.settings.chatShowOffline == false)
-        Theme:ApplyOnlineOfflineOrb(btnChatOffline, showChatOff, 24, 22)
+        local offSig = (showChatOff and "1:" or "0:") .. tostring(p.key or "")
+        if btnChatOffline._scOffOrbSig ~= offSig then
+            btnChatOffline._scOffOrbSig = offSig
+            Theme:ApplyOnlineOfflineOrb(btnChatOffline, showChatOff, 24, 22)
+        end
         local showQuickUnread = (totalUnread > 0) or (self._filter == "unread")
         btnUnreadQuick:SetShown(showQuickUnread)
         if showQuickUnread then
@@ -8733,43 +8691,97 @@ function SocialPanels:CreateChatPanel(parent)
         end
         LayoutChatPanels()
 
-        local threads = FilterChatThreadsByType(self._filter, false)
+        local threads
+        if self._filter == "all" and type(allThreadsCached) == "table" then
+            if showChatOff then
+                threads = allThreadsCached
+            else
+                local visAll = panel._allOnlineScratch
+                if not visAll then
+                    visAll = {}
+                    panel._allOnlineScratch = visAll
+                else
+                    wipe(visAll)
+                end
+                for ai = 1, #allThreadsCached do
+                    local ath = allThreadsCached[ai]
+                    local isDirectTh = (ath.kind == "WHISPER" or ath.kind == "BN_WHISPER")
+                    if (not isDirectTh) or IsChatThreadOnline(ath) or ((ath.unread or 0) > 0) then
+                        visAll[#visAll + 1] = ath
+                    end
+                end
+                threads = visAll
+            end
+        else
+            threads = FilterChatThreadsByType(self._filter, false)
+        end
         local tQuery = threadSearch and threadSearch:GetText() or ""
         local qFold = (tQuery ~= "") and ((ns.Chat and ns.Chat.FoldSearchText) and ns.Chat:FoldSearchText(tQuery) or tQuery:lower()) or ""
         if qFold ~= "" then
-            local filtered = {}
+            local filtered = panel._chatSearchScratch
+            if not filtered then
+                filtered = {}
+                panel._chatSearchScratch = filtered
+            else
+                wipe(filtered)
+            end
+            local foldFn = ns.Chat and ns.Chat.FoldSearchText
             for _, th in ipairs(threads) do
                 th._searchPreview = nil
                 th._searchMatchCount = nil
-                local hay = (ns.Chat and ns.Chat.FoldSearchText)
-                    and ns.Chat:FoldSearchText((th.title or "") .. " " .. (th.preview or ""))
-                    or ((th.title or "") .. " " .. (th.preview or "")):lower()
                 local rawThread = ns.Chat and ns.Chat.threads and ns.Chat.threads[th.key]
                 if rawThread and rawThread._hydrated == false and ns.Chat and ns.Chat.EnsureThreadHydrated then
                     ns.Chat:EnsureThreadHydrated(rawThread)
                 end
                 local msgs = rawThread and rawThread.messages
-                local matchCount = 0
-                local latestMatchText = nil
-                if type(msgs) == "table" then
-                    for i = #msgs, 1, -1 do
-                        local m = msgs[i]
-                        local mText = m and (m.rawText or m.text) or ""
-                        local mSender = m and m.sender or ""
-                        local mFold = (ns.Chat and ns.Chat.FoldSearchText) and ns.Chat:FoldSearchText(mSender .. " " .. mText) or (mSender .. " " .. mText):lower()
-                        if mFold:find(qFold, 1, true) then
-                            matchCount = matchCount + 1
-                            if not latestMatchText then
-                                latestMatchText = mText
+                local msgLen = (type(msgs) == "table") and #msgs or 0
+                local lastMsgRef = (msgLen > 0) and msgs[msgLen] or nil
+                local titlePrevSig = (th.title or "") .. "\1" .. (th.preview or "")
+                local cachedHit = rawThread
+                    and rawThread._scSearchQ == qFold
+                    and rawThread._scSearchCnt == msgLen
+                    and rawThread._scSearchLast == lastMsgRef
+                    and rawThread._scSearchTitleSig == titlePrevSig
+                local matchCount, latestMatchText, hayHit
+                if cachedHit then
+                    matchCount = rawThread._scSearchMatches or 0
+                    latestMatchText = rawThread._scSearchPreview
+                    hayHit = rawThread._scSearchHayHit == true
+                else
+                    local hay = foldFn and foldFn(ns.Chat, (th.title or "") .. " " .. (th.preview or ""))
+                        or ((th.title or "") .. " " .. (th.preview or "")):lower()
+                    hayHit = hay:find(qFold, 1, true) ~= nil
+                    matchCount = 0
+                    latestMatchText = nil
+                    if type(msgs) == "table" then
+                        for i = msgLen, 1, -1 do
+                            local m = msgs[i]
+                            local mText = m and (m.rawText or m.text) or ""
+                            local mSender = m and m.sender or ""
+                            local mFold = foldFn and foldFn(ns.Chat, mSender .. " " .. mText) or (mSender .. " " .. mText):lower()
+                            if mFold:find(qFold, 1, true) then
+                                matchCount = matchCount + 1
+                                if not latestMatchText then
+                                    latestMatchText = mText
+                                end
                             end
                         end
+                    end
+                    if rawThread then
+                        rawThread._scSearchQ = qFold
+                        rawThread._scSearchCnt = msgLen
+                        rawThread._scSearchLast = lastMsgRef
+                        rawThread._scSearchTitleSig = titlePrevSig
+                        rawThread._scSearchMatches = matchCount
+                        rawThread._scSearchPreview = latestMatchText
+                        rawThread._scSearchHayHit = hayHit
                     end
                 end
                 if matchCount > 0 then
                     th._searchPreview = latestMatchText
                     th._searchMatchCount = matchCount
                     filtered[#filtered + 1] = th
-                elseif hay:find(qFold, 1, true) then
+                elseif hayHit then
                     filtered[#filtered + 1] = th
                 end
             end
@@ -8833,6 +8845,8 @@ function SocialPanels:CreateChatPanel(parent)
         local prevSameThread = (panel._renderedMsgActiveKey == activeKey) and (not resetScroll)
         local filterChangedNow = isGeneralAct and (panel._renderedGeneralFilterSig ~= genFilterSig)
         local prevMsgCount = panel._renderedMsgCount or 0
+        local savedScrollOff = (prevSameThread and (not filterChangedNow) and (not wasAtBottom) and msgFrame.GetScrollOffset) and (msgFrame:GetScrollOffset() or 0) or 0
+        local prevRenderedLines = (prevSameThread and msgFrame.GetNumMessages) and (msgFrame:GetNumMessages() or 0) or 0
         local incStartMsgIdx = nil
         if (not themeChanged)
             and (not resetScroll)
@@ -8844,6 +8858,7 @@ function SocialPanels:CreateChatPanel(parent)
             and (qFold == "")
             and (panel._renderedMsgDelivSig == delivSig)
             and (prevMsgCount > 0)
+            and (prevRenderedLines < 480)
             and (lineCount >= prevMsgCount)
             and lines ~= nil
         then
@@ -8869,11 +8884,10 @@ function SocialPanels:CreateChatPanel(parent)
             or (lines and (panel._renderedMsgFirst ~= lines[1] or panel._renderedMsgLast ~= lines[lineCount]))
             or panel._renderedMsgDelivSig ~= delivSig
             or panel._renderedSearchFold ~= qFold
-        local wasAtBottom = (not msgFrame.AtBottom) or (msgFrame:AtBottom() ~= false)
-        local savedScrollOff = (prevSameThread and (not filterChangedNow) and (not wasAtBottom) and msgFrame.GetScrollOffset) and (msgFrame:GetScrollOffset() or 0) or 0
-        local prevRenderedLines = (prevSameThread and msgFrame.GetNumMessages) and (msgFrame:GetNumMessages() or 0) or 0
+        local prevTotalH = (canIncrementalAppend and msgFrame.GetTotalHeight) and (msgFrame:GetTotalHeight() or 0) or 0
         panel._pendingRestoreScrollOffset = (prevSameThread and (not filterChangedNow) and (not wasAtBottom) and savedScrollOff > 0) and savedScrollOff or nil
         panel._pendingRestorePrevLines = prevRenderedLines
+        panel._pendingRestorePrevTotalH = prevTotalH
         if not prevSameThread then
             panel._scrollUnreadNew = 0
         elseif panel._pendingRestoreScrollOffset and lineCount > prevMsgCount then
@@ -8899,6 +8913,7 @@ function SocialPanels:CreateChatPanel(parent)
                 panel._renderedUnreadBannerShown = nil
                 panel._renderedLastSenderKey = nil
                 panel._renderedLastSenderTs = nil
+                panel._renderedLastTurnStartTs = nil
                 panel._renderedLastSenderTextX = nil
                 msgFrame:Clear()
             end
@@ -8942,47 +8957,55 @@ function SocialPanels:CreateChatPanel(parent)
             local hdrLvl = isDirect and (not isNotes) and ((active.level and active.level > 0 and active.level)
                 or (ns.Chat and ns.Chat.ResolvePlayerLevel and ns.Chat:ResolvePlayerLevel(active.lookupKey, shownHdrTitle, active.guid, active.bnetAccountID))) or nil
             local hdrLvlTag = (hdrLvl and hdrLvl > 0) and (" |cff9da7b5[" .. L["Lv."] .. tostring(math.floor(hdrLvl)) .. "]|r") or ""
-            hdrTitle:SetText(hdrStar .. hdrFacIco .. shownHdrTitle .. hdrLvlTag .. (isRoom and ("  |cff3fb950[" .. memberCount .. "]|r") or "") .. availHdrTag .. unreadHdrTag)
+            local hdrOut = hdrStar .. hdrFacIco .. shownHdrTitle .. hdrLvlTag .. (isRoom and ("  |cff3fb950[" .. memberCount .. "]|r") or "") .. availHdrTag .. unreadHdrTag
+            if hdrTitle._scHdrText ~= hdrOut then
+                hdrTitle._scHdrText = hdrOut
+                hdrTitle:SetText(hdrOut)
+            end
             if hdrIcon and Theme and Theme.ResolveThreadIcon then
                 local gT = (active.kind == "GENERAL" and ns.Chat and ns.Chat.GetGeneralTargetInfo) and ns.Chat:GetGeneralTargetInfo() or nil
-                local icoTex, icoTc, ir, ig, ib = Theme:ResolveThreadIcon(active.kind, isDirect and active.classFile or nil, gT)
-                local toneKey = Theme.GetChatToneForKind and Theme:GetChatToneForKind(active.kind) or "whisper"
-                local toneSpec = Theme.GetChatToneSpec and Theme:GetChatToneSpec(toneKey)
-                local acc = (toneSpec and toneSpec.accent) or { 0.65, 0.72, 0.85 }
-                hdrIcoRim:SetVertexColor(acc[1], acc[2], acc[3], 0.75)
-                hdrIcon:SetTexture(icoTex)
-                if icoTc then
-                    hdrIcon:SetTexCoord(icoTc[1], icoTc[2], icoTc[3], icoTc[4])
-                else
-                    hdrIcon:SetTexCoord(0, 1, 0, 1)
-                end
-                hdrIcon:SetVertexColor(ir or 1, ig or 1, ib or 1, 1)
-                hdrIcoRim:Show()
-                hdrIcoBg:Show()
-                hdrIcon:Show()
-                if thumbTex then
-                    thumbTex:SetVertexColor(acc[1], acc[2], acc[3], 0.72)
-                end
-                panel._activeToneRgb = acc
-                if replyInput and replyInput.HasFocus and replyInput:HasFocus() and replyInput.SetBackdropBorderColor then
-                    replyInput:SetBackdropBorderColor(acc[1], acc[2], acc[3], 0.95)
-                end
-                if btnScrollBottom and btnScrollBottom.SetBackdropBorderColor then
-                    btnScrollBottom:SetBackdropBorderColor(acc[1], acc[2], acc[3], 0.85)
-                end
-                if rightHdrWash then
-                    rightHdrWash:Show()
-                    if Theme.ApplySafeGradient then
-                        Theme:ApplySafeGradient(rightHdrWash, "HORIZONTAL", acc[1], acc[2], acc[3], 0.14, acc[1], acc[2], acc[3], 0.00)
+                local chromeSig = tostring(active.kind) .. ":" .. tostring(isDirect and active.classFile or "") .. ":" .. tostring(gT and gT.channelId or 0) .. ":" .. tostring(gT and gT.isYell and 1 or 0) .. ":" .. tostring(p.key or "")
+                if themeChanged or panel._scRightHdrChromeSig ~= chromeSig then
+                    panel._scRightHdrChromeSig = chromeSig
+                    local icoTex, icoTc, ir, ig, ib = Theme:ResolveThreadIcon(active.kind, isDirect and active.classFile or nil, gT)
+                    local toneKey = Theme.GetChatToneForKind and Theme:GetChatToneForKind(active.kind) or "whisper"
+                    local toneSpec = Theme.GetChatToneSpec and Theme:GetChatToneSpec(toneKey)
+                    local acc = (toneSpec and toneSpec.accent) or { 0.65, 0.72, 0.85 }
+                    hdrIcoRim:SetVertexColor(acc[1], acc[2], acc[3], 0.75)
+                    hdrIcon:SetTexture(icoTex)
+                    if icoTc then
+                        hdrIcon:SetTexCoord(icoTc[1], icoTc[2], icoTc[3], icoTc[4])
                     else
-                        rightHdrWash:SetColorTexture(acc[1], acc[2], acc[3], 0.08)
+                        hdrIcon:SetTexCoord(0, 1, 0, 1)
                     end
-                end
-                if rightHdrSep then
-                    if Theme.ApplySafeGradient then
-                        Theme:ApplySafeGradient(rightHdrSep, "HORIZONTAL", acc[1], acc[2], acc[3], 0.65, acc[1], acc[2], acc[3], 0.12)
-                    else
-                        rightHdrSep:SetColorTexture(acc[1], acc[2], acc[3], 0.45)
+                    hdrIcon:SetVertexColor(ir or 1, ig or 1, ib or 1, 1)
+                    hdrIcoRim:Show()
+                    hdrIcoBg:Show()
+                    hdrIcon:Show()
+                    if thumbTex then
+                        thumbTex:SetVertexColor(acc[1], acc[2], acc[3], 0.72)
+                    end
+                    panel._activeToneRgb = acc
+                    if replyInput and replyInput.HasFocus and replyInput:HasFocus() and replyInput.SetBackdropBorderColor then
+                        replyInput:SetBackdropBorderColor(acc[1], acc[2], acc[3], 0.95)
+                    end
+                    if btnScrollBottom and btnScrollBottom.SetBackdropBorderColor then
+                        btnScrollBottom:SetBackdropBorderColor(acc[1], acc[2], acc[3], 0.85)
+                    end
+                    if rightHdrWash then
+                        rightHdrWash:Show()
+                        if Theme.ApplySafeGradient then
+                            Theme:ApplySafeGradient(rightHdrWash, "HORIZONTAL", acc[1], acc[2], acc[3], 0.14, acc[1], acc[2], acc[3], 0.00)
+                        else
+                            rightHdrWash:SetColorTexture(acc[1], acc[2], acc[3], 0.08)
+                        end
+                    end
+                    if rightHdrSep then
+                        if Theme.ApplySafeGradient then
+                            Theme:ApplySafeGradient(rightHdrSep, "HORIZONTAL", acc[1], acc[2], acc[3], 0.65, acc[1], acc[2], acc[3], 0.12)
+                        else
+                            rightHdrSep:SetColorTexture(acc[1], acc[2], acc[3], 0.45)
+                        end
                     end
                 end
             end
@@ -8998,22 +9021,26 @@ function SocialPanels:CreateChatPanel(parent)
                 panel.btnMentionCfg:SetShown(isMentions)
             end
             btnMuteThread._scMuted = isMuted
-            if btnMuteThread.ico then
-                local bellTex = isMuted
-                    and "Interface\\AddOns\\SocialCentral\\Media\\bell-off"
-                    or "Interface\\AddOns\\SocialCentral\\Media\\bell-on"
-                btnMuteThread.ico:SetTexture(bellTex)
-                local btc = Theme and Theme.ResolveIconTexCoord and Theme:ResolveIconTexCoord(bellTex)
-                if btc then
-                    btnMuteThread.ico:SetTexCoord(btc[1], btc[2], btc[3], btc[4])
+            local muteBtnSig = (isMuted and "1:" or "0:") .. tostring(p.key or "")
+            if btnMuteThread._scMuteStateSig ~= muteBtnSig then
+                btnMuteThread._scMuteStateSig = muteBtnSig
+                if btnMuteThread.ico then
+                    local bellTex = isMuted
+                        and "Interface\\AddOns\\SocialCentral\\Media\\bell-off"
+                        or "Interface\\AddOns\\SocialCentral\\Media\\bell-on"
+                    btnMuteThread.ico:SetTexture(bellTex)
+                    local btc = Theme and Theme.ResolveIconTexCoord and Theme:ResolveIconTexCoord(bellTex)
+                    if btc then
+                        btnMuteThread.ico:SetTexCoord(btc[1], btc[2], btc[3], btc[4])
+                    end
+                    if isMuted then
+                        btnMuteThread.ico:SetVertexColor(0.96, 0.58, 0.28, 1)
+                    else
+                        btnMuteThread.ico:SetVertexColor(1, 1, 1, 1)
+                    end
                 end
-                if isMuted then
-                    btnMuteThread.ico:SetVertexColor(0.96, 0.58, 0.28, 1)
-                else
-                    btnMuteThread.ico:SetVertexColor(1, 1, 1, 1)
-                end
+                Theme:SetButtonActive(btnMuteThread, isMuted, "default")
             end
-            Theme:SetButtonActive(btnMuteThread, isMuted, "default")
 
             local orderedRight = panel._orderedRightScratch
             if not orderedRight then
@@ -9069,23 +9096,36 @@ function SocialPanels:CreateChatPanel(parent)
 
             -- Peer verification bar (compact icon + short tag; full explanation on hover)
             peerStatusIcon:Show()
-            peerStatusIcon:SetTexCoord(0, 1, 0, 1)
-            peerStatusIcon:SetVertexColor(1, 1, 1)
-            peerStatusText:ClearAllPoints()
-            peerStatusText:SetPoint("LEFT", peerStatusIcon, "RIGHT", 5, 0)
-            peerStatusText:SetPoint("RIGHT", peerBar, "RIGHT", -4, 0)
-            peerStatusText:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+            if not peerStatusText._scAnchored then
+                peerStatusText._scAnchored = true
+                peerStatusIcon:SetTexCoord(0, 1, 0, 1)
+                peerStatusIcon:SetVertexColor(1, 1, 1)
+                peerStatusText:ClearAllPoints()
+                peerStatusText:SetPoint("LEFT", peerStatusIcon, "RIGHT", 5, 0)
+                peerStatusText:SetPoint("RIGHT", peerBar, "RIGHT", -4, 0)
+            end
+            if themeChanged or peerStatusText._scThemeKey ~= p.key then
+                peerStatusText._scThemeKey = p.key
+                peerStatusText:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3])
+            end
 
             local function SetPeerStatus(iconTex, r, g, b, shortTxt, tipTitle, tipDesc, texCoord)
+                peerStatusHover._tipTitle = tipTitle
+                peerStatusHover._tipDesc = tipDesc
+                local pSig = tostring(iconTex) .. ":" .. tostring(r) .. ":" .. tostring(g) .. ":" .. tostring(b) .. ":" .. tostring(shortTxt)
+                if peerBar._scPeerStatusSig == pSig then
+                    return
+                end
+                peerBar._scPeerStatusSig = pSig
                 peerStatusIcon:SetTexture(iconTex)
                 local tc = texCoord or (Theme and Theme.ResolveIconTexCoord and Theme:ResolveIconTexCoord(iconTex))
                 if tc then
                     peerStatusIcon:SetTexCoord(tc[1], tc[2], tc[3], tc[4])
+                else
+                    peerStatusIcon:SetTexCoord(0, 1, 0, 1)
                 end
                 peerStatusIcon:SetVertexColor(r, g, b)
                 peerStatusText:SetText(shortTxt)
-                peerStatusHover._tipTitle = tipTitle
-                peerStatusHover._tipDesc = tipDesc
             end
 
             local parsedAct = active.targetName and Compat.ParseCharacterName and Compat.ParseCharacterName(active.targetName) or nil
@@ -9234,10 +9274,15 @@ function SocialPanels:CreateChatPanel(parent)
             local pinnedMsg = panel._pinnedMsgs and panel._pinnedMsgs[activeKey]
             local hasPinnedBanner = (pinnedMsg ~= nil and pinnedMsg ~= "")
             if hasPinnedBanner then
-                pinnedBannerText:SetText("|cffffd24d[" .. L["Pinned"] .. "]|r " .. pinnedMsg)
-                Theme:ApplyBackdrop(pinnedBanner, "inset", p)
+                local pinSig = tostring(pinnedMsg) .. ":" .. tostring(p.key or "")
+                if pinnedBanner._scPinSig ~= pinSig then
+                    pinnedBanner._scPinSig = pinSig
+                    pinnedBannerText:SetText("|cffffd24d[" .. L["Pinned"] .. "]|r " .. pinnedMsg)
+                    Theme:ApplyBackdrop(pinnedBanner, "inset", p)
+                end
                 pinnedBanner:Show()
             else
+                pinnedBanner._scPinSig = nil
                 pinnedBanner:Hide()
             end
             panel._hasHubPinnedBanner = hasPinnedBanner
@@ -9257,12 +9302,11 @@ function SocialPanels:CreateChatPanel(parent)
                     replyInput:SetFocus()
                 end
             end
+            local desiredPh = nil
             if isMentions then
                 btnSend:SetEnabled(false)
                 btnQuickReply:SetEnabled(false)
-                if replyInput.SetPlaceholder then
-                    replyInput:SetPlaceholder(L["Click a sender name above to reply, or click 'Keywords' to configure."])
-                end
+                desiredPh = L["Click a sender name above to reply, or click 'Keywords' to configure."]
             elseif (isNotes or isRoom or pState.verified or isAlliance) and not isBNetRedirectActive and not isAltRedirectActive then
                 btnSend:SetEnabled(true)
                 btnSend._isBNetSend = false
@@ -9272,13 +9316,11 @@ function SocialPanels:CreateChatPanel(parent)
                     or (isAlliance and L["Send to Alliance chat inside SocialCentral."]
                     or (isRoom and L["Send to Private Addon Room."]
                     or L["Send direct in-addon message."]))
-                if replyInput.SetPlaceholder then
-                    replyInput:SetPlaceholder(isNotes
-                        and L["Type a personal note to save permanently..."]
-                        or (isAlliance and L["Type in-addon alliance message and press Enter..."]
-                        or (isRoom and L["Type message to Private Room and press Enter..."]
-                        or L["Type in-addon direct message and press Enter..."])))
-                end
+                desiredPh = isNotes
+                    and L["Type a personal note to save permanently..."]
+                    or (isAlliance and L["Type in-addon alliance message and press Enter..."]
+                    or (isRoom and L["Type message to Private Room and press Enter..."]
+                    or L["Type in-addon direct message and press Enter..."]))
             else
                 btnSend:SetEnabled(destInfo ~= nil)
                 btnSend._isBNetSend = (destInfo and destInfo.kind == "BN_WHISPER") or false
@@ -9291,14 +9333,16 @@ function SocialPanels:CreateChatPanel(parent)
                 else
                     btnSend._tipDesc = L["Press Enter or click to send."]
                 end
-                if replyInput.SetPlaceholder then
-                    local phTarget = (active and (shownHdrTitle or active.title))
-                    if destInfo and phTarget and phTarget ~= "" then
-                        replyInput:SetPlaceholder(string.format(L["Message %s..."], phTarget))
-                    else
-                        replyInput:SetPlaceholder((destInfo and destInfo.buttonText) or L["Select a conversation to reply..."])
-                    end
+                local phTarget = (active and (shownHdrTitle or active.title))
+                if destInfo and phTarget and phTarget ~= "" then
+                    desiredPh = string.format(L["Message %s..."], phTarget)
+                else
+                    desiredPh = (destInfo and destInfo.buttonText) or L["Select a conversation to reply..."]
                 end
+            end
+            if desiredPh and replyInput.SetPlaceholder and replyInput._scLastPhText ~= desiredPh then
+                replyInput._scLastPhText = desiredPh
+                replyInput:SetPlaceholder(desiredPh)
             end
             if not panel._replyInputAnchored then
                 panel._replyInputAnchored = true
@@ -9325,8 +9369,24 @@ function SocialPanels:CreateChatPanel(parent)
                 else
                     panel._msgTrackState = nil
                 end
+                local function AddHubDivider(txt, divOpts)
+                    if msgFrame._isStreamViewport and msgFrame.AddStreamDivider then
+                        return msgFrame:AddStreamDivider(txt, divOpts)
+                    end
+                    if panel._msgTrackState and ns.Chat and ns.Chat.AddTrackedMessage then
+                        return ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, txt, divOpts and divOpts.r, divOpts and divOpts.g, divOpts and divOpts.b)
+                    end
+                    msgFrame:AddMessage(txt, divOpts and divOpts.r, divOpts and divOpts.g, divOpts and divOpts.b)
+                    return (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
+                end
+                local function AddHubNotice(txt, noticeOpts)
+                    if msgFrame._isStreamViewport and msgFrame.AddNoticeStrip then
+                        return msgFrame:AddNoticeStrip(txt, noticeOpts)
+                    end
+                    return AddHubDivider(txt, noticeOpts)
+                end
                 if #lines == 0 then
-                    msgFrame:AddMessage(L["No messages yet."], p.textMuted[1], p.textMuted[2], p.textMuted[3])
+                    AddHubDivider(L["No messages yet."], { r = p.textMuted[1], g = p.textMuted[2], b = p.textMuted[3] })
                 else
                     local todayKey = date("%Y-%m-%d")
                     local yesterdayKey = date("%Y-%m-%d", time() - 86400)
@@ -9337,6 +9397,7 @@ function SocialPanels:CreateChatPanel(parent)
                     local lastMsgTs = canIncrementalAppend and panel._renderedLastMsgTs or nil
                     local lastSenderKey = canIncrementalAppend and panel._renderedLastSenderKey or nil
                     local lastSenderTs = canIncrementalAppend and panel._renderedLastSenderTs or nil
+                    local lastTurnStartTs = canIncrementalAppend and panel._renderedLastTurnStartTs or nil
                     local lastSenderTextX = canIncrementalAppend and panel._renderedLastSenderTextX or nil
                     local grpRenderMap = ((active.kind == "PARTY" or active.kind == "RAID" or active.kind == "INSTANCE_CHAT") and ns.Chat and ns.Chat.GetThreadGroupRenderMap)
                         and ns.Chat:GetThreadGroupRenderMap(active)
@@ -9358,7 +9419,7 @@ function SocialPanels:CreateChatPanel(parent)
                     end
                     if isGeneralAct and (not canIncrementalAppend) and #lines > 0 and iterCount == 0 then
                         panel._showingEmptyGeneralHint = true
-                        ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, "|cff7f8a9c" .. L["All current messages in General are hidden by your tab filters. Right-click the General tab to customize."] .. "|r")
+                        AddHubNotice("|cff9da7b5" .. L["All current messages in General are hidden by your tab filters. Right-click the General tab to customize."] .. "|r", { isNotice = true })
                     else
                         panel._showingEmptyGeneralHint = nil
                         for msgStep = 1, iterCount do
@@ -9378,7 +9439,7 @@ function SocialPanels:CreateChatPanel(parent)
                                     or (dKey == yesterdayKey and L["Yesterday"])
                                     or date("%d/%m/%Y", eTs)
                                 lastDateLabel = dLabel
-                                local dLine = ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, "|cff7f8a9c— " .. dLabel .. "|r")
+                                local dLine = AddHubDivider("|cff8f9eb3— " .. dLabel .. "|r", { isGroup = false })
                                 showedBreakLine = true
                                 if panel._msgTrackState and (not mGrpSess) and ns.Chat.RecordTrackedSection then
                                     ns.Chat:RecordTrackedSection(panel._msgTrackState, {
@@ -9397,10 +9458,10 @@ function SocialPanels:CreateChatPanel(parent)
                             lastGroupKey = mGrpSess
                             local grpBanner = ns.Chat and ns.Chat.FormatGroupSessionBanner and ns.Chat:FormatGroupSessionBanner(active.key, msgIdx, gInfo, eTs)
                             if grpBanner then
-                                local gLine = ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, grpBanner)
+                                local gLbl = ns.Chat.FormatGroupSessionLabel and ns.Chat:FormatGroupSessionLabel(gInfo, eTs)
+                                local gLine = AddHubDivider(grpBanner, { isGroup = true, accentRgb = gLbl and gLbl.rgb or { 0.48, 0.68, 1.0 } })
                                 showedBreakLine = true
                                 if panel._msgTrackState and ns.Chat.RecordTrackedSection then
-                                    local gLbl = ns.Chat.FormatGroupSessionLabel and ns.Chat:FormatGroupSessionLabel(gInfo, eTs)
                                     ns.Chat:RecordTrackedSection(panel._msgTrackState, {
                                         kind = "GROUP",
                                         stepId = msgIdx,
@@ -9422,7 +9483,7 @@ function SocialPanels:CreateChatPanel(parent)
                         end
                         if (not showedBreakLine) and lastMsgTs and eTs > 0 and (eTs - lastMsgTs) >= 7200 and not entry.isStatusNotice then
                             local clockTxt = date("%H:%M", eTs)
-                            local iLine = ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, "|cff6e7681— " .. clockTxt .. "|r")
+                            local iLine = AddHubDivider("|cff8793a4— " .. clockTxt .. "|r", { isGroup = false })
                             showedBreakLine = true
                             if panel._msgTrackState and (not mGrpSess) and ns.Chat.RecordTrackedSection then
                                 local combLabel = (lastDateLabel and (lastDateLabel .. " · " .. clockTxt)) or clockTxt
@@ -9443,21 +9504,25 @@ function SocialPanels:CreateChatPanel(parent)
                         if not unreadBannerShown and entry.incoming and ((unreadTargetEntry and entry == unreadTargetEntry) or (not unreadTargetEntry and unreadTargetTs and entry.ts and entry.ts >= unreadTargetTs)) then
                             unreadBannerShown = true
                             showedBreakLine = true
-                            ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, "|cffffd24d» |r|cffffe89a" .. L["New Messages"] .. "|r")
+                            AddHubDivider("|cffffd24d» |r|cffffe89a" .. L["New Messages"] .. "|r", { isUnread = true, accentRgb = { 1.0, 0.78, 0.24 } })
                         end
                         local curSenderKey = nil
-                        if (qFold == "") and (not isGeneralAct) and (not isNotes) and (not isMentions)
-                            and (not entry.isStatusNotice) and (not entry.isSystem) and (not entry.guildEventKind)
+                        if (qFold == "") and (not isNotes) and (not isMentions)
+                            and (not entry.isStatusNotice) and (not entry.isSystem) and (not entry.noSenderColon) and (not entry.guildEventKind)
                         then
-                            if entry.incoming then
+                            if isGeneralAct then
+                                if entry.sender and entry.sender ~= "" and entry.sender ~= L["System"] then
+                                    curSenderKey = "gen:" .. tostring(entry.senderCharName or entry.sender) .. "|" .. tostring(entry.generalTag or "")
+                                end
+                            elseif entry.incoming then
                                 curSenderKey = "in:" .. tostring(entry.senderCharName or entry.sender or "?")
                             else
-                                curSenderKey = "me:" .. tostring(entry.targetChar or "")
+                                curSenderKey = "me:" .. tostring(entry.sender or "") .. "|" .. tostring(entry.targetChar or "")
                             end
                         end
-                        local isSameAuthorGroup = (curSenderKey ~= nil) and (not showedBreakLine)
-                            and (lastSenderKey == curSenderKey)
-                            and (eTs > 0) and ((lastSenderTs or 0) > 0) and ((eTs - lastSenderTs) <= 120)
+                        local isSameAuthorGroup = (ns.Chat and ns.Chat.ShouldGroupWithPreviousTurn)
+                            and ns.Chat:ShouldGroupWithPreviousTurn(curSenderKey, lastSenderKey, lastSenderTs, lastTurnStartTs, eTs, showedBreakLine)
+                            or false
                         local ts
                         if ns.Chat and ns.Chat.BuildMessageTimestampPrefix then
                             ts = ns.Chat:BuildMessageTimestampPrefix(entry.ts, msgIdx, active.key, entry.isStatusNotice, false, nil)
@@ -9472,6 +9537,7 @@ function SocialPanels:CreateChatPanel(parent)
                         if ns.Chat and ns.Chat.FormatRaidTargetTokens then
                             bodyTxt = ns.Chat:FormatRaidTargetTokens(bodyTxt)
                         end
+                        local hasMentionMatch = isMentions or (entry.mentionTerm ~= nil)
                         if entry.incoming and not entry.isStatusNotice and not isNotes and ns.Chat and ns.Chat.HighlightMentionsInline then
                             local mKind
                             if isMentions then
@@ -9479,7 +9545,11 @@ function SocialPanels:CreateChatPanel(parent)
                             else
                                 mKind = active.kind
                             end
-                            bodyTxt = ns.Chat:HighlightMentionsInline(bodyTxt, mKind, entry.mentionTerm)
+                            local hlTxt = ns.Chat:HighlightMentionsInline(bodyTxt, mKind, entry.mentionTerm)
+                            if hlTxt ~= bodyTxt then
+                                hasMentionMatch = true
+                                bodyTxt = hlTxt
+                            end
                         end
                         local searchHitTag = ""
                         if qFold ~= "" and ns.Chat and ns.Chat.FoldSearchText then
@@ -9490,21 +9560,51 @@ function SocialPanels:CreateChatPanel(parent)
                         if entry.guildEventKind and ns.Chat and ns.Chat.FormatGuildEventDisplayLine then
                             local guildLine = ns.Chat:FormatGuildEventDisplayLine(entry, msgIdx, active.key, ts .. searchHitTag)
                             if guildLine then
-                                ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, guildLine)
+                                AddHubNotice(guildLine, { isNotice = true, accentRgb = { 0.30, 0.86, 0.45 } })
                             end
                         elseif entry.isStatusNotice then
                             local sCol = (entry.statusKind == "DND") and "|cfff54747" or "|cffff9b3d"
-                            ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, ts .. searchHitTag .. sCol .. "[" .. (entry.sender or L["Status"]) .. "]|r |cffb8c2d0" .. bodyTxt .. "|r")
+                            AddHubNotice(ts .. searchHitTag .. sCol .. "[" .. (entry.sender or L["Status"]) .. "]|r |cffb8c2d0" .. bodyTxt .. "|r", { isNotice = true, accentRgb = { 0.95, 0.60, 0.24 } })
                         elseif isNotes then
                             local delLink = entry.noteId and ("|Haddon:SCentral:delnote:" .. tostring(entry.noteId) .. "|h|cffff6b6b[x]|r|h ") or ""
-                            ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, ts .. searchHitTag .. delLink .. "|cffffd24d" .. (entry.sender or "") .. "|r: " .. bodyTxt, 0.93, 0.95, 0.98)
+                            local noteLine = ts .. searchHitTag .. delLink .. "|cffffd24d" .. (entry.sender or "") .. "|r: " .. bodyTxt
+                            if msgFrame._isStreamViewport and msgFrame.PushChatMessage then
+                                msgFrame:PushChatMessage({
+                                    msgIdx = msgIdx,
+                                    threadKey = active.key,
+                                    ts = eTs,
+                                    text = noteLine,
+                                    isSelf = true,
+                                    hasMention = false,
+                                    senderKey = nil,
+                                    appendToLastTurn = false,
+                                })
+                            else
+                                AddHubDivider(noteLine, { r = 0.93, g = 0.95, b = 0.98 })
+                            end
                         elseif isMentions then
                             local hex = entry.classFile and Compat.ClassHex(entry.classFile) or "|cff58a6ff"
                             local chTag = entry.mentionChannel and ("|cff8ab4f8[" .. entry.mentionChannel .. "]|r ") or ""
                             local kwTag = entry.mentionTerm and ("|cffffd24d[" .. entry.mentionTerm .. "]|r ") or ""
                             local sName = entry.sender or "?"
                             local senderLink = "|Haddon:SCentral:w:" .. sName .. "|h" .. hex .. "[" .. sName .. "]|r|h"
-                            ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, ts .. searchHitTag .. chTag .. kwTag .. senderLink .. ": " .. bodyTxt, 0.93, 0.95, 0.98)
+                            local mLine = ts .. searchHitTag .. chTag .. kwTag .. senderLink .. ": " .. bodyTxt
+                            if msgFrame._isStreamViewport and msgFrame.PushChatMessage then
+                                msgFrame:PushChatMessage({
+                                    msgIdx = msgIdx,
+                                    threadKey = active.key,
+                                    ts = eTs,
+                                    text = mLine,
+                                    isSelf = false,
+                                    hasMention = true,
+                                    senderKey = nil,
+                                    appendToLastTurn = false,
+                                })
+                            else
+                                AddHubDivider(mLine, { r = 0.93, g = 0.95, b = 0.98 })
+                            end
+                        elseif entry.isSystem or entry.noSenderColon then
+                            AddHubNotice(ts .. searchHitTag .. bodyTxt, { isNotice = true, accentRgb = { 0.54, 0.66, 0.82 } })
                         else
                             local addonTag = (entry.viaAddon and not isRoom) and ((Compat.AddonIconMarkup and (Compat.AddonIconMarkup(true, 12) .. " ")) or "|cff3fb950[SC]|r ") or ""
                             local mentionPrefix = ""
@@ -9552,7 +9652,7 @@ function SocialPanels:CreateChatPanel(parent)
                                     then
                                         peerDisp = Compat.MaskStreamerBNetName(peerDisp)
                                     end
-                                    ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, "|cff7f8a9c— |r" .. myFacIco .. myHex .. myChar .. "|r |cff7f8a9c&|r " .. peerFacIco .. peerHex .. peerDisp .. "|r")
+                                    AddHubDivider("|cff8f9eb3— |r" .. myFacIco .. myHex .. myChar .. "|r |cff8f9eb3&|r " .. peerFacIco .. peerHex .. peerDisp .. "|r", { isGroup = false })
                                     isSameAuthorGroup = false
                                 end
                             end
@@ -9589,27 +9689,57 @@ function SocialPanels:CreateChatPanel(parent)
                                 end
                             end
                             local senderDisp = sFacIco .. hex .. shortSender .. "|r" .. msgLvlTag
-                            if isSameAuthorGroup then
+                            local turnBarCol = nil
+                            if not entry.incoming then
+                                turnBarCol = Theme and Theme.CHAT_SELF_BAR_COLOR or { 0.35, 0.65, 1.0 }
+                            elseif entry.classFile and entry.classFile ~= "" and Theme and Theme.GetClassBarColor then
+                                turnBarCol = Theme:GetClassBarColor(entry.classFile)
+                            elseif entry.classFile and entry.classFile ~= "" and Compat.ClassColor then
+                                local cr, cg, cb = Compat.ClassColor(entry.classFile)
+                                turnBarCol = cr and { cr, cg, cb } or nil
+                            end
+                            if msgFrame._isStreamViewport and msgFrame.PushChatMessage then
+                                local fullLineTxt
+                                if isSameAuthorGroup then
+                                    local groupedPrefix = (ns.Chat and ns.Chat.BuildMessageTimestampPrefix)
+                                        and ns.Chat:BuildMessageTimestampPrefix(entry.ts, msgIdx, active.key, false, true, lastSenderTs, msgFrame, lastSenderTextX)
+                                        or ""
+                                    fullLineTxt = groupedPrefix .. searchHitTag .. mentionPrefix .. bodyTxt .. tick
+                                else
+                                    fullLineTxt = ts .. searchHitTag .. mentionPrefix .. addonTag .. senderDisp .. ": " .. bodyTxt .. tick
+                                end
+                                msgFrame:PushChatMessage({
+                                    msgIdx = msgIdx,
+                                    threadKey = active.key,
+                                    ts = eTs,
+                                    text = fullLineTxt,
+                                    barColor = turnBarCol,
+                                    isSelf = (not entry.incoming),
+                                    hasMention = hasMentionMatch,
+                                    senderKey = curSenderKey,
+                                    appendToLastTurn = isSameAuthorGroup,
+                                })
+                            elseif isSameAuthorGroup then
                                 local groupedPrefix = (ns.Chat and ns.Chat.BuildMessageTimestampPrefix)
                                     and ns.Chat:BuildMessageTimestampPrefix(entry.ts, msgIdx, active.key, false, true, lastSenderTs, msgFrame, lastSenderTextX)
                                     or (ts .. "|cff586069·|r ")
-                                ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, groupedPrefix .. searchHitTag .. mentionPrefix .. bodyTxt .. tick, 0.93, 0.95, 0.98)
+                                AddHubDivider(groupedPrefix .. searchHitTag .. mentionPrefix .. bodyTxt .. tick, { r = 0.93, g = 0.95, b = 0.98 })
                             else
                                 local headPrefix = ts .. searchHitTag .. mentionPrefix .. addonTag .. senderDisp .. ": "
-                                ns.Chat:AddTrackedMessage(msgFrame, panel._msgTrackState, headPrefix .. bodyTxt .. tick, 0.93, 0.95, 0.98)
-                                if curSenderKey and ns.Chat and ns.Chat.MeasureMessagePrefixWidth then
-                                    lastSenderTextX = ns.Chat:MeasureMessagePrefixWidth(msgFrame, headPrefix)
-                                else
-                                    lastSenderTextX = nil
-                                end
+                                AddHubDivider(headPrefix .. bodyTxt .. tick, { r = 0.93, g = 0.95, b = 0.98 })
+                                lastSenderTextX = nil
                             end
                         end
                         if curSenderKey then
+                            if not isSameAuthorGroup then
+                                lastTurnStartTs = eTs
+                            end
                             lastSenderKey = curSenderKey
                             if eTs > 0 then lastSenderTs = eTs end
                         else
                             lastSenderKey = nil
                             lastSenderTs = nil
+                            lastTurnStartTs = nil
                             lastSenderTextX = nil
                         end
                             end
@@ -9623,18 +9753,28 @@ function SocialPanels:CreateChatPanel(parent)
                     panel._renderedUnreadBannerShown = unreadBannerShown
                     panel._renderedLastSenderKey = lastSenderKey
                     panel._renderedLastSenderTs = lastSenderTs
+                    panel._renderedLastTurnStartTs = lastTurnStartTs
                     panel._renderedLastSenderTextX = lastSenderTextX
                 end
+                if msgFrame.FinalizeRender then
+                    msgFrame:FinalizeRender()
+                end
                 if panel._pendingRestoreScrollOffset and panel._pendingRestoreScrollOffset > 0 and msgFrame.SetScrollOffset then
-                    local newLinesTotal = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
-                    local addedDisplayLines = (panel._pendingRestorePrevLines and panel._pendingRestorePrevLines > 0)
-                        and math.max(0, newLinesTotal - panel._pendingRestorePrevLines) or 0
-                    msgFrame:SetScrollOffset(panel._pendingRestoreScrollOffset + addedDisplayLines)
+                    if msgFrame._isStreamViewport and msgFrame.GetTotalHeight then
+                        local addedPx = canIncrementalAppend and math.max(0, (msgFrame:GetTotalHeight() or 0) - (panel._pendingRestorePrevTotalH or 0)) or 0
+                        msgFrame:SetScrollOffset(panel._pendingRestoreScrollOffset + addedPx)
+                    else
+                        local newLinesTotal = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
+                        local addedDisplayLines = (panel._pendingRestorePrevLines and panel._pendingRestorePrevLines > 0)
+                            and math.max(0, newLinesTotal - panel._pendingRestorePrevLines) or 0
+                        msgFrame:SetScrollOffset(panel._pendingRestoreScrollOffset + addedDisplayLines)
+                    end
                 elseif msgFrame.ScrollToBottom then
                     msgFrame:ScrollToBottom()
                 end
                 panel._pendingRestoreScrollOffset = nil
                 panel._pendingRestorePrevLines = nil
+                panel._pendingRestorePrevTotalH = nil
                 SyncHubScrollBottomPill(false)
                 UpdateChatMsgScrollbar()
             end
@@ -9687,6 +9827,9 @@ function SocialPanels:CreateChatPanel(parent)
             end
             if needMsgRebuild then
                 msgFrame:AddMessage(L["Use '+ Chat' for 1-on-1 verified addon chat or '+ Room' for group rooms."], p.textMuted[1], p.textMuted[2], p.textMuted[3])
+                if msgFrame.FinalizeRender then
+                    msgFrame:FinalizeRender()
+                end
             end
         end
     end
@@ -9706,6 +9849,10 @@ function SocialPanels:CreateChatPanel(parent)
         panel._renderedLastGroupKey = nil
         panel._renderedLastMsgTs = nil
         panel._renderedUnreadBannerShown = nil
+        panel._renderedLastSenderKey = nil
+        panel._renderedLastSenderTs = nil
+        panel._renderedLastTurnStartTs = nil
+        panel._renderedLastSenderTextX = nil
     end)
 
     panel:RefreshTheme()

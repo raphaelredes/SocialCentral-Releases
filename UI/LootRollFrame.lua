@@ -37,6 +37,8 @@ local ICON_DOT = "Interface\\AddOns\\SocialCentral\\Media\\dot"
 local ICON_LOCK_CLOSED = "Interface\\AddOns\\SocialCentral\\Media\\lock-closed"
 local ICON_LOCK_OPEN = "Interface\\AddOns\\SocialCentral\\Media\\lock-open"
 local ICON_PASS = "Interface\\Buttons\\UI-GroupLoot-Pass-Up"
+local ICON_ARROW_UP = "Interface\\ChatFrame\\UI-ChatIcon-ScrollUp-Up"
+local ICON_ARROW_DOWN = "Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up"
 local ICON_LEAD_STAR = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_1"
 local LEAD_STAR_TAG = "|T" .. ICON_LEAD_STAR .. ":12:12:0:0|t"
 
@@ -116,6 +118,40 @@ local function HideItemHoverTooltip()
     if GameTooltip then GameTooltip:Hide() end
     if _G.ShoppingTooltip1 and _G.ShoppingTooltip1.Hide then _G.ShoppingTooltip1:Hide() end
     if _G.ShoppingTooltip2 and _G.ShoppingTooltip2.Hide then _G.ShoppingTooltip2:Hide() end
+end
+
+--- Anchors roll card tooltips outside the active window bounds so hovered choice tooltips
+--- never cover the item details, stat comparison, or party votes inside the card.
+local function SetLootRollButtonTooltipOwner(btn, cardFrame, preferBottom)
+    if not GameTooltip then return end
+    local anchor = cardFrame or btn
+    if not (anchor and anchor.GetTop and UIParent and UIParent.GetTop) then
+        GameTooltip:SetOwner(anchor or btn, preferBottom and "ANCHOR_BOTTOM" or "ANCHOR_TOP")
+        return
+    end
+    local uTop = UIParent:GetTop() or 900
+    local uBot = UIParent:GetBottom() or 0
+    local uWidth = UIParent:GetWidth() or 1280
+    local cTop = anchor:GetTop() or 0
+    local cBot = anchor:GetBottom() or 0
+    local cCx = anchor:GetCenter() or (uWidth * 0.5)
+    if preferBottom then
+        if (cBot - uBot) >= 85 then
+            GameTooltip:SetOwner(anchor, "ANCHOR_BOTTOM", 0, -4)
+        elseif cCx > (uWidth * 0.5) then
+            GameTooltip:SetOwner(anchor, "ANCHOR_LEFT", -4, 0)
+        else
+            GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT", 4, 0)
+        end
+    else
+        if (uTop - cTop) >= 92 then
+            GameTooltip:SetOwner(anchor, "ANCHOR_TOP", 0, 4)
+        elseif cCx > (uWidth * 0.5) then
+            GameTooltip:SetOwner(anchor, "ANCHOR_LEFT", -4, 0)
+        else
+            GameTooltip:SetOwner(anchor, "ANCHOR_RIGHT", 4, 0)
+        end
+    end
 end
 
 local function HandleItemIconClick(owner, itemLink, button)
@@ -666,7 +702,7 @@ function LootRollUI:SyncCardLockVisual()
     })
 end
 
-local function CreateStackedRollRow(parent, idx)
+local function CreateStackedRollRow(parent, idx, cardFrame)
     local Theme = ns.Theme
     local row = CreateFrame("Frame", nil, parent)
     row:SetHeight(50)
@@ -747,7 +783,7 @@ local function CreateStackedRollRow(parent, idx)
     end)
     bopBtn:HookScript("OnEnter", function(selfBtn)
         if not GameTooltip then return end
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        SetLootRollButtonTooltipOwner(selfBtn, cardFrame, false)
         GameTooltip:SetText(L["Confirm BoP"], 0.35, 0.95, 0.55)
         GameTooltip:AddLine(L["Left-click: Confirm BoP roll\nRight-click: Cancel"], 0.88, 0.92, 0.96, true)
         GameTooltip:Show()
@@ -772,7 +808,7 @@ local function CreateStackedRollRow(parent, idx)
         end)
         b:HookScript("OnEnter", function(selfBtn)
             if not GameTooltip then return end
-            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+            SetLootRollButtonTooltipOwner(selfBtn, cardFrame, false)
             GameTooltip:SetText(tipLbl, 1, 0.85, 0.25)
             GameTooltip:Show()
         end)
@@ -876,7 +912,7 @@ local function BuildActiveComparisonSection(f, itemCard)
     end)
     slotSwapBtn:HookScript("OnEnter", function(selfBtn)
         if not GameTooltip then return end
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        SetLootRollButtonTooltipOwner(selfBtn, f, false)
         GameTooltip:SetText(L["Swap Comparison Slot"], 1, 0.85, 0.25)
         GameTooltip:AddLine(L["Compare this drop against your other Ring, Trinket, or Off-Hand slot."], 0.88, 0.92, 0.96, true)
         GameTooltip:Show()
@@ -943,12 +979,12 @@ local function BuildActiveComparisonSection(f, itemCard)
     return compBox
 end
 
-local function BuildIntegratedPicksSection(f, actRow)
+local function BuildIntegratedPicksSection(f, compBox)
     local Theme = ns.Theme
     -- Integrated Live Party Votes & Multi-Drop Batch Footer inside the single unified roll card
     local picksDrawer = CreateFrame("Frame", nil, f)
-    picksDrawer:SetPoint("TOPLEFT", actRow, "BOTTOMLEFT", 0, 0)
-    picksDrawer:SetPoint("TOPRIGHT", actRow, "BOTTOMRIGHT", 0, 0)
+    picksDrawer:SetPoint("TOPLEFT", compBox, "BOTTOMLEFT", 0, 0)
+    picksDrawer:SetPoint("TOPRIGHT", compBox, "BOTTOMRIGHT", 0, 0)
     picksDrawer:SetHeight(24)
     picksDrawer:EnableMouse(true)
     picksDrawer:Hide()
@@ -974,8 +1010,16 @@ local function BuildIntegratedPicksSection(f, actRow)
     tHl:SetAllPoints()
     tHl:SetColorTexture(1.0, 0.94, 0.78, 0.05)
 
+    local collapseIco = tallyBtn:CreateTexture(nil, "OVERLAY")
+    collapseIco:SetSize(11, 11)
+    collapseIco:SetPoint("RIGHT", tallyBtn, "RIGHT", -10, 0)
+    collapseIco:SetTexture(ICON_ARROW_UP)
+    collapseIco:SetTexCoord(0.18, 0.82, 0.18, 0.82)
+    collapseIco:SetVertexColor(0.60, 0.66, 0.74, 0.95)
+    picksDrawer.collapseIco = collapseIco
+
     local collapseFs = tallyBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    collapseFs:SetPoint("RIGHT", tallyBtn, "RIGHT", -10, 0)
+    collapseFs:SetPoint("RIGHT", collapseIco, "LEFT", -3, 0)
     collapseFs:SetJustifyH("RIGHT")
     collapseFs:SetWordWrap(false)
     picksDrawer.collapseFs = collapseFs
@@ -1136,7 +1180,7 @@ local function BuildIntegratedPicksSection(f, actRow)
     end)
     batchGreedBtn:HookScript("OnEnter", function(selfBtn)
         if not GameTooltip then return end
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        SetLootRollButtonTooltipOwner(selfBtn, f, true)
         GameTooltip:SetText(L["Greed Unusable"], 1.0, 0.84, 0.25)
         GameTooltip:AddLine(L["Rolls Greed on all remaining non-BoP items your character cannot equip, already knows, or that are lower item level."], 0.88, 0.92, 0.96, true)
         GameTooltip:Show()
@@ -1156,7 +1200,7 @@ local function BuildIntegratedPicksSection(f, actRow)
     end)
     batchPassBtn:HookScript("OnEnter", function(selfBtn)
         if not GameTooltip then return end
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        SetLootRollButtonTooltipOwner(selfBtn, f, true)
         GameTooltip:SetText(L["Pass Remaining"], 1.0, 0.55, 0.45)
         GameTooltip:AddLine(L["Passes on every active drop you have not rolled on yet."], 0.88, 0.92, 0.96, true)
         GameTooltip:Show()
@@ -1262,16 +1306,16 @@ function LootRollUI:EnsureFrame()
             target = f,
             steps = {
                 {
-                    title = L["1. Item, Usability & Stat Comparison"],
-                    tag = "1/4 · " .. L["Group Loot Roll"],
-                    text = L["Hover anywhere on the item card for comparison tooltips, read the 2-column stat diff grid, or click 1/2 to swap Ring/Trinket comparison slots."],
-                    target = function() return (f.itemCard and f.itemCard:IsShown() and f.itemCard) or f end,
+                    title = L["1. Roll Buttons & BoP Safety"],
+                    tag = "1/4 · " .. L["Actions"],
+                    text = L["Roll Need, Greed, Disenchant, or Pass from the top action bar. Tooltips appear cleanly above the window so stats stay clear, and BoP items confirm inline."],
+                    target = function() return (f.actRow and f.actRow:IsShown() and f.actRow) or f end,
                 },
                 {
-                    title = L["2. Roll Buttons & BoP Safety"],
-                    tag = "2/4 · " .. L["Actions"],
-                    text = L["Roll Need, Greed, Disenchant, or Pass. BoP items ask for an inline confirmation so canceling never locks your buttons."],
-                    target = function() return (f.actRow and f.actRow:IsShown() and f.actRow) or f end,
+                    title = L["2. Item, Usability & Stat Comparison"],
+                    tag = "2/4 · " .. L["Group Loot Roll"],
+                    text = L["Hover anywhere on the item card for comparison tooltips, read the 2-column stat diff grid, or click 1/2 to swap Ring/Trinket comparison slots."],
+                    target = function() return (f.itemCard and f.itemCard:IsShown() and { f.itemCard, f.compBox }) or f end,
                 },
                 {
                     title = L["3. Live Party Votes & Batch Actions"],
@@ -1316,7 +1360,7 @@ function LootRollUI:EnsureFrame()
     end)
     stackModeBtn:HookScript("OnEnter", function(selfBtn)
         if not GameTooltip then return end
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        SetLootRollButtonTooltipOwner(selfBtn, f, false)
         GameTooltip:SetText(L["Roll Card Layout"], 1.0, 0.85, 0.25)
         GameTooltip:AddLine(L["Switch between Single Tabbed Card (detailed comparison) and Stacked Multi-Drop Cards (compact simultaneous view)."], 0.90, 0.94, 0.98, true)
         GameTooltip:Show()
@@ -1366,7 +1410,7 @@ function LootRollUI:EnsureFrame()
     stackBox:Hide()
     stackBox._rows = {}
     for sIdx = 1, MAX_STACKED_CARDS do
-        local sRow = CreateStackedRollRow(stackBox, sIdx)
+        local sRow = CreateStackedRollRow(stackBox, sIdx, f)
         sRow:SetPoint("TOPLEFT", stackBox, "TOPLEFT", 0, -((sIdx - 1) * 50))
         sRow:SetPoint("TOPRIGHT", stackBox, "TOPRIGHT", 0, -((sIdx - 1) * 50))
         stackBox._rows[sIdx] = sRow
@@ -1423,10 +1467,134 @@ function LootRollUI:EnsureFrame()
     tabNextBtn:Hide()
     f.tabNextBtn = tabNextBtn
 
+    -- Semantic Action Buttons Bar at top of card body (Need / Greed / Disenchant / Pass + Inline BoP Confirm)
+    local actRow = CreateFrame("Frame", nil, f)
+    actRow:SetPoint("TOPLEFT", hdr, "BOTTOMLEFT", 0, 0)
+    actRow:SetPoint("TOPRIGHT", hdr, "BOTTOMRIGHT", 0, 0)
+    actRow:SetHeight(44)
+    actRow:EnableMouse(true)
+    local actBg = actRow:CreateTexture(nil, "BACKGROUND", nil, -1)
+    actBg:SetAllPoints()
+    actBg:SetTexture(WHITE8X8)
+    actBg:SetVertexColor(0.04, 0.045, 0.055, 0.48)
+    actRow._bg = actBg
+    local actBotDiv = actRow:CreateTexture(nil, "ARTWORK", nil, 1)
+    actBotDiv:SetHeight(1)
+    actBotDiv:SetPoint("BOTTOMLEFT", actRow, "BOTTOMLEFT", 0, 0)
+    actBotDiv:SetPoint("BOTTOMRIGHT", actRow, "BOTTOMRIGHT", 0, 0)
+    actBotDiv:SetTexture(WHITE8X8)
+    actBotDiv:SetVertexColor(0.35, 0.32, 0.24, 0.45)
+    actRow._botDiv = actBotDiv
+    if Theme.AttachDragHandle then
+        Theme:AttachDragHandle(actRow, f)
+    end
+    f.actRow = actRow
+
+    local btnNeed = Theme:CreateButton(actRow, 86, 34, "", "default")
+    ApplyIconOnlyLootButton(btnNeed, CHOICE_ICONS.NEED, 18, L["RollBtnNeed"], "NEED")
+    local btnGreed = Theme:CreateButton(actRow, 86, 34, "", "default")
+    ApplyIconOnlyLootButton(btnGreed, CHOICE_ICONS.GREED, 18, L["RollBtnGreed"], "GREED")
+    local btnDE = Theme:CreateButton(actRow, 86, 34, "", "default")
+    ApplyIconOnlyLootButton(btnDE, CHOICE_ICONS.DE, 18, L["RollBtnDE"], "DE")
+    local btnPass = Theme:CreateButton(actRow, 86, 34, "", "default")
+    ApplyIconOnlyLootButton(btnPass, CHOICE_ICONS.PASS, 18, L["Pass"], "PASS")
+
+    local bopConfirmRow = CreateFrame("Frame", nil, actRow)
+    bopConfirmRow:SetAllPoints(actRow)
+    bopConfirmRow:Hide()
+    local bopConfirmBtn = Theme:CreateButton(bopConfirmRow, 240, 32, L["Confirm BoP"], "default")
+    ApplyIconOnlyLootButton(bopConfirmBtn, CHOICE_ICONS.NEED, 16, L["Confirm BoP"], "NEED")
+    bopConfirmBtn:SetPoint("LEFT", bopConfirmRow, "LEFT", 10, 0)
+    bopConfirmBtn:SetScript("OnClick", function()
+        if LootRollUI.selectedRollID and ns.LootRoll and ns.LootRoll.ConfirmPendingRoll then
+            ns.LootRoll:ConfirmPendingRoll(LootRollUI.selectedRollID)
+        end
+    end)
+    local bopCancelBtn = Theme:CreateButton(bopConfirmRow, 102, 32, L["Cancel"], "danger")
+    bopCancelBtn:SetPoint("RIGHT", bopConfirmRow, "RIGHT", -10, 0)
+    bopCancelBtn:SetScript("OnClick", function()
+        if LootRollUI.selectedRollID and ns.LootRoll and ns.LootRoll.CancelPendingRoll then
+            ns.LootRoll:CancelPendingRoll(LootRollUI.selectedRollID)
+        end
+    end)
+    bopConfirmBtn:SetPoint("RIGHT", bopCancelBtn, "LEFT", -8, 0)
+    f.bopConfirmRow = bopConfirmRow
+    f.bopConfirmBtn = bopConfirmBtn
+    f.bopCancelBtn = bopCancelBtn
+
+    local statusWrap = CreateFrame("Frame", nil, actRow)
+    statusWrap:SetPoint("TOPLEFT", actRow, "TOPLEFT", 10, -5)
+    statusWrap:SetPoint("BOTTOMRIGHT", actRow, "BOTTOMRIGHT", -10, 5)
+    statusWrap:Hide()
+    local stBg = statusWrap:CreateTexture(nil, "BACKGROUND", nil, 0)
+    stBg:SetAllPoints()
+    stBg:SetTexture(WHITE8X8)
+    stBg:SetVertexColor(0.14, 0.24, 0.16, 0.30)
+    statusWrap._bg = stBg
+    local statusBanner = statusWrap:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statusBanner:SetPoint("LEFT", statusWrap, "LEFT", 8, 0)
+    statusBanner:SetPoint("RIGHT", statusWrap, "RIGHT", -8, 0)
+    statusBanner:SetJustifyH("CENTER")
+    statusBanner:SetWordWrap(false)
+    f.statusWrap = statusWrap
+    f.statusBanner = statusBanner
+
+    local function BindRollButton(btn, rollType, reasonKey, helpTitle, helpDesc)
+        btn:SetScript("OnClick", function()
+            if LootRollUI.selectedRollID and ns.LootRoll then
+                local curId = LootRollUI.selectedRollID
+                ns.LootRoll:SubmitRoll(curId, rollType)
+                if C_Timer and C_Timer.After then
+                    C_Timer.After(0.30, function()
+                        if LootRollUI.selectedRollID == curId and ns.LootRoll then
+                            local curRec = ns.LootRoll:GetRollByID(curId)
+                            if curRec and curRec.pendingConfirm then return end
+                            for _, r in ipairs(ns.LootRoll:GetActiveList()) do
+                                if not r.myChoice and not r.resolved then
+                                    LootRollUI.selectedRollID = r.rollID
+                                    LootRollUI:Refresh()
+                                    break
+                                end
+                            end
+                        end
+                    end)
+                end
+            end
+        end)
+        btn:HookScript("OnEnter", function(selfBtn)
+            local rec = LootRollUI.selectedRollID and ns.LootRoll and ns.LootRoll:GetRollByID(LootRollUI.selectedRollID)
+            local reason = reasonKey and rec and rec[reasonKey]
+            if not GameTooltip then return end
+            SetLootRollButtonTooltipOwner(selfBtn, f, false)
+            GameTooltip:ClearLines()
+            if not btn:IsEnabled() and reason and reason ~= "" then
+                GameTooltip:AddLine(helpTitle .. " — " .. L["Unavailable"], 1.0, 0.45, 0.38)
+                GameTooltip:AddLine(reason, 0.90, 0.92, 0.95, true)
+                GameTooltip:AddLine(helpDesc, 0.72, 0.78, 0.86, true)
+            else
+                GameTooltip:AddLine(helpTitle, 1.0, 0.85, 0.25)
+                GameTooltip:AddLine(helpDesc, 0.90, 0.94, 0.98, true)
+            end
+            GameTooltip:Show()
+        end)
+        btn:HookScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
+    end
+    BindRollButton(btnNeed, 1, "reasonNeed", L["Need (Roll)"], L["Roll Need for an upgrade you can use right now."])
+    BindRollButton(btnGreed, 2, "reasonGreed", L["Greed"], L["Roll Greed when nobody needs the item (or for gold/vendor)."])
+    BindRollButton(btnDE, 3, "reasonDisenchant", L["Disenchant"], L["Roll Disenchant if an Enchanter in the group can break the item into shards."])
+    BindRollButton(btnPass, 0, nil, L["Pass"], L["Pass on this item so other party members can roll."])
+
+    f.btnNeed = btnNeed
+    f.btnGreed = btnGreed
+    f.btnDE = btnDE
+    f.btnPass = btnPass
+
     -- Item Hero Band (borderless with soft quality glow wash + 44x44 icon + edge-to-edge timer bar)
     local itemCard = CreateFrame("Frame", nil, f)
-    itemCard:SetPoint("TOPLEFT", hdr, "BOTTOMLEFT", 0, 0)
-    itemCard:SetPoint("TOPRIGHT", hdr, "BOTTOMRIGHT", 0, 0)
+    itemCard:SetPoint("TOPLEFT", actRow, "BOTTOMLEFT", 0, 0)
+    itemCard:SetPoint("TOPRIGHT", actRow, "BOTTOMRIGHT", 0, 0)
     itemCard:SetHeight(66)
     if itemCard.SetClipsChildren then itemCard:SetClipsChildren(true) end
     local heroGlow = itemCard:CreateTexture(nil, "BACKGROUND", nil, 0)
@@ -1539,116 +1707,8 @@ function LootRollUI:EnsureFrame()
     -- Structured Gear / Recipe Comparison Band (modular helper)
     local compBox = BuildActiveComparisonSection(f, itemCard)
 
-    -- Semantic Action Buttons Bar (Need / Greed / Disenchant / Pass + Inline BoP Confirm)
-    local actRow = CreateFrame("Frame", nil, f)
-    actRow:SetPoint("TOPLEFT", compBox, "BOTTOMLEFT", 0, 0)
-    actRow:SetPoint("TOPRIGHT", compBox, "BOTTOMRIGHT", 0, 0)
-    actRow:SetHeight(44)
-    f.actRow = actRow
-
-    local btnNeed = Theme:CreateButton(actRow, 86, 34, "", "default")
-    ApplyIconOnlyLootButton(btnNeed, CHOICE_ICONS.NEED, 18, L["RollBtnNeed"], "NEED")
-    local btnGreed = Theme:CreateButton(actRow, 86, 34, "", "default")
-    ApplyIconOnlyLootButton(btnGreed, CHOICE_ICONS.GREED, 18, L["RollBtnGreed"], "GREED")
-    local btnDE = Theme:CreateButton(actRow, 86, 34, "", "default")
-    ApplyIconOnlyLootButton(btnDE, CHOICE_ICONS.DE, 18, L["RollBtnDE"], "DE")
-    local btnPass = Theme:CreateButton(actRow, 86, 34, "", "default")
-    ApplyIconOnlyLootButton(btnPass, CHOICE_ICONS.PASS, 18, L["Pass"], "PASS")
-
-    local bopConfirmRow = CreateFrame("Frame", nil, actRow)
-    bopConfirmRow:SetAllPoints(actRow)
-    bopConfirmRow:Hide()
-    local bopConfirmBtn = Theme:CreateButton(bopConfirmRow, 240, 32, L["Confirm BoP"], "default")
-    ApplyIconOnlyLootButton(bopConfirmBtn, CHOICE_ICONS.NEED, 16, L["Confirm BoP"], "NEED")
-    bopConfirmBtn:SetPoint("LEFT", bopConfirmRow, "LEFT", 10, 0)
-    bopConfirmBtn:SetScript("OnClick", function()
-        if LootRollUI.selectedRollID and ns.LootRoll and ns.LootRoll.ConfirmPendingRoll then
-            ns.LootRoll:ConfirmPendingRoll(LootRollUI.selectedRollID)
-        end
-    end)
-    local bopCancelBtn = Theme:CreateButton(bopConfirmRow, 102, 32, L["Cancel"], "danger")
-    bopCancelBtn:SetPoint("RIGHT", bopConfirmRow, "RIGHT", -10, 0)
-    bopCancelBtn:SetScript("OnClick", function()
-        if LootRollUI.selectedRollID and ns.LootRoll and ns.LootRoll.CancelPendingRoll then
-            ns.LootRoll:CancelPendingRoll(LootRollUI.selectedRollID)
-        end
-    end)
-    bopConfirmBtn:SetPoint("RIGHT", bopCancelBtn, "LEFT", -8, 0)
-    f.bopConfirmRow = bopConfirmRow
-    f.bopConfirmBtn = bopConfirmBtn
-    f.bopCancelBtn = bopCancelBtn
-
-    local statusWrap = CreateFrame("Frame", nil, actRow)
-    statusWrap:SetPoint("TOPLEFT", actRow, "TOPLEFT", 10, -5)
-    statusWrap:SetPoint("BOTTOMRIGHT", actRow, "BOTTOMRIGHT", -10, 5)
-    statusWrap:Hide()
-    local stBg = statusWrap:CreateTexture(nil, "BACKGROUND", nil, 0)
-    stBg:SetAllPoints()
-    stBg:SetTexture(WHITE8X8)
-    stBg:SetVertexColor(0.14, 0.24, 0.16, 0.30)
-    statusWrap._bg = stBg
-    local statusBanner = statusWrap:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    statusBanner:SetPoint("LEFT", statusWrap, "LEFT", 8, 0)
-    statusBanner:SetPoint("RIGHT", statusWrap, "RIGHT", -8, 0)
-    statusBanner:SetJustifyH("CENTER")
-    statusBanner:SetWordWrap(false)
-    f.statusWrap = statusWrap
-    f.statusBanner = statusBanner
-
-    local function BindRollButton(btn, rollType, reasonKey, helpTitle, helpDesc)
-        btn:SetScript("OnClick", function()
-            if LootRollUI.selectedRollID and ns.LootRoll then
-                local curId = LootRollUI.selectedRollID
-                ns.LootRoll:SubmitRoll(curId, rollType)
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0.30, function()
-                        if LootRollUI.selectedRollID == curId and ns.LootRoll then
-                            local curRec = ns.LootRoll:GetRollByID(curId)
-                            if curRec and curRec.pendingConfirm then return end
-                            for _, r in ipairs(ns.LootRoll:GetActiveList()) do
-                                if not r.myChoice and not r.resolved then
-                                    LootRollUI.selectedRollID = r.rollID
-                                    LootRollUI:Refresh()
-                                    break
-                                end
-                            end
-                        end
-                    end)
-                end
-            end
-        end)
-        btn:HookScript("OnEnter", function(selfBtn)
-            local rec = LootRollUI.selectedRollID and ns.LootRoll and ns.LootRoll:GetRollByID(LootRollUI.selectedRollID)
-            local reason = reasonKey and rec and rec[reasonKey]
-            if not GameTooltip then return end
-            GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
-            GameTooltip:ClearLines()
-            if not btn:IsEnabled() and reason and reason ~= "" then
-                GameTooltip:AddLine(helpTitle .. " — " .. L["Unavailable"], 1.0, 0.45, 0.38)
-                GameTooltip:AddLine(reason, 0.90, 0.92, 0.95, true)
-                GameTooltip:AddLine(helpDesc, 0.72, 0.78, 0.86, true)
-            else
-                GameTooltip:AddLine(helpTitle, 1.0, 0.85, 0.25)
-                GameTooltip:AddLine(helpDesc, 0.90, 0.94, 0.98, true)
-            end
-            GameTooltip:Show()
-        end)
-        btn:HookScript("OnLeave", function()
-            if GameTooltip then GameTooltip:Hide() end
-        end)
-    end
-    BindRollButton(btnNeed, 1, "reasonNeed", L["Need (Roll)"], L["Roll Need for an upgrade you can use right now."])
-    BindRollButton(btnGreed, 2, "reasonGreed", L["Greed"], L["Roll Greed when nobody needs the item (or for gold/vendor)."])
-    BindRollButton(btnDE, 3, "reasonDisenchant", L["Disenchant"], L["Roll Disenchant if an Enchanter in the group can break the item into shards."])
-    BindRollButton(btnPass, 0, nil, L["Pass"], L["Pass on this item so other party members can roll."])
-
-    f.btnNeed = btnNeed
-    f.btnGreed = btnGreed
-    f.btnDE = btnDE
-    f.btnPass = btnPass
-
     -- Integrated Live Party Votes & Multi-Drop Batch Footer (modular helper)
-    BuildIntegratedPicksSection(f, actRow)
+    BuildIntegratedPicksSection(f, compBox)
 
     local function UpdateSingleTimerBar(rec, tBg, tFill, tSpark, tNumFs, cacheObj, nowMono)
         if not (rec and tBg and tFill) then return end
@@ -1835,6 +1895,12 @@ function LootRollUI:ApplyTheme()
     end
     if f.tabsRow and f.tabsRow._div then
         f.tabsRow._div:SetVertexColor(divC[1], divC[2], divC[3], 0.45)
+    end
+    if f.actRow and f.actRow._bg then
+        f.actRow._bg:SetVertexColor(iBg[1], iBg[2], iBg[3], 0.48)
+    end
+    if f.actRow and f.actRow._botDiv then
+        f.actRow._botDiv:SetVertexColor(divC[1], divC[2], divC[3], 0.55)
     end
     if f.compBox and f.compBox._bg then
         f.compBox._bg:SetVertexColor(iBg[1], iBg[2], iBg[3], 0.72)
@@ -5343,10 +5409,10 @@ function LootRollUI:Refresh()
 
     local showTabs = hasMulti
     f.tabsRow:SetShown(showTabs)
-    f.itemCard:ClearAllPoints()
+    f.actRow:ClearAllPoints()
     if showTabs then
-        f.itemCard:SetPoint("TOPLEFT", f.tabsRow, "BOTTOMLEFT", 0, 0)
-        f.itemCard:SetPoint("TOPRIGHT", f.tabsRow, "BOTTOMRIGHT", 0, 0)
+        f.actRow:SetPoint("TOPLEFT", f.tabsRow, "BOTTOMLEFT", 0, 0)
+        f.actRow:SetPoint("TOPRIGHT", f.tabsRow, "BOTTOMRIGHT", 0, 0)
 
         if f.tabsCountFs then
             if unvotedCount > 0 then
@@ -5478,9 +5544,12 @@ function LootRollUI:Refresh()
     else
         f.tabPrevBtn:Hide()
         f.tabNextBtn:Hide()
-        f.itemCard:SetPoint("TOPLEFT", f.header, "BOTTOMLEFT", 0, 0)
-        f.itemCard:SetPoint("TOPRIGHT", f.header, "BOTTOMRIGHT", 0, 0)
+        f.actRow:SetPoint("TOPLEFT", f.header, "BOTTOMLEFT", 0, 0)
+        f.actRow:SetPoint("TOPRIGHT", f.header, "BOTTOMRIGHT", 0, 0)
     end
+    f.itemCard:ClearAllPoints()
+    f.itemCard:SetPoint("TOPLEFT", f.actRow, "BOTTOMLEFT", 0, 0)
+    f.itemCard:SetPoint("TOPRIGHT", f.actRow, "BOTTOMRIGHT", 0, 0)
 
     -- Hero Item Row
     f.iconBtn._itemLink = selectedRec.link
@@ -5654,8 +5723,8 @@ function LootRollUI:Refresh()
         drawer._hasWinner = false
         drawer._pendingVoters = pendingVoters
         drawer:ClearAllPoints()
-        drawer:SetPoint("TOPLEFT", f.actRow, "BOTTOMLEFT", 0, 0)
-        drawer:SetPoint("TOPRIGHT", f.actRow, "BOTTOMRIGHT", 0, 0)
+        drawer:SetPoint("TOPLEFT", f.compBox, "BOTTOMLEFT", 0, 0)
+        drawer:SetPoint("TOPRIGHT", f.compBox, "BOTTOMRIGHT", 0, 0)
 
         if not hasTally and not showBatchBar then
             for idx = 1, MAX_DRAWER_ROWS do
@@ -5687,7 +5756,10 @@ function LootRollUI:Refresh()
                         sumBits[#sumBits + 1] = "|cff58b8ff" .. string.format(L["Waiting: %d"], #pendingVoters) .. "|r"
                     end
                     drawer.summaryFs:SetText(table.concat(sumBits, "   "))
-                    drawer.collapseFs:SetText(self.votesCollapsed and ("|cff8b949e" .. L["Show"] .. " ▸|r") or ("|cff8b949e" .. L["Hide"] .. " ▾|r"))
+                    drawer.collapseFs:SetText("|cff8b949e" .. (self.votesCollapsed and L["Show"] or L["Hide"]) .. "|r")
+                    if drawer.collapseIco then
+                        drawer.collapseIco:SetTexture(self.votesCollapsed and ICON_ARROW_DOWN or ICON_ARROW_UP)
+                    end
                 end
             end
 
@@ -5797,7 +5869,10 @@ function LootRollUI:Refresh()
         drawer._tooltipRows = tipRows
     end
 
-    local totalH = 34 + (showTabs and 27 or 0) + 66 + compH + 44 + drawerH + 4
+    if f.compBox and f.compBox._botDiv then
+        f.compBox._botDiv:SetShown(drawerH > 0)
+    end
+    local totalH = 34 + (showTabs and 27 or 0) + 44 + 66 + compH + drawerH + 4
     f:SetHeight(totalH)
 
     if not f:IsShown() then

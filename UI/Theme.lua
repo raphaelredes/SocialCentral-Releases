@@ -2387,7 +2387,7 @@ function Theme:SyncStickySectionBar(bar, msgFrame, trackState, isGroupThread, pa
     local labelText = activeSec.label or ""
     local rgb = activeSec.rgb or { 0.50, 0.56, 0.64 }
 
-    local atVeryTop = (offset >= maxRange) and (activeIdx <= 1) and ((activeSec.bannerLineIdx or 0) <= topIdx)
+    local atVeryTop = (offset >= math.max(0, maxRange - 1)) and (activeIdx <= 1) and ((activeSec.bannerLineIdx or 0) <= topIdx)
     local canJump = (maxRange > 0) and (not atVeryTop)
     local wouldJumpPrev = canJump and ((activeSec.bannerLineIdx or 0) >= topIdx) and (activeIdx > 1)
 
@@ -7785,4 +7785,1137 @@ if ns.RegisterEvent then
     ns.RegisterEvent(Theme, "UI_SCALE_CHANGED", function()
         Theme:QueueViewportChanged()
     end)
+end
+
+do
+    local STREAM_TEXT_X_HEAD = 7
+    local STREAM_TEXT_X_CONT = 14
+    local STREAM_TEXT_PAD_RIGHT = 6
+    local STREAM_TURN_PAD_TOP = 0
+    local STREAM_TURN_PAD_BOT = 0
+    local STREAM_LINE_GAP = 1
+    local STREAM_TURN_GAP = 4
+    local STREAM_DIVIDER_GAP = 2
+
+    local function ComputeStreamLineMetrics(fs, rawText, innerWidth, fontSize)
+        local w = math.max(80, innerWidth)
+        fs:SetWidth(w)
+        fs:SetText(rawText or "")
+        local measuredH = (fs.GetStringHeight and fs:GetStringHeight()) or fontSize or 12
+        local linePx = math.max(10, math.ceil(fontSize or 12))
+        local totalPx = math.max(linePx, math.ceil(measuredH))
+        local wrappedRows = math.max(1, math.floor((totalPx / math.max(1, linePx)) + 0.35))
+        return totalPx, wrappedRows
+    end
+
+    local function ResolveTurnBarColor(item, palette)
+        if item and item.hasMention == true then
+            return Theme.CHAT_MENTION_BAR_COLOR
+        end
+        if item and type(item.barColor) == "table" and item.barColor[1] then
+            return item.barColor
+        end
+        if item and item.isSelf == true then
+            return Theme.CHAT_SELF_BAR_COLOR
+        end
+        return (palette and palette.border) or Theme.CHAT_FALLBACK_BAR_COLOR
+    end
+
+    local function ApplyDarkTurnBlockFade(block, item, bAlpha, cAlpha, palette, isHovering)
+        local lines = item and item.lines
+        local hasGroupBar = lines and (#lines >= 2)
+        local hasMention = item and (item.hasMention == true)
+        if block.leftBar then
+            if hasGroupBar or hasMention then
+                local barRgb = ResolveTurnBarColor(item, palette)
+                local baseA = hasMention and 0.72 or 0.38
+                if isHovering then
+                    baseA = math.max(baseA, 0.78)
+                end
+                block.leftBar:SetVertexColor(barRgb[1] or 0.52, barRgb[2] or 0.64, barRgb[3] or 0.78, baseA * bAlpha)
+                block.leftBar:Show()
+            else
+                block.leftBar:Hide()
+            end
+        end
+        for i = 1, #block.linePool do
+            local lf = block.linePool[i]
+            if lf and lf:IsShown() and lf.fs then
+                lf.fs:SetAlpha(cAlpha)
+            end
+        end
+    end
+
+    local function ApplyDarkDividerFade(row, bAlpha, cAlpha)
+        if row.noticeBg then
+            row.noticeBg:SetAlpha(0.55 * bAlpha)
+        end
+        if row.accentBar then
+            row.accentBar:SetAlpha(0.85 * math.max(0.25, bAlpha))
+        end
+        if row.ruleTex then
+            row.ruleTex:SetAlpha(0.28 * bAlpha)
+        end
+        if row.fs then
+            row.fs:SetAlpha(cAlpha)
+        end
+    end
+
+    local function SyncDarkHoverTimePill(vp, block, lineFrame, showHover, palette)
+        local pill = block and block.hoverTimePill
+        if not pill then
+            return
+        end
+        if (not showHover) or (not lineFrame) or (lineFrame._lineIdx or 1) < 2 or not lineFrame._hoverTimeStr or lineFrame._hoverTimeStr == "" then
+            pill:Hide()
+            return
+        end
+        local pal = palette or Theme:GetPalette()
+        local sBg = (pal and pal.surfaceBg) or { 0.08, 0.10, 0.14 }
+        local sBd = (pal and (pal.surfaceBorder or pal.windowBorder)) or { 0.30, 0.38, 0.50 }
+        local mutedCol = (pal and pal.textMuted) or { 0.76, 0.84, 0.94 }
+        pill:SetBackdropColor(sBg[1], sBg[2], sBg[3], 0.95)
+        pill:SetBackdropBorderColor(sBd[1] or 0.30, sBd[2] or 0.38, sBd[3] or 0.50, 0.85)
+        pill.fs:SetTextColor(mutedCol[1] or 0.76, mutedCol[2] or 0.84, mutedCol[3] or 0.94, 1.0)
+        pill.fs:SetText(lineFrame._hoverTimeStr)
+        local tw = math.max(38, math.ceil((pill.fs:GetStringWidth() or 32) + 10))
+        pill:SetWidth(tw)
+        pill:ClearAllPoints()
+        local lineW = (lineFrame.GetWidth and lineFrame:GetWidth()) or 0
+        local textW = (lineFrame.fs and lineFrame.fs.GetStringWidth and lineFrame.fs:GetStringWidth()) or 999
+        if lineW > 120 and (lineFrame._wrappedRows or 1) == 1 and textW <= (lineW - tw - 12) then
+            pill:SetPoint("RIGHT", lineFrame, "RIGHT", -2, 0)
+        else
+            local vpTop = (vp.GetTop and vp:GetTop()) or 9999
+            local lTop = (lineFrame.GetTop and lineFrame:GetTop()) or 0
+            if (lTop + 16) > vpTop then
+                pill:SetPoint("TOPRIGHT", lineFrame, "TOPRIGHT", -2, -1)
+            else
+                pill:SetPoint("BOTTOMRIGHT", lineFrame, "TOPRIGHT", -2, 1)
+            end
+        end
+        pill:Show()
+    end
+
+    --- Creates a virtualized dark-theme proximity message stream (`Discord Compact` / `Chattynator` style)
+    --- grouping consecutive same-author turns tightly (`2px`), separating speakers cleanly (`8px`),
+    --- linking multi-line bursts with a subtle `2px` left bar, and preserving all hyperlinks and idle fade.
+    function Theme:CreateChatStreamViewport(parent, opts)
+        opts = opts or {}
+        local vp = CreateFrame("Frame", nil, parent)
+        vp:SetClipsChildren(true)
+        vp:EnableMouse(true)
+        vp:EnableMouseWheel(true)
+        if vp.SetHyperlinksEnabled then
+            pcall(vp.SetHyperlinksEnabled, vp, true)
+        end
+
+        vp._isStreamViewport = true
+        vp._items = {}
+        vp._totalHeight = 0
+        vp._pxFromBottom = 0
+        vp._backdropAlpha = 1.0
+        vp._contentAlpha = 1.0
+        vp._mouseEnabled = true
+        vp._defaultWidth = opts.defaultWidth or 380
+        vp._shadowColor = { 0, 0, 0, 0.95 }
+        vp._shadowOffset = { 1, -1 }
+        vp._onInteract = opts.onInteract
+        vp._onHoverUpdate = opts.onHoverUpdate
+        vp._onLayoutChanged = opts.onLayoutChanged
+        vp._dragScrollEnabled = (opts.dragScroll == true)
+        vp._onDragScrollUpdate = opts.onDragScrollUpdate
+        vp._palette = self:GetPalette()
+
+        local baseFontObj = opts.fontObj or _G.ChatFontNormal or _G.GameFontHighlightSmall
+        local initPath, initSize, initFlags
+        if baseFontObj and baseFontObj.GetFont then
+            initPath, initSize, initFlags = baseFontObj:GetFont()
+        end
+        vp._fontPath = initPath or "Fonts\\FRIZQT__.TTF"
+        vp._fontSize = initSize or 12
+        vp._fontFlags = initFlags or ""
+
+        local measureFs = vp:CreateFontString(nil, "ARTWORK")
+        measureFs:SetAlpha(0)
+        measureFs:SetPoint("TOPLEFT", vp, "TOPLEFT", 0, 0)
+        measureFs:SetJustifyH("LEFT")
+        measureFs:SetJustifyV("TOP")
+        measureFs:SetWordWrap(true)
+        if measureFs.SetNonSpaceWrap then
+            measureFs:SetNonSpaceWrap(true)
+        end
+        measureFs:SetFont(vp._fontPath, vp._fontSize, vp._fontFlags)
+        vp._measureFs = measureFs
+
+        local turnPool = {}
+        local dividerPool = {}
+        vp._turnPool = turnPool
+        vp._dividerPool = dividerPool
+
+        local dragScrollActive = false
+        local dragLastY = 0
+
+        local function NotifyInteract()
+            if type(vp._onInteract) == "function" then
+                vp._onInteract()
+            end
+        end
+
+        local function GetStreamInnerWidths()
+            local vpW = vp:GetWidth()
+            if not vpW or vpW < 60 then
+                local pW = parent and parent.GetWidth and parent:GetWidth() or nil
+                vpW = (pW and pW >= 80) and (pW - 22) or vp._defaultWidth
+            end
+            vpW = math.max(120, math.floor(vpW + 0.5))
+            local headTextW = math.max(80, vpW - STREAM_TEXT_X_HEAD - STREAM_TEXT_PAD_RIGHT)
+            local contTextW = math.max(80, vpW - STREAM_TEXT_X_CONT - STREAM_TEXT_PAD_RIGHT)
+            local divTextW = math.max(80, vpW - 14)
+            return vpW, headTextW, contTextW, divTextW
+        end
+
+        local function MeasureTurnItem(item, headTextW, contTextW)
+            local yAcc = STREAM_TURN_PAD_TOP
+            local lineCount = #item.lines
+            for li = 1, lineCount do
+                local ln = item.lines[li]
+                local isCont = (li > 1)
+                local textW = isCont and contTextW or headTextW
+                local lh, wrappedRows = ComputeStreamLineMetrics(vp._measureFs, ln.text, textW, vp._fontSize)
+                ln.isContinuation = isCont
+                ln.xOffset = isCont and STREAM_TEXT_X_CONT or STREAM_TEXT_X_HEAD
+                ln.textWidth = textW
+                ln.yOffset = yAcc
+                ln.height = lh
+                ln.wrappedRows = wrappedRows
+                yAcc = yAcc + lh
+                if li < lineCount then
+                    yAcc = yAcc + STREAM_LINE_GAP
+                end
+            end
+            item.height = math.max(12, yAcc + STREAM_TURN_PAD_BOT)
+        end
+
+        local function MeasureDividerItem(item, divTextW)
+            local padY = item.isNotice and 4 or 2
+            local lh = ComputeStreamLineMetrics(vp._measureFs, item.text, divTextW, vp._fontSize)
+            item.textHeight = lh
+            item.height = math.max(item.isNotice and 17 or 15, lh + padY)
+        end
+
+        local function RecomputeYOffsets()
+            local y = 0
+            local items = vp._items
+            local total = #items
+            for i = 1, total do
+                local it = items[i]
+                it.yTop = y
+                it.yBottom = y + (it.height or 16)
+                local gap = (i < total) and ((it.kind == "TURN" and items[i + 1].kind == "TURN") and STREAM_TURN_GAP or STREAM_DIVIDER_GAP) or 0
+                y = it.yBottom + gap
+            end
+            vp._totalHeight = y
+        end
+
+        local function ForwardHyperlinkEnter(sourceObj, link, text, region, left, bottom, width, height)
+            sourceObj._scHoveredHyperlink = link
+            vp._scHoveredHyperlink = link
+            NotifyInteract()
+            local fn = vp:GetScript("OnHyperlinkEnter")
+            if fn then
+                fn(vp, link, text, region, left, bottom, width, height)
+            end
+        end
+
+        local function ForwardHyperlinkLeave(sourceObj)
+            sourceObj._scHoveredHyperlink = nil
+            vp._scHoveredHyperlink = nil
+            local fn = vp:GetScript("OnHyperlinkLeave")
+            if fn then
+                fn(vp)
+            end
+        end
+
+        local function ForwardHyperlinkClick(sourceObj, link, text, button, region, left, bottom, width, height)
+            NotifyInteract()
+            local fn = vp:GetScript("OnHyperlinkClick")
+            if fn then
+                fn(vp, link, text, button, region, left, bottom, width, height)
+            end
+        end
+
+        local function AttachDragOrScrollHandlers(obj)
+            if vp._dragWin and Theme and Theme.AttachDragHandle then
+                Theme:AttachDragHandle(obj, vp._dragWin)
+            end
+            if not obj._scStreamHooked then
+                obj._scStreamHooked = true
+                obj:HookScript("OnMouseDown", function(selfObj, btn)
+                    NotifyInteract()
+                    if vp._dragScrollEnabled and btn == "LeftButton" and selfObj._scHoveredHyperlink == nil and vp._scHoveredHyperlink == nil then
+                        local _, cy = GetCursorPosition()
+                        local sc = (vp.GetEffectiveScale and vp:GetEffectiveScale()) or 1
+                        dragLastY = cy / sc
+                        dragScrollActive = true
+                    end
+                end)
+                obj:HookScript("OnMouseUp", function()
+                    dragScrollActive = false
+                end)
+                obj:HookScript("OnHide", function()
+                    dragScrollActive = false
+                end)
+            end
+        end
+
+        if vp._dragScrollEnabled then
+            vp:SetScript("OnUpdate", function()
+                if not dragScrollActive then return end
+                if not IsMouseButtonDown or not IsMouseButtonDown("LeftButton") then
+                    dragScrollActive = false
+                    return
+                end
+                local _, cy = GetCursorPosition()
+                local sc = (vp.GetEffectiveScale and vp:GetEffectiveScale()) or 1
+                local curY = cy / sc
+                local dy = curY - dragLastY
+                if math.abs(dy) >= 2 then
+                    dragLastY = curY
+                    vp:ScrollByPixels(-dy)
+                    if type(vp._onDragScrollUpdate) == "function" then
+                        vp._onDragScrollUpdate()
+                    end
+                end
+            end)
+        end
+
+        if opts.handleWheel == true then
+            vp:SetScript("OnMouseWheel", function(selfVp, delta)
+                if IsShiftKeyDown and IsShiftKeyDown() then
+                    if delta > 0 then selfVp:ScrollToTop() else selfVp:ScrollToBottom() end
+                elseif IsControlKeyDown and IsControlKeyDown() then
+                    if delta > 0 then selfVp:PageUp() else selfVp:PageDown() end
+                else
+                    if delta > 0 then selfVp:ScrollUp() else selfVp:ScrollDown() end
+                end
+                if type(vp._onLayoutChanged) == "function" then
+                    vp._onLayoutChanged()
+                end
+            end)
+        end
+
+        local function EnsureLineFrame(block, linePoolIdx)
+            local lf = block.linePool[linePoolIdx]
+            if lf then
+                return lf
+            end
+            lf = CreateFrame("Frame", nil, block)
+            lf:EnableMouse(vp._mouseEnabled ~= false)
+            if lf.SetHyperlinksEnabled then
+                pcall(lf.SetHyperlinksEnabled, lf, true)
+            end
+
+            local hBg = lf:CreateTexture(nil, "BACKGROUND", nil, 4)
+            hBg:SetPoint("TOPLEFT", lf, "TOPLEFT", -3, 1)
+            hBg:SetPoint("BOTTOMRIGHT", lf, "BOTTOMRIGHT", 3, -1)
+            hBg:SetTexture(WHITE8X8)
+            hBg:SetVertexColor(1.0, 1.0, 1.0, 0.045)
+            hBg:Hide()
+            lf.hoverBg = hBg
+
+            local fs = lf:CreateFontString(nil, "OVERLAY")
+            fs:SetPoint("TOPLEFT", lf, "TOPLEFT", 0, 0)
+            fs:SetPoint("TOPRIGHT", lf, "TOPRIGHT", 0, 0)
+            fs:SetJustifyH("LEFT")
+            fs:SetJustifyV("TOP")
+            fs:SetWordWrap(true)
+            if fs.SetNonSpaceWrap then
+                fs:SetNonSpaceWrap(true)
+            end
+            fs:SetFont(vp._fontPath, vp._fontSize, vp._fontFlags)
+            fs:SetTextColor(0.93, 0.95, 0.98, 1.0)
+            if fs.SetShadowColor then
+                fs:SetShadowColor(vp._shadowColor[1], vp._shadowColor[2], vp._shadowColor[3], vp._shadowColor[4])
+            end
+            if fs.SetShadowOffset then
+                fs:SetShadowOffset(vp._shadowOffset[1], vp._shadowOffset[2])
+            end
+            lf.fs = fs
+
+            lf:SetScript("OnHyperlinkEnter", ForwardHyperlinkEnter)
+            lf:SetScript("OnHyperlinkLeave", ForwardHyperlinkLeave)
+            lf:SetScript("OnHyperlinkClick", ForwardHyperlinkClick)
+            lf:HookScript("OnEnter", function(selfLine)
+                if selfLine.hoverBg then
+                    selfLine.hoverBg:Show()
+                end
+                block._isHovering = true
+                ApplyDarkTurnBlockFade(block, block._item, vp._backdropAlpha, vp._contentAlpha, vp._palette, true)
+                SyncDarkHoverTimePill(vp, block, selfLine, true, vp._palette)
+                if type(vp._onHoverUpdate) == "function" then
+                    vp._onHoverUpdate(true)
+                end
+            end)
+            lf:HookScript("OnLeave", function(selfLine)
+                if selfLine.hoverBg then
+                    selfLine.hoverBg:Hide()
+                end
+                block._isHovering = false
+                ApplyDarkTurnBlockFade(block, block._item, vp._backdropAlpha, vp._contentAlpha, vp._palette, false)
+                SyncDarkHoverTimePill(vp, block, selfLine, false, vp._palette)
+                if type(vp._onHoverUpdate) == "function" then
+                    vp._onHoverUpdate(false)
+                end
+            end)
+            lf:HookScript("OnMouseUp", function(selfLine, btn)
+                if btn == "RightButton"
+                    and selfLine._scHoveredHyperlink == nil
+                    and selfLine.IsMouseOver and selfLine:IsMouseOver()
+                    and selfLine._msgIdx and selfLine._threadKey
+                then
+                    ForwardHyperlinkClick(selfLine, "addon:SCentral:msgact:" .. tostring(selfLine._msgIdx) .. ":" .. tostring(selfLine._threadKey), "", "RightButton")
+                end
+            end)
+            AttachDragOrScrollHandlers(lf)
+            block.linePool[linePoolIdx] = lf
+            return lf
+        end
+
+        local function AcquireTurnBlock(poolIdx)
+            local block = turnPool[poolIdx]
+            if block then
+                return block
+            end
+            block = CreateFrame("Frame", nil, vp)
+            block:EnableMouse(vp._mouseEnabled ~= false)
+
+            local leftBar = block:CreateTexture(nil, "ARTWORK", nil, 2)
+            leftBar:SetWidth(2)
+            leftBar:SetPoint("TOPLEFT", block, "TOPLEFT", 1, -1)
+            leftBar:SetPoint("BOTTOMLEFT", block, "BOTTOMLEFT", 1, 1)
+            leftBar:SetTexture(WHITE8X8)
+            leftBar:Hide()
+            block.leftBar = leftBar
+
+            local pill = CreateFrame("Frame", nil, block, "BackdropTemplate")
+            pill:SetHeight(14)
+            pill:SetWidth(42)
+            pill:SetFrameLevel((block:GetFrameLevel() or 3) + 4)
+            pill:SetBackdrop({
+                bgFile = WHITE8X8,
+                edgeFile = WHITE8X8,
+                edgeSize = 1,
+                insets = { left = 1, right = 1, top = 1, bottom = 1 },
+            })
+            local pFs = pill:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            pFs:SetPoint("CENTER", pill, "CENTER", 0, 0)
+            if pFs.SetShadowColor then pFs:SetShadowColor(0, 0, 0, 0.95) end
+            if pFs.SetShadowOffset then pFs:SetShadowOffset(1, -1) end
+            pill.fs = pFs
+            pill:Hide()
+            block.hoverTimePill = pill
+
+            block.linePool = {}
+            block:HookScript("OnEnter", function()
+                block._isHovering = true
+                ApplyDarkTurnBlockFade(block, block._item, vp._backdropAlpha, vp._contentAlpha, vp._palette, true)
+                if type(vp._onHoverUpdate) == "function" then
+                    vp._onHoverUpdate(true)
+                end
+            end)
+            block:HookScript("OnLeave", function()
+                block._isHovering = false
+                if block.hoverTimePill then block.hoverTimePill:Hide() end
+                ApplyDarkTurnBlockFade(block, block._item, vp._backdropAlpha, vp._contentAlpha, vp._palette, false)
+                if type(vp._onHoverUpdate) == "function" then
+                    vp._onHoverUpdate(false)
+                end
+            end)
+            AttachDragOrScrollHandlers(block)
+            turnPool[poolIdx] = block
+            return block
+        end
+
+        local function AcquireDividerRow(poolIdx)
+            local row = dividerPool[poolIdx]
+            if row then
+                return row
+            end
+            row = CreateFrame("Frame", nil, vp)
+            row:EnableMouse(vp._mouseEnabled ~= false)
+            if row.SetHyperlinksEnabled then
+                pcall(row.SetHyperlinksEnabled, row, true)
+            end
+
+            local nBg = row:CreateTexture(nil, "BACKGROUND", nil, 0)
+            nBg:SetAllPoints()
+            nBg:SetTexture(WHITE8X8)
+            nBg:Hide()
+            row.noticeBg = nBg
+
+            local acc = row:CreateTexture(nil, "ARTWORK", nil, 1)
+            acc:SetWidth(2)
+            acc:SetPoint("TOPLEFT", row, "TOPLEFT", 1, -2)
+            acc:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 1, 2)
+            acc:SetTexture(WHITE8X8)
+            acc:Hide()
+            row.accentBar = acc
+
+            local rule = row:CreateTexture(nil, "BACKGROUND", nil, 1)
+            rule:SetHeight(1)
+            rule:SetTexture(WHITE8X8)
+            rule:Hide()
+            row.ruleTex = rule
+
+            local fs = row:CreateFontString(nil, "OVERLAY")
+            fs:SetPoint("TOPLEFT", row, "TOPLEFT", STREAM_TEXT_X_HEAD, -2)
+            fs:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -4, 2)
+            fs:SetJustifyH("LEFT")
+            fs:SetJustifyV("MIDDLE")
+            fs:SetWordWrap(true)
+            if fs.SetNonSpaceWrap then
+                fs:SetNonSpaceWrap(true)
+            end
+            fs:SetFont(vp._fontPath, vp._fontSize, vp._fontFlags)
+            if fs.SetShadowColor then
+                fs:SetShadowColor(vp._shadowColor[1], vp._shadowColor[2], vp._shadowColor[3], vp._shadowColor[4])
+            end
+            if fs.SetShadowOffset then
+                fs:SetShadowOffset(vp._shadowOffset[1], vp._shadowOffset[2])
+            end
+            row.fs = fs
+
+            row:SetScript("OnHyperlinkEnter", ForwardHyperlinkEnter)
+            row:SetScript("OnHyperlinkLeave", ForwardHyperlinkLeave)
+            row:SetScript("OnHyperlinkClick", ForwardHyperlinkClick)
+            row:HookScript("OnEnter", function()
+                if type(vp._onHoverUpdate) == "function" then
+                    vp._onHoverUpdate(true)
+                end
+            end)
+            row:HookScript("OnLeave", function()
+                if type(vp._onHoverUpdate) == "function" then
+                    vp._onHoverUpdate(false)
+                end
+            end)
+            AttachDragOrScrollHandlers(row)
+            dividerPool[poolIdx] = row
+            return row
+        end
+
+        function vp:GetMaxScrollRange()
+            local vpH = (self.GetHeight and self:GetHeight()) or 0
+            return math.max(0, (self._totalHeight or 0) - vpH)
+        end
+
+        function vp:GetTotalHeight()
+            return self._totalHeight or 0
+        end
+
+        function vp:GetNumMessages()
+            return #(self._items or {})
+        end
+
+        function vp:GetScrollOffset()
+            return self._pxFromBottom or 0
+        end
+
+        function vp:GetScrollMetrics()
+            local vpH = (self.GetHeight and self:GetHeight()) or 0
+            local totalH = self._totalHeight or 0
+            local maxRange = math.max(0, totalH - vpH)
+            return self._pxFromBottom or 0, maxRange, vpH, totalH
+        end
+
+        function vp:AtBottom()
+            return (self._pxFromBottom or 0) <= 1
+        end
+
+        function vp:RenderVisible()
+            local _, headTextW, contTextW = GetStreamInnerWidths()
+            local vpH = (self.GetHeight and self:GetHeight()) or 0
+            local maxRange = math.max(0, (self._totalHeight or 0) - vpH)
+            local pxBottom = math.max(0, math.min(maxRange, self._pxFromBottom or 0))
+            self._pxFromBottom = pxBottom
+
+            local viewTop = maxRange - pxBottom
+            local viewBot = viewTop + vpH
+            local baseLvl = math.max(1, (self.GetFrameLevel and self:GetFrameLevel()) or 2)
+            local pal = self._palette or Theme:GetPalette()
+
+            local usedTurns = 0
+            local usedDividers = 0
+            local items = self._items
+            for idx = 1, #items do
+                local it = items[idx]
+                local iTop = it.yTop or 0
+                local iBot = it.yBottom or 0
+                if iBot >= (viewTop - 2) and iTop <= (viewBot + 2) then
+                    local relY = -(iTop - viewTop)
+                    if it.kind == "TURN" then
+                        usedTurns = usedTurns + 1
+                        local block = AcquireTurnBlock(usedTurns)
+                        if (block:GetFrameLevel() or 0) ~= (baseLvl + 1) then
+                            block:SetFrameLevel(baseLvl + 1)
+                        end
+                        if block.hoverTimePill and (block.hoverTimePill:GetFrameLevel() or 0) ~= (baseLvl + 5) then
+                            block.hoverTimePill:SetFrameLevel(baseLvl + 5)
+                        end
+                        block:ClearAllPoints()
+                        block:SetPoint("TOPLEFT", self, "TOPLEFT", 1, relY)
+                        block:SetPoint("TOPRIGHT", self, "TOPRIGHT", -1, relY)
+                        block:SetHeight(it.height or 16)
+                        block._item = it
+                        block._isHovering = false
+
+                        local lines = it.lines
+                        for li = 1, #lines do
+                            local ln = lines[li]
+                            local lf = EnsureLineFrame(block, li)
+                            if (lf:GetFrameLevel() or 0) ~= (baseLvl + 2) then
+                                lf:SetFrameLevel(baseLvl + 2)
+                            end
+                            lf._lineIdx = li
+                            lf._msgIdx = ln.msgIdx
+                            lf._threadKey = ln.threadKey
+                            lf._wrappedRows = ln.wrappedRows or 1
+                            lf._hoverTimeStr = (ln.ts and ln.ts > 0) and date("%H:%M:%S", ln.ts) or nil
+                            lf:ClearAllPoints()
+                            local xOff = ln.xOffset or ((li > 1) and STREAM_TEXT_X_CONT or STREAM_TEXT_X_HEAD)
+                            lf:SetPoint("TOPLEFT", block, "TOPLEFT", xOff, -(ln.yOffset or STREAM_TURN_PAD_TOP))
+                            lf:SetPoint("TOPRIGHT", block, "TOPRIGHT", -STREAM_TEXT_PAD_RIGHT, -(ln.yOffset or STREAM_TURN_PAD_TOP))
+                            lf:SetHeight(ln.height or 14)
+                            if lf.fs then
+                                if lf.fs._scFontSig ~= self._fontSig then
+                                    lf.fs._scFontSig = self._fontSig
+                                    lf.fs:SetFont(self._fontPath, self._fontSize, self._fontFlags)
+                                end
+                                lf.fs:SetWidth(ln.textWidth or ((li > 1) and contTextW or headTextW))
+                                lf.fs:SetText(ln.text or "")
+                            end
+                            if lf.hoverBg then lf.hoverBg:Hide() end
+                            lf:Show()
+                        end
+                        for li = #lines + 1, #block.linePool do
+                            block.linePool[li]:Hide()
+                        end
+                        if block.hoverTimePill then block.hoverTimePill:Hide() end
+                        ApplyDarkTurnBlockFade(block, it, self._backdropAlpha, self._contentAlpha, pal, false)
+                        block:Show()
+                    else
+                        usedDividers = usedDividers + 1
+                        local row = AcquireDividerRow(usedDividers)
+                        if (row:GetFrameLevel() or 0) ~= (baseLvl + 1) then
+                            row:SetFrameLevel(baseLvl + 1)
+                        end
+                        row:ClearAllPoints()
+                        row:SetPoint("TOPLEFT", self, "TOPLEFT", 1, relY)
+                        row:SetPoint("TOPRIGHT", self, "TOPRIGHT", -1, relY)
+                        row:SetHeight(it.height or 18)
+                        row._item = it
+                        if row.fs then
+                            if row.fs._scFontSig ~= self._fontSig then
+                                row.fs._scFontSig = self._fontSig
+                                row.fs:SetFont(self._fontPath, self._fontSize, self._fontFlags)
+                            end
+                            local tr = it.r or (pal and pal.text and pal.text[1]) or 0.85
+                            local tg = it.g or (pal and pal.text and pal.text[2]) or 0.90
+                            local tb = it.b or (pal and pal.text and pal.text[3]) or 0.96
+                            row.fs:SetTextColor(tr, tg, tb, 1.0)
+                            row.fs:SetText(it.text or "")
+                        end
+                        if it.isNotice then
+                            local sBg = (pal and pal.surfaceBg) or { 0.08, 0.10, 0.14 }
+                            row.noticeBg:SetVertexColor(sBg[1], sBg[2], sBg[3], 0.65)
+                            row.noticeBg:Show()
+                            local ac = it.accentRgb or { 0.82, 0.62, 0.24 }
+                            row.accentBar:SetVertexColor(ac[1], ac[2], ac[3], 0.90)
+                            row.accentBar:Show()
+                            row.ruleTex:Hide()
+                        else
+                            row.noticeBg:Hide()
+                            row.accentBar:Hide()
+                            if it.isGroup or it.isUnread then
+                                local ac = it.accentRgb or (it.isUnread and { 1.0, 0.78, 0.24 } or { 0.48, 0.68, 1.0 })
+                                row.accentBar:SetVertexColor(ac[1], ac[2], ac[3], 0.85)
+                                row.accentBar:Show()
+                                row.ruleTex:Hide()
+                            else
+                                local borderCol = (pal and (pal.surfaceBorder or pal.border)) or { 0.42, 0.50, 0.62 }
+                                row.ruleTex:ClearAllPoints()
+                                row.ruleTex:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 6, 1)
+                                row.ruleTex:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -6, 1)
+                                row.ruleTex:SetVertexColor(borderCol[1] or 0.42, borderCol[2] or 0.50, borderCol[3] or 0.62, 0.28)
+                                row.ruleTex:Show()
+                            end
+                        end
+                        ApplyDarkDividerFade(row, self._backdropAlpha, self._contentAlpha)
+                        row:Show()
+                    end
+                end
+            end
+            for i = usedTurns + 1, #turnPool do
+                turnPool[i]:Hide()
+            end
+            for i = usedDividers + 1, #dividerPool do
+                dividerPool[i]:Hide()
+            end
+        end
+
+        function vp:Clear()
+            wipe(self._items)
+            self._totalHeight = 0
+            self._pxFromBottom = 0
+            for i = 1, #self._turnPool do
+                self._turnPool[i]:Hide()
+            end
+            for i = 1, #self._dividerPool do
+                self._dividerPool[i]:Hide()
+            end
+        end
+
+        function vp:AddStreamDivider(text, divOpts)
+            divOpts = divOpts or {}
+            local _, _, _, divTextW = GetStreamInnerWidths()
+            local item = {
+                kind = divOpts.isNotice and "NOTICE" or "DIVIDER",
+                text = tostring(text or ""),
+                isGroup = (divOpts.isGroup == true),
+                isUnread = (divOpts.isUnread == true),
+                isNotice = (divOpts.isNotice == true),
+                accentRgb = divOpts.accentRgb,
+                r = divOpts.r,
+                g = divOpts.g,
+                b = divOpts.b,
+            }
+            MeasureDividerItem(item, divTextW)
+            local items = self._items
+            local prevIdx = #items
+            if prevIdx > 0 then
+                local prev = items[prevIdx]
+                item.yTop = (prev.yBottom or 0) + STREAM_DIVIDER_GAP
+            else
+                item.yTop = 0
+            end
+            item.yBottom = item.yTop + item.height
+            items[prevIdx + 1] = item
+            self._totalHeight = item.yBottom
+            return prevIdx + 1
+        end
+
+        function vp:AddNoticeStrip(text, noticeOpts)
+            noticeOpts = noticeOpts or {}
+            noticeOpts.isNotice = true
+            return self:AddStreamDivider(text, noticeOpts)
+        end
+
+        function vp:AddMessage(text, r, g, b)
+            return self:AddStreamDivider(text, { isNotice = false, r = r, g = g, b = b })
+        end
+
+        function vp:PushChatMessage(spec)
+            if type(spec) ~= "table" then return 0 end
+            local _, headTextW, contTextW = GetStreamInnerWidths()
+            local rawTxt = tostring(spec.text or "")
+            local lineEntry = {
+                msgIdx = spec.msgIdx,
+                threadKey = spec.threadKey,
+                ts = tonumber(spec.ts) or 0,
+                text = rawTxt,
+            }
+            local items = self._items
+            local lastItem = items[#items]
+            if spec.appendToLastTurn and lastItem and lastItem.kind == "TURN" then
+                local oldH = lastItem.height or 16
+                local prevLine = lastItem.lines[#lastItem.lines]
+                local newY = prevLine and ((prevLine.yOffset or STREAM_TURN_PAD_TOP) + (prevLine.height or 14) + STREAM_LINE_GAP) or STREAM_TURN_PAD_TOP
+                local lh, wrappedRows = ComputeStreamLineMetrics(self._measureFs, rawTxt, contTextW, self._fontSize)
+                lineEntry.isContinuation = true
+                lineEntry.xOffset = STREAM_TEXT_X_CONT
+                lineEntry.textWidth = contTextW
+                lineEntry.yOffset = newY
+                lineEntry.height = lh
+                lineEntry.wrappedRows = wrappedRows
+                lastItem.lines[#lastItem.lines + 1] = lineEntry
+                if spec.hasMention then lastItem.hasMention = true end
+                if not lastItem.barColor and spec.barColor then lastItem.barColor = spec.barColor end
+                local newH = math.max(12, newY + lh + STREAM_TURN_PAD_BOT)
+                lastItem.height = newH
+                lastItem.yBottom = (lastItem.yTop or 0) + newH
+                self._totalHeight = (self._totalHeight or 0) + (newH - oldH)
+                return #items
+            end
+
+            local item = {
+                kind = "TURN",
+                isSelf = (spec.isSelf == true),
+                hasMention = (spec.hasMention == true),
+                barColor = spec.barColor,
+                senderKey = spec.senderKey,
+                startTs = lineEntry.ts,
+                lines = { lineEntry },
+            }
+            MeasureTurnItem(item, headTextW, contTextW)
+            local prevIdx = #items
+            if prevIdx > 0 then
+                local prev = items[prevIdx]
+                local gap = (prev.kind == "TURN") and STREAM_TURN_GAP or STREAM_DIVIDER_GAP
+                item.yTop = (prev.yBottom or 0) + gap
+            else
+                item.yTop = 0
+            end
+            item.yBottom = item.yTop + item.height
+            items[prevIdx + 1] = item
+            self._totalHeight = item.yBottom
+            return prevIdx + 1
+        end
+
+        function vp:FinalizeRender()
+            self:RenderVisible()
+        end
+
+        function vp:ReflowAllWidths()
+            local vpW, headTextW, contTextW, divTextW = GetStreamInnerWidths()
+            self._lastMeasureWidth = vpW
+            local wasAtBottom = self:AtBottom()
+            local prevAnchorMsgIdx = nil
+            if not wasAtBottom then
+                local topIdx = self:GetVisibleItemBounds()
+                local topIt = self._items[topIdx]
+                if topIt and topIt.kind == "TURN" and topIt.lines and topIt.lines[1] then
+                    prevAnchorMsgIdx = topIt.lines[1].msgIdx
+                end
+            end
+            local items = self._items
+            for i = 1, #items do
+                local it = items[i]
+                if it.kind == "TURN" then
+                    MeasureTurnItem(it, headTextW, contTextW)
+                else
+                    MeasureDividerItem(it, divTextW)
+                end
+            end
+            RecomputeYOffsets()
+            if wasAtBottom then
+                self._pxFromBottom = 0
+            elseif prevAnchorMsgIdx then
+                local maxR = self:GetMaxScrollRange()
+                for i = 1, #items do
+                    local it = items[i]
+                    if it.kind == "TURN" and it.lines then
+                        for li = 1, #it.lines do
+                            if it.lines[li].msgIdx == prevAnchorMsgIdx then
+                                self._pxFromBottom = math.max(0, math.min(maxR, maxR - (it.yTop or 0)))
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            self:RenderVisible()
+        end
+
+        function vp:SetScrollOffset(px)
+            local maxR = self:GetMaxScrollRange()
+            self._pxFromBottom = math.max(0, math.min(maxR, tonumber(px) or 0))
+            self:RenderVisible()
+        end
+
+        function vp:ScrollByPixels(deltaPx)
+            self:SetScrollOffset((self._pxFromBottom or 0) + (tonumber(deltaPx) or 0))
+        end
+
+        function vp:ScrollToBottom()
+            self:SetScrollOffset(0)
+        end
+
+        function vp:ScrollToTop()
+            self:SetScrollOffset(self:GetMaxScrollRange())
+        end
+
+        function vp:ScrollUp()
+            self:ScrollByPixels(36)
+        end
+
+        function vp:ScrollDown()
+            self:ScrollByPixels(-36)
+        end
+
+        function vp:PageUp()
+            local step = math.max(80, math.floor(((self:GetHeight() or 220) * 0.85) + 0.5))
+            self:ScrollByPixels(step)
+        end
+
+        function vp:PageDown()
+            local step = math.max(80, math.floor(((self:GetHeight() or 220) * 0.85) + 0.5))
+            self:ScrollByPixels(-step)
+        end
+
+        function vp:GetVisibleItemBounds()
+            local vpH = (self.GetHeight and self:GetHeight()) or 0
+            local totalH = self._totalHeight or 0
+            local maxRange = math.max(0, totalH - vpH)
+            local offset = math.max(0, math.min(maxRange, self._pxFromBottom or 0))
+            local items = self._items
+            local total = #items
+            if total <= 0 then
+                return 1, 0, offset, vpH, maxRange
+            end
+            local viewTop = maxRange - offset
+            local viewBot = viewTop + vpH
+            local topLimit = viewTop + 2
+            local botLimit = viewBot - 2
+            local lo, hi = 1, total
+            local topIdx = total
+            while lo <= hi do
+                local mid = math.floor((lo + hi) * 0.5)
+                if (items[mid].yBottom or 0) > topLimit then
+                    topIdx = mid
+                    hi = mid - 1
+                else
+                    lo = mid + 1
+                end
+            end
+            local bottomIdx = 1
+            for i = topIdx, total do
+                if (items[i].yTop or 0) < botLimit then
+                    bottomIdx = i
+                else
+                    break
+                end
+            end
+            return topIdx, bottomIdx, offset, vpH, maxRange
+        end
+
+        function vp:ComputeSectionScrollOffset(anchorIdx)
+            local items = self._items
+            local it = anchorIdx and items[anchorIdx]
+            local maxRange = self:GetMaxScrollRange()
+            if not it or anchorIdx <= 1 then
+                return maxRange
+            end
+            local peekPx = (anchorIdx > 1) and 22 or 0
+            local targetTop = math.max(0, (it.yTop or 0) - peekPx)
+            return math.max(0, math.min(maxRange, maxRange - targetTop))
+        end
+
+        function vp:SetFont(path, size, flags)
+            local np = path or self._fontPath or "Fonts\\FRIZQT__.TTF"
+            local nsSize = tonumber(size) or self._fontSize or 12
+            local nf = flags or ""
+            local sig = tostring(np) .. ":" .. tostring(nsSize) .. ":" .. tostring(nf)
+            if self._fontSig == sig then
+                return
+            end
+            self._fontSig = sig
+            self._fontPath = np
+            self._fontSize = nsSize
+            self._fontFlags = nf
+            self._measureFs:SetFont(np, nsSize, nf)
+            if #(self._items or {}) > 0 then
+                self:ReflowAllWidths()
+            end
+        end
+
+        function vp:SetFontObject(fontObj)
+            local obj = fontObj or _G.ChatFontNormal or _G.GameFontHighlightSmall
+            if obj and obj.GetFont then
+                local p, s, f = obj:GetFont()
+                self:SetFont(p, s, f or "")
+            end
+        end
+
+        function vp:GetFont()
+            return self._fontPath, self._fontSize, self._fontFlags
+        end
+
+        function vp:SetShadowColor(r, g, b, a)
+            local nr, ng, nb, na = r or 0, g or 0, b or 0, a or 0.95
+            local cur = self._shadowColor
+            if cur and cur[1] == nr and cur[2] == ng and cur[3] == nb and cur[4] == na then
+                return
+            end
+            if cur then
+                cur[1], cur[2], cur[3], cur[4] = nr, ng, nb, na
+            else
+                self._shadowColor = { nr, ng, nb, na }
+            end
+            for i = 1, #self._turnPool do
+                local blk = self._turnPool[i]
+                for j = 1, #blk.linePool do
+                    local fs = blk.linePool[j].fs
+                    if fs and fs.SetShadowColor then
+                        fs:SetShadowColor(nr, ng, nb, na)
+                    end
+                end
+            end
+            for i = 1, #self._dividerPool do
+                local fs = self._dividerPool[i].fs
+                if fs and fs.SetShadowColor then
+                    fs:SetShadowColor(nr, ng, nb, na)
+                end
+            end
+        end
+
+        function vp:SetShadowOffset(x, y)
+            local nx, ny = x or 1, y or -1
+            local cur = self._shadowOffset
+            if cur and cur[1] == nx and cur[2] == ny then
+                return
+            end
+            if cur then
+                cur[1], cur[2] = nx, ny
+            else
+                self._shadowOffset = { nx, ny }
+            end
+            for i = 1, #self._turnPool do
+                local blk = self._turnPool[i]
+                for j = 1, #blk.linePool do
+                    local fs = blk.linePool[j].fs
+                    if fs and fs.SetShadowOffset then
+                        fs:SetShadowOffset(nx, ny)
+                    end
+                end
+            end
+            for i = 1, #self._dividerPool do
+                local fs = self._dividerPool[i].fs
+                if fs and fs.SetShadowOffset then
+                    fs:SetShadowOffset(nx, ny)
+                end
+            end
+        end
+
+        function vp:SetThemePalette(pal)
+            self._palette = pal or Theme:GetPalette()
+            if #(self._items or {}) > 0 then
+                self:RenderVisible()
+            end
+        end
+
+        function vp:SetVisualFade(backdropAlpha, contentAlpha)
+            local bA = tonumber(backdropAlpha) or 1.0
+            local cA = tonumber(contentAlpha) or 1.0
+            if self._backdropAlpha == bA and self._contentAlpha == cA then
+                return
+            end
+            self._backdropAlpha = bA
+            self._contentAlpha = cA
+            for i = 1, #self._turnPool do
+                local blk = self._turnPool[i]
+                if blk:IsShown() then
+                    ApplyDarkTurnBlockFade(blk, blk._item, bA, cA, self._palette, blk._isHovering)
+                end
+            end
+            for i = 1, #self._dividerPool do
+                local row = self._dividerPool[i]
+                if row:IsShown() then
+                    ApplyDarkDividerFade(row, bA, cA)
+                end
+            end
+        end
+
+        function vp:SetDragWindow(win)
+            if not win or self._dragWin == win then return end
+            self._dragWin = win
+            if Theme and Theme.AttachDragHandle then
+                Theme:AttachDragHandle(self, win)
+                for i = 1, #self._turnPool do
+                    local blk = self._turnPool[i]
+                    Theme:AttachDragHandle(blk, win)
+                    for j = 1, #blk.linePool do
+                        Theme:AttachDragHandle(blk.linePool[j], win)
+                    end
+                end
+                for i = 1, #self._dividerPool do
+                    Theme:AttachDragHandle(self._dividerPool[i], win)
+                end
+            end
+        end
+
+        function vp:SetMousePassThrough(passThrough)
+            local mouseOn = not passThrough
+            if self._mouseEnabled == mouseOn then return end
+            self._mouseEnabled = mouseOn
+            pcall(self.EnableMouse, self, mouseOn)
+            pcall(self.EnableMouseWheel, self, mouseOn)
+            for i = 1, #self._turnPool do
+                local blk = self._turnPool[i]
+                pcall(blk.EnableMouse, blk, mouseOn)
+                for j = 1, #blk.linePool do
+                    pcall(blk.linePool[j].EnableMouse, blk.linePool[j], mouseOn)
+                end
+            end
+            for i = 1, #self._dividerPool do
+                pcall(self._dividerPool[i].EnableMouse, self._dividerPool[i], mouseOn)
+            end
+        end
+
+        vp:HookScript("OnShow", function(selfVp)
+            if #(selfVp._items or {}) > 0 then
+                local curW = math.floor((selfVp:GetWidth() or 0) + 0.5)
+                if curW >= 60 and curW ~= (selfVp._lastMeasureWidth or 0) then
+                    selfVp:ReflowAllWidths()
+                else
+                    selfVp:RenderVisible()
+                end
+            end
+        end)
+
+        vp:HookScript("OnSizeChanged", function(selfVp, w, h)
+            local nw = math.floor((tonumber(w) or selfVp:GetWidth() or 0) + 0.5)
+            local nh = math.floor((tonumber(h) or selfVp:GetHeight() or 0) + 0.5)
+            if selfVp._inSizeRelayout or nw < 40 or nh < 20 then
+                return
+            end
+            local prevW = selfVp._lastLayoutW or 0
+            local prevH = selfVp._lastLayoutH or 0
+            local widthChanged = math.abs(nw - prevW) >= 2
+            local heightChanged = math.abs(nh - prevH) >= 2
+            if not widthChanged and not heightChanged then
+                return
+            end
+            selfVp._inSizeRelayout = true
+            selfVp._lastLayoutW = nw
+            selfVp._lastLayoutH = nh
+            if widthChanged and #(selfVp._items or {}) > 0 then
+                selfVp:ReflowAllWidths()
+            elseif heightChanged and #(selfVp._items or {}) > 0 then
+                selfVp:RenderVisible()
+            end
+            if type(selfVp._onLayoutChanged) == "function" then
+                selfVp._onLayoutChanged()
+            end
+            selfVp._inSizeRelayout = false
+        end)
+
+        vp._fontSig = tostring(vp._fontPath) .. ":" .. tostring(vp._fontSize) .. ":" .. tostring(vp._fontFlags)
+        return vp
+    end
+end
+
+Theme.CHAT_SELF_BAR_COLOR = Theme.CHAT_SELF_BAR_COLOR or { 0.35, 0.65, 1.0 }
+Theme.CHAT_MENTION_BAR_COLOR = Theme.CHAT_MENTION_BAR_COLOR or { 0.96, 0.74, 0.24 }
+Theme.CHAT_FALLBACK_BAR_COLOR = Theme.CHAT_FALLBACK_BAR_COLOR or { 0.48, 0.58, 0.72 }
+Theme._classBarColorCache = Theme._classBarColorCache or {}
+
+--- Return a cached RGB color table for chat turn bar indicators (zero per-line table allocation).
+function Theme:GetClassBarColor(classFile)
+    if type(classFile) ~= "string" or classFile == "" then
+        return nil
+    end
+    local cached = self._classBarColorCache[classFile]
+    if cached ~= nil then
+        return cached ~= false and cached or nil
+    end
+    if ns.Compat and ns.Compat.ClassColor then
+        local cr, cg, cb = ns.Compat.ClassColor(classFile)
+        if cr then
+            local col = { cr, cg, cb }
+            self._classBarColorCache[classFile] = col
+            return col
+        end
+    end
+    self._classBarColorCache[classFile] = false
+    return nil
 end

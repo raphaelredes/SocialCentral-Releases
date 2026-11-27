@@ -3652,16 +3652,43 @@ function Chat:MeasureMessagePrefixWidth(msgFrame, text)
     return math.max(0, totalW - markerW)
 end
 
---- Formats the leading timestamp (and grouping dot) for a chat message,
---- hiding repeated `[HH:MM]` timestamps when consecutive messages from the
---- same sender fall within the same minute while keeping `msgact` clickable
---- and aligning the message text start vertically with `targetTextX`.
+Chat.AUTHOR_GROUP_MAX_GAP_SEC = 180
+Chat.AUTHOR_GROUP_MAX_SPAN_SEC = 300
+
+--- Returns true when a consecutive message from the same speaker should join
+--- the active proximity turn block (within a 3-minute gap and 5-minute span).
+function Chat:ShouldGroupWithPreviousTurn(curSenderKey, lastSenderKey, lastSenderTs, turnStartTs, curTs, showedBreakLine)
+    local tVal = tonumber(curTs) or 0
+    local prevVal = tonumber(lastSenderTs) or 0
+    local startVal = tonumber(turnStartTs) or 0
+    if curSenderKey == nil or showedBreakLine == true or lastSenderKey ~= curSenderKey then
+        return false
+    end
+    if tVal <= 0 or prevVal <= 0 then
+        return false
+    end
+    local delta = tVal - prevVal
+    if delta < 0 or delta > (self.AUTHOR_GROUP_MAX_GAP_SEC or 180) then
+        return false
+    end
+    if startVal > 0 and (tVal - startVal) > (self.AUTHOR_GROUP_MAX_SPAN_SEC or 300) then
+        return false
+    end
+    return true
+end
+
+--- Formats the leading timestamp for a chat message or speaker turn header,
+--- omitting repeated `[HH:MM]` timestamps inside dark proximity continuation lines
+--- while keeping full click/hover timestamp actions intact.
 function Chat:BuildMessageTimestampPrefix(msgTs, msgIdx, threadKey, isStatusNotice, isSameAuthorGroup, prevSenderTs, msgFrame, targetTextX)
     local tVal = tonumber(msgTs) or 0
     local prevVal = tonumber(prevSenderTs) or 0
     local tsStr = (tVal > 0) and date("%H:%M", tVal) or ""
     if isSameAuthorGroup then
-        local showChangedMin = (tsStr ~= "") and (prevVal > 0) and (tsStr ~= date("%H:%M", prevVal))
+        if msgFrame and msgFrame._isStreamViewport then
+            return ""
+        end
+        local showChangedGap = (tsStr ~= "") and (prevVal > 0) and (math.abs(tVal - prevVal) > (self.AUTHOR_GROUP_MAX_GAP_SEC or 180))
         local dotPlain = "|cff586069·|r "
         local dotPart
         if (not isStatusNotice) and msgIdx and threadKey then
@@ -3670,7 +3697,7 @@ function Chat:BuildMessageTimestampPrefix(msgTs, msgIdx, threadKey, isStatusNoti
             dotPart = dotPlain
         end
         local tsPart = ""
-        if showChangedMin then
+        if showChangedGap then
             local tsTxt = "|cff545c67[" .. tsStr .. "]|r"
             if (not isStatusNotice) and msgIdx and threadKey then
                 tsPart = "|Haddon:SCentral:msgact:" .. tostring(msgIdx) .. ":" .. tostring(threadKey) .. "|h" .. tsTxt .. "|h "
@@ -4237,8 +4264,11 @@ function Chat:RefreshTrackedGroupSectionLabel(state, sessKey, gInfo, msgTs)
     end
 end
 
---- Computes the topmost and bottommost logical message indices visible inside `msgFrame`.
+--- Computes the topmost and bottommost logical message/item indices visible inside `msgFrame`.
 function Chat:FindTopVisibleLine(msgFrame, lineVisRows)
+    if msgFrame and msgFrame._isStreamViewport and msgFrame.GetVisibleItemBounds then
+        return msgFrame:GetVisibleItemBounds()
+    end
     local total = (msgFrame and msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or 0
     local visLines = (msgFrame and msgFrame.GetNumVisibleLines and msgFrame:GetNumVisibleLines()) or 14
     local offset = (msgFrame and msgFrame.GetScrollOffset and msgFrame:GetScrollOffset()) or 0
@@ -4293,7 +4323,7 @@ function Chat:ResolveStickySection(msgFrame, state)
     return secs[activeIdx], activeIdx, topIdx, bottomIdx, offset, visLines, maxRange
 end
 
---- Scrolls `msgFrame` to the start of the active sticky section (exposing 1-2 lines of the prior section),
+--- Scrolls `msgFrame` to the start of the active sticky section (exposing 1-2 lines or ~22px of the prior section),
 --- or jumps up to the previous section if already viewing the start of the active one.
 function Chat:JumpToStickySectionStart(msgFrame, state)
     local activeSec, activeIdx, topIdx, _, offset, visLines, maxRange = self:ResolveStickySection(msgFrame, state)
@@ -4301,6 +4331,18 @@ function Chat:JumpToStickySectionStart(msgFrame, state)
         return false
     end
     local secs = state.sections
+    if msgFrame and msgFrame._isStreamViewport and msgFrame.ComputeSectionScrollOffset then
+        local targetOff = msgFrame:ComputeSectionScrollOffset(activeSec.bannerLineIdx or 1)
+        if (activeSec.bannerLineIdx or 0) >= topIdx or math.abs(targetOff - offset) <= 2 then
+            if activeIdx > 1 then
+                targetOff = msgFrame:ComputeSectionScrollOffset(secs[activeIdx - 1].bannerLineIdx or 1)
+            elseif maxRange > offset then
+                targetOff = maxRange
+            end
+        end
+        msgFrame:SetScrollOffset(targetOff)
+        return true, targetOff
+    end
     local total = (msgFrame.GetNumMessages and msgFrame:GetNumMessages()) or #(state.lineVisRows or {})
     local function ComputeOffsetForSection(sec)
         local anchorLine = math.max(1, sec.bannerLineIdx or 1)
@@ -4538,9 +4580,14 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     local isMention = false
     if incoming and (thread.kind == "ROOM" or thread.kind == "ALLIANCE" or IsPublicChannelKind(thread.kind)) then
         local myDisp = GetMyInfo()
-        local myParsed = myDisp and Compat.ParseCharacterName and Compat.ParseCharacterName(myDisp)
-        local fnLow = myParsed and myParsed.firstName and myParsed.firstName:lower()
-        if fnLow and #fnLow >= 2 then
+        if myDisp and myDisp ~= Chat._cachedMyDispForMention then
+            Chat._cachedMyDispForMention = myDisp
+            local myParsed = Compat.ParseCharacterName and Compat.ParseCharacterName(myDisp)
+            local rawFn = myParsed and myParsed.firstName and myParsed.firstName:lower() or nil
+            Chat._cachedMyFirstLower = (rawFn and #rawFn >= 2) and rawFn or false
+        end
+        local fnLow = Chat._cachedMyFirstLower
+        if fnLow and fnLow ~= false then
             local plainLow = tostring(text):gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):lower()
             local padded = " " .. plainLow:gsub("[%p]", " ") .. " "
             if padded:find(" " .. fnLow .. " ", 1, true) or plainLow:find("@" .. fnLow, 1, true) then
@@ -6347,7 +6394,19 @@ function Chat:GetThreadsList(kindFilter)
     local out = {}
     local rooms = GetRoomsScopeTable() or {}
 
-    local mirrorChannels = ns.db and ns.db.settings and ns.db.settings.chatMirrorChannels == true
+    local sCfg = ns.db and ns.db.settings
+    local mirrorChannels = sCfg and sCfg.chatMirrorChannels == true
+    local inGuild = false
+    if Compat.ShouldShowGuildFeatures then
+        inGuild = Compat.ShouldShowGuildFeatures() == true
+    elseif Compat.IsInGuild then
+        inGuild = Compat.IsInGuild() == true
+    end
+    local inGroup = Compat.IsInGroup and Compat.IsInGroup()
+    local isAllianceAuth = inGuild and ns.Clan and ns.Clan.IsMemberAllianceAuthorized and ns.Clan:IsMemberAllianceAuthorized()
+    local canSaveGuildHist = inGuild and self:ShouldSaveGuildHistory()
+    local canSaveGroupHist = self:ShouldSaveGroupHistory()
+    local canShowSayYell = (not sCfg) or (sCfg.quickReplyRecordSay ~= false)
 
     for key, t in pairs(self.threads) do
         local isRoom = key:sub(1, 5) == "room:"
@@ -6364,25 +6423,19 @@ function Chat:GetThreadsList(kindFilter)
             local isSayYellChan = (t.kind == "LOCAL_SAY" or t.kind == "LOCAL_YELL")
             local isPubChan = (t.kind == "PUB_CHANNEL")
             local isGeneralChan = (t.kind == "GENERAL")
-            local inGuild = false
-            if Compat.ShouldShowGuildFeatures then
-                inGuild = Compat.ShouldShowGuildFeatures() == true
-            elseif Compat.IsInGuild then
-                inGuild = Compat.IsInGuild() == true
-            end
-            local inGroup = Compat.IsInGroup and Compat.IsInGroup()
-            local isAllianceAuth = inGuild and ns.Clan and ns.Clan.IsMemberAllianceAuthorized and ns.Clan:IsMemberAllianceAuthorized()
+            local msgLen = #(t.messages or {})
+            local hasMsgs = msgLen > 0
             local forceShow = (isGuildChan and inGuild and kindFilter == "guild")
                 or (isGroupChan and inGroup and kindFilter == "group")
                 or (isAllianceChan and isAllianceAuth and (kindFilter == "alliance" or kindFilter == "channels" or not kindFilter or kindFilter == "all"))
                 or ((isSayYellChan or isPubChan) and kindFilter == "channels")
-                or (isGeneralChan and (not kindFilter or kindFilter == "all" or kindFilter == "channels") and #(t.messages or {}) > 0)
-            local showGuildHist = isGuildChan and inGuild and Chat:ShouldSaveGuildHistory() and #(t.messages or {}) > 0
-            local showGroupHist = isGroupChan and Chat:ShouldSaveGroupHistory() and #(t.messages or {}) > 0
-            local showSayYellHist = isSayYellChan and ((not ns.db or not ns.db.settings or ns.db.settings.quickReplyRecordSay ~= false)) and #(t.messages or {}) > 0
-            local showPubHist = isPubChan and #(t.messages or {}) > 0
+                or (isGeneralChan and (not kindFilter or kindFilter == "all" or kindFilter == "channels") and hasMsgs)
+            local showGuildHist = isGuildChan and canSaveGuildHist and hasMsgs
+            local showGroupHist = isGroupChan and canSaveGroupHist and hasMsgs
+            local showSayYellHist = isSayYellChan and canShowSayYell and hasMsgs
+            local showPubHist = isPubChan and hasMsgs
             include = (isAllianceChan and isAllianceAuth)
-                or (((not isGuildChan and not isAllianceChan) or (isGuildChan and inGuild)) and mirrorChannels and #(t.messages or {}) > 0)
+                or (((not isGuildChan and not isAllianceChan) or (isGuildChan and inGuild)) and mirrorChannels and hasMsgs)
                 or showGuildHist
                 or showGroupHist
                 or showSayYellHist
@@ -12873,27 +12926,37 @@ local function OfficialChatShieldFilter(_, eventName, msgRaw, authorRaw, ...)
         return true
     end
     local outText = dec.modifiedText or msg
-    if eventName == "CHAT_MSG_WHISPER_INFORM" then
-        local sUrl = ns.db and ns.db.settings
-        if (not sUrl or sUrl.chatClickableUrls ~= false) and Chat.LinkifyUrls then
-            local linked = Chat:LinkifyUrls(outText)
-            if linked and linked ~= outText then
-                outText = linked
-            end
-        end
-        if Chat.FormatRaidTargetTokens then
-            local rtOut = Chat:FormatRaidTargetTokens(outText)
-            if rtOut and rtOut ~= outText then
-                outText = rtOut
-            end
-        end
-    end
     local isMeSender = (eventName == "CHAT_MSG_WHISPER_INFORM" or eventName == "CHAT_MSG_BN_WHISPER_INFORM")
         or (author and Compat.IsMe and Compat.IsMe(author, guid) == true)
-    if (not isMeSender) and Chat.HighlightMentionsInline then
-        local hl = Chat:HighlightMentionsInline(outText, eventName)
-        if hl and hl ~= outText then
-            outText = hl
+    if dec ~= Chat._SHIELD_NOT_BLOCKED and dec._fmtReady and dec._fmtSrc == msg and dec._fmtMe == (isMeSender == true) then
+        outText = dec._fmtOut
+    else
+        if eventName == "CHAT_MSG_WHISPER_INFORM" then
+            local sUrl = ns.db and ns.db.settings
+            if (not sUrl or sUrl.chatClickableUrls ~= false) and Chat.LinkifyUrls then
+                local linked = Chat:LinkifyUrls(outText)
+                if linked and linked ~= outText then
+                    outText = linked
+                end
+            end
+            if Chat.FormatRaidTargetTokens then
+                local rtOut = Chat:FormatRaidTargetTokens(outText)
+                if rtOut and rtOut ~= outText then
+                    outText = rtOut
+                end
+            end
+        end
+        if (not isMeSender) and Chat.HighlightMentionsInline then
+            local hl = Chat:HighlightMentionsInline(outText, eventName)
+            if hl and hl ~= outText then
+                outText = hl
+            end
+        end
+        if dec ~= Chat._SHIELD_NOT_BLOCKED and lineID and lineID ~= 0 then
+            dec._fmtReady = true
+            dec._fmtSrc = msg
+            dec._fmtMe = (isMeSender == true)
+            dec._fmtOut = outText
         end
     end
     if dec.modifiedChannel and eventName == "CHAT_MSG_CHANNEL" then
@@ -15132,7 +15195,7 @@ function Chat:Init()
             end
             if changed then
                 self:BumpPeerStateGen()
-                ns:Emit("CHAT_UPDATED")
+                QueueChatEmit(0.10)
             end
         end)
     end

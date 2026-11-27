@@ -2713,25 +2713,26 @@ function Toast:Init()
         end
     end)
 
+    local function IsToastThreadReadVisible(cur)
+        if not (cur and cur.threadKey) then return false end
+        if ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible(cur.threadKey) then
+            return true
+        end
+        if ns.QuickReply and ns.QuickReply.IsViewingThread and ns.QuickReply:IsViewingThread(cur.threadKey) then
+            return true
+        end
+        return false
+    end
+
     ns:On("CHAT_UPDATED", function()
         if #Toast.activeItems == 0 and #Toast.queue == 0 then return end
         -- Automatically dismiss any active or queued toast if the player opened and read that exact thread elsewhere.
-        local function IsThreadReadVisible(cur)
-            if not (cur and cur.threadKey) then return false end
-            if ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible(cur.threadKey) then
-                return true
-            end
-            if ns.QuickReply and ns.QuickReply.IsViewingThread and ns.QuickReply:IsViewingThread(cur.threadKey) then
-                return true
-            end
-            return false
-        end
         for i = #Toast.queue, 1, -1 do
-            if IsThreadReadVisible(Toast.queue[i]) then
+            if IsToastThreadReadVisible(Toast.queue[i]) then
                 table.remove(Toast.queue, i)
             end
         end
-        local changed, removedActive = PruneActiveToasts(IsThreadReadVisible)
+        local changed, removedActive = PruneActiveToasts(IsToastThreadReadVisible)
         if changed then
             DrainToastQueueAndResetElapsed(removedActive)
             Toast:LayoutStack()
