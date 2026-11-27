@@ -130,6 +130,73 @@ local FLAT_BACKDROP_SPEC = {
     insets = { left = 0, right = 0, top = 0, bottom = 0 },
 }
 
+Theme._SC = {
+    defWindowBg = { 0.08, 0.08, 0.08, 1.0 },
+    defAccent = { 0.3, 0.7, 1.0 },
+    defAccentBorder = { 0.35, 0.78, 1.0 },
+    blizzRow = { 0.085, 0.078, 0.070 },
+    blizzRowAlt = { 0.055, 0.050, 0.045 },
+    blizzListSurf = { 0.22, 0.17, 0.08 },
+    blizzWinBg = { 0.08, 0.075, 0.07 },
+    blizzWinBr = { 0.86, 0.80, 0.68 },
+    blizzHdrBg = { 0.085, 0.08, 0.07 },
+    blizzHdrBr = { 0.46, 0.38, 0.22 },
+    blizzInsetBg = { 0.048, 0.045, 0.042 },
+    blizzInsetBr = { 0.36, 0.30, 0.19 },
+    blizzSurfBg = { 0.075, 0.068, 0.060 },
+    blizzSurfBr = { 0.44, 0.36, 0.22 },
+    navDisBg = { 0.06, 0.055, 0.050, 0.55 },
+    navDisBr = { 0.16, 0.15, 0.14, 0.30 },
+    navActBg = { 0.24, 0.17, 0.07, 0.95 },
+    navActBr = { 0.84, 0.66, 0.24, 0.90 },
+    navActTxt = { 1.0, 0.96, 0.82 },
+    navActInd = { 0.98, 0.78, 0.20 },
+    navHovBg = { 0.16, 0.13, 0.09, 0.90 },
+    navHovBr = { 0.52, 0.42, 0.22, 0.75 },
+    navHovTxt = { 1.0, 0.92, 0.65 },
+    navBlizzBg = { 0.085, 0.078, 0.070, 0.78 },
+    navDarkBg = { 0.08, 0.09, 0.12, 0.65 },
+    navBlizzBr = { 0.26, 0.22, 0.15, 0.55 },
+    navDarkBr = { 0.16, 0.20, 0.26, 0.55 },
+    navBlizzTxt = { 0.88, 0.82, 0.68 },
+    togDefAc = { 0.96, 0.76, 0.22 },
+    togDisBg = { 0.06, 0.065, 0.075, 0.92 },
+    togDisBr = { 0.26, 0.28, 0.32, 0.75 },
+    togActTxt = { 1.0, 0.96, 0.84 },
+    togOffHovBg = { 0.14, 0.15, 0.17, 0.96 },
+    togOffBg = { 0.08, 0.085, 0.095, 0.94 },
+    togOffHovBr = { 0.56, 0.60, 0.66, 0.96 },
+    togOffBr = { 0.36, 0.38, 0.42, 0.90 },
+    togScratchBg = { 0, 0, 0, 0.96 },
+    togScratchBr = { 0, 0, 0, 1.0 },
+    btnDisBlizzBg = { 0.07, 0.065, 0.06, 0.88 },
+    btnDisBlizzBr = { 0.24, 0.21, 0.16, 0.75 },
+    whiteTxt = { 1.0, 1.0, 1.0 },
+    btnActHovBlizzBg = { 0.28, 0.21, 0.09, 0.98 },
+    btnActBlizzBg = { 0.21, 0.16, 0.07, 0.96 },
+    btnActBlizzBr = { 0.90, 0.72, 0.26, 1.0 },
+    btnActBlizzTxt = { 1.0, 0.95, 0.78 },
+    btnDangerBlizzTxt = { 1.0, 0.86, 0.82 },
+    clearCol = { 0, 0, 0, 0 },
+    helpHovTxt = { 1.0, 0.95, 0.72 },
+    helpTxt = { 0.84, 0.72, 0.38 },
+    ghostHovBlizzBg = { 0.22, 0.17, 0.09, 0.85 },
+    ghostHovBlizzBr = { 0.68, 0.54, 0.22, 0.85 },
+    ghostHovBlizzTxt = { 1.0, 0.90, 0.55 },
+    btnDefHovBlizzBg = { 0.20, 0.17, 0.12, 0.98 },
+    btnDefBlizzBg = { 0.12, 0.11, 0.095, 0.96 },
+    btnDefHovBlizzBr = { 0.84, 0.66, 0.24, 1.0 },
+    btnDefBlizzBr = { 0.40, 0.34, 0.21, 0.92 },
+    btnDefBlizzTxt = { 0.94, 0.86, 0.64 },
+    inBlizzBg = { 0.055, 0.050, 0.045, 1.0 },
+    inBlizzFocBr = { 0.96, 0.78, 0.22, 1.0 },
+    inBlizzHovBr = { 0.70, 0.58, 0.34, 1.0 },
+    inBlizzDefBr = { 0.46, 0.40, 0.28, 1.0 },
+    inBlizzTxt = { 1.0, 0.95, 0.84 },
+    quickGoldFb = { 0.85, 0.68, 0.28, 1.0 },
+    quickBgFb = { 0.08, 0.08, 0.09, 1.0 },
+}
+
 local BLIZZ_DIALOG_BACKDROP = {
     bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
     edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -477,12 +544,13 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             frame._solidOpaqueBg:SetAllPoints(frame)
         end
         frame._solidOpaqueBg:SetTexture(WHITE8X8)
-        local wBg = p.windowBg or { 0.08, 0.08, 0.08, 1.0 }
+        local wBg = p.windowBg or Theme._SC.defWindowBg
         frame._solidOpaqueBg:SetVertexColor(wBg[1], wBg[2], wBg[3], 1.0)
         frame._solidOpaqueBg:Show()
     end
 
     if self:IsBlizzard(p) then
+        local sc = Theme._SC
         local hasStoneAtlas = HasAtlas("groupfinder-Stat-StoneBG")
 
         if resolvedKind == "row" or resolvedKind == "rowAlt" then
@@ -493,7 +561,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
                 frame._foreverRowBg:Hide()
             end
             SyncDepthPolish(frame, "none", p, true)
-            local bgRow = (resolvedKind == "row") and { 0.085, 0.078, 0.070 } or { 0.055, 0.050, 0.045 }
+            local bgRow = (resolvedKind == "row") and sc.blizzRow or sc.blizzRowAlt
             ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, bgRow, nil, false)
             frame:SetBackdropColor(bgRow[1], bgRow[2], bgRow[3], (resolvedKind == "row") and 0.42 or 0.25)
             if frame.GetObjectType and frame:GetObjectType() == "Button" and not frame._foreverRowHl then
@@ -506,7 +574,7 @@ function Theme:ApplyBackdrop(frame, kind, palette)
         end
 
         if resolvedKind == "surface" and frame._scIsListRow then
-            ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, { 0.22, 0.17, 0.08 }, nil, false)
+            ApplyBackdropSpec(frame, FLAT_BACKDROP_SPEC, sc.blizzListSurf, nil, false)
             frame:SetBackdropColor(0.22, 0.17, 0.08, 0.55)
             if frame._foreverRowBg then frame._foreverRowBg:Hide() end
             SyncDepthPolish(frame, "none", p, true)
@@ -521,11 +589,11 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            ApplyBackdropSpec(frame, BLIZZ_DIALOG_BACKDROP, { 0.08, 0.075, 0.07 }, { 0.86, 0.80, 0.68 }, true)
+            ApplyBackdropSpec(frame, BLIZZ_DIALOG_BACKDROP, sc.blizzWinBg, sc.blizzWinBr, true)
             SyncDepthPolish(frame, "none", p, true)
             return
         elseif resolvedKind == "header" then
-            ApplyBackdropSpec(frame, hasStoneAtlas and BACKDROP_SPEC or BLIZZ_SURFACE_BACKDROP, { 0.085, 0.08, 0.07 }, { 0.46, 0.38, 0.22 }, true)
+            ApplyBackdropSpec(frame, hasStoneAtlas and BACKDROP_SPEC or BLIZZ_SURFACE_BACKDROP, sc.blizzHdrBg, sc.blizzHdrBr, true)
             if hasStoneAtlas then
                 if not frame._foreverSurfaceStone then
                     frame._foreverSurfaceStone = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
@@ -543,14 +611,14 @@ function Theme:ApplyBackdrop(frame, kind, palette)
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.048, 0.045, 0.042 }, { 0.36, 0.30, 0.19 }, true)
+            ApplyBackdropSpec(frame, BACKDROP_SPEC, sc.blizzInsetBg, sc.blizzInsetBr, true)
             SyncDepthPolish(frame, "inset", p, true)
             return
         elseif resolvedKind == "surface" then
             if frame._foreverSurfaceStone then
                 frame._foreverSurfaceStone:Hide()
             end
-            ApplyBackdropSpec(frame, BACKDROP_SPEC, { 0.075, 0.068, 0.060 }, { 0.44, 0.36, 0.22 }, true)
+            ApplyBackdropSpec(frame, BACKDROP_SPEC, sc.blizzSurfBg, sc.blizzSurfBr, true)
             SyncDepthPolish(frame, "surface", p, true)
             return
         end
@@ -1021,29 +1089,30 @@ local function ApplyButtonColors(btn, hovered)
             ind:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 1, 3)
             btn._scNavIndicator = ind
         end
+        local sc = Theme._SC
         local bgNav, brNav, txtNav
         if not btn:IsEnabled() then
-            bgNav = { 0.06, 0.055, 0.050, 0.55 }
-            brNav = { 0.16, 0.15, 0.14, 0.30 }
+            bgNav = sc.navDisBg
+            brNav = sc.navDisBr
             txtNav = p.textDim
             btn._scNavIndicator:Hide()
         elseif active then
-            bgNav = isBlizz and { 0.24, 0.17, 0.07, 0.95 } or p.accentDim
-            brNav = isBlizz and { 0.84, 0.66, 0.24, 0.90 } or p.accentBorder
-            txtNav = { 1.0, 0.96, 0.82 }
-            local ic = isBlizz and { 0.98, 0.78, 0.20 } or (p.accentBorder or { 0.35, 0.78, 1.0 })
+            bgNav = isBlizz and sc.navActBg or p.accentDim
+            brNav = isBlizz and sc.navActBr or p.accentBorder
+            txtNav = sc.navActTxt
+            local ic = isBlizz and sc.navActInd or (p.accentBorder or sc.defAccentBorder)
             btn._scNavIndicator:SetColorTexture(ic[1], ic[2], ic[3], 1.0)
             btn._scNavIndicator:Show()
         elseif hovered then
-            bgNav = isBlizz and { 0.16, 0.13, 0.09, 0.90 } or p.rowHoverBg
-            brNav = isBlizz and { 0.52, 0.42, 0.22, 0.75 } or p.surfaceBorder
-            txtNav = { 1.0, 0.92, 0.65 }
+            bgNav = isBlizz and sc.navHovBg or p.rowHoverBg
+            brNav = isBlizz and sc.navHovBr or p.surfaceBorder
+            txtNav = sc.navHovTxt
             btn._scNavIndicator:SetColorTexture(0.75, 0.60, 0.24, 0.55)
             btn._scNavIndicator:Show()
         else
-            bgNav = isBlizz and { 0.085, 0.078, 0.070, 0.78 } or { 0.08, 0.09, 0.12, 0.65 }
-            brNav = isBlizz and { 0.26, 0.22, 0.15, 0.55 } or { 0.16, 0.20, 0.26, 0.55 }
-            txtNav = isBlizz and { 0.88, 0.82, 0.68 } or p.textMuted
+            bgNav = isBlizz and sc.navBlizzBg or sc.navDarkBg
+            brNav = isBlizz and sc.navBlizzBr or sc.navDarkBr
+            txtNav = isBlizz and sc.navBlizzTxt or p.textMuted
             btn._scNavIndicator:Hide()
         end
         ApplyBackdropSpec(btn, BACKDROP_SPEC, bgNav, brNav, false)
@@ -1064,26 +1133,29 @@ local function ApplyButtonColors(btn, hovered)
 
     SyncBlizzTextOffset(btn, 0, 0)
 
+    local sc = Theme._SC
     local bg, border, textColor
     local isIconToggle = (btn._scIconToggle == true)
     if isIconToggle then
         local enabled = btn:IsEnabled()
-        local ac = btn._scToggleActiveCol or { 0.96, 0.76, 0.22 }
+        local ac = btn._scToggleActiveCol or sc.togDefAc
         local ring = EnsureToggleSquareRing(btn)
         if not enabled then
-            bg = { 0.06, 0.065, 0.075, 0.92 }
-            border = { 0.26, 0.28, 0.32, 0.75 }
+            bg = sc.togDisBg
+            border = sc.togDisBr
             textColor = p.textDim
             SetToggleSquareRingColor(ring, 0.26, 0.28, 0.32, 0.70)
         elseif active then
-            bg = hovered and { ac[1] * 0.34, ac[2] * 0.34, ac[3] * 0.34, 0.98 }
-                or { ac[1] * 0.24, ac[2] * 0.24, ac[3] * 0.24, 0.96 }
-            border = { ac[1], ac[2], ac[3], 1.0 }
-            textColor = { 1.0, 0.96, 0.84 }
+            local mult = hovered and 0.34 or 0.24
+            bg = sc.togScratchBg
+            bg[1], bg[2], bg[3], bg[4] = ac[1] * mult, ac[2] * mult, ac[3] * mult, hovered and 0.98 or 0.96
+            border = sc.togScratchBr
+            border[1], border[2], border[3], border[4] = ac[1], ac[2], ac[3], 1.0
+            textColor = sc.togActTxt
             SetToggleSquareRingColor(ring, ac[1], ac[2], ac[3], 1.0)
         else
-            bg = hovered and { 0.14, 0.15, 0.17, 0.96 } or { 0.08, 0.085, 0.095, 0.94 }
-            border = hovered and { 0.56, 0.60, 0.66, 0.96 } or { 0.36, 0.38, 0.42, 0.90 }
+            bg = hovered and sc.togOffHovBg or sc.togOffBg
+            border = hovered and sc.togOffHovBr or sc.togOffBr
             textColor = p.textMuted
             if hovered then
                 SetToggleSquareRingColor(ring, 0.58, 0.62, 0.68, 0.95)
@@ -1123,40 +1195,40 @@ local function ApplyButtonColors(btn, hovered)
             end
         end
         if not btn:IsEnabled() then
-            bg = isBlizz and { 0.07, 0.065, 0.06, 0.88 } or p.insetBg
-            border = isBlizz and { 0.24, 0.21, 0.16, 0.75 } or p.surfaceBorder
+            bg = isBlizz and sc.btnDisBlizzBg or p.insetBg
+            border = isBlizz and sc.btnDisBlizzBr or p.surfaceBorder
             textColor = p.textDim
         elseif variant == "primary" or (active and not isBlizz) then
             bg = hovered and p.accent or p.accentDim
             border = p.accentBorder
-            textColor = (isBlizz and hovered) and { 1.0, 1.0, 1.0 } or p.text
+            textColor = (isBlizz and hovered) and sc.whiteTxt or p.text
         elseif active and isBlizz then
-            bg = hovered and { 0.28, 0.21, 0.09, 0.98 } or { 0.21, 0.16, 0.07, 0.96 }
-            border = { 0.90, 0.72, 0.26, 1.0 }
-            textColor = { 1.0, 0.95, 0.78 }
+            bg = hovered and sc.btnActHovBlizzBg or sc.btnActBlizzBg
+            border = sc.btnActBlizzBr
+            textColor = sc.btnActBlizzTxt
         elseif variant == "danger" then
             bg = hovered and p.dangerHoverBg or p.dangerBg
             border = p.dangerBorder
-            textColor = isBlizz and (hovered and { 1.0, 1.0, 1.0 } or { 1.0, 0.86, 0.82 }) or p.text
+            textColor = isBlizz and (hovered and sc.whiteTxt or sc.btnDangerBlizzTxt) or p.text
         elseif variant == "tab" then
             bg = hovered and p.rowHoverBg or p.surfaceBg
             border = p.surfaceBorder
             textColor = hovered and p.text or p.textMuted
         elseif variant == "ghost" then
             if btn._scHelpRing then
-                bg = { 0, 0, 0, 0 }
-                border = { 0, 0, 0, 0 }
-                textColor = hovered and { 1.0, 0.95, 0.72 } or { 0.84, 0.72, 0.38 }
+                bg = sc.clearCol
+                border = sc.clearCol
+                textColor = hovered and sc.helpHovTxt or sc.helpTxt
             else
-                bg = hovered and (isBlizz and { 0.22, 0.17, 0.09, 0.85 } or p.rowHoverBg) or { 0, 0, 0, 0 }
-                border = hovered and (isBlizz and { 0.68, 0.54, 0.22, 0.85 } or p.surfaceBorder) or { 0, 0, 0, 0 }
-                textColor = hovered and (isBlizz and { 1.0, 0.90, 0.55 } or p.text) or p.textMuted
+                bg = hovered and (isBlizz and sc.ghostHovBlizzBg or p.rowHoverBg) or sc.clearCol
+                border = hovered and (isBlizz and sc.ghostHovBlizzBr or p.surfaceBorder) or sc.clearCol
+                textColor = hovered and (isBlizz and sc.ghostHovBlizzTxt or p.text) or p.textMuted
             end
         elseif isBlizz then
             -- Sleek Modern Blizzard Charcoal-Bronze Matte Button (replaces archaic red boxes on default utility buttons)
-            bg = hovered and { 0.20, 0.17, 0.12, 0.98 } or { 0.12, 0.11, 0.095, 0.96 }
-            border = hovered and { 0.84, 0.66, 0.24, 1.0 } or { 0.40, 0.34, 0.21, 0.92 }
-            textColor = hovered and { 1.0, 0.96, 0.82 } or { 0.94, 0.86, 0.64 }
+            bg = hovered and sc.btnDefHovBlizzBg or sc.btnDefBlizzBg
+            border = hovered and sc.btnDefHovBlizzBr or sc.btnDefBlizzBr
+            textColor = hovered and sc.navActTxt or sc.btnDefBlizzTxt
         else
             bg = hovered and p.btnHoverBg or p.btnBg
             border = hovered and p.accentBorder or p.btnBorder
@@ -1183,7 +1255,7 @@ local function ApplyButtonColors(btn, hovered)
         end
         if variant == "tab" and active then
             btn._scBtnGloss:SetHeight(2)
-            local ac = p.accentBorder or { 0.35, 0.78, 1.0 }
+            local ac = p.accentBorder or sc.defAccentBorder
             btn._scBtnGloss:SetColorTexture(ac[1], ac[2], ac[3], 0.96)
         else
             btn._scBtnGloss:SetHeight(1)
@@ -1712,16 +1784,27 @@ local function ApplyInputBackdrop(target, focused, hovered, textTarget)
     local p = Theme:GetPalette()
     local isBlizz = Theme:IsBlizzard(p)
     local bg, border, textColor
+    local styleSig = tostring(p and p.key or "dark") .. ":" .. (focused and "F" or "_") .. (hovered and "H" or "_")
+    if target._scAppliedBackdrop ~= BACKDROP_SPEC then
+        target:SetBackdrop(BACKDROP_SPEC)
+        target._scAppliedBackdrop = BACKDROP_SPEC
+        target._scInputStyleSig = nil
+    end
+    if target._scInputStyleSig == styleSig then
+        return
+    end
+    target._scInputStyleSig = styleSig
     if isBlizz then
-        bg = { 0.055, 0.050, 0.045, 1.0 }
+        local sc = Theme._SC
+        bg = sc.inBlizzBg
         if focused then
-            border = { 0.96, 0.78, 0.22, 1.0 }
+            border = sc.inBlizzFocBr
         elseif hovered then
-            border = { 0.70, 0.58, 0.34, 1.0 }
+            border = sc.inBlizzHovBr
         else
-            border = { 0.46, 0.40, 0.28, 1.0 }
+            border = sc.inBlizzDefBr
         end
-        textColor = { 1.0, 0.95, 0.84 }
+        textColor = sc.inBlizzTxt
     else
         bg = p.insetBg
         if focused then
@@ -1734,30 +1817,21 @@ local function ApplyInputBackdrop(target, focused, hovered, textTarget)
         textColor = p.text
     end
 
-    local styleSig = tostring(p and p.key or "dark") .. ":" .. (focused and "F" or "_") .. (hovered and "H" or "_")
-    if target._scAppliedBackdrop ~= BACKDROP_SPEC then
-        target:SetBackdrop(BACKDROP_SPEC)
-        target._scAppliedBackdrop = BACKDROP_SPEC
-        target._scInputStyleSig = nil
+    target:SetBackdropColor(bg[1], bg[2], bg[3], 1.0)
+    target:SetBackdropBorderColor(border[1], border[2], border[3], 1.0)
+    if not target._scNoInputShade and target.CreateTexture then
+        if not target._scInputTopShade then
+            local sh = target:CreateTexture(nil, "ARTWORK", nil, -1)
+            sh:SetHeight(2)
+            sh:SetPoint("TOPLEFT", target, "TOPLEFT", 1, -1)
+            sh:SetPoint("TOPRIGHT", target, "TOPRIGHT", -1, -1)
+            target._scInputTopShade = sh
+        end
+        target._scInputTopShade:SetColorTexture(0, 0, 0, focused and 0.25 or 0.42)
+        target._scInputTopShade:Show()
     end
-    if target._scInputStyleSig ~= styleSig then
-        target._scInputStyleSig = styleSig
-        target:SetBackdropColor(bg[1], bg[2], bg[3], 1.0)
-        target:SetBackdropBorderColor(border[1], border[2], border[3], 1.0)
-        if not target._scNoInputShade and target.CreateTexture then
-            if not target._scInputTopShade then
-                local sh = target:CreateTexture(nil, "ARTWORK", nil, -1)
-                sh:SetHeight(2)
-                sh:SetPoint("TOPLEFT", target, "TOPLEFT", 1, -1)
-                sh:SetPoint("TOPRIGHT", target, "TOPRIGHT", -1, -1)
-                target._scInputTopShade = sh
-            end
-            target._scInputTopShade:SetColorTexture(0, 0, 0, focused and 0.25 or 0.42)
-            target._scInputTopShade:Show()
-        end
-        if textTarget and textTarget.SetTextColor then
-            textTarget:SetTextColor(textColor[1], textColor[2], textColor[3])
-        end
+    if textTarget and textTarget.SetTextColor then
+        textTarget:SetTextColor(textColor[1], textColor[2], textColor[3])
     end
 end
 
@@ -7182,16 +7256,15 @@ function Theme:CreateOfficialQuickButton(parent, opts)
 
     function btn:RefreshTheme()
         local p = Theme:GetPalette()
-        local gold = p.textGold or p.accent or { 0.85, 0.68, 0.28, 1.0 }
-        local wbg = p.windowBg or { 0.08, 0.08, 0.09, 1.0 }
+        local sc = Theme._SC
+        local gold = p.textGold or p.accent or sc.quickGoldFb
+        local wbg = p.windowBg or sc.quickBgFb
         self._solidBg:SetVertexColor(wbg[1], wbg[2], wbg[3], 1.0)
         if self.SetBackdrop then
-            self:SetBackdrop({
-                bgFile = WHITE8X8,
-                edgeFile = WHITE8X8,
-                edgeSize = 1,
-                insets = { left = 1, right = 1, top = 1, bottom = 1 },
-            })
+            if self._scAppliedBackdrop ~= BACKDROP_SPEC then
+                self:SetBackdrop(BACKDROP_SPEC)
+                self._scAppliedBackdrop = BACKDROP_SPEC
+            end
             self:SetBackdropColor(wbg[1], wbg[2], wbg[3], 1.0)
             self:SetBackdropBorderColor(gold[1], gold[2], gold[3], 0.92)
         end

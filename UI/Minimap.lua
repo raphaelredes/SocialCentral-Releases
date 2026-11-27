@@ -2465,13 +2465,21 @@ end
 
 local function SetOfficialSurfaceFrameHidden(fr, hidden, allowMouseToggle)
     if not fr then return end
+    local wantAlpha = hidden and 0 or 1
     if fr.SetAlpha then
-        pcall(fr.SetAlpha, fr, hidden and 0 or 1)
+        local curAlpha = fr.GetAlpha and fr:GetAlpha() or nil
+        if curAlpha == nil or math.abs(curAlpha - wantAlpha) > 0.005 then
+            pcall(fr.SetAlpha, fr, wantAlpha)
+        end
     end
     if allowMouseToggle and fr.EnableMouse then
         local isProt = fr.IsProtected and fr:IsProtected()
         if not isProt then
-            pcall(fr.EnableMouse, fr, not hidden)
+            local wantMouse = not hidden
+            local curMouse = fr.IsMouseEnabled and fr:IsMouseEnabled()
+            if curMouse == nil or curMouse ~= wantMouse then
+                pcall(fr.EnableMouse, fr, wantMouse)
+            end
         end
     end
 end
@@ -2550,20 +2558,24 @@ function MinimapBtn:ApplyExclusiveChatMode()
                 QuickReply:ShowActiveOfficialEditBox(eb)
             elseif eb == _G.ChatFrame1EditBox and QuickReply.frame and QuickReply.frame:IsShown() and QuickReply.IsOfficialOnlyThread and QuickReply:IsOfficialOnlyThread() then
                 QuickReply:DockOfficialEditBox(eb, false)
-            else
+            elseif eb._scDockedToQr or eb._scPreDockedToQr
+                or (eb._scDockedSkin and eb._scDockedSkin:IsShown())
+                or (eb.IsShown and eb:IsShown())
+                or ((eb.GetAlpha and eb:GetAlpha() or 0) > 0.005)
+            then
                 QuickReply:HideTemporaryOfficialEditBox(eb)
             end
             if not eb._scExclHooked and eb.HookScript then
                 eb._scExclHooked = true
                 eb:HookScript("OnEnter", function(selfEb)
                     if selfEb._scDockedToQr then
-                        QuickReply._focusDimSig = nil
+                        if QuickReply.InvalidateFocusVisuals then QuickReply:InvalidateFocusVisuals() end
                         QuickReply:UpdateFocusVisuals()
                     end
                 end)
                 eb:HookScript("OnLeave", function(selfEb)
                     if selfEb._scDockedToQr then
-                        QuickReply._focusDimSig = nil
+                        if QuickReply.InvalidateFocusVisuals then QuickReply:InvalidateFocusVisuals() end
                         QuickReply:UpdateFocusVisuals()
                     end
                 end)
@@ -2682,27 +2694,34 @@ function MinimapBtn:ApplyExclusiveChatMode()
                         if stayDocked then
                             QuickReply._refocusInputAfterBlizzSend = false
                             QuickReply:DockOfficialEditBox(selfEb, false)
-                            if C_Timer and C_Timer.After then
-                                C_Timer.After(0, function()
-                                    if QuickReply.frame and QuickReply.frame:IsShown()
-                                        and QuickReply.IsOfficialOnlyThread and QuickReply:IsOfficialOnlyThread()
-                                        and not (selfEb.HasFocus and selfEb:HasFocus())
-                                    then
-                                        QuickReply:DockOfficialEditBox(selfEb, false)
+                            if C_Timer and C_Timer.After and not QuickReply._ebFocusLostStayQueued then
+                                QuickReply._ebFocusLostStayQueued = true
+                                QuickReply._ebFocusLostTarget = selfEb
+                                if not QuickReply._ebFocusLostStayFn then
+                                    QuickReply._ebFocusLostStayFn = function()
+                                        QuickReply._ebFocusLostStayQueued = false
+                                        local tEb = QuickReply._ebFocusLostTarget
+                                        if tEb and QuickReply.frame and QuickReply.frame:IsShown()
+                                            and QuickReply.IsOfficialOnlyThread and QuickReply:IsOfficialOnlyThread()
+                                            and not (tEb.HasFocus and tEb:HasFocus())
+                                        then
+                                            QuickReply:DockOfficialEditBox(tEb, false)
+                                        end
+                                        if QuickReply.ApplyCombatFadeStep then
+                                            QuickReply:ApplyCombatFadeStep(0.016, false)
+                                        end
+                                        if QuickReply.UpdateFocusVisuals then
+                                            QuickReply:UpdateFocusVisuals()
+                                        end
+                                        if QuickReply.SyncEnterBinding then
+                                            QuickReply:SyncEnterBinding()
+                                        end
+                                        if QuickReply.SyncQuickReplyHotkeys then
+                                            QuickReply:SyncQuickReplyHotkeys()
+                                        end
                                     end
-                                    if QuickReply.ApplyCombatFadeStep then
-                                        QuickReply:ApplyCombatFadeStep(0.016, false)
-                                    end
-                                    if QuickReply.UpdateFocusVisuals then
-                                        QuickReply:UpdateFocusVisuals()
-                                    end
-                                    if QuickReply.SyncEnterBinding then
-                                        QuickReply:SyncEnterBinding()
-                                    end
-                                    if QuickReply.SyncQuickReplyHotkeys then
-                                        QuickReply:SyncQuickReplyHotkeys()
-                                    end
-                                end)
+                                end
+                                C_Timer.After(0, QuickReply._ebFocusLostStayFn)
                             end
                         else
                             QuickReply._refocusInputAfterBlizzSend = false
@@ -2713,15 +2732,20 @@ function MinimapBtn:ApplyExclusiveChatMode()
                             if QuickReply.SyncEnterBinding then
                                 QuickReply:SyncEnterBinding()
                             end
-                            if C_Timer and C_Timer.After then
-                                C_Timer.After(0, function()
-                                    if QuickReply.UpdateFocusVisuals then
-                                        QuickReply:UpdateFocusVisuals()
+                            if C_Timer and C_Timer.After and not QuickReply._ebFocusLostHideQueued then
+                                QuickReply._ebFocusLostHideQueued = true
+                                if not QuickReply._ebFocusLostHideFn then
+                                    QuickReply._ebFocusLostHideFn = function()
+                                        QuickReply._ebFocusLostHideQueued = false
+                                        if QuickReply.UpdateFocusVisuals then
+                                            QuickReply:UpdateFocusVisuals()
+                                        end
+                                        if QuickReply.SyncEnterBinding then
+                                            QuickReply:SyncEnterBinding()
+                                        end
                                     end
-                                    if QuickReply.SyncEnterBinding then
-                                        QuickReply:SyncEnterBinding()
-                                    end
-                                end)
+                                end
+                                C_Timer.After(0, QuickReply._ebFocusLostHideFn)
                             end
                         end
                     end
@@ -2738,15 +2762,31 @@ function MinimapBtn:ApplyExclusiveChatMode()
                         and not (InCombatLockdown and InCombatLockdown())
                         and C_Timer and C_Timer.After
                     then
-                        C_Timer.After(0, function()
-                            if not QuickReply._hidingDockedOfficial
-                                and QuickReply.frame and QuickReply.frame:IsShown()
-                                and QuickReply.IsOfficialOnlyThread and QuickReply:IsOfficialOnlyThread()
-                                and not (InCombatLockdown and InCombatLockdown())
-                            then
-                                QuickReply:DockOfficialEditBox(selfEb, selfEb.HasFocus and selfEb:HasFocus() == true)
+                        local nowT = (GetTime and GetTime()) or 0
+                        if (nowT - (QuickReply._ebRedockWindowAt or 0)) > 1.0 then
+                            QuickReply._ebRedockWindowAt = nowT
+                            QuickReply._ebRedockCount = 0
+                        end
+                        QuickReply._ebRedockCount = (QuickReply._ebRedockCount or 0) + 1
+                        if QuickReply._ebRedockCount > 6 or QuickReply._ebRedockQueued then
+                            return
+                        end
+                        QuickReply._ebRedockQueued = true
+                        QuickReply._ebRedockTarget = selfEb
+                        if not QuickReply._ebRedockFn then
+                            QuickReply._ebRedockFn = function()
+                                QuickReply._ebRedockQueued = false
+                                local tEb = QuickReply._ebRedockTarget
+                                if tEb and not QuickReply._hidingDockedOfficial
+                                    and QuickReply.frame and QuickReply.frame:IsShown()
+                                    and QuickReply.IsOfficialOnlyThread and QuickReply:IsOfficialOnlyThread()
+                                    and not (InCombatLockdown and InCombatLockdown())
+                                then
+                                    QuickReply:DockOfficialEditBox(tEb, tEb.HasFocus and tEb:HasFocus() == true)
+                                end
                             end
-                        end)
+                        end
+                        C_Timer.After(0, QuickReply._ebRedockFn)
                     end
                 end)
             end
@@ -3884,6 +3924,14 @@ end
 
 local function MpOpenReplyChat(item)
     if not item then return end
+    local officialOnly = Compat and Compat.IsOfficialChatMode and Compat.IsOfficialChatMode()
+    local s = ns.db and ns.db.settings
+    local qrEnabled = (not s) or s.quickReplyEnabled ~= false
+    if (not officialOnly) and qrEnabled and item.threadKey and ns.QuickReply and ns.QuickReply.OpenThread then
+        if ns.QuickReply:OpenThread(item.threadKey, true) then
+            return
+        end
+    end
     if MpIsInCombat() then
         ns:Print("%s", L["Unavailable during combat."])
         return
@@ -3895,7 +3943,7 @@ local function MpOpenReplyChat(item)
     elseif item.replySlash and ChatFrame_OpenChat then
         pcall(ChatFrame_OpenChat, item.replySlash)
     elseif item.threadKey and ns.NavigateToModule then
-        ns:NavigateToModule("chat", { threadKey = item.threadKey })
+        ns:NavigateToModule("chat", { threadKey = item.threadKey, focusInput = true })
     end
 end
 
@@ -6567,12 +6615,32 @@ function QuickReply:ResolveOfficialPrefixColor(thread, fallbackTone)
     return fbR, fbG, fbB
 end
 
+QuickReply._GENERAL_TONE_THREAD = QuickReply._GENERAL_TONE_THREAD or { kind = "GENERAL" }
+QuickReply._DEF_IN_BG = QuickReply._DEF_IN_BG or { 0.03, 0.03, 0.04, 1.0 }
+QuickReply._DEF_MUTED = QuickReply._DEF_MUTED or { 0.52, 0.56, 0.64, 0.85 }
+
+function QuickReply:InvalidateFocusVisuals()
+    self._focusDimR = nil
+    self._focusDimG = nil
+    self._focusDimB = nil
+    self._focusDimHover = nil
+    local eb = self._activeDockedSkinEb or _G.ChatFrame1EditBox
+    if eb and eb._scDockedSkin then
+        eb._scDockedSkin._scSkinPalKey = nil
+    end
+end
+
 function QuickReply:SyncInputStyleToOfficial(force)
     local f = self.frame
     if not f then
         return
     end
     local eb1 = _G.ChatFrame1EditBox
+    local skin = eb1 and eb1._scDockedSkin or nil
+    local hasRest = (skin and skin._restingLabel ~= nil) and true or false
+    if (not force) and self._officialInputStyleSynced and self._officialInputStyleHasRest == hasRest then
+        return
+    end
     local hdr1 = eb1 and (eb1.header or _G.ChatFrame1EditBoxHeader) or nil
     local hFont, hSize, hFlags = nil, nil, nil
     if hdr1 and hdr1.GetFont then
@@ -6621,11 +6689,11 @@ function QuickReply:SyncInputStyleToOfficial(force)
             sr, sg, sb, sa = cr, cg or 0, cb or 0, ca or 1
         end
     end
-    local skin = eb1 and eb1._scDockedSkin or nil
-    local hasRest = (skin and skin._restingLabel ~= nil) and "1" or "0"
+    self._officialInputStyleSynced = true
+    self._officialInputStyleHasRest = hasRest
     local sig = tostring(hFont or "") .. ":" .. tostring(hSize or 0) .. ":" .. tostring(hFlags or "")
         .. "|" .. tostring(eFont or "") .. ":" .. tostring(eSize or 0) .. ":" .. tostring(eFlags or "")
-        .. "|" .. tostring(hx) .. "," .. tostring(hy) .. "|" .. hasRest
+        .. "|" .. tostring(hx) .. "," .. tostring(hy) .. "|" .. (hasRest and "1" or "0")
     if (not force) and self._officialInputStyleSig == sig then
         return
     end
@@ -6668,19 +6736,39 @@ local function SyncDockedOfficialSkinColors(eb)
     end
     local skin = eb._scDockedSkin
     local p = ns.Theme and ns.Theme.GetPalette and ns.Theme:GetPalette() or nil
-    if ns.Theme and ns.Theme.ApplyBackdrop then
-        ns.Theme:ApplyBackdrop(skin, "inset", p)
-    end
+    local palKey = (p and p.key) or "dark"
     local tone = QuickReply and QuickReply._activeToneRgb
     local r = (tone and tone[1]) or 0.85
     local g = (tone and tone[2]) or 0.72
     local b = (tone and tone[3]) or 0.36
     local hasFocus = (eb.HasFocus and eb:HasFocus() == true) == true
-    local inBg = (p and p.inputBg) or { 0.03, 0.03, 0.04, 1.0 }
+    local hov = (not hasFocus) and ((eb.IsMouseOver and eb:IsMouseOver() == true) == true) or false
+    local br = hasFocus and (QuickReply._focusBorderR or math.min(1, r + (1 - r) * 0.25)) or -1
+    local bg = hasFocus and (QuickReply._focusBorderG or math.min(1, g + (1 - g) * 0.25)) or -1
+    local bb = hasFocus and (QuickReply._focusBorderB or math.min(1, b + (1 - b) * 0.25)) or -1
+    local gTarget = (not hasFocus) and (ns.Chat and ns.Chat.GetGeneralTargetInfo) and ns.Chat:GetGeneralTargetInfo() or nil
+    local gKey = (not hasFocus) and ((gTarget and gTarget.channelId) or (gTarget and gTarget.isYell and "Y") or "S") or ""
+    if skin._scSkinPalKey == palKey
+        and skin._scSkinFocus == hasFocus
+        and skin._scSkinHov == hov
+        and skin._scSkinTR == r and skin._scSkinTG == g and skin._scSkinTB == b
+        and skin._scSkinBR == br and skin._scSkinBG == bg and skin._scSkinBB == bb
+        and skin._scSkinGKey == gKey
+    then
+        return
+    end
+    skin._scSkinPalKey = palKey
+    skin._scSkinFocus = hasFocus
+    skin._scSkinHov = hov
+    skin._scSkinTR, skin._scSkinTG, skin._scSkinTB = r, g, b
+    skin._scSkinBR, skin._scSkinBG, skin._scSkinBB = br, bg, bb
+    skin._scSkinGKey = gKey
+
+    if ns.Theme and ns.Theme.ApplyBackdrop then
+        ns.Theme:ApplyBackdrop(skin, "inset", p)
+    end
+    local inBg = (p and p.inputBg) or QuickReply._DEF_IN_BG
     if hasFocus then
-        local br = QuickReply._focusBorderR or math.min(1, r + (1 - r) * 0.25)
-        local bg = QuickReply._focusBorderG or math.min(1, g + (1 - g) * 0.25)
-        local bb = QuickReply._focusBorderB or math.min(1, b + (1 - b) * 0.25)
         if skin.SetBackdropColor then
             skin:SetBackdropColor(r * 0.11 + 0.05, g * 0.11 + 0.05, b * 0.11 + 0.05, 1.0)
         end
@@ -6691,7 +6779,6 @@ local function SyncDockedOfficialSkinColors(eb)
             skin._solidBg:SetVertexColor(r * 0.11 + 0.05, g * 0.11 + 0.05, b * 0.11 + 0.05, 1.0)
         end
     else
-        local hov = (eb.IsMouseOver and eb:IsMouseOver() == true) == true
         local mult = hov and 0.48 or 0.28
         if skin.SetBackdropColor then
             skin:SetBackdropColor(inBg[1], inBg[2], inBg[3], 1.0)
@@ -6705,16 +6792,15 @@ local function SyncDockedOfficialSkinColors(eb)
     end
     if skin._restingLabel then
         if not hasFocus then
-            local gTarget = (ns.Chat and ns.Chat.GetGeneralTargetInfo) and ns.Chat:GetGeneralTargetInfo() or nil
             local pfx = (gTarget and gTarget.channelId and ("/" .. tostring(gTarget.channelId) .. ":"))
                 or (gTarget and gTarget.isYell and (L["Yell"] .. ":"))
                 or (L["Say"] .. ":")
-            local pr, pg, pb = QuickReply:ResolveOfficialPrefixColor({ kind = "GENERAL" }, tone)
+            local pr, pg, pb = QuickReply:ResolveOfficialPrefixColor(QuickReply._GENERAL_TONE_THREAD, tone)
             skin._restingLabel:SetText(pfx)
             skin._restingLabel:SetTextColor(pr, pg, pb, 1.0)
             skin._restingLabel:Show()
             if skin._restingPlaceholder then
-                local mc = (p and p.textMuted) or { 0.52, 0.56, 0.64, 0.85 }
+                local mc = (p and p.textMuted) or QuickReply._DEF_MUTED
                 skin._restingPlaceholder:SetText(L["Click here to type..."])
                 skin._restingPlaceholder:SetTextColor(mc[1] or 0.52, mc[2] or 0.56, mc[3] or 0.64, 0.72)
                 skin._restingPlaceholder:Show()
@@ -6755,9 +6841,12 @@ local function ApplyDockedOfficialEditSkin(eb)
             end
         end
     end
-    for obj in pairs(eb._scOrigTexAlphas) do
-        if obj and obj.SetAlpha then
-            pcall(obj.SetAlpha, obj, 0)
+    if not eb._scOrigTexHidden then
+        eb._scOrigTexHidden = true
+        for obj in pairs(eb._scOrigTexAlphas) do
+            if obj and obj.SetAlpha then
+                pcall(obj.SetAlpha, obj, 0)
+            end
         end
     end
 
@@ -6773,7 +6862,8 @@ local function ApplyDockedOfficialEditSkin(eb)
             eb._scOrigInsets = { l or 0, r or 0, t or 0, b or 0 }
         end
     end
-    if not (InCombatLockdown and InCombatLockdown()) then
+    if not (InCombatLockdown and InCombatLockdown()) and not eb._scDockedSizingApplied then
+        eb._scDockedSizingApplied = true
         if eb.SetHeight then
             pcall(eb.SetHeight, eb, 22)
         end
@@ -6827,13 +6917,22 @@ local function ApplyDockedOfficialEditSkin(eb)
             skinLevel = math.max(1, math.min(skinLevel, liveEbLevel - 2))
         end
     end
-    skin:ClearAllPoints()
-    skin:SetPoint("BOTTOMLEFT", QuickReply.frame, "BOTTOMLEFT", 6, 6)
-    skin:SetPoint("BOTTOMRIGHT", QuickReply.frame, "BOTTOMRIGHT", -6, 6)
-    skin:SetHeight(22)
-    skin:SetFrameStrata(skinStrata)
-    skin:SetFrameLevel(skinLevel)
-    skin:Show()
+    if not skin._scAnchoredToQr then
+        skin._scAnchoredToQr = true
+        skin:ClearAllPoints()
+        skin:SetPoint("BOTTOMLEFT", QuickReply.frame, "BOTTOMLEFT", 6, 6)
+        skin:SetPoint("BOTTOMRIGHT", QuickReply.frame, "BOTTOMRIGHT", -6, 6)
+        skin:SetHeight(22)
+    end
+    if (skin.GetFrameStrata and skin:GetFrameStrata()) ~= skinStrata then
+        skin:SetFrameStrata(skinStrata)
+    end
+    if (skin.GetFrameLevel and skin:GetFrameLevel()) ~= skinLevel then
+        skin:SetFrameLevel(skinLevel)
+    end
+    if not skin:IsShown() then
+        skin:Show()
+    end
     QuickReply:SyncInputStyleToOfficial(false)
     SyncDockedOfficialSkinColors(eb)
     QuickReply._activeDockedSkinEb = eb
@@ -6844,7 +6943,12 @@ local function RestoreDockedOfficialEditSkin(eb, keepPreDockLayout)
         QuickReply._activeDockedSkinEb = nil
     end
     if not eb then return end
+    eb._scOrigTexHidden = nil
+    eb._scDockedSizingApplied = nil
+    eb._scDockAppliedStrata = nil
+    eb._scDockAppliedLevel = nil
     if eb._scDockedSkin then
+        eb._scDockedSkin._scSkinPalKey = nil
         eb._scDockedSkin:Hide()
     end
     if keepPreDockLayout then
@@ -7000,17 +7104,20 @@ function QuickReply:DockOfficialEditBox(targetEb, isFocused)
         end
         if isAddonMode then
             if qrShown then
-                pcall(eb.ClearAllPoints, eb)
-                pcall(eb.SetPoint, eb, "BOTTOMLEFT", QuickReply.frame, "BOTTOMLEFT", 6, 6)
-                pcall(eb.SetPoint, eb, "BOTTOMRIGHT", QuickReply.frame, "BOTTOMRIGHT", -6, 6)
-                eb._scDockedToQr = true
-                eb._scPreDockedToQr = true
+                if not eb._scDockedToQr then
+                    pcall(eb.ClearAllPoints, eb)
+                    pcall(eb.SetPoint, eb, "BOTTOMLEFT", QuickReply.frame, "BOTTOMLEFT", 6, 6)
+                    pcall(eb.SetPoint, eb, "BOTTOMRIGHT", QuickReply.frame, "BOTTOMRIGHT", -6, 6)
+                    eb._scDockedToQr = true
+                    eb._scPreDockedToQr = true
+                end
                 ApplyDockedOfficialEditSkin(eb)
-                if eb.SetFrameStrata then
+                if eb.SetFrameStrata and ((eb.GetFrameStrata and eb:GetFrameStrata()) ~= focusedStrata) then
                     pcall(eb.SetFrameStrata, eb, focusedStrata)
                 end
-                if eb.SetFrameLevel then
-                    pcall(eb.SetFrameLevel, eb, baseLevel + 24)
+                local wantLevel = baseLevel + 24
+                if eb.SetFrameLevel and ((eb.GetFrameLevel and eb:GetFrameLevel()) ~= wantLevel) then
+                    pcall(eb.SetFrameLevel, eb, wantLevel)
                 end
                 if isFocused and eb.Raise then
                     pcall(eb.Raise, eb)
@@ -7025,9 +7132,13 @@ function QuickReply:DockOfficialEditBox(targetEb, isFocused)
             end
         end
         if eb.EnableMouse and not isProt then
-            pcall(eb.EnableMouse, eb, not (self._mousePassThrough == true))
+            local wantMouse = not (self._mousePassThrough == true)
+            if eb._scDockAppliedMouse ~= wantMouse then
+                eb._scDockAppliedMouse = wantMouse
+                pcall(eb.EnableMouse, eb, wantMouse)
+            end
         end
-        if eb.Show then
+        if eb.Show and not (eb.IsShown and eb:IsShown()) then
             pcall(eb.Show, eb)
         end
         if (not isFocused) and eb.HasFocus and eb:HasFocus() and eb.ClearFocus then
@@ -7038,14 +7149,16 @@ function QuickReply:DockOfficialEditBox(targetEb, isFocused)
             if not (eb._scDockedToQr or eb._scPreDockedToQr) then
                 self:PreDockOfficialEditBoxAnchor(eb)
             end
-            if eb.SetHeight then
+            if eb.SetHeight and not eb._scDockedSizingApplied then
                 pcall(eb.SetHeight, eb, 22)
             end
-            if eb.SetFrameStrata then
-                pcall(eb.SetFrameStrata, eb, isFocused and "FULLSCREEN_DIALOG" or focusedStrata)
+            local wantCombatStrata = isFocused and "FULLSCREEN_DIALOG" or focusedStrata
+            if eb.SetFrameStrata and ((eb.GetFrameStrata and eb:GetFrameStrata()) ~= wantCombatStrata) then
+                pcall(eb.SetFrameStrata, eb, wantCombatStrata)
             end
-            if eb.SetFrameLevel then
-                pcall(eb.SetFrameLevel, eb, baseLevel + 24)
+            local wantLevel = baseLevel + 24
+            if eb.SetFrameLevel and ((eb.GetFrameLevel and eb:GetFrameLevel()) ~= wantLevel) then
+                pcall(eb.SetFrameLevel, eb, wantLevel)
             end
             if isFocused and eb.Raise then
                 pcall(eb.Raise, eb)
@@ -7070,23 +7183,45 @@ function QuickReply:DockOfficialEditBox(targetEb, isFocused)
     end
     local targetAlpha = isFocused and 1.0 or 0.01
     if eb.SetAlpha then
-        pcall(eb.SetAlpha, eb, targetAlpha)
+        local curA = eb.GetAlpha and eb:GetAlpha() or nil
+        if curA == nil or math.abs(curA - targetAlpha) > 0.005 then
+            pcall(eb.SetAlpha, eb, targetAlpha)
+        end
     end
-    SyncDockedOfficialSkinColors(eb)
+    if not (eb._scDockedSkin and eb._scDockedSkin:IsShown()) then
+        SyncDockedOfficialSkinColors(eb)
+    end
 end
 
 function QuickReply:ShowActiveOfficialEditBox(targetEb)
+    local nowT = (GetTime and GetTime()) or 0
+    local isNewDock = (targetEb == nil) or (targetEb._scDockedToQr ~= true)
+    if isNewDock or self.interactedOutside then
+        self._lastProgrammaticFocusAt = nowT
+        self.interactedOutside = false
+    end
     self:DockOfficialEditBox(targetEb, true)
+    self:ElevateToForeground()
+    if self.InvalidateFocusVisuals then
+        self:InvalidateFocusVisuals()
+    end
+    if self.UpdateFocusVisuals then
+        self:UpdateFocusVisuals()
+    end
+    if self.WakeOnUpdate then
+        self:WakeOnUpdate()
+    end
 end
 
 function QuickReply:HideTemporaryOfficialEditBox(eb)
     self._hidingDockedOfficial = true
+    local wasDocked = (eb ~= nil) and (eb._scDockedToQr == true or (eb._scDockedSkin and eb._scDockedSkin:IsShown()) == true)
     local isAddonMode = (Compat and Compat.HasChosenChatUiMode and Compat.HasChosenChatUiMode() and Compat.IsAddonChatMode and Compat.IsAddonChatMode()) == true
     local qrShown = (self.frame and self.frame:IsShown()) == true
     local keepPreDocked = isAddonMode and qrShown and (eb == _G.ChatFrame1EditBox)
     RestoreDockedOfficialEditSkin(eb, keepPreDocked)
     local isOfficialTab = qrShown and self:IsOfficialOnlyThread()
-    if QuickReply.frame then
+    if QuickReply.frame and (wasDocked or eb == _G.ChatFrame1EditBox or eb == nil) then
         if QuickReply.frame.inputWrap then
             QuickReply.frame.inputWrap:SetShown(not isOfficialTab)
         end
@@ -7105,7 +7240,7 @@ function QuickReply:HideTemporaryOfficialEditBox(eb)
         if QuickReply.frame.btnSend then
             QuickReply.frame.btnSend:Hide()
         end
-        QuickReply._focusDimSig = nil
+        QuickReply:InvalidateFocusVisuals()
         if QuickReply.UpdateFocusVisuals then
             QuickReply:UpdateFocusVisuals()
         end
@@ -7115,6 +7250,7 @@ function QuickReply:HideTemporaryOfficialEditBox(eb)
         return
     end
     eb._scDockedToQr = false
+    eb._scDockAppliedMouse = nil
     if eb.SetIgnoreParentAlpha then
         pcall(eb.SetIgnoreParentAlpha, eb, true)
     end
@@ -8198,8 +8334,9 @@ function QuickReply:UpdateFocusVisuals(nowSec)
     else
         self._focusActiveShown = false
         self._focusAnimNextAt = nil
+        local inputWrapTarget = f.inputWrap or box
         local hov = ((box and box._scHovered == true) or (f.inputWrap and f.inputWrap.IsMouseOver and f.inputWrap:IsMouseOver() == true)) == true
-        if self._focusDimR == r and self._focusDimG == g and self._focusDimB == b and self._focusDimHover == hov and not (box and box._scInputStyleSig ~= nil) then
+        if self._focusDimR == r and self._focusDimG == g and self._focusDimB == b and self._focusDimHover == hov and not (inputWrapTarget and inputWrapTarget._scInputStyleSig ~= nil) then
             return
         end
         self._focusDimR = r
@@ -8226,7 +8363,6 @@ function QuickReply:UpdateFocusVisuals(nowSec)
         if halo then
             halo:Hide()
         end
-        local inputWrapTarget = f.inputWrap or box
         if inputWrapTarget and inputWrapTarget.SetBackdropBorderColor then
             inputWrapTarget._scInputStyleSig = nil
             local mult = hov and 0.48 or 0.28
@@ -8237,7 +8373,7 @@ function QuickReply:UpdateFocusVisuals(nowSec)
                 0.95
             )
             local pal = ns.Theme and ns.Theme.GetPalette and ns.Theme:GetPalette() or nil
-            local inBg = (pal and pal.inputBg) or { 0.03, 0.03, 0.04, 1.0 }
+            local inBg = (pal and pal.inputBg) or QuickReply._DEF_IN_BG
             inputWrapTarget:SetBackdropColor(inBg[1], inBg[2], inBg[3], 1.0)
             if inputWrapTarget._solidBg then
                 inputWrapTarget._solidBg:SetVertexColor(inBg[1], inBg[2], inBg[3], 1.0)
@@ -8458,6 +8594,8 @@ function QuickReply:InstallSmartZOrderHooks()
 end
 
 function QuickReply:FocusInputBox(initialText)
+    local focusAt = (GetTime and GetTime()) or 0
+    self._lastProgrammaticFocusAt = focusAt
     self:ElevateToForeground()
     self:SnapshotMouseButtonState()
     self._focusEnsureSeq = (self._focusEnsureSeq or 0) + 1
@@ -8470,7 +8608,8 @@ function QuickReply:FocusInputBox(initialText)
         local existing = (type(initialText) == "string" and initialText ~= "") and initialText or ""
         if self:ActivateDockedOfficialInput(existing) then
             self.interactedOutside = false
-            self.lastInputAt = GetTime()
+            self.lastInputAt = focusAt
+            self._lastOpaqueActivityAt = focusAt
             self.idleCountdown = nil
             return true
         end
@@ -8478,8 +8617,10 @@ function QuickReply:FocusInputBox(initialText)
         if dockedEb and dockedEb._scDockedToQr and dockedEb.SetFocus then
             pcall(dockedEb.SetFocus, dockedEb)
             self.interactedOutside = false
-            self.lastInputAt = GetTime()
+            self.lastInputAt = focusAt
+            self._lastOpaqueActivityAt = focusAt
             self.idleCountdown = nil
+            self:ElevateToForeground()
             self:UpdateFocusVisuals()
             return true
         end
@@ -8487,6 +8628,13 @@ function QuickReply:FocusInputBox(initialText)
     end
     local box = f.inputBox
     self:SetCombatMousePassThrough(false)
+    if box.Enable and box.IsEnabled and not box:IsEnabled() then
+        pcall(box.Enable, box)
+    end
+    if not box:IsShown() then
+        box:Show()
+    end
+    box:SetAlpha(1)
     if box.EnableKeyboard then
         pcall(box.EnableKeyboard, box, true)
     end
@@ -8495,12 +8643,17 @@ function QuickReply:FocusInputBox(initialText)
     end
     self:ApplyCombatFadeStep(0, true)
     self.interactedOutside = false
-    self.lastInputAt = GetTime()
+    self.lastInputAt = focusAt
+    self._lastOpaqueActivityAt = focusAt
     self.idleCountdown = nil
     if box.placeholder and (box:GetText() or "") == "" then
         box.placeholder:SetText(L["Type a quick reply..."])
     end
+    self:ElevateToForeground()
     self:UpdateFocusVisuals()
+    if self.WakeOnUpdate then
+        self:WakeOnUpdate()
+    end
     if _G.C_Timer and _G.C_Timer.After then
         _G.C_Timer.After(0, function()
             if not (self.frame and self.frame:IsShown() and self._focusEnsureSeq == focusSeq) then
@@ -8511,7 +8664,7 @@ function QuickReply:FocusInputBox(initialText)
             end
             local curFocus = _G.GetCurrentKeyBoardFocus and _G.GetCurrentKeyBoardFocus() or nil
             if curFocus and curFocus ~= box then
-                return
+                pcall(box.SetFocus, box)
             end
             if box.EnableKeyboard then
                 pcall(box.EnableKeyboard, box, true)
@@ -8519,6 +8672,7 @@ function QuickReply:FocusInputBox(initialText)
             if (not box.HasFocus or not box:HasFocus()) and box.SetFocus then
                 pcall(box.SetFocus, box)
             end
+            self:ElevateToForeground()
             self:SnapshotMouseButtonState()
             self:UpdateFocusVisuals()
         end)
@@ -8570,10 +8724,14 @@ function QuickReply:MarkOutsideInteraction()
     if not (self.frame and self.frame:IsShown()) then
         return
     end
-    self:ReleaseKeyboardFocus()
+    if self:IsInputFocused() then
+        self:ReleaseKeyboardFocus()
+    end
     self.interactedOutside = true
     self.lastInputAt = 0
-    self:YieldToGameUIIfPanelOpen()
+    if not self._yieldedToGameUI then
+        self:YieldToGameUIIfPanelOpen()
+    end
 end
 
 function QuickReply:SnapshotMouseButtonState()
@@ -8613,12 +8771,13 @@ function QuickReply:CheckExternalMouseButtons()
         or (self.IsWhispersDropdownShown and self:IsWhispersDropdownShown() == true)
         or ((self._closeConfirmModal and self._closeConfirmModal:IsShown()) == true)
     local shiftLinkHeld = ((IsShiftKeyDown and IsShiftKeyDown() == true) or (IsModifiedClick and IsModifiedClick("CHATLINK") == true)) == true
+    local justFocused = self._lastProgrammaticFocusAt and (((GetTime and GetTime()) or 0) - self._lastProgrammaticFocusAt) < 0.25
     for _, btnName in ipairs(QUICK_REPLY_MOUSE_BUTTONS) do
         local ok, down = pcall(IsMouseButtonDown, btnName)
         local isDown = (ok and down == true)
         local wasDown = self._mouseDownPrev[btnName] == true
         self._mouseDownPrev[btnName] = isDown
-        if isDown and not wasDown then
+        if isDown and not wasDown and not justFocused then
             if btnName == "LeftButton" and shiftLinkHeld then
                 local nowT = (GetTime and GetTime()) or 0
                 self.interactedOutside = false
@@ -8655,26 +8814,38 @@ function QuickReply:IsResizeLocked()
     return self:GetLockMode() == "full_locked"
 end
 
+QuickReply._LOCK_COL_UNLOCK = QuickReply._LOCK_COL_UNLOCK or { 0.38, 0.96, 0.60 }
+QuickReply._LOCK_COL_POS = QuickReply._LOCK_COL_POS or { 0.38, 0.84, 1.00 }
+QuickReply._LOCK_COL_FULL = QuickReply._LOCK_COL_FULL or { 1.0, 0.84, 0.34 }
+QuickReply._LOCK_ACT_POS = QuickReply._LOCK_ACT_POS or { 0.32, 0.76, 0.98 }
+QuickReply._LOCK_ACT_FULL = QuickReply._LOCK_ACT_FULL or { 0.98, 0.68, 0.22 }
+QuickReply._DOCK_COL_ON = QuickReply._DOCK_COL_ON or { 0.45, 0.85, 1.0 }
+QuickReply._DOCK_COL_OFF = QuickReply._DOCK_COL_OFF or { 0.78, 0.82, 0.88 }
+
 function QuickReply:ApplyLockState()
     local mode = self:GetLockMode()
     local locked = (mode ~= "unlocked")
     local resizeLocked = (mode == "full_locked")
     local f = self.frame
     if f then
+        local modeChanged = (f._scAppliedLockMode ~= mode)
+        f._scAppliedLockMode = mode
         f._scLocked = locked
         f._scResizeLocked = resizeLocked
         if resizeLocked and f._scStopResize then
             f:_scStopResize(false)
         end
-        if type(f._scResizeGrips) == "table" then
-            for _, g in ipairs(f._scResizeGrips) do
-                if g and g.SetShown then
-                    g:SetShown(not resizeLocked)
+        if modeChanged then
+            if type(f._scResizeGrips) == "table" then
+                for _, g in ipairs(f._scResizeGrips) do
+                    if g and g.SetShown then
+                        g:SetShown(not resizeLocked)
+                    end
                 end
             end
-        end
-        if f._scSizeCornerIcon then
-            f._scSizeCornerIcon:SetShown(not resizeLocked)
+            if f._scSizeCornerIcon then
+                f._scSizeCornerIcon:SetShown(not resizeLocked)
+            end
         end
         if locked and f._scDragging and f._scEndDrag then
             f:_scEndDrag()
@@ -8683,49 +8854,59 @@ function QuickReply:ApplyLockState()
                 f._scDragging = false
             end
             if not self._mousePassThrough and ns.Theme and ns.Theme.AttachDragHandle then
-                pcall(f.EnableMouse, f, true)
-                local handles = { f.header, f.infoBar, f.chipsBar, f.msgBg, f.msgFrame, f.quickPingsBar }
-                for _, h in ipairs(handles) do
-                    if h then
-                        ns.Theme:AttachDragHandle(h, f)
-                    end
+                if modeChanged or not f._scDragHandlesReady then
+                    f._scDragHandlesReady = true
+                    pcall(f.EnableMouse, f, true)
+                    if f.header then ns.Theme:AttachDragHandle(f.header, f) end
+                    if f.infoBar then ns.Theme:AttachDragHandle(f.infoBar, f) end
+                    if f.chipsBar then ns.Theme:AttachDragHandle(f.chipsBar, f) end
+                    if f.msgBg then ns.Theme:AttachDragHandle(f.msgBg, f) end
+                    if f.msgFrame then ns.Theme:AttachDragHandle(f.msgFrame, f) end
+                    if f.quickPingsBar then ns.Theme:AttachDragHandle(f.quickPingsBar, f) end
                 end
             end
         end
-        if f.dragGrip1 then
-            if locked then
-                f.dragGrip1:SetVertexColor(0.55, 0.62, 0.72, 0.30)
-            else
-                f.dragGrip1:SetVertexColor(0.35, 0.95, 0.55, 0.85)
+        if modeChanged then
+            if f.dragGrip1 then
+                if locked then
+                    f.dragGrip1:SetVertexColor(0.55, 0.62, 0.72, 0.30)
+                else
+                    f.dragGrip1:SetVertexColor(0.35, 0.95, 0.55, 0.85)
+                end
             end
-        end
-        if f.dragGrip2 then
-            if locked then
-                f.dragGrip2:SetVertexColor(0.55, 0.62, 0.72, 0.20)
-            else
-                f.dragGrip2:SetVertexColor(0.35, 0.95, 0.55, 0.55)
+            if f.dragGrip2 then
+                if locked then
+                    f.dragGrip2:SetVertexColor(0.55, 0.62, 0.72, 0.20)
+                else
+                    f.dragGrip2:SetVertexColor(0.35, 0.95, 0.55, 0.55)
+                end
             end
         end
         if f.btnLock and ns.Theme then
-            local iconCol = { 0.38, 0.96, 0.60 }
-            if mode == "pos_locked" then
-                iconCol = { 0.38, 0.84, 1.00 }
-            elseif mode == "full_locked" then
-                iconCol = { 1.0, 0.84, 0.34 }
+            local themeKey = (ns.Theme.GetThemeName and ns.Theme:GetThemeName()) or "blizzard"
+            local lockSig = mode .. ":" .. themeKey
+            if f.btnLock._scLockBtnSig ~= lockSig then
+                f.btnLock._scLockBtnSig = lockSig
+                local iconCol = QuickReply._LOCK_COL_UNLOCK
+                if mode == "pos_locked" then
+                    iconCol = QuickReply._LOCK_COL_POS
+                elseif mode == "full_locked" then
+                    iconCol = QuickReply._LOCK_COL_FULL
+                end
+                local opts = f.btnLock._scLockCfgOpts
+                if not opts then
+                    opts = { size = 17, toggle = true, keepColorWhenInactive = true, tooltipFn = f._lockTooltipFn }
+                    f.btnLock._scLockCfgOpts = opts
+                end
+                opts.active = locked
+                opts.activeColor = (mode == "pos_locked") and QuickReply._LOCK_ACT_POS or QuickReply._LOCK_ACT_FULL
+                opts.color = iconCol
+                ns.Theme:ConfigureIconButton(
+                    f.btnLock, 20, 20,
+                    locked and ICON_LOCK_CLOSED or ICON_LOCK_OPEN,
+                    opts
+                )
             end
-            ns.Theme:ConfigureIconButton(
-                f.btnLock, 20, 20,
-                locked and ICON_LOCK_CLOSED or ICON_LOCK_OPEN,
-                {
-                    size = 17,
-                    toggle = true,
-                    active = locked,
-                    activeColor = (mode == "pos_locked") and { 0.32, 0.76, 0.98 } or { 0.98, 0.68, 0.22 },
-                    keepColorWhenInactive = true,
-                    color = iconCol,
-                    tooltipFn = f._lockTooltipFn,
-                }
-            )
         end
     end
     return locked
@@ -8789,15 +8970,23 @@ function QuickReply:UpdateDockButton()
         return
     end
     local docked = self:IsDockedOverChat()
+    local themeKey = (ns.Theme.GetThemeName and ns.Theme:GetThemeName()) or "blizzard"
+    local dockSig = (docked and "1:" or "0:") .. themeKey
+    if f.btnDock._scDockBtnSig == dockSig then
+        return
+    end
+    f.btnDock._scDockBtnSig = dockSig
     ns.Theme:SetButtonActive(f.btnDock, docked, "default")
+    local opts = f.btnDock._scDockCfgOpts
+    if not opts then
+        opts = { size = 16, tooltipFn = f._dockTooltipFn }
+        f.btnDock._scDockCfgOpts = opts
+    end
+    opts.color = docked and QuickReply._DOCK_COL_ON or QuickReply._DOCK_COL_OFF
     ns.Theme:ConfigureIconButton(
         f.btnDock, 20, 20,
         "Interface\\Icons\\INV_Misc_Map_01",
-        {
-            size = 16,
-            color = docked and { 0.45, 0.85, 1.0 } or { 0.78, 0.82, 0.88 },
-            tooltipFn = f._dockTooltipFn,
-        }
+        opts
     )
 end
 
@@ -9341,9 +9530,16 @@ function QuickReply:UpdateAutoCloseButton()
     end
     local enabled, delay = self:GetAutoCloseSettings()
     local fadeEnabled, fadeDelay = self:GetFadeDelaySettings()
+    local persistOpen = self:IsPersistentOpenMode()
     local w = f:GetWidth() or 444
     local ultraCompact = (w < 365)
     local compactHdr = (w < 540)
+    local themeKey = (ns.Theme.GetThemeName and ns.Theme:GetThemeName()) or "blizzard"
+    local acSig = (enabled and "1" or "0") .. ":" .. tostring(delay) .. ":" .. (fadeEnabled and "1" or "0") .. ":" .. tostring(fadeDelay) .. ":" .. (persistOpen and "1" or "0") .. ":" .. (ultraCompact and "U" or (compactHdr and "C" or "F")) .. ":" .. themeKey
+    if f.btnAutoClose._scAcSig == acSig then
+        return
+    end
+    f.btnAutoClose._scAcSig = acSig
     local label
     if not enabled then
         if fadeEnabled then
@@ -9351,7 +9547,7 @@ function QuickReply:UpdateAutoCloseButton()
         else
             label = ultraCompact and "100%" or (compactHdr and L["Opaque"] or L["Always Open (Opaque)"])
         end
-    elseif self:IsPersistentOpenMode() then
+    elseif persistOpen then
         label = ultraCompact and "DG" or (compactHdr and L["Raid/DG"] or L["Dungeon: Stay Open"])
     else
         label = ultraCompact and (tostring(delay) .. "s") or (compactHdr and L["Auto: %ds"]:format(delay) or L["Auto-close: %d seconds"]:format(delay))
@@ -9399,8 +9595,8 @@ function QuickReply:SyncDockGeometry()
                 refW = math.max(360, math.floor(cfW * scale + 0.5))
                 local tallerDefault = math.min(math.max(268, math.floor(cfH * scale + 64 + 0.5)), math.max(268, math.floor(uh - (cfBottom * scale) - 18)))
                 refH = tallerDefault
-                refX = cfLeft * scale
-                refY = cfBottom * scale
+                refX = math.floor(cfLeft * scale + 0.5)
+                refY = math.floor(cfBottom * scale + 0.5)
             end
         end
     end
@@ -9411,20 +9607,24 @@ function QuickReply:SyncDockGeometry()
     if dockOn and refW and refH and not hasSavedPos then
         local finalW = useW or refW
         local finalH = useH or refH
-        f:SetSize(finalW, finalH)
-        f:ClearAllPoints()
-        f:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", refX, refY)
-        if f.header then
-            f.header:SetHeight(finalH < 250 and 23 or 25)
-        end
-        if f.infoBar then
-            f.infoBar:SetHeight(finalH < 250 and 29 or 32)
-        end
-        if f.chipsBar then
-            f.chipsBar:SetHeight(finalH < 250 and 19 or 21)
-        end
-        if self.UpdateWhispersButton then
-            self:UpdateWhispersButton()
+        local changed = (f._scDockMode ~= "dock")
+            or (f._scDockW ~= finalW) or (f._scDockH ~= finalH)
+            or (f._scDockX ~= refX) or (f._scDockY ~= refY)
+        if changed then
+            f._scDockMode = "dock"
+            f._scDockW, f._scDockH, f._scDockX, f._scDockY = finalW, finalH, refX, refY
+            f:SetSize(finalW, finalH)
+            f:ClearAllPoints()
+            f:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", refX, refY)
+            if f.header then
+                f.header:SetHeight(finalH < 250 and 23 or 25)
+            end
+            if f.infoBar then
+                f.infoBar:SetHeight(finalH < 250 and 29 or 32)
+            end
+            if f.chipsBar then
+                f.chipsBar:SetHeight(finalH < 250 and 19 or 21)
+            end
         end
         self:UpdateDockButton()
         self:ApplyLockState()
@@ -9433,23 +9633,25 @@ function QuickReply:SyncDockGeometry()
 
     local defW = useW or (dockOn and refW) or math.min(444, math.max(350, math.floor(uw - 32)))
     local defH = useH or (dockOn and refH) or math.min(380, math.max(268, math.floor(uh - 32)))
-    f:SetSize(defW, defH)
-    if f.header then
-        f.header:SetHeight(defH < 250 and 23 or 25)
-    end
-    if f.infoBar then
-        f.infoBar:SetHeight(defH < 250 and 29 or 32)
-    end
-    if f.chipsBar then
-        f.chipsBar:SetHeight(defH < 250 and 19 or 21)
-    end
-    local restored = ns.Theme and ns.Theme.RestoreWindowPosition and ns.Theme:RestoreWindowPosition(f, "quickReply", false, { allowLockedRestore = true })
-    if not restored then
-        f:ClearAllPoints()
-        f:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 0)
-    end
-    if self.UpdateWhispersButton then
-        self:UpdateWhispersButton()
+    local freeChanged = (f._scDockMode ~= "free") or (f._scDockW ~= defW) or (f._scDockH ~= defH) or (f._scDockHasSaved ~= hasSavedPos)
+    if freeChanged then
+        f._scDockMode = "free"
+        f._scDockW, f._scDockH, f._scDockHasSaved = defW, defH, hasSavedPos
+        f:SetSize(defW, defH)
+        if f.header then
+            f.header:SetHeight(defH < 250 and 23 or 25)
+        end
+        if f.infoBar then
+            f.infoBar:SetHeight(defH < 250 and 29 or 32)
+        end
+        if f.chipsBar then
+            f.chipsBar:SetHeight(defH < 250 and 19 or 21)
+        end
+        local restored = ns.Theme and ns.Theme.RestoreWindowPosition and ns.Theme:RestoreWindowPosition(f, "quickReply", false, { allowLockedRestore = true })
+        if not restored then
+            f:ClearAllPoints()
+            f:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 0)
+        end
     end
     self:UpdateDockButton()
     self:ApplyLockState()
@@ -10728,7 +10930,16 @@ function QuickReply:HookBlizzardEditBoxForSlash(eb)
     end)
     eb:HookScript("OnHide", function()
         if C_Timer and C_Timer.After then
-            C_Timer.After(0, function() QuickReply:SyncEnterBinding() end)
+            if not QuickReply._syncEnterOnHideQueued then
+                QuickReply._syncEnterOnHideQueued = true
+                if not QuickReply._syncEnterOnHideFn then
+                    QuickReply._syncEnterOnHideFn = function()
+                        QuickReply._syncEnterOnHideQueued = false
+                        QuickReply:SyncEnterBinding()
+                    end
+                end
+                C_Timer.After(0, QuickReply._syncEnterOnHideFn)
+            end
         else
             QuickReply:SyncEnterBinding()
         end
@@ -10810,14 +11021,33 @@ function QuickReply:UpdateWhispersButton()
     if not (f and f.btnWhispers and ns.Theme) then
         return
     end
-    local _, unreadTotal = self:CollectRecentWhispers(10)
+    local unreadTotal = 0
+    if ns.Chat and ns.Chat.GetQuickWhisperUnreadCount then
+        unreadTotal = ns.Chat:GetQuickWhisperUnreadCount()
+    else
+        local _, fallbackUnread = self:CollectRecentWhispers(10)
+        unreadTotal = fallbackUnread or 0
+    end
     local openUp = self:ShouldWhispersDropdownOpenUp()
+    local isDropShown = self:IsWhispersDropdownShown()
+    local themeKey = (ns.Theme.GetThemeName and ns.Theme:GetThemeName()) or "blizzard"
+    local isActive = isDropShown or (unreadTotal > 0)
+    if f.btnWhispers._scWhispUnread == unreadTotal
+        and f.btnWhispers._scWhispUp == openUp
+        and f.btnWhispers._scWhispAct == isActive
+        and f.btnWhispers._scWhispTheme == themeKey
+    then
+        return
+    end
+    f.btnWhispers._scWhispUnread = unreadTotal
+    f.btnWhispers._scWhispUp = openUp
+    f.btnWhispers._scWhispAct = isActive
+    f.btnWhispers._scWhispTheme = themeKey
     local arrowTex = openUp and ICON_ARROW_UP or ICON_ARROW_DOWN
     local arrowTag = "|T" .. arrowTex .. ":12:12:0:-1|t"
     local badgeStr = (unreadTotal > 0) and (" |cff4ade80(" .. tostring(unreadTotal) .. ")|r") or ""
     ns.Theme:SetButtonText(f.btnWhispers, L["Whispers"] .. badgeStr .. " " .. arrowTag)
     ns.Theme:AutoFitButton(f.btnWhispers, 76, 16, 136)
-    local isActive = self:IsWhispersDropdownShown() or (unreadTotal > 0)
     ns.Theme:StyleButton(f.btnWhispers, isActive and "primary" or "default")
 end
 
@@ -11312,7 +11542,7 @@ function QuickReply:ApplyTheme()
             ns.Theme:StyleButton(cBtn, "default")
         end
     end
-    self._focusDimSig = nil
+    self:InvalidateFocusVisuals()
     self:UpdateFocusVisuals()
     if self.tutorialDialog and self.tutorialDialog.ApplyTheme then
         self.tutorialDialog:ApplyTheme()
@@ -13063,6 +13293,7 @@ function QuickReply:EnsureFrame()
         placeholder = L["Type a quick reply..."],
     })
     inputBox._scNoBackdrop = true
+    inputBox._scInputStyleSig = nil
     if inputBox.SetBackdrop then
         inputBox:SetBackdrop(nil)
     end
@@ -13125,20 +13356,20 @@ function QuickReply:EnsureFrame()
         QuickReply:FocusInputBox()
     end)
     inputWrap:SetScript("OnEnter", function()
-        QuickReply._focusDimSig = nil
+        QuickReply:InvalidateFocusVisuals()
         QuickReply:UpdateFocusVisuals()
     end)
     inputWrap:SetScript("OnLeave", function()
-        QuickReply._focusDimSig = nil
+        QuickReply:InvalidateFocusVisuals()
         QuickReply:UpdateFocusVisuals()
     end)
 
     inputBox:HookScript("OnEnter", function()
-        QuickReply._focusDimSig = nil
+        QuickReply:InvalidateFocusVisuals()
         QuickReply:UpdateFocusVisuals()
     end)
     inputBox:HookScript("OnLeave", function()
-        QuickReply._focusDimSig = nil
+        QuickReply:InvalidateFocusVisuals()
         QuickReply:UpdateFocusVisuals()
     end)
 
@@ -13427,6 +13658,13 @@ function QuickReply:EnsureFrame()
         elseif selfFrame.btnMute and selfFrame.btnMute:IsShown() then
             infoLeftBtn = selfFrame.btnMute
         end
+        local st = selfFrame.statusText and selfFrame.statusText:GetText() or ""
+        local hasStatus = (st ~= "")
+        if selfFrame._scTitleAnchorBtn == infoLeftBtn and selfFrame._scTitleAnchorHasStatus == hasStatus then
+            return
+        end
+        selfFrame._scTitleAnchorBtn = infoLeftBtn
+        selfFrame._scTitleAnchorHasStatus = hasStatus
         if selfFrame.statusText then
             selfFrame.statusText:ClearAllPoints()
             if infoLeftBtn then
@@ -13438,8 +13676,7 @@ function QuickReply:EnsureFrame()
         local leftAnchor = selfFrame.icoRim or selfFrame.classIco
         selfFrame.titleText:ClearAllPoints()
         selfFrame.titleText:SetPoint("TOPLEFT", leftAnchor, "TOPRIGHT", 7, 1)
-        local st = selfFrame.statusText and selfFrame.statusText:GetText() or ""
-        if st ~= "" and selfFrame.statusText then
+        if hasStatus and selfFrame.statusText then
             selfFrame.titleText:SetPoint("RIGHT", selfFrame.statusText, "LEFT", -6, 0)
         elseif infoLeftBtn then
             selfFrame.titleText:SetPoint("RIGHT", infoLeftBtn, "LEFT", -6, 0)
@@ -13544,17 +13781,24 @@ function QuickReply:EnsureFrame()
                     local rem = fadeDelay - (now - lastAct)
                     if rem > 0.05 and C_Timer and C_Timer.After then
                         QuickReply._idleWakeSeq = (QuickReply._idleWakeSeq or 0) + 1
-                        local seq = QuickReply._idleWakeSeq
-                        C_Timer.After(rem + 0.06, function()
-                            if QuickReply._idleWakeSeq == seq and QuickReply.frame and QuickReply.frame:IsShown() then
-                                QuickReply:WakeOnUpdate()
+                        QuickReply._idleWakeExpectedSeq = QuickReply._idleWakeSeq
+                        if not QuickReply._idleWakeTimerFn then
+                            QuickReply._idleWakeTimerFn = function()
+                                if QuickReply._idleWakeSeq == QuickReply._idleWakeExpectedSeq and QuickReply.frame and QuickReply.frame:IsShown() then
+                                    QuickReply:WakeOnUpdate()
+                                end
                             end
-                        end)
+                        end
+                        C_Timer.After(rem + 0.06, QuickReply._idleWakeTimerFn)
                         selfFrame:SetScript("OnUpdate", nil)
                         return
                     end
                 elseif not hoveringNow then
                     selfFrame:SetScript("OnUpdate", nil)
+                    if (QuickReply._refreshesSinceGc or 0) >= 8 and ns.RequestIdleGcStep then
+                        QuickReply._refreshesSinceGc = 0
+                        ns:RequestIdleGcStep(100, 1.5)
+                    end
                     return
                 end
             end
@@ -13632,6 +13876,8 @@ function QuickReply:EnsureFrame()
 
     f:HookScript("OnShow", function(selfFrame)
         QuickReply._userDraggedThisOpen = false
+        QuickReply._officialInputStyleSynced = nil
+        QuickReply._ebRedockCount = 0
         QuickReply:HideWhispersDropdown()
         QuickReply:SyncDockGeometry()
         QuickReply:UpdateWhispersButton()
@@ -13731,6 +13977,9 @@ function QuickReply:EnsureFrame()
         end
         if ns.Theme and ns.Theme.HideNpcGuide then
             ns.Theme:HideNpcGuide("quick_reply")
+        end
+        if ns.RequestIdleGcStep then
+            ns:RequestIdleGcStep(120, 1.0)
         end
     end)
 
@@ -14033,40 +14282,71 @@ local function LayoutQuickReplyChipsBar(f, pending)
     local whispW = (f.btnWhispers and math.floor((f.btnWhispers._scAutoFitW or f.btnWhispers:GetWidth() or 86) + 0.5)) or 0
     local barW = math.max(96, math.floor((f:GetWidth() or 430) - 12) - whispW - 6)
     local chipCapW = (#pending >= 3) and math.min(barW, 152) or barW
-    local widths = {}
+    local widths = f._chipWidthsScratch
+    if not widths then
+        widths = {}
+        f._chipWidthsScratch = widths
+    else
+        wipe(widths)
+    end
     local totalW = 0
+    local streamerOn = (ns.Compat and ns.Compat.IsStreamerMode and ns.Compat.IsStreamerMode()) == true
+    local activeKeyNow = QuickReply.activeKey
     for i = 1, #pending do
         local item = pending[i]
         local btn = QuickReply:EnsureChipButton(i)
         if btn then
             local fullName = item.title or "?"
-            if ns.Compat and ns.Compat.IsStreamerMode and ns.Compat.IsStreamerMode()
+            if streamerOn
                 and (item.kind == "BN_WHISPER" or tostring(fullName):find("#", 1, true))
                 and ns.Compat.MaskStreamerBNetName
             then
                 fullName = ns.Compat.MaskStreamerBNetName(fullName)
             end
-            local mutePrefix = item.muted and ("|T" .. ICON_BELL_OFF .. ":11:11:0:-1|t ") or ""
-            local pinPrefix = (item.pinned and not item.isAlwaysFirst) and "|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_1:11:11:0:-1|t " or ""
-            local suffix = (item.unread and item.unread > 0) and (" (" .. item.unread .. ")") or (item.hasDraft and " *" or "")
+            local isSelChip = (item.key == activeKeyNow)
+            local itemUnread = item.unread or 0
+            local itemDraft = item.hasDraft == true
+            local itemPin = item.pinned == true
+            local itemAlways = item.isAlwaysFirst == true
+            local itemMuted = item.muted == true
+            local needTextUpdate = (btn._fullChipTitle ~= fullName)
+                or (btn._chipUnread ~= itemUnread)
+                or (btn._chipHasDraft ~= itemDraft)
+                or (btn._chipPinned ~= itemPin)
+                or (btn._chipAlwaysFirst ~= itemAlways)
+                or (btn._chipMuted ~= itemMuted)
             btn._threadKey = item.key
             btn._fullChipTitle = fullName
-            btn._chipUnread = item.unread or 0
-            btn._chipHasDraft = item.hasDraft == true
-            btn._chipPinned = item.pinned == true
-            btn._chipMuted = item.muted == true
-            ns.Theme:SetButtonText(btn, mutePrefix .. pinPrefix .. fullName .. suffix)
-            ns.Theme:SetButtonActive(btn, item.key == QuickReply.activeKey, "default")
+            btn._chipUnread = itemUnread
+            btn._chipHasDraft = itemDraft
+            btn._chipPinned = itemPin
+            btn._chipAlwaysFirst = itemAlways
+            btn._chipMuted = itemMuted
+            if needTextUpdate then
+                local mutePrefix = itemMuted and ("|T" .. ICON_BELL_OFF .. ":11:11:0:-1|t ") or ""
+                local pinPrefix = (itemPin and not itemAlways) and "|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_1:11:11:0:-1|t " or ""
+                local suffix = (itemUnread > 0) and (" (" .. itemUnread .. ")") or (itemDraft and " *" or "")
+                ns.Theme:SetButtonText(btn, mutePrefix .. pinPrefix .. fullName .. suffix)
+            end
+            if btn._scActive ~= isSelChip or needTextUpdate then
+                ns.Theme:SetButtonActive(btn, isSelChip, "default")
+            end
             if btn._toneRule then
                 local thrObj = item.key and ns.Chat and ns.Chat.threads and ns.Chat.threads[item.key]
                 local cKind = (thrObj and thrObj.kind) or item.kind or "WHISPER"
-                local cToneKey = ns.Theme and ns.Theme.GetChatToneForKind and ns.Theme:GetChatToneForKind(cKind)
-                local cToneSpec = cToneKey and ns.Theme.GetChatToneSpec and ns.Theme:GetChatToneSpec(cToneKey)
-                local cAcc = (cToneSpec and cToneSpec.accent) or { 0.85, 0.72, 0.36 }
-                local isSelChip = (item.key == QuickReply.activeKey)
-                btn._toneRule:SetVertexColor(cAcc[1], cAcc[2], cAcc[3], isSelChip and 0.96 or 0.42)
+                if btn._scToneRuleKind ~= cKind or btn._scToneRuleSel ~= isSelChip then
+                    btn._scToneRuleKind = cKind
+                    btn._scToneRuleSel = isSelChip
+                    local cToneKey = ns.Theme and ns.Theme.GetChatToneForKind and ns.Theme:GetChatToneForKind(cKind)
+                    local cToneSpec = cToneKey and ns.Theme.GetChatToneSpec and ns.Theme:GetChatToneSpec(cToneKey)
+                    local cAcc = (cToneSpec and cToneSpec.accent) or QuickReply._DEF_MUTED
+                    btn._toneRule:SetVertexColor(cAcc[1], cAcc[2], cAcc[3], isSelChip and 0.96 or 0.42)
+                end
             end
-            ns.Theme:AutoFitButton(btn, 44, 14, chipCapW)
+            if needTextUpdate or btn._scLastChipCapW ~= chipCapW or not btn._scAutoFitW then
+                btn._scLastChipCapW = chipCapW
+                ns.Theme:AutoFitButton(btn, 44, 14, chipCapW)
+            end
             local bw = math.floor((btn._scAutoFitW or btn:GetWidth() or 60) + 0.5)
             widths[i] = bw
             totalW = totalW + bw + ((i > 1) and 4 or 0)
@@ -14074,22 +14354,29 @@ local function LayoutQuickReplyChipsBar(f, pending)
     end
 
     for i = #pending + 1, #(f.chips or {}) do
-        f.chips[i]:Hide()
+        local oldBtn = f.chips[i]
+        if oldBtn:IsShown() then
+            oldBtn:Hide()
+            oldBtn._scLastChipX = nil
+        end
     end
 
     if totalW <= barW then
         QuickReply.chipsPage = 1
         QuickReply._chipsFollowActive = false
-        if f.chipsPrevBtn then f.chipsPrevBtn:Hide() end
-        if f.chipsNextBtn then f.chipsNextBtn:Hide() end
-        if f.chipsPageText then f.chipsPageText:Hide() end
+        if f.chipsPrevBtn and f.chipsPrevBtn:IsShown() then f.chipsPrevBtn:Hide() end
+        if f.chipsNextBtn and f.chipsNextBtn:IsShown() then f.chipsNextBtn:Hide() end
+        if f.chipsPageText and f.chipsPageText:IsShown() then f.chipsPageText:Hide() end
         local cx = 0
         for i = 1, #pending do
             local btn = f.chips[i]
             if btn then
-                btn:ClearAllPoints()
-                btn:SetPoint("LEFT", f.chipsBar, "LEFT", cx, 0)
-                btn:Show()
+                if btn._scLastChipX ~= cx or not btn:IsShown() then
+                    btn._scLastChipX = cx
+                    btn:ClearAllPoints()
+                    btn:SetPoint("LEFT", f.chipsBar, "LEFT", cx, 0)
+                    btn:Show()
+                end
                 cx = cx + (widths[i] or 60) + 4
             end
         end
@@ -14098,33 +14385,56 @@ local function LayoutQuickReplyChipsBar(f, pending)
 
     local navW = 92
     local availW = math.max(96, barW - navW)
-    local pages = {}
-    local curPageList = {}
+    local pages = f._chipPagesScratch
+    if not pages then
+        pages = {}
+        f._chipPagesScratch = pages
+    end
+    local pagePool = f._chipPageSubPool
+    if not pagePool then
+        pagePool = {}
+        f._chipPageSubPool = pagePool
+    end
+    local numPages = 0
+    local function AcquirePageList()
+        numPages = numPages + 1
+        local pl = pagePool[numPages]
+        if not pl then
+            pl = {}
+            pagePool[numPages] = pl
+        else
+            wipe(pl)
+        end
+        pages[numPages] = pl
+        return pl
+    end
+    local curPageList = AcquirePageList()
     local curW = 0
     local activePageIdx = nil
     for i = 1, #pending do
         local btn = f.chips[i]
         local bw = widths[i] or 60
         if btn and bw > availW then
+            btn._scLastChipCapW = availW
             ns.Theme:AutoFitButton(btn, 44, 14, availW)
             bw = math.floor((btn._scAutoFitW or btn:GetWidth() or availW) + 0.5)
             widths[i] = bw
         end
         local needed = (#curPageList > 0) and (4 + bw) or bw
         if #curPageList > 0 and (curW + needed) > availW then
-            pages[#pages + 1] = curPageList
-            curPageList = { i }
+            curPageList = AcquirePageList()
+            curPageList[1] = i
             curW = bw
         else
             curPageList[#curPageList + 1] = i
             curW = curW + needed
         end
-        if pending[i].key == QuickReply.activeKey then
-            activePageIdx = #pages + 1
+        if pending[i].key == activeKeyNow then
+            activePageIdx = numPages
         end
     end
-    if #curPageList > 0 then
-        pages[#pages + 1] = curPageList
+    for pClear = numPages + 1, #pages do
+        pages[pClear] = nil
     end
 
     if QuickReply._chipsFollowActive and activePageIdx then
@@ -14132,25 +14442,29 @@ local function LayoutQuickReplyChipsBar(f, pending)
     end
     QuickReply._chipsFollowActive = false
 
-    local pageCount = math.max(1, #pages)
+    local pageCount = math.max(1, numPages)
     local pageIdx = math.max(1, math.min(pageCount, QuickReply.chipsPage or 1))
     QuickReply.chipsPage = pageIdx
 
     for i = 1, #pending do
         if f.chips[i] then
             f.chips[i]:Hide()
+            f.chips[i]._scLastChipX = nil
         end
     end
 
     local cx = 0
-    local showList = pages[pageIdx] or {}
-    for _, idx in ipairs(showList) do
-        local btn = f.chips[idx]
-        if btn then
-            btn:ClearAllPoints()
-            btn:SetPoint("LEFT", f.chipsBar, "LEFT", cx, 0)
-            btn:Show()
-            cx = cx + (widths[idx] or 60) + 4
+    local showList = pages[pageIdx]
+    if showList then
+        for _, idx in ipairs(showList) do
+            local btn = f.chips[idx]
+            if btn then
+                btn._scLastChipX = cx
+                btn:ClearAllPoints()
+                btn:SetPoint("LEFT", f.chipsBar, "LEFT", cx, 0)
+                btn:Show()
+                cx = cx + (widths[idx] or 60) + 4
+            end
         end
     end
 
@@ -14177,13 +14491,14 @@ function QuickReply:Refresh()
     if not t then
         return
     end
+    self._refreshesSinceGc = (self._refreshesSinceGc or 0) + 1
 
     -- Tone & rich player/channel header summary
     local gTarget = (t.kind == "GENERAL" and ns.Chat and ns.Chat.GetGeneralTargetInfo) and ns.Chat:GetGeneralTargetInfo() or nil
     local effectiveKind = (gTarget and ((gTarget.channelId and "PUB_CHANNEL") or (gTarget.isYell and "LOCAL_YELL"))) or t.kind
     local toneKey = ns.Theme and ns.Theme.GetChatToneForKind and ns.Theme:GetChatToneForKind(effectiveKind) or "whisper"
     local toneSpec = ns.Theme and ns.Theme.GetChatToneSpec and ns.Theme:GetChatToneSpec(toneKey)
-    local tc = (toneSpec and toneSpec.accent) or { 0.85, 0.72, 0.36 }
+    local tc = (toneSpec and toneSpec.accent) or QuickReply._DEF_MUTED
     local tcHex = (toneSpec and toneSpec.hex) or "|cffffd24d"
     self._activeToneRgb = tc
     if self._lastHeaderToneR ~= tc[1] or self._lastHeaderToneG ~= tc[2] or self._lastHeaderToneB ~= tc[3] then
@@ -14216,7 +14531,6 @@ function QuickReply:Refresh()
             f.btnScrollBottom:SetBackdropBorderColor(tc[1], tc[2], tc[3], 0.85)
         end
     end
-    self:UpdateFocusVisuals()
 
     local isPlayerThread = (t.kind == "WHISPER" or t.kind == "BN_WHISPER")
     local livePubInfo = (t.kind == "PUB_CHANNEL" and t.channelId and ns.Chat and ns.Chat.GetOfficialChannelInfo)
@@ -14317,7 +14631,13 @@ function QuickReply:Refresh()
         f.statusDot:Hide()
     end
 
-    local line1Parts = {}
+    local line1Parts = f._line1PartsScratch
+    if not line1Parts then
+        line1Parts = {}
+        f._line1PartsScratch = line1Parts
+    else
+        wipe(line1Parts)
+    end
     if isFav and ns.Compat and ns.Compat.FavoriteStarMarkup then
         line1Parts[#line1Parts + 1] = ns.Compat.FavoriteStarMarkup(12)
     end
@@ -14409,7 +14729,14 @@ function QuickReply:Refresh()
         chanLabel = string.format(L["Channel /%s · Sending to %s%s"], tostring(t.channelId or "?"), pubName, zoneSuffix)
     end
 
-    local subParts = { tcHex .. chanLabel .. "|r" }
+    local subParts = f._subPartsScratch
+    if not subParts then
+        subParts = {}
+        f._subPartsScratch = subParts
+    else
+        wipe(subParts)
+    end
+    subParts[1] = tcHex .. chanLabel .. "|r"
     if isPlayerThread and zone ~= "" then
         subParts[#subParts + 1] = "|cffc8d1de" .. zone .. "|r"
     end
@@ -14448,33 +14775,42 @@ function QuickReply:Refresh()
     elseif isOnline then
         statusLbl, stR, stG, stB = L["Online"], 0.30, 0.90, 0.50
     end
-    local relParts = {}
+    local relParts = f._relPartsScratch
+    if not relParts then
+        relParts = {}
+        f._relPartsScratch = relParts
+    else
+        wipe(relParts)
+    end
     if isFriend then relParts[#relParts + 1] = L["Friends"] end
     if isBNet then relParts[#relParts + 1] = L["Battle.net"] end
     if isGuildSrc then relParts[#relParts + 1] = L["Guild"] end
     if wl then relParts[#relParts + 1] = L["Watchlist"] end
     if isSC then relParts[#relParts + 1] = L["SocialCentral [SC]"] end
-    f._headerMeta = {
-        tooltipTitle = coloredName,
-        channelLabel = chanLabel,
-        accentR = tc[1],
-        accentG = tc[2],
-        accentB = tc[3],
-        statusLabel = isPlayerThread and statusLbl or nil,
-        statusR = stR,
-        statusG = stG,
-        statusB = stB,
-        level = isPlayerThread and level or 0,
-        classLocalized = (classFile and LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[classFile]) or nil,
-        zone = isPlayerThread and zone or "",
-        guild = isPlayerThread and guild or "",
-        relText = isPlayerThread and table.concat(relParts, ", ") or "",
-        flagLabel = flagLabel,
-        flagR = flagR,
-        flagG = flagG,
-        flagB = flagB,
-        noteText = rawNote and self:TruncateUtf8(rawNote, 60) or "",
-    }
+    local hm = f._headerMeta
+    if not hm then
+        hm = {}
+        f._headerMeta = hm
+    end
+    hm.tooltipTitle = coloredName
+    hm.channelLabel = chanLabel
+    hm.accentR = tc[1]
+    hm.accentG = tc[2]
+    hm.accentB = tc[3]
+    hm.statusLabel = isPlayerThread and statusLbl or nil
+    hm.statusR = stR
+    hm.statusG = stG
+    hm.statusB = stB
+    hm.level = isPlayerThread and level or 0
+    hm.classLocalized = (classFile and LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[classFile]) or nil
+    hm.zone = isPlayerThread and zone or ""
+    hm.guild = isPlayerThread and guild or ""
+    hm.relText = isPlayerThread and table.concat(relParts, ", ") or ""
+    hm.flagLabel = flagLabel
+    hm.flagR = flagR
+    hm.flagG = flagG
+    hm.flagB = flagB
+    hm.noteText = rawNote and self:TruncateUtf8(rawNote, 60) or ""
 
     -- Action buttons (Invite + Watchlist)
     local curThemeKey = (ns.Theme and ns.Theme.GetThemeName and ns.Theme:GetThemeName()) or "blizzard"
@@ -14634,15 +14970,20 @@ function QuickReply:Refresh()
         local isActPinned = ns.Chat.IsQuickReplyPinned and ns.Chat:IsQuickReplyPinned(self.activeKey) == true
         local isActMuted = ns.Chat.IsThreadMuted and ns.Chat:IsThreadMuted(self.activeKey) == true
         local insertIdx = (pending[1] and pending[1].key == "ch:general") and 2 or 1
-        table.insert(pending, insertIdx, {
-            key = self.activeKey,
-            title = titleStr,
-            kind = t.kind,
-            unread = 0,
-            hasDraft = (f.inputBox:GetText() or "") ~= "",
-            pinned = isActPinned,
-            muted = isActMuted,
-        })
+        local actRec = f._activePendingRec
+        if not actRec then
+            actRec = {}
+            f._activePendingRec = actRec
+        end
+        actRec.key = self.activeKey
+        actRec.title = titleStr
+        actRec.kind = t.kind
+        actRec.unread = 0
+        actRec.hasDraft = (f.inputBox:GetText() or "") ~= ""
+        actRec.pinned = isActPinned
+        actRec.muted = isActMuted
+        actRec.isAlwaysFirst = (self.activeKey == "ch:general")
+        table.insert(pending, insertIdx, actRec)
     end
 
     LayoutQuickReplyChipsBar(f, pending)
@@ -14713,7 +15054,6 @@ function QuickReply:Refresh()
     if f._updateCharCounterFn then
         f._updateCharCounterFn()
     end
-    self._focusDimSig = nil
     self:UpdateFocusVisuals()
     if f.inputBox then f.inputBox:SetEnabled((not self:IsOfficialOnlyThread(t)) and t.kind ~= "MENTIONS") end
     if f.btnSend then f.btnSend:SetEnabled(false) end
@@ -15997,16 +16337,25 @@ function QuickReply:Init()
     QuickReply:InstallSmartZOrderHooks()
     local function RunCoalescedRefreshIfShown()
         QuickReply._qrCoalescePending = false
+        local needDock = QuickReply._qrNeedDockSync == true
+        QuickReply._qrNeedDockSync = false
         if QuickReply.frame and QuickReply.frame:IsShown() then
-            QuickReply:SyncDockGeometry()
+            if needDock then
+                QuickReply:SyncDockGeometry()
+            end
             QuickReply:ApplyCombatFadeStep(0.016, false)
             QuickReply:Refresh()
-            if QuickReply.WakeOnUpdate then QuickReply:WakeOnUpdate() end
+            if (QuickReply._combatFadeAnimating or QuickReply:IsInputFocused() or (not QuickReply:IsPersistentOpenMode())) and QuickReply.WakeOnUpdate then
+                QuickReply:WakeOnUpdate()
+            end
         end
         QuickReply:SyncEnterBinding()
         QuickReply:SyncQuickReplyHotkeys()
     end
-    local function RefreshIfShown()
+    local function RefreshIfShown(needDockSync)
+        if needDockSync then
+            QuickReply._qrNeedDockSync = true
+        end
         if not (QuickReply.frame and QuickReply.frame:IsShown()) then
             QuickReply:SyncEnterBinding()
             QuickReply:SyncQuickReplyHotkeys()
@@ -16017,17 +16366,37 @@ function QuickReply:Init()
         end
         QuickReply._qrCoalescePending = true
         if C_Timer and C_Timer.After then
-            C_Timer.After(0.03, RunCoalescedRefreshIfShown)
+            C_Timer.After(0.06, RunCoalescedRefreshIfShown)
         else
             RunCoalescedRefreshIfShown()
+        end
+    end
+    local function RefreshIfActiveKindMatches(includeGuild, includeGroup)
+        if not (QuickReply.frame and QuickReply.frame:IsShown()) then
+            return
+        end
+        local activeT = QuickReply.activeKey and ns.Chat and ns.Chat.threads and ns.Chat.threads[QuickReply.activeKey]
+        if not activeT then
+            return
+        end
+        local k = activeT.kind
+        if k == "WHISPER" or k == "BN_WHISPER"
+            or (includeGuild and (k == "GUILD" or k == "OFFICER"))
+            or (includeGroup and (k == "PARTY" or k == "RAID" or k == "INSTANCE_CHAT"))
+        then
+            RefreshIfShown(false)
         end
     end
     local function MarkOutsideInteraction()
         QuickReply:MarkOutsideInteraction()
     end
-    local function HandleGlobalMouseEvent(btnName)
+    local function HandleGlobalMouseEvent(btnName, isMouseUp)
         local f = QuickReply.frame
         if not (f and f:IsShown()) then
+            return
+        end
+        local nowMono = (GetTime and GetTime()) or 0
+        if QuickReply._lastProgrammaticFocusAt and (nowMono - QuickReply._lastProgrammaticFocusAt) < (isMouseUp and 0.35 or 0.15) then
             return
         end
         if (QuickReply.tutorialDialog and QuickReply.tutorialDialog:IsShown() and QuickReply.tutorialDialog.IsMouseOver and QuickReply.tutorialDialog:IsMouseOver())
@@ -16105,18 +16474,29 @@ function QuickReply:Init()
         end
         MarkOutsideInteraction()
     end
-    ns:On("CHAT_UPDATED", RefreshIfShown)
+    ns:On("CHAT_UPDATED", function()
+        RefreshIfShown(false)
+    end)
     ns:On("COMBAT_LOG_UPDATED", function()
         if QuickReply._combatLogFrame and QuickReply._combatLogFrame:IsShown() then
             QuickReply:RefreshCombatLogFrame()
         end
     end)
-    ns:On("SOCIAL_UPDATED", RefreshIfShown)
-    ns:On("NEARBY_UPDATED", RefreshIfShown)
-    ns:On("WATCHLIST_UPDATED", RefreshIfShown)
-    ns:On("GROUP_UPDATED", RefreshIfShown)
+    ns:On("SOCIAL_UPDATED", function()
+        RefreshIfActiveKindMatches(true, false)
+    end)
+    ns:On("NEARBY_UPDATED", function()
+        RefreshIfActiveKindMatches(false, false)
+    end)
+    ns:On("WATCHLIST_UPDATED", function()
+        RefreshIfActiveKindMatches(false, false)
+    end)
+    ns:On("GROUP_UPDATED", function()
+        RefreshIfActiveKindMatches(false, true)
+    end)
     ns:On("SETTINGS_UPDATED", function()
-        RefreshIfShown()
+        QuickReply._officialInputStyleSynced = nil
+        RefreshIfShown(true)
         QuickReply:SyncQuickReplyHotkeys()
     end)
     ns:On("CHAT_HOTKEYS_UPDATED", function()
@@ -16173,18 +16553,18 @@ function QuickReply:Init()
         QuickReply:SyncQuickReplyHotkeys()
     end)
     ns.RegisterEvent(self, "GLOBAL_MOUSE_DOWN", function(_, _, btnName)
-        HandleGlobalMouseEvent(btnName)
+        HandleGlobalMouseEvent(btnName, false)
     end)
     ns.RegisterEvent(self, "GLOBAL_MOUSE_UP", function(_, _, btnName)
-        HandleGlobalMouseEvent(btnName)
+        HandleGlobalMouseEvent(btnName, true)
     end)
     if _G.WorldFrame and _G.WorldFrame.HookScript and not QuickReply._worldMouseHooked then
         QuickReply._worldMouseHooked = true
         pcall(_G.WorldFrame.HookScript, _G.WorldFrame, "OnMouseDown", function(_, btnName)
-            HandleGlobalMouseEvent(btnName)
+            HandleGlobalMouseEvent(btnName, false)
         end)
         pcall(_G.WorldFrame.HookScript, _G.WorldFrame, "OnMouseUp", function(_, btnName)
-            HandleGlobalMouseEvent(btnName)
+            HandleGlobalMouseEvent(btnName, true)
         end)
     end
     ns.RegisterEvent(self, "PLAYER_REGEN_DISABLED", function()
@@ -16230,6 +16610,7 @@ function QuickReply:Init()
         local nowT = (GetTime and GetTime()) or 0
         QuickReply._dockedOfficialInputActive = true
         QuickReply._allowTempOfficialEditUntil = nowT + 120
+        QuickReply._lastProgrammaticFocusAt = nowT
         QuickReply.interactedOutside = false
         QuickReply.lastInputAt = nowT
         QuickReply._lastOpaqueActivityAt = nowT
@@ -16248,6 +16629,9 @@ function QuickReply:Init()
     local function HandleActivatedBlizzardEditBox(eb, fromOpenChatHook, rawOpenText)
         if not eb then return end
         QuickReply:HookBlizzardEditBoxForSlash(eb)
+        if fromOpenChatHook then
+            QuickReply._lastProgrammaticFocusAt = (GetTime and GetTime()) or 0
+        end
         local inCombatNow = ((InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))) == true
         if inCombatNow and eb.SetAlpha and eb.GetAlpha and (eb:GetAlpha() or 1) < 0.99 then
             pcall(eb.SetAlpha, eb, 1.0)
@@ -16397,12 +16781,24 @@ function QuickReply:Init()
             if type(eb._scOrigTexAlphas) == "table" then
                 for obj in pairs(eb._scOrigTexAlphas) do
                     if obj and obj.SetAlpha then
-                        pcall(obj.SetAlpha, obj, 0)
+                        local curA = obj.GetAlpha and obj:GetAlpha() or 1
+                        if curA > 0.005 then
+                            pcall(obj.SetAlpha, obj, 0)
+                        end
                     end
                 end
             end
             SyncDockedOfficialSkinColors(eb)
         end
+    end
+    if type(_G.FCF_SetChatWindowFontSize) == "function" and type(hooksecurefunc) == "function" and not QuickReply._chatFontHooked then
+        QuickReply._chatFontHooked = true
+        hooksecurefunc("FCF_SetChatWindowFontSize", function()
+            QuickReply._officialInputStyleSynced = nil
+            if QuickReply.frame and QuickReply.frame:IsShown() then
+                QuickReply:SyncInputStyleToOfficial(true)
+            end
+        end)
     end
     if type(_G.ChatEdit_UpdateHeader) == "function" and not QuickReply._chatEditUpdateHdrHooked then
         QuickReply._chatEditUpdateHdrHooked = true

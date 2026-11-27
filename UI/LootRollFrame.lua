@@ -192,10 +192,10 @@ local function OpenPlayerQuickRollMenu(anchor, playerName, itemLink, isMe)
             if itemLink and itemLink ~= "" then
                 root:CreateButton(L["Ask about item (/w)"], function()
                     local draft = string.format(L["Hey %s, do you need %s?"], playerName, itemLink)
-                    if ns.Chat and ns.Chat.OpenOfficialChatForThread then
-                        ns.Chat:OpenOfficialChatForThread({ kind = "WHISPER", target = playerName }, draft)
+                    if ns.Chat and ns.Chat.OpenPreferredConversation then
+                        ns.Chat:OpenPreferredConversation({ targetName = playerName, draftText = draft })
                     elseif Compat and Compat.Whisper then
-                        Compat.Whisper(playerName)
+                        Compat.Whisper(playerName, draft)
                     end
                 end)
             end
@@ -3114,10 +3114,10 @@ local function OpenDropRowContextMenu(anchor, rec)
             if rec.itemLink or rec.link then
                 root:CreateButton(L["Ask about item (/w)"], function()
                     local draft = string.format(L["Hey %s, do you need %s?"], rec.winnerName, rec.itemLink or rec.link)
-                    if ns.Chat and ns.Chat.OpenOfficialChatForThread then
-                        ns.Chat:OpenOfficialChatForThread({ kind = "WHISPER", target = rec.winnerName }, draft)
+                    if ns.Chat and ns.Chat.OpenPreferredConversation then
+                        ns.Chat:OpenPreferredConversation({ targetName = rec.winnerName, draftText = draft })
                     elseif Compat and Compat.Whisper then
-                        Compat.Whisper(rec.winnerName)
+                        Compat.Whisper(rec.winnerName, draft)
                     end
                 end)
             end

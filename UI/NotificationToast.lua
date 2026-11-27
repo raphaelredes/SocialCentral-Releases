@@ -316,11 +316,11 @@ local function NavigateForItem(item)
             ns:NavigateToModule("chat", { threadKey = item.threadKey or "mentions:radar" })
         end
     elseif k == "FOCUS_SUMMARY" then
-        if ns.QuickReply and ns.QuickReply.OpenLatest and ns.QuickReply:OpenLatest(true) then
+        if ns.QuickReply and ns.QuickReply.OpenLatest and ns.QuickReply:OpenLatest(true, false, true) then
             return
         end
         if ns.NavigateToModule then
-            ns:NavigateToModule("chat")
+            ns:NavigateToModule("chat", { focusInput = true })
         end
     else
         local s = ns.db and ns.db.settings

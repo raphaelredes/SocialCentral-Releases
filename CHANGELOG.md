@@ -5,6 +5,16 @@ Versioning follows Semantic Versioning (`MAJOR.MINOR.PATCH`). Ongoing developmen
 
 ## [Unreleased]
 
+## [0.2.29] - 2026-11-27
+- **Message Button & Reply Focus Consistency Audit (`UI/LootRollFrame.lua`, `UI/Minimap.lua`, `UI/SocialPanels.lua`, `UI/NotificationToast.lua`, `Providers/Chat.lua`, `Core/Init.lua`):**
+  - Fixed broken `Ask about item (/w)` menu actions in both Group Loot Roll quick cards and Roll Results so they properly open conversations pre-filled and ready to type via the player's active chat mode instead of failing silently.
+  - Preserved keyboard focus across external Official Whisper / Share Draft buttons while Quick Reply is visible by preventing the button's mouse-up event from cancelling the newly opened chat input box.
+  - Aligned **Quick Reply in Chat** (`Shift+Click` and right-click menu on Minimap Message Previews), Focus Summary notifications, New Chat modal starts, and clickable sender replies inside Conversations & Mentions so explicit reply actions open focused and ready to type immediately.
+- **Social -> Quick Reply Focus Preservation (`UI/Minimap.lua`, `Providers/Chat.lua`):**
+  - Clicking "Chat in SocialCentral" (`O`) or opening a direct conversation now keeps keyboard focus armed in the message input box immediately on click instead of losing focus on the button's mouse-up event.
+- **Chat Window & Quick Reply Memory Optimization (`UI/Minimap.lua`, `Providers/Chat.lua`, `UI/Theme.lua`, `UI/SocialPanels.lua`):**
+  - Eliminated continuous background RAM growth while the Quick Reply / Chat window stays open by fixing the broken unfocused focus-border cache guard, memoizing docked official chat input styling/skin colors and header buttons, scoping Quick Reply refreshes strictly to relevant events instead of rebuilding on every nearby/watchlist/social update, caching official channel lookups, pinned-thread order, and portal quick-reply lists, pooling general chat capture batches, replacing repeated `GetThreadsList` scans on the Whispers button with an O(N) zero-allocation unread counter, and hoisting hot-path Blizzard theme color tables.
+
 ## [0.2.28] - 2026-11-27
 ### Major Feature Overhauls & Audits
 - **Group Loot Roll & Raid Leader `/roll (1-100)` Overhaul (`Providers/LootRoll.lua`, `UI/LootRollFrame.lua`, `UI/Settings.lua`, `UI/Minimap.lua`, `UI/QuickBar.lua`, `UI/Theme.lua`, `Core/Init.lua`, `Locales/Locale.lua`):**

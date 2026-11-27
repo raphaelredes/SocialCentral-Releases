@@ -1444,6 +1444,7 @@ local function OpenGroupMemberMenu(anchor, panel, item)
                         scConfirmed = true,
                     })
                 elseif ns.Chat and ns.Chat.OpenDirectConversation then
+                    ns.Chat.focusInputPending = true
                     ns.Chat:OpenDirectConversation({
                         targetName = rKey,
                         classFile = item.classFile,
@@ -4759,7 +4760,10 @@ local function OpenNewDirectChatModal()
             r:SetScript("OnClick", function(selfRow)
                 local item = selfRow._item
                 if not item then return end
+                input:ClearFocus()
+                m:Hide()
                 if ns.Chat and ns.Chat.OpenDirectConversation then
+                    ns.Chat.focusInputPending = true
                     ns.Chat:OpenDirectConversation({
                         targetName = (item.hasCharacterName ~= false) and (item.displayName or item.lookupKey) or nil,
                         bnetAccountID = item.bnetAccountID,
@@ -4767,9 +4771,10 @@ local function OpenNewDirectChatModal()
                         classFile = item.classFile,
                         autoProbe = true,
                     })
+                    if ns.UI and ns.UI.Refresh then
+                        ns.UI:Refresh()
+                    end
                 end
-                input:ClearFocus()
-                m:Hide()
             end)
             return r
         end, function(r, item, _, pal)
@@ -4869,12 +4874,16 @@ local function OpenNewDirectChatModal()
         local function SubmitStart()
             local txt = Compat.CleanInput(input:GetText() or "")
             if txt and txt ~= "" and ns.Chat and ns.Chat.OpenDirectConversation then
+                input:ClearFocus()
+                m:Hide()
+                ns.Chat.focusInputPending = true
                 ns.Chat:OpenDirectConversation({
                     targetName = txt,
                     autoProbe = true,
                 })
-                input:ClearFocus()
-                m:Hide()
+                if ns.UI and ns.UI.Refresh then
+                    ns.UI:Refresh()
+                end
             end
         end
 
@@ -7615,6 +7624,7 @@ function SocialPanels:CreateChatPanel(parent)
                     and ((not Compat.IsModuleEnabled) or Compat.IsModuleEnabled("chat"))
                 local scConfirmed = chatModOn and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(who, bnetAccId)
                 if scConfirmed and ns.Chat and ns.Chat.OpenDirectConversation then
+                    ns.Chat.focusInputPending = true
                     ns.Chat:OpenDirectConversation({ targetName = who, bnetAccountID = bnetAccId, bnetName = bnetName, autoProbe = true })
                     panel:Refresh(false)
                 elseif Compat.Whisper then
@@ -8308,6 +8318,9 @@ function SocialPanels:CreateChatPanel(parent)
         if opts.chatFilter and opts.chatFilter ~= "" then
             self._filter = opts.chatFilter
         end
+        if opts.focusInput and ns.Chat then
+            ns.Chat.focusInputPending = true
+        end
         if opts.chatThreadKey and ns.Chat and ns.Chat.SetActiveThread then
             ns.Chat:SetActiveThread(opts.chatThreadKey, false)
         else
@@ -8614,36 +8627,54 @@ function SocialPanels:CreateChatPanel(parent)
             end
             Theme:SetButtonActive(btnMuteThread, isMuted, "default")
 
-            local orderedRight = {}
-            if btnLeaveRoom:IsShown() then table.insert(orderedRight, btnLeaveRoom) end
-            if btnRoomInvite:IsShown() then table.insert(orderedRight, btnRoomInvite) end
-            if btnClearNotes:IsShown() then table.insert(orderedRight, btnClearNotes) end
-            if btnThreadActions:IsShown() then table.insert(orderedRight, btnThreadActions) end
-            if panel.btnMentionCfg and panel.btnMentionCfg:IsShown() then table.insert(orderedRight, panel.btnMentionCfg) end
-            if btnMuteThread:IsShown() then table.insert(orderedRight, btnMuteThread) end
-            if btnTargetCard:IsShown() then table.insert(orderedRight, btnTargetCard) end
-            if btnPinLoc:IsShown() then table.insert(orderedRight, btnPinLoc) end
-            local rightGap = -4
-            local prevR
-            for _, rb in ipairs(orderedRight) do
-                rb:ClearAllPoints()
-                if not prevR then
-                    rb:SetPoint("RIGHT", rightHdr, "RIGHT", 0, 0)
-                else
-                    rb:SetPoint("RIGHT", prevR, "LEFT", rightGap, 0)
+            local orderedRight = panel._orderedRightScratch
+            if not orderedRight then
+                orderedRight = {}
+                panel._orderedRightScratch = orderedRight
+            else
+                wipe(orderedRight)
+            end
+            if btnLeaveRoom:IsShown() then orderedRight[#orderedRight + 1] = btnLeaveRoom end
+            if btnRoomInvite:IsShown() then orderedRight[#orderedRight + 1] = btnRoomInvite end
+            if btnClearNotes:IsShown() then orderedRight[#orderedRight + 1] = btnClearNotes end
+            if btnThreadActions:IsShown() then orderedRight[#orderedRight + 1] = btnThreadActions end
+            if panel.btnMentionCfg and panel.btnMentionCfg:IsShown() then orderedRight[#orderedRight + 1] = panel.btnMentionCfg end
+            if btnMuteThread:IsShown() then orderedRight[#orderedRight + 1] = btnMuteThread end
+            if btnTargetCard:IsShown() then orderedRight[#orderedRight + 1] = btnTargetCard end
+            if btnPinLoc:IsShown() then orderedRight[#orderedRight + 1] = btnPinLoc end
+            local rightSig = (btnLeaveRoom:IsShown() and "1" or "0")
+                .. (btnRoomInvite:IsShown() and "1" or "0")
+                .. (btnClearNotes:IsShown() and "1" or "0")
+                .. (btnThreadActions:IsShown() and "1" or "0")
+                .. ((panel.btnMentionCfg and panel.btnMentionCfg:IsShown()) and "1" or "0")
+                .. (btnMuteThread:IsShown() and "1" or "0")
+                .. (btnTargetCard:IsShown() and "1" or "0")
+                .. (btnPinLoc:IsShown() and "1" or "0")
+                .. ((panel.btnToggleThreads and panel.btnToggleThreads:IsShown()) and "1" or "0")
+            if panel._rightHdrLayoutSig ~= rightSig then
+                panel._rightHdrLayoutSig = rightSig
+                local rightGap = -4
+                local prevR
+                for _, rb in ipairs(orderedRight) do
+                    rb:ClearAllPoints()
+                    if not prevR then
+                        rb:SetPoint("RIGHT", rightHdr, "RIGHT", 0, 0)
+                    else
+                        rb:SetPoint("RIGHT", prevR, "LEFT", rightGap, 0)
+                    end
+                    prevR = rb
                 end
-                prevR = rb
-            end
-            hdrTitle:ClearAllPoints()
-            if panel.btnToggleThreads and panel.btnToggleThreads:IsShown() then
-                hdrTitle:SetPoint("LEFT", panel.btnToggleThreads, "RIGHT", 6, 0)
-            else
-                hdrTitle:SetPoint("LEFT", 2, 0)
-            end
-            if prevR then
-                hdrTitle:SetPoint("RIGHT", prevR, "LEFT", -8, 0)
-            else
-                hdrTitle:SetPoint("RIGHT", rightHdr, "RIGHT", -4, 0)
+                hdrTitle:ClearAllPoints()
+                if panel.btnToggleThreads and panel.btnToggleThreads:IsShown() then
+                    hdrTitle:SetPoint("LEFT", panel.btnToggleThreads, "RIGHT", 6, 0)
+                else
+                    hdrTitle:SetPoint("LEFT", 2, 0)
+                end
+                if prevR then
+                    hdrTitle:SetPoint("RIGHT", prevR, "LEFT", -8, 0)
+                else
+                    hdrTitle:SetPoint("RIGHT", rightHdr, "RIGHT", -4, 0)
+                end
             end
 
             -- Peer verification bar (compact icon + short tag; full explanation on hover)
@@ -8811,17 +8842,18 @@ function SocialPanels:CreateChatPanel(parent)
                 panel._pinnedMsgs[activeKey] = nil
             end
             local pinnedMsg = panel._pinnedMsgs and panel._pinnedMsgs[activeKey]
-            if pinnedMsg and pinnedMsg ~= "" then
+            local hasPinnedBanner = (pinnedMsg ~= nil and pinnedMsg ~= "")
+            if hasPinnedBanner then
                 pinnedBannerText:SetText("|cffffd24d[" .. L["Pinned"] .. "]|r " .. pinnedMsg)
                 Theme:ApplyBackdrop(pinnedBanner, "inset", p)
                 pinnedBanner:Show()
-                msgFrame:ClearAllPoints()
-                msgFrame:SetPoint("TOPLEFT", 10, -82)
-                msgFrame:SetPoint("BOTTOMRIGHT", -10, 40)
             else
                 pinnedBanner:Hide()
+            end
+            if panel._msgFramePinnedLayout ~= hasPinnedBanner then
+                panel._msgFramePinnedLayout = hasPinnedBanner
                 msgFrame:ClearAllPoints()
-                msgFrame:SetPoint("TOPLEFT", 10, -60)
+                msgFrame:SetPoint("TOPLEFT", 10, hasPinnedBanner and -82 or -60)
                 msgFrame:SetPoint("BOTTOMRIGHT", -10, 40)
             end
 
@@ -8874,9 +8906,12 @@ function SocialPanels:CreateChatPanel(parent)
                     replyInput:SetPlaceholder((destInfo and destInfo.buttonText) or L["Select a conversation to reply..."])
                 end
             end
-            replyInput:ClearAllPoints()
-            replyInput:SetPoint("LEFT", 0, 0)
-            replyInput:SetPoint("RIGHT", btnQuickReply, "LEFT", -6, 0)
+            if not panel._replyInputAnchored then
+                panel._replyInputAnchored = true
+                replyInput:ClearAllPoints()
+                replyInput:SetPoint("LEFT", 0, 0)
+                replyInput:SetPoint("RIGHT", btnQuickReply, "LEFT", -6, 0)
+            end
             if ns.Chat and ns.Chat.pendingDraftText and ((not ns.Chat.pendingDraftThreadKey) or ns.Chat.pendingDraftThreadKey == activeKey) then
                 local draft = ns.Chat.pendingDraftText
                 ns.Chat.pendingDraftText = nil

@@ -947,7 +947,23 @@ local function SyncPinnedOrder(chatObj)
         end
         ns.charDb.pinnedChatOrder = outPersist
     end
+    local ranks = chatObj._pinnedRanksCache
+    if not ranks then
+        ranks = {}
+        chatObj._pinnedRanksCache = ranks
+    else
+        wipe(ranks)
+    end
+    for i = 1, #cleaned do
+        ranks[cleaned[i]] = i
+    end
+    chatObj._pinnedDbRef = persisted
+    chatObj._pinnedOrderDirty = false
     return cleaned
+end
+
+function Chat:InvalidatePinnedOrderCache()
+    self._pinnedOrderDirty = true
 end
 
 function Chat:IsThreadPinned(threadKey)
@@ -962,12 +978,12 @@ function Chat:IsThreadPinned(threadKey)
 end
 
 function Chat:GetPinnedOrderMap()
-    local order = SyncPinnedOrder(self)
-    local ranks = {}
-    for i = 1, #order do
-        ranks[order[i]] = i
+    local persisted = ns.charDb and ns.charDb.pinnedChatThreads
+    if (not self._pinnedOrderDirty) and self._pinnedRanksCache and self._pinnedDbRef == persisted then
+        return self._pinnedRanksCache
     end
-    return ranks
+    SyncPinnedOrder(self)
+    return self._pinnedRanksCache or {}
 end
 
 function Chat:SetThreadPinned(threadKey, state)
@@ -1117,37 +1133,66 @@ function Chat:BuildDefaultQuickRepliesForContext(ctxId)
 end
 
 function Chat:GetPortalDestinationsForPlayer()
-    local fac = Compat.PlayerFaction and Compat.PlayerFaction() or nil
-    local dests = {}
-    if fac == "Horde" then
-        dests = {
-            { id = "uc", name = L["Undercity"], enName = "Undercity", abbr = "UC", match = { "undercity", "cidade baixa", "entranas", "entrañas" } },
-            { id = "org", name = "Orgrimmar", enName = "Orgrimmar", abbr = "Org", match = { "orgrimmar" } },
-            { id = "tb", name = L["Thunder Bluff"], enName = "Thunder Bluff", abbr = "TB", match = { "thunder bluff", "penhasco do trovao", "penhasco do trovão", "cima del trueno" } },
-            { id = "smc", name = L["Silvermoon"], enName = "Silvermoon", abbr = "SMC", match = { "silvermoon", "luaprata", "lunargenta" } },
-            { id = "shatt", name = "Shattrath", enName = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
-        }
-    elseif fac == "Alliance" then
-        dests = {
-            { id = "sw", name = L["Stormwind"], enName = "Stormwind", abbr = "SW", match = { "stormwind", "ventobravo", "ventormenta" } },
-            { id = "if", name = L["Ironforge"], enName = "Ironforge", abbr = "IF", match = { "ironforge", "altaforja", "forjaz" } },
-            { id = "darn", name = "Darnassus", enName = "Darnassus", abbr = "Darn", match = { "darnassus" } },
-            { id = "exo", name = "Exodar", enName = "Exodar", abbr = "Exo", match = { "exodar", "el exodar" } },
-            { id = "shatt", name = "Shattrath", enName = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
-        }
-    else
-        dests = {
-            { id = "shatt", name = "Shattrath", enName = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
-            { id = "org", name = "Orgrimmar", enName = "Orgrimmar", abbr = "Org", match = { "orgrimmar" } },
-            { id = "sw", name = L["Stormwind"], enName = "Stormwind", abbr = "SW", match = { "stormwind", "ventobravo", "ventormenta" } },
-        }
-    end
+    local fac = (Compat.PlayerFaction and Compat.PlayerFaction()) or "Neutral"
     local zoneRaw = (GetRealZoneText and Safe.String(Safe.Call(GetRealZoneText)))
         or (Compat.CurrentZoneName and Compat.CurrentZoneName())
         or ""
     local subRaw = (GetSubZoneText and Safe.String(Safe.Call(GetSubZoneText))) or ""
+    if self._portalCacheFac == fac
+        and self._portalCacheZone == zoneRaw
+        and self._portalCacheSub == subRaw
+        and self._portalCacheOut
+    then
+        return self._portalCacheOut
+    end
+
+    local byFac = self._PORTAL_DESTS_BY_FACTION
+    if not byFac then
+        byFac = {
+            Horde = {
+                { id = "uc", name = L["Undercity"], enName = "Undercity", abbr = "UC", match = { "undercity", "cidade baixa", "entranas", "entrañas" } },
+                { id = "org", name = "Orgrimmar", enName = "Orgrimmar", abbr = "Org", match = { "orgrimmar" } },
+                { id = "tb", name = L["Thunder Bluff"], enName = "Thunder Bluff", abbr = "TB", match = { "thunder bluff", "penhasco do trovao", "penhasco do trovão", "cima del trueno" } },
+                { id = "smc", name = L["Silvermoon"], enName = "Silvermoon", abbr = "SMC", match = { "silvermoon", "luaprata", "lunargenta" } },
+                { id = "shatt", name = "Shattrath", enName = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
+            },
+            Alliance = {
+                { id = "sw", name = L["Stormwind"], enName = "Stormwind", abbr = "SW", match = { "stormwind", "ventobravo", "ventormenta" } },
+                { id = "if", name = L["Ironforge"], enName = "Ironforge", abbr = "IF", match = { "ironforge", "altaforja", "forjaz" } },
+                { id = "darn", name = "Darnassus", enName = "Darnassus", abbr = "Darn", match = { "darnassus" } },
+                { id = "exo", name = "Exodar", enName = "Exodar", abbr = "Exo", match = { "exodar", "el exodar" } },
+                { id = "shatt", name = "Shattrath", enName = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
+            },
+            Neutral = {
+                { id = "shatt", name = "Shattrath", enName = "Shattrath", abbr = "Shatt", match = { "shattrath" } },
+                { id = "org", name = "Orgrimmar", enName = "Orgrimmar", abbr = "Org", match = { "orgrimmar" } },
+                { id = "sw", name = L["Stormwind"], enName = "Stormwind", abbr = "SW", match = { "stormwind", "ventobravo", "ventormenta" } },
+            },
+        }
+        for _, list in pairs(byFac) do
+            for _, d in ipairs(list) do
+                local locPortal = string.format(L["LF portal to %s (%s)!"], d.name, d.abbr)
+                local enPortal = string.format("LF portal to %s (%s)!", d.enName or d.name, d.abbr)
+                d.entry = {
+                    id = d.id,
+                    name = d.name,
+                    abbr = d.abbr,
+                    text = self:_FormatBilingualQuickReply(enPortal, locPortal),
+                }
+            end
+        end
+        self._PORTAL_DESTS_BY_FACTION = byFac
+    end
+
+    local dests = byFac[fac] or byFac.Neutral
     local curFold = self:FoldSearchText(zoneRaw .. " " .. subRaw)
-    local out = {}
+    local out = self._portalCacheOut
+    if not out then
+        out = {}
+        self._portalCacheOut = out
+    else
+        wipe(out)
+    end
     for _, d in ipairs(dests) do
         local isHere = false
         if curFold ~= "" then
@@ -1159,16 +1204,12 @@ function Chat:GetPortalDestinationsForPlayer()
             end
         end
         if not isHere then
-            local locPortal = string.format(L["LF portal to %s (%s)!"], d.name, d.abbr)
-            local enPortal = string.format("LF portal to %s (%s)!", d.enName or d.name, d.abbr)
-            out[#out + 1] = {
-                id = d.id,
-                name = d.name,
-                abbr = d.abbr,
-                text = self:_FormatBilingualQuickReply(enPortal, locPortal),
-            }
+            out[#out + 1] = d.entry
         end
     end
+    self._portalCacheFac = fac
+    self._portalCacheZone = zoneRaw
+    self._portalCacheSub = subRaw
     return out
 end
 
@@ -1261,7 +1302,13 @@ function Chat:GetQuickReplies(threadKey)
     local base = self:GetQuickRepliesForContext(ctx)
     if ctx == "local" then
         local portals = self:GetPortalDestinationsForPlayer()
-        local combined = {}
+        local combined = self._localQrCombinedBuf
+        if not combined then
+            combined = {}
+            self._localQrCombinedBuf = combined
+        else
+            wipe(combined)
+        end
         if portals[1] then combined[#combined + 1] = portals[1].text end
         if portals[2] then combined[#combined + 1] = portals[2].text end
         for _, v in ipairs(base) do
@@ -2127,14 +2174,16 @@ local function RewriteThreadHistory(thread)
     end
 end
 
+Chat._flushChatEmitFn = Chat._flushChatEmitFn or function()
+    Chat._chatEmitQueued = false
+    ns:Emit("CHAT_UPDATED")
+end
+
 local function QueueChatEmit(delay)
     if Chat._chatEmitQueued then return end
     Chat._chatEmitQueued = true
     if C_Timer and C_Timer.After then
-        C_Timer.After(delay or 0.30, function()
-            Chat._chatEmitQueued = false
-            ns:Emit("CHAT_UPDATED")
-        end)
+        C_Timer.After(delay or 0.30, Chat._flushChatEmitFn)
     else
         Chat._chatEmitQueued = false
         ns:Emit("CHAT_UPDATED")
@@ -2825,11 +2874,7 @@ function Chat:RecordGeneralMessage(kind, senderDisp, text, isMe, resolvedClass, 
     if not (extraFields and extraFields.skipImmediateEmit == true) then
         local viewingGeneral = (ns.QuickReply and ns.QuickReply.IsViewingThread and ns.QuickReply:IsViewingThread("ch:general")) == true
             or (ns.UI and ns.UI.IsMainVisible and ns.UI:IsMainVisible() and self.activeThreadKey == "ch:general") == true
-        if viewingGeneral then
-            ns:Emit("CHAT_UPDATED")
-        else
-            QueueChatEmit(0.30)
-        end
+        QueueChatEmit(viewingGeneral and 0.08 or 0.30)
     end
     return gEntry
 end
@@ -2845,6 +2890,52 @@ function Chat:_StripLeadingChatTimestamp(msg)
     return out:gsub("^%s*(.-)%s*$", "%1")
 end
 
+Chat._flushOfficialGeneralLinesFn = Chat._flushOfficialGeneralLinesFn or function()
+    Chat._pendingOfficialGeneralTimer = nil
+    local batch = Chat._pendingOfficialGeneralLines
+    if type(batch) ~= "table" or #batch == 0 then
+        return
+    end
+    local swap = Chat._pendingOfficialGeneralSwap
+    if not swap then
+        swap = {}
+    else
+        wipe(swap)
+    end
+    Chat._pendingOfficialGeneralLines = swap
+    Chat._pendingOfficialGeneralSwap = batch
+    local pool = Chat._officialGenLinePool
+    if not pool then
+        pool = {}
+        Chat._officialGenLinePool = pool
+    end
+    local anyAdded = false
+    local anyGeneralChatAdded = false
+    for i = 1, #batch do
+        local it = batch[i]
+        batch[i] = nil
+        if it then
+            local didWorld, didGen = Chat:RecordGeneralOfficialFrameLine(it.msg, it.r, it.g, it.b, true)
+            if didWorld then
+                anyAdded = true
+            end
+            if didGen then
+                anyGeneralChatAdded = true
+            end
+            it.msg, it.r, it.g, it.b = nil, nil, nil, nil
+            if #pool < 64 then
+                pool[#pool + 1] = it
+            end
+        end
+    end
+    if anyAdded then
+        ns:Emit("COMBAT_LOG_UPDATED")
+    end
+    if anyGeneralChatAdded then
+        QueueChatEmit(0.08)
+    end
+end
+
 function Chat:QueueGeneralOfficialFrameLine(rawMsg, r, g, b)
     if not self:IsChatHistoryCaptureEnabled() then
         return
@@ -2857,46 +2948,25 @@ function Chat:QueueGeneralOfficialFrameLine(rawMsg, r, g, b)
         q = {}
         self._pendingOfficialGeneralLines = q
     end
-    q[#q + 1] = { msg = rawMsg, r = r, g = g, b = b }
+    local pool = self._officialGenLinePool
+    local rec = (pool and #pool > 0) and table.remove(pool) or {}
+    rec.msg, rec.r, rec.g, rec.b = rawMsg, r, g, b
+    q[#q + 1] = rec
     if #q > 60 then
-        table.remove(q, 1)
+        local dropped = table.remove(q, 1)
+        if dropped and pool and #pool < 64 then
+            dropped.msg, dropped.r, dropped.g, dropped.b = nil, nil, nil, nil
+            pool[#pool + 1] = dropped
+        end
     end
     if self._pendingOfficialGeneralTimer then
         return
     end
     self._pendingOfficialGeneralTimer = true
-    local function FlushQueue()
-        self._pendingOfficialGeneralTimer = nil
-        local batch = self._pendingOfficialGeneralLines
-        if type(batch) ~= "table" or #batch == 0 then
-            return
-        end
-        self._pendingOfficialGeneralLines = {}
-        local anyAdded = false
-        local anyGeneralChatAdded = false
-        for i = 1, #batch do
-            local it = batch[i]
-            if it then
-                local didWorld, didGen = self:RecordGeneralOfficialFrameLine(it.msg, it.r, it.g, it.b, true)
-                if didWorld then
-                    anyAdded = true
-                end
-                if didGen then
-                    anyGeneralChatAdded = true
-                end
-            end
-        end
-        if anyAdded then
-            ns:Emit("COMBAT_LOG_UPDATED")
-        end
-        if anyGeneralChatAdded then
-            ns:Emit("CHAT_UPDATED")
-        end
-    end
     if C_Timer and C_Timer.After then
-        C_Timer.After(0, FlushQueue)
+        C_Timer.After(0, self._flushOfficialGeneralLinesFn)
     else
-        FlushQueue()
+        self._flushOfficialGeneralLinesFn()
     end
 end
 
@@ -4818,15 +4888,61 @@ function Chat:ParseCommunityChannelName(rawChannelName)
     return ((numPrefix or "") .. friendly), clubId, streamId
 end
 
-function Chat:GetJoinedOfficialChannels()
-    local list = {}
-    local seen = {}
+Chat._CompareOfficialChannel = Chat._CompareOfficialChannel or function(a, b)
+    return (a.id or 99) < (b.id or 99)
+end
+
+Chat._PackVarargInto = Chat._PackVarargInto or function(buf, ...)
+    wipe(buf)
+    local n = select("#", ...)
+    for i = 1, n do
+        buf[i] = select(i, ...)
+    end
+    return n
+end
+
+Chat._CollectChannelList = Chat._CollectChannelList or function(buf)
+    return Chat._PackVarargInto(buf, _G.GetChannelList())
+end
+
+function Chat:InvalidateOfficialChannelsCache()
+    self._officialChannelsCacheAt = 0
+    self._generalTargetCache = nil
+end
+
+function Chat:GetJoinedOfficialChannels(forceRefresh)
+    local nowMono = (GetTime and GetTime()) or 0
+    if (not forceRefresh) and self._officialChannelsCache
+        and self._officialChannelsCacheAt and self._officialChannelsCacheAt > 0
+        and (nowMono - self._officialChannelsCacheAt) < 5.0
+    then
+        return self._officialChannelsCache
+    end
+    local list = self._officialChannelsCache
+    if not list then
+        list = {}
+        self._officialChannelsCache = list
+    else
+        wipe(list)
+    end
+    local byId = self._officialChannelsById
+    if not byId then
+        byId = {}
+        self._officialChannelsById = byId
+    else
+        wipe(byId)
+    end
     if _G.GetChannelList then
-        local okCh, packed = pcall(function() return { _G.GetChannelList() } end)
-        if not okCh or type(packed) ~= "table" then
+        local packed = self._chanListScratch
+        if not packed then
+            packed = {}
+            self._chanListScratch = packed
+        end
+        local okCh, n = pcall(Chat._CollectChannelList, packed)
+        if not okCh or type(n) ~= "number" then
+            self._officialChannelsCacheAt = nowMono
             return list
         end
-        local n = #packed
         local stride = 3
         if n >= 3 and type(packed[3]) == "number" then
             stride = 2
@@ -4835,11 +4951,10 @@ function Chat:GetJoinedOfficialChannels()
             local cid = Safe.Number(packed[i])
             local cname = Safe.String(packed[i + 1])
             local disabled = (stride == 3) and (Safe.Value(packed[i + 2]) == true) or false
-            if cid and cid >= 1 and cid <= 20 and cname and cname ~= "" and not disabled and not seen[cid] then
-                seen[cid] = true
+            if cid and cid >= 1 and cid <= 20 and cname and cname ~= "" and not disabled and not byId[cid] then
                 local dispName, clubId, streamId = self:ParseCommunityChannelName(cname)
                 local showName = dispName or cname
-                list[#list + 1] = {
+                local rec = {
                     id = cid,
                     name = showName,
                     rawName = cname,
@@ -4849,6 +4964,8 @@ function Chat:GetJoinedOfficialChannels()
                     slash = "/" .. tostring(cid) .. " ",
                     title = tostring(cid) .. ". " .. showName,
                 }
+                byId[cid] = rec
+                list[#list + 1] = rec
             end
         end
     end
@@ -4857,11 +4974,10 @@ function Chat:GetJoinedOfficialChannels()
             local ok, rId, rName = pcall(_G.GetChannelName, cid)
             local nId = ok and Safe.Number(rId) or nil
             local nName = ok and Safe.String(rName) or nil
-            if nId and nId >= 1 and nName and nName ~= "" and not seen[nId] then
-                seen[nId] = true
+            if nId and nId >= 1 and nName and nName ~= "" and not byId[nId] then
                 local dispName, clubId, streamId = self:ParseCommunityChannelName(nName)
                 local showName = dispName or nName
-                list[#list + 1] = {
+                local rec = {
                     id = nId,
                     name = showName,
                     rawName = nName,
@@ -4871,18 +4987,24 @@ function Chat:GetJoinedOfficialChannels()
                     slash = "/" .. tostring(nId) .. " ",
                     title = tostring(nId) .. ". " .. showName,
                 }
+                byId[nId] = rec
+                list[#list + 1] = rec
             end
         end
     end
-    table.sort(list, function(a, b)
-        return (a.id or 99) < (b.id or 99)
-    end)
+    table.sort(list, Chat._CompareOfficialChannel)
+    self._officialChannelsCacheAt = nowMono
     return list
 end
 
 function Chat:GetOfficialChannelInfo(channelId)
     local cid = tonumber(channelId)
     if not cid or cid < 1 or cid > 20 then return nil end
+    self:GetJoinedOfficialChannels(false)
+    local cached = self._officialChannelsById and self._officialChannelsById[cid]
+    if cached then
+        return cached
+    end
     if _G.GetChannelName then
         local ok, rId, rName = pcall(_G.GetChannelName, cid)
         local nId = ok and Safe.Number(rId) or nil
@@ -4890,7 +5012,7 @@ function Chat:GetOfficialChannelInfo(channelId)
         if nId and nId == cid and nName and nName ~= "" then
             local dispName, clubId, streamId = self:ParseCommunityChannelName(nName)
             local showName = dispName or nName
-            return {
+            local rec = {
                 id = cid,
                 name = showName,
                 rawName = nName,
@@ -4900,17 +5022,17 @@ function Chat:GetOfficialChannelInfo(channelId)
                 slash = "/" .. tostring(cid) .. " ",
                 title = tostring(cid) .. ". " .. showName,
             }
-        end
-    end
-    for _, ch in ipairs(self:GetJoinedOfficialChannels()) do
-        if ch.id == cid then
-            return ch
+            if self._officialChannelsById then
+                self._officialChannelsById[cid] = rec
+            end
+            return rec
         end
     end
     return nil
 end
 
 function Chat:SetGeneralTargetChannel(channelIdOrNil)
+    self._generalTargetCache = nil
     if channelIdOrNil == "yell" or channelIdOrNil == "LOCAL_YELL" then
         self._generalChannelId = nil
         self._generalChannelName = nil
@@ -4936,38 +5058,50 @@ function Chat:GetGeneralTargetInfo()
     if cid and cid >= 1 and cid <= 20 then
         local info = self:GetOfficialChannelInfo(cid)
         if info then
-            return {
-                channelId = info.id,
-                name = info.name,
-                title = info.title,
-                slash = info.slash,
-                clubId = info.clubId,
-                streamId = info.streamId,
-                isSay = false,
-                isYell = false,
-            }
+            local cached = self._generalTargetCache
+            if cached and cached.channelId == info.id and cached.name == info.name and cached.clubId == info.clubId and cached.streamId == info.streamId then
+                return cached
+            end
+            cached = cached or {}
+            cached.channelId = info.id
+            cached.name = info.name
+            cached.title = info.title
+            cached.slash = info.slash
+            cached.clubId = info.clubId
+            cached.streamId = info.streamId
+            cached.isSay = false
+            cached.isYell = false
+            self._generalTargetCache = cached
+            return cached
         end
         self._generalChannelId = nil
         self._generalChannelName = nil
+        self._generalTargetCache = nil
     end
     if self._generalLocalMode == "yell" then
-        return {
+        if not self._genYellTarget then
+            self._genYellTarget = {
+                channelId = nil,
+                name = L["Yell"],
+                title = L["Yell"],
+                slash = "/y ",
+                isSay = false,
+                isYell = true,
+            }
+        end
+        return self._genYellTarget
+    end
+    if not self._genSayTarget then
+        self._genSayTarget = {
             channelId = nil,
-            name = L["Yell"],
-            title = L["Yell"],
-            slash = "/y ",
-            isSay = false,
-            isYell = true,
+            name = L["Say"],
+            title = L["General"],
+            slash = "/s ",
+            isSay = true,
+            isYell = false,
         }
     end
-    return {
-        channelId = nil,
-        name = L["Say"],
-        title = L["General"],
-        slash = "/s ",
-        isSay = true,
-        isYell = false,
-    }
+    return self._genSayTarget
 end
 
 function Chat:EnsureOfficialNumberedChannelThread(channelId, nameHint)
@@ -4986,10 +5120,9 @@ end
 
 function Chat:RefreshOfficialChannelThreads()
     local changed = false
-    local byId = {}
-    for _, info in ipairs(self:GetJoinedOfficialChannels()) do
-        byId[info.id] = info
-    end
+    self:InvalidateOfficialChannelsCache()
+    self:GetJoinedOfficialChannels(true)
+    local byId = self._officialChannelsById or {}
     -- Unify Say, Yell, World & all numbered public channels into General: prune any legacy split tabs/pins.
     local pinned = ns.charDb and ns.charDb.quickReplyPinnedThreads
     if type(pinned) == "table" then
@@ -5030,8 +5163,56 @@ function Chat:RefreshOfficialChannelThreads()
     return changed
 end
 
+Chat._CompareQuickReplyThread = Chat._CompareQuickReplyThread or function(a, b)
+    if (a.isAlwaysFirst == true) ~= (b.isAlwaysFirst == true) then
+        return a.isAlwaysFirst == true
+    end
+    local aUn = (a.unread or 0) > 0
+    local bUn = (b.unread or 0) > 0
+    if aUn ~= bUn then
+        return aUn
+    end
+    local aDraft, bDraft = (a.hasDraft == true), (b.hasDraft == true)
+    if aDraft ~= bDraft then
+        return aDraft
+    end
+    local aPin, bPin = (a.pinned == true), (b.pinned == true)
+    if aPin ~= bPin then
+        return aPin
+    end
+    if aPin and bPin then
+        local ao, bo = a.staticOrder or 999, b.staticOrder or 999
+        if ao ~= bo then
+            return ao < bo
+        end
+    end
+    if (a.lastAt or 0) ~= (b.lastAt or 0) then
+        return (a.lastAt or 0) > (b.lastAt or 0)
+    end
+    return tostring(a.key or "") < tostring(b.key or "")
+end
+
+function Chat:GetQuickWhisperUnreadCount()
+    local total = 0
+    for key, t in pairs(self.threads) do
+        if type(t) == "table" and (t.kind == "WHISPER" or t.kind == "BN_WHISPER") then
+            local u = tonumber(t.unread) or 0
+            if u > 0 and not self:IsThreadMuted(key) then
+                total = total + u
+            end
+        end
+    end
+    return total
+end
+
 function Chat:GetQuickReplyThreads()
-    local list = {}
+    local list = self._qrThreadsScratch
+    if not list then
+        list = {}
+        self._qrThreadsScratch = list
+    else
+        wipe(list)
+    end
     local s = ns.db and ns.db.settings
     local qrOn = (not s) or s.quickReplyEnabled ~= false
     if qrOn then
@@ -5069,65 +5250,44 @@ function Chat:GetQuickReplyThreads()
                     local meta = STATIC_CHANNEL_ORDER[key]
                     local titleStr = (meta and L[meta.titleKey]) or t.title or t.targetName or key
                     local pubOrder = (t.kind == "PUB_CHANNEL" and tonumber(t.channelId)) and (100 + tonumber(t.channelId)) or nil
-                    list[#list + 1] = {
-                        key = key,
-                        thread = t,
-                        title = titleStr,
-                        kind = t.kind,
-                        unread = hasUnread and u or 0,
-                        hasDraft = draft ~= nil,
-                        draftText = draft and draft.text or nil,
-                        pinned = (isPinned == true) or isAutoDungeon,
-                        isAlwaysFirst = isGeneral,
-                        muted = isMuted == true,
-                        staticOrder = (meta and meta.order) or pubOrder or nil,
-                        lastAt = sortAt,
-                    }
+                    local rec = t._qrThreadRec
+                    if not rec then
+                        rec = {}
+                        t._qrThreadRec = rec
+                    end
+                    rec.key = key
+                    rec.thread = t
+                    rec.title = titleStr
+                    rec.kind = t.kind
+                    rec.unread = hasUnread and u or 0
+                    rec.hasDraft = draft ~= nil
+                    rec.draftText = draft and draft.text or nil
+                    rec.pinned = (isPinned == true) or isAutoDungeon
+                    rec.isAlwaysFirst = isGeneral
+                    rec.muted = isMuted == true
+                    rec.staticOrder = (meta and meta.order) or pubOrder or nil
+                    rec.lastAt = sortAt
+                    list[#list + 1] = rec
                 end
             end
         end
     end
-    table.sort(list, function(a, b)
-        if (a.isAlwaysFirst == true) ~= (b.isAlwaysFirst == true) then
-            return a.isAlwaysFirst == true
-        end
-        local aUn = (a.unread or 0) > 0
-        local bUn = (b.unread or 0) > 0
-        if aUn ~= bUn then
-            return aUn
-        end
-        local aDraft, bDraft = (a.hasDraft == true), (b.hasDraft == true)
-        if aDraft ~= bDraft then
-            return aDraft
-        end
-        local aPin, bPin = (a.pinned == true), (b.pinned == true)
-        if aPin ~= bPin then
-            return aPin
-        end
-        if aPin and bPin then
-            local ao, bo = a.staticOrder or 999, b.staticOrder or 999
-            if ao ~= bo then
-                return ao < bo
-            end
-        end
-        if (a.lastAt or 0) ~= (b.lastAt or 0) then
-            return (a.lastAt or 0) > (b.lastAt or 0)
-        end
-        return tostring(a.key or "") < tostring(b.key or "")
-    end)
+    table.sort(list, Chat._CompareQuickReplyThread)
     return list
 end
 
 function Chat:MarkAllQuickReplyRead()
     local list = self:GetQuickReplyThreads()
-    local cleared = 0
+    local keys = {}
     for _, item in ipairs(list) do
         if item and item.key and (item.unread or 0) > 0 then
-            self:MarkThreadRead(item.key)
-            cleared = cleared + 1
+            keys[#keys + 1] = item.key
         end
     end
-    return cleared
+    for i = 1, #keys do
+        self:MarkThreadRead(keys[i])
+    end
+    return #keys
 end
 
 function Chat:HasQuickReplyPending()
@@ -5572,19 +5732,9 @@ function Chat:GetThreadsList(kindFilter)
         end
     end
 
-    local pinRanks = self:GetPinnedOrderMap()
-    table.sort(out, function(a, b)
-        if kindFilter == "unread" then
-            if (a.unread or 0) ~= (b.unread or 0) then
-                return (a.unread or 0) > (b.unread or 0)
-            end
-            if (a.kind == "NOTES") ~= (b.kind == "NOTES") then
-                return a.kind == "NOTES"
-            end
-            if (a.pinned == true) ~= (b.pinned == true) then
-                return a.pinned == true
-            end
-        else
+    Chat._sortPinRanks = self:GetPinnedOrderMap()
+    if not Chat._CompareThreadsDefault then
+        Chat._CompareThreadsDefault = function(a, b)
             if (a.kind == "NOTES") ~= (b.kind == "NOTES") then
                 return a.kind == "NOTES"
             end
@@ -5592,8 +5742,9 @@ function Chat:GetThreadsList(kindFilter)
                 return a.pinned == true
             end
             if a.pinned == true and b.pinned == true then
-                local ra = pinRanks[a.key] or 9999
-                local rb = pinRanks[b.key] or 9999
+                local pr = Chat._sortPinRanks
+                local ra = (pr and pr[a.key]) or 9999
+                local rb = (pr and pr[b.key]) or 9999
                 if ra ~= rb then
                     return ra < rb
                 end
@@ -5601,21 +5752,46 @@ function Chat:GetThreadsList(kindFilter)
             if (a.unread or 0) ~= (b.unread or 0) then
                 return (a.unread or 0) > (b.unread or 0)
             end
+            if (a.lastAt or 0) ~= (b.lastAt or 0) then
+                return (a.lastAt or 0) > (b.lastAt or 0)
+            end
+            if (a.kind == "ROOM") ~= (b.kind == "ROOM") then
+                return a.kind == "ROOM"
+            end
+            if a.kind ~= b.kind then
+                return (a.kind or "") < (b.kind or "")
+            end
+            if (a.title or "") ~= (b.title or "") then
+                return (a.title or "") < (b.title or "")
+            end
+            return (a.key or "") < (b.key or "")
         end
-        if (a.lastAt or 0) ~= (b.lastAt or 0) then
-            return (a.lastAt or 0) > (b.lastAt or 0)
+        Chat._CompareThreadsUnread = function(a, b)
+            if (a.unread or 0) ~= (b.unread or 0) then
+                return (a.unread or 0) > (b.unread or 0)
+            end
+            if (a.kind == "NOTES") ~= (b.kind == "NOTES") then
+                return a.kind == "NOTES"
+            end
+            if (a.pinned == true) ~= (b.pinned == true) then
+                return a.pinned == true
+            end
+            if (a.lastAt or 0) ~= (b.lastAt or 0) then
+                return (a.lastAt or 0) > (b.lastAt or 0)
+            end
+            if (a.kind == "ROOM") ~= (b.kind == "ROOM") then
+                return a.kind == "ROOM"
+            end
+            if a.kind ~= b.kind then
+                return (a.kind or "") < (b.kind or "")
+            end
+            if (a.title or "") ~= (b.title or "") then
+                return (a.title or "") < (b.title or "")
+            end
+            return (a.key or "") < (b.key or "")
         end
-        if (a.kind == "ROOM") ~= (b.kind == "ROOM") then
-            return a.kind == "ROOM"
-        end
-        if a.kind ~= b.kind then
-            return (a.kind or "") < (b.kind or "")
-        end
-        if (a.title or "") ~= (b.title or "") then
-            return (a.title or "") < (b.title or "")
-        end
-        return (a.key or "") < (b.key or "")
-    end)
+    end
+    table.sort(out, (kindFilter == "unread") and Chat._CompareThreadsUnread or Chat._CompareThreadsDefault)
     return out
 end
 
@@ -9765,12 +9941,14 @@ function Chat:OpenPreferredConversation(opts)
                 end
             end
             if ns.UI and ns.UI.ShowHub then
+                self.focusInputPending = true
                 if ns.UI.SetChatNavigation then
                     ns.UI:SetChatNavigation({ chatThreadKey = threadKey })
                 end
                 ns.UI:ShowHub("chat")
                 return true
             elseif ns.UI and ns.UI.OpenTab then
+                self.focusInputPending = true
                 ns.UI:OpenTab("chat")
                 return true
             end
@@ -11909,6 +12087,8 @@ function Chat:_EnqueueOfficialFallback(lt, fbKey, eventName, lineID, msg, author
     end
 end
 
+Chat._SHIELD_NOT_BLOCKED = Chat._SHIELD_NOT_BLOCKED or { blocked = false }
+
 local function OfficialChatShieldFilter(_, eventName, msgRaw, authorRaw, ...)
     if eventName == "CHAT_MSG_BN_WHISPER" or eventName == "CHAT_MSG_BN_WHISPER_INFORM" then
         return Chat:ShouldHideInOfficialChat(eventName) == true
@@ -11927,7 +12107,7 @@ local function OfficialChatShieldFilter(_, eventName, msgRaw, authorRaw, ...)
     local guid = Safe.String(select(10, ...))
     local dec = (eventName ~= "CHAT_MSG_WHISPER_INFORM")
         and EvaluateShieldDecision(eventName, msg, author, guid, lineID, channelLabel)
-        or { blocked = false }
+        or Chat._SHIELD_NOT_BLOCKED
     if dec.blocked then
         Chat:MarkChatLineRecorded(eventName, lineID)
         return true
@@ -14068,7 +14248,7 @@ function Chat:Init()
             self:RefreshOfficialChannelThreads()
         end)
     end
-    for _, chEv in ipairs({ "CHANNEL_UI_UPDATE", "CHAT_MSG_CHANNEL_NOTICE" }) do
+    for _, chEv in ipairs({ "CHANNEL_UI_UPDATE", "CHAT_MSG_CHANNEL_NOTICE", "ZONE_CHANGED_NEW_AREA" }) do
         ns.RegisterEvent(self, chEv, function()
             self:RefreshOfficialChannelThreads()
         end)

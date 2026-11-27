@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.28"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.28" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.29"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.29" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -1429,6 +1429,7 @@ function ns:NavigateToModule(modName, opts)
         ns.UI:SetChatNavigation({
             chatFilter = opts.chatFilter,
             chatThreadKey = opts.chatThreadKey or opts.threadKey,
+            focusInput = opts.focusInput == true,
         })
     end
     if (opts.altSubTab or opts.altBagSource or opts.altSearch ~= nil or opts.altAllAlts ~= nil or opts.altViewMode) and ns.UI and ns.UI.SetAltsNavigation then
@@ -1459,8 +1460,12 @@ function ns:NavigateToModule(modName, opts)
         ns.Chat:SetActiveThread("room:" .. tostring(opts.pendingRoomId))
     end
     if opts.threadKey and ns.Chat and ns.Chat.SetActiveThread then
+        if opts.focusInput then
+            ns.Chat.focusInputPending = true
+        end
         ns.Chat:SetActiveThread(opts.threadKey)
     elseif (opts.targetName or opts.bnetAccountID) and ns.Chat and ns.Chat.OpenDirectConversation then
+        ns.Chat.focusInputPending = true
         ns.Chat:OpenDirectConversation({
             targetName = opts.targetName,
             bnetAccountID = opts.bnetAccountID,
