@@ -2416,6 +2416,49 @@ function Theme:HandleGameHyperlinkClick(link, text, button, ownerFrame, insertBo
     if type(link) ~= "string" or link == "" or link:find("^addon:") then
         return false
     end
+    local isShiftOnly = (button == "LeftButton")
+        and (IsShiftKeyDown and IsShiftKeyDown())
+        and not (IsAltKeyDown and IsAltKeyDown())
+        and not (IsControlKeyDown and IsControlKeyDown())
+    if isShiftOnly and link:sub(1, 7) == "player:" then
+        local rawTarget = link:match("^player:([^:]+)")
+        local parsed = (rawTarget and rawTarget ~= "" and ns.Compat and ns.Compat.ParseCharacterName)
+            and ns.Compat.ParseCharacterName(rawTarget) or nil
+        local disp = (parsed and parsed.displayName) or rawTarget
+        if disp and disp ~= "" then
+            local blizzFocused = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
+                or (_G.ChatEdit_GetActiveWindow and _G.ChatEdit_GetActiveWindow())
+                or nil
+            if blizzFocused and ((blizzFocused.IsVisible and not blizzFocused:IsVisible()) or (blizzFocused.HasFocus and not blizzFocused:HasFocus())) then
+                blizzFocused = nil
+            end
+            local qrDockedFocused = (ns.QuickReply and ns.QuickReply.IsDockedOfficialFocused and ns.QuickReply:IsDockedOfficialFocused())
+                and (_G.ChatFrame1EditBox) or nil
+            local activeInput = blizzFocused
+                or qrDockedFocused
+                or ((insertBox and insertBox.IsVisible and insertBox:IsVisible() and insertBox.HasFocus and insertBox:HasFocus()) and insertBox)
+                or nil
+            if activeInput and activeInput.Insert and (not activeInput.IsEnabled or activeInput:IsEnabled()) then
+                local cur = (activeInput.GetText and activeInput:GetText()) or ""
+                local pos = (activeInput.GetCursorPosition and activeInput:GetCursorPosition()) or #cur
+                local ins = ((pos > 0 and cur:sub(pos, pos) ~= " ") and " " or "") .. disp .. " "
+                pcall(activeInput.Insert, activeInput, ins)
+                return true
+            end
+            if not (ns.Compat and ns.Compat.IsMe and ns.Compat.IsMe(disp)) then
+                if ns.QuickReply and ns.QuickReply.TriggerWhoByName then
+                    ns.QuickReply:TriggerWhoByName(disp)
+                    return true
+                elseif ns.Watchlist and ns.Watchlist.CheckCharacter then
+                    ns.Watchlist:CheckCharacter(disp, false)
+                    return true
+                elseif ns.Chat and ns.Chat.ExecuteSlashCommand then
+                    ns.Chat:ExecuteSlashCommand('/who n-"' .. disp .. '"', true)
+                    return true
+                end
+            end
+        end
+    end
     local isLinkMod = (IsModifiedClick and IsModifiedClick("CHATLINK")) or (IsShiftKeyDown and IsShiftKeyDown())
     if isLinkMod and type(text) == "string" and text ~= "" then
         local blizzBox = (_G.ChatFrameUtil and _G.ChatFrameUtil.GetActiveWindow and _G.ChatFrameUtil.GetActiveWindow())
@@ -7796,6 +7839,35 @@ do
     local STREAM_LINE_GAP = 1
     local STREAM_TURN_GAP = 4
     local STREAM_DIVIDER_GAP = 2
+    local EMPTY_DIV_OPTS = {}
+
+    local function ReleaseStreamItem(vp, it)
+        if type(it) ~= "table" then return end
+        if it.lines and vp._linesArrPool then
+            local lines = it.lines
+            local ePool = vp._lineEntryPool
+            for j = 1, #lines do
+                local ln = lines[j]
+                if ln then
+                    ln.msgIdx, ln.threadKey, ln.ts, ln.text = nil, nil, nil, nil
+                    ln.isContinuation, ln.xOffset, ln.textWidth, ln.yOffset, ln.height, ln.wrappedRows = nil, nil, nil, nil, nil, nil
+                    if ePool and #ePool < 320 then
+                        ePool[#ePool + 1] = ln
+                    end
+                    lines[j] = nil
+                end
+            end
+            if #vp._linesArrPool < 240 then
+                vp._linesArrPool[#vp._linesArrPool + 1] = lines
+            end
+        end
+        it.kind, it.isSelf, it.hasMention, it.barColor, it.senderKey, it.startTs, it.lines = nil, nil, nil, nil, nil, nil, nil
+        it.text, it.isGroup, it.isUnread, it.isNotice, it.accentRgb, it.r, it.g, it.b = nil, nil, nil, nil, nil, nil, nil, nil
+        it.yTop, it.yBottom, it.height, it.textHeight = nil, nil, nil, nil
+        if vp._itemPool and #vp._itemPool < 240 then
+            vp._itemPool[#vp._itemPool + 1] = it
+        end
+    end
 
     local function ComputeStreamLineMetrics(fs, rawText, innerWidth, fontSize)
         local w = math.max(80, innerWidth)
@@ -7952,6 +8024,9 @@ do
         local dividerPool = {}
         vp._turnPool = turnPool
         vp._dividerPool = dividerPool
+        vp._itemPool = {}
+        vp._linesArrPool = {}
+        vp._lineEntryPool = {}
 
         local dragScrollActive = false
         local dragLastY = 0
@@ -8045,35 +8120,16 @@ do
             end
         end
 
-        local function AttachDragOrScrollHandlers(obj)
-            if vp._dragWin and Theme and Theme.AttachDragHandle then
-                Theme:AttachDragHandle(obj, vp._dragWin)
-            end
-            if not obj._scStreamHooked then
-                obj._scStreamHooked = true
-                obj:HookScript("OnMouseDown", function(selfObj, btn)
-                    NotifyInteract()
-                    if vp._dragScrollEnabled and btn == "LeftButton" and selfObj._scHoveredHyperlink == nil and vp._scHoveredHyperlink == nil then
-                        local _, cy = GetCursorPosition()
-                        local sc = (vp.GetEffectiveScale and vp:GetEffectiveScale()) or 1
-                        dragLastY = cy / sc
-                        dragScrollActive = true
-                    end
-                end)
-                obj:HookScript("OnMouseUp", function()
-                    dragScrollActive = false
-                end)
-                obj:HookScript("OnHide", function()
-                    dragScrollActive = false
-                end)
-            end
-        end
-
+        local dragScrollOnUpdate = nil
         if vp._dragScrollEnabled then
-            vp:SetScript("OnUpdate", function()
-                if not dragScrollActive then return end
+            dragScrollOnUpdate = function()
+                if not dragScrollActive then
+                    vp:SetScript("OnUpdate", nil)
+                    return
+                end
                 if not IsMouseButtonDown or not IsMouseButtonDown("LeftButton") then
                     dragScrollActive = false
+                    vp:SetScript("OnUpdate", nil)
                     return
                 end
                 local _, cy = GetCursorPosition()
@@ -8087,7 +8143,44 @@ do
                         vp._onDragScrollUpdate()
                     end
                 end
-            end)
+            end
+        end
+
+        local function AttachDragOrScrollHandlers(obj)
+            if vp._dragWin and Theme and Theme.AttachDragHandle then
+                Theme:AttachDragHandle(obj, vp._dragWin)
+            end
+            if not obj._scStreamHooked then
+                obj._scStreamHooked = true
+                obj:HookScript("OnMouseDown", function(selfObj, btn)
+                    NotifyInteract()
+                    if vp._dragScrollEnabled and btn == "LeftButton" and selfObj._scHoveredHyperlink == nil and vp._scHoveredHyperlink == nil then
+                        local _, cy = GetCursorPosition()
+                        local sc = (vp.GetEffectiveScale and vp:GetEffectiveScale()) or 1
+                        dragLastY = cy / sc
+                        dragScrollActive = true
+                        if dragScrollOnUpdate then
+                            vp:SetScript("OnUpdate", dragScrollOnUpdate)
+                        end
+                    end
+                end)
+                obj:HookScript("OnMouseUp", function()
+                    if dragScrollActive then
+                        dragScrollActive = false
+                        if vp._dragScrollEnabled then
+                            vp:SetScript("OnUpdate", nil)
+                        end
+                    end
+                end)
+                obj:HookScript("OnHide", function()
+                    if dragScrollActive then
+                        dragScrollActive = false
+                        if vp._dragScrollEnabled then
+                            vp:SetScript("OnUpdate", nil)
+                        end
+                    end
+                end)
+            end
         end
 
         if opts.handleWheel == true then
@@ -8456,39 +8549,81 @@ do
                 end
             end
             for i = usedTurns + 1, #turnPool do
+                turnPool[i]._item = nil
                 turnPool[i]:Hide()
             end
             for i = usedDividers + 1, #dividerPool do
+                dividerPool[i]._item = nil
                 dividerPool[i]:Hide()
             end
         end
 
         function vp:Clear()
-            wipe(self._items)
-            self._totalHeight = 0
-            self._pxFromBottom = 0
             for i = 1, #self._turnPool do
+                self._turnPool[i]._item = nil
                 self._turnPool[i]:Hide()
             end
             for i = 1, #self._dividerPool do
+                self._dividerPool[i]._item = nil
                 self._dividerPool[i]:Hide()
             end
+            local items = self._items
+            for i = 1, #items do
+                ReleaseStreamItem(self, items[i])
+                items[i] = nil
+            end
+            self._totalHeight = 0
+            self._pxFromBottom = 0
         end
 
-        function vp:AddStreamDivider(text, divOpts)
-            divOpts = divOpts or {}
+        function vp:TrimOldestItems(maxItems)
+            local cap = tonumber(maxItems) or 200
+            local items = self._items
+            local total = #items
+            if total <= cap then
+                return 0, 0
+            end
+            local drop = total - cap
+            local keptFirst = items[drop + 1]
+            local shiftY = (keptFirst and keptFirst.yTop) or 0
+            for i = 1, #self._turnPool do
+                self._turnPool[i]._item = nil
+            end
+            for i = 1, #self._dividerPool do
+                self._dividerPool[i]._item = nil
+            end
+            for i = 1, drop do
+                ReleaseStreamItem(self, items[i])
+                items[i] = nil
+            end
+            for i = 1, cap do
+                local it = items[i + drop]
+                items[i] = it
+                if it then
+                    it.yTop = math.max(0, (it.yTop or 0) - shiftY)
+                    it.yBottom = math.max(0, (it.yBottom or 0) - shiftY)
+                end
+            end
+            for i = total, cap + 1, -1 do
+                items[i] = nil
+            end
+            self._totalHeight = math.max(0, (self._totalHeight or 0) - shiftY)
+            return drop, shiftY
+        end
+
+        function vp:AddStreamDivider(text, divOpts, forceNotice)
+            divOpts = divOpts or EMPTY_DIV_OPTS
             local _, _, _, divTextW = GetStreamInnerWidths()
-            local item = {
-                kind = divOpts.isNotice and "NOTICE" or "DIVIDER",
-                text = tostring(text or ""),
-                isGroup = (divOpts.isGroup == true),
-                isUnread = (divOpts.isUnread == true),
-                isNotice = (divOpts.isNotice == true),
-                accentRgb = divOpts.accentRgb,
-                r = divOpts.r,
-                g = divOpts.g,
-                b = divOpts.b,
-            }
+            local item = table.remove(self._itemPool) or {}
+            item.kind = ((forceNotice == true) or divOpts.isNotice) and "NOTICE" or "DIVIDER"
+            item.text = tostring(text or "")
+            item.isGroup = (divOpts.isGroup == true)
+            item.isUnread = (divOpts.isUnread == true)
+            item.isNotice = ((forceNotice == true) or (divOpts.isNotice == true))
+            item.accentRgb = divOpts.accentRgb
+            item.r = divOpts.r
+            item.g = divOpts.g
+            item.b = divOpts.b
             MeasureDividerItem(item, divTextW)
             local items = self._items
             local prevIdx = #items
@@ -8505,25 +8640,28 @@ do
         end
 
         function vp:AddNoticeStrip(text, noticeOpts)
-            noticeOpts = noticeOpts or {}
-            noticeOpts.isNotice = true
-            return self:AddStreamDivider(text, noticeOpts)
+            return self:AddStreamDivider(text, noticeOpts, true)
         end
 
         function vp:AddMessage(text, r, g, b)
-            return self:AddStreamDivider(text, { isNotice = false, r = r, g = g, b = b })
+            local optsScratch = self._addMsgOptsScratch
+            if not optsScratch then
+                optsScratch = { isNotice = false }
+                self._addMsgOptsScratch = optsScratch
+            end
+            optsScratch.r, optsScratch.g, optsScratch.b = r, g, b
+            return self:AddStreamDivider(text, optsScratch, false)
         end
 
         function vp:PushChatMessage(spec)
             if type(spec) ~= "table" then return 0 end
             local _, headTextW, contTextW = GetStreamInnerWidths()
             local rawTxt = tostring(spec.text or "")
-            local lineEntry = {
-                msgIdx = spec.msgIdx,
-                threadKey = spec.threadKey,
-                ts = tonumber(spec.ts) or 0,
-                text = rawTxt,
-            }
+            local lineEntry = table.remove(self._lineEntryPool) or {}
+            lineEntry.msgIdx = spec.msgIdx
+            lineEntry.threadKey = spec.threadKey
+            lineEntry.ts = tonumber(spec.ts) or 0
+            lineEntry.text = rawTxt
             local items = self._items
             local lastItem = items[#items]
             if spec.appendToLastTurn and lastItem and lastItem.kind == "TURN" then
@@ -8547,15 +8685,16 @@ do
                 return #items
             end
 
-            local item = {
-                kind = "TURN",
-                isSelf = (spec.isSelf == true),
-                hasMention = (spec.hasMention == true),
-                barColor = spec.barColor,
-                senderKey = spec.senderKey,
-                startTs = lineEntry.ts,
-                lines = { lineEntry },
-            }
+            local linesArr = table.remove(self._linesArrPool) or {}
+            linesArr[1] = lineEntry
+            local item = table.remove(self._itemPool) or {}
+            item.kind = "TURN"
+            item.isSelf = (spec.isSelf == true)
+            item.hasMention = (spec.hasMention == true)
+            item.barColor = spec.barColor
+            item.senderKey = spec.senderKey
+            item.startTs = lineEntry.ts
+            item.lines = linesArr
             MeasureTurnItem(item, headTextW, contTextW)
             local prevIdx = #items
             if prevIdx > 0 then

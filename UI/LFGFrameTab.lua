@@ -4967,27 +4967,45 @@ local function OpenLfgRowContextMenu(anchor, item)
                     end
                 end)
             end
-            if not item.isWatchlist and ns.Watchlist and ns.Watchlist.Add then
-                root:CreateButton(L["Add to Watchlist"], function()
-                    ns.Watchlist:Add(targetName, item.activity or L["Clans & Allies LFG"])
-                end)
-            end
-            root:CreateDivider()
-            if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
-                root:CreateButton(L["Edit Social Card"], function()
-                    ns.SocialPanels:OpenSocialMetaModal(targetName, item.lookupKey or targetName)
-                end)
-            end
-            if Store and Store.SetSocialFlag then
-                local curMeta = Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(item.lookupKey or targetName)
-                local goodLbl = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
-                local avoidLbl = (curMeta and curMeta.flag == "AVOID") and ("|cffff4d4d[x]|r " .. L["Flag: Avoid"]) or L["Flag: Avoid"]
-                root:CreateButton(goodLbl, function()
-                    Store:SetSocialFlag(item.lookupKey or targetName, "GOOD")
-                end)
-                root:CreateButton(avoidLbl, function()
-                    Store:SetSocialFlag(item.lookupKey or targetName, "AVOID")
-                end)
+            local lkOrName = item.lookupKey or targetName
+            if ns.SocialPanels and ns.SocialPanels.PopulatePlayerQuickMenu then
+                root:CreateDivider()
+                ns.SocialPanels:PopulatePlayerQuickMenu(root, {
+                    displayName = targetName,
+                    lookupKey = lkOrName,
+                    guild = item.guild,
+                    faction = item.faction,
+                    watchlistNote = item.activity or L["Clans & Allies LFG"],
+                    includeFavorite = true,
+                    includeWatchlist = true,
+                    includeCard = true,
+                    includeFlags = true,
+                    includeIgnore = true,
+                    includeDiplomacy = true,
+                })
+            else
+                if not item.isWatchlist and ns.Watchlist and ns.Watchlist.Add then
+                    root:CreateButton(L["Add to Watchlist"], function()
+                        ns.Watchlist:Add(targetName, item.activity or L["Clans & Allies LFG"])
+                    end)
+                end
+                root:CreateDivider()
+                if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
+                    root:CreateButton(L["Edit Social Card"], function()
+                        ns.SocialPanels:OpenSocialMetaModal(targetName, lkOrName)
+                    end)
+                end
+                if Store and Store.SetSocialFlag then
+                    local curMeta = Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(lkOrName)
+                    local goodLbl = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
+                    local avoidLbl = (curMeta and curMeta.flag == "AVOID") and ("|cffff4d4d[x]|r " .. L["Flag: Avoid"]) or L["Flag: Avoid"]
+                    root:CreateButton(goodLbl, function()
+                        Store:SetSocialFlag(lkOrName, "GOOD")
+                    end)
+                    root:CreateButton(avoidLbl, function()
+                        Store:SetSocialFlag(lkOrName, "AVOID")
+                    end)
+                end
             end
             if item.isOfficial or item.sourceType == "OFFICIAL_LFG" then
                 root:CreateDivider()

@@ -161,43 +161,67 @@ local function OpenTargetContextMenu(anchor, entry)
             end
         end
 
-        root:CreateButton(L["Add to Watchlist"], function()
-            if ns.Watchlist and ns.Watchlist.Add then
-                ns.Watchlist:Add(entry.displayName, entry.guild or "")
+        if ns.SocialPanels and ns.SocialPanels.PopulatePlayerQuickMenu then
+            root:CreateDivider()
+            ns.SocialPanels:PopulatePlayerQuickMenu(root, {
+                displayName = entry.displayName,
+                lookupKey = entry.key or entry.displayName,
+                guild = entry.guild,
+                watchlistNote = entry.guild or "",
+                isCrossFaction = (entry.stance == "ENEMY"),
+                samePool = (entry.stance ~= "ENEMY"),
+                includeFavorite = (entry.stance ~= "ENEMY"),
+                includeWatchlist = (entry.stance ~= "ENEMY"),
+                includeCard = (entry.stance ~= "ENEMY"),
+                includeFlags = true,
+                includeIgnore = true,
+                includeDiplomacy = false,
+                onAfterAction = function()
+                    SpotterHUD:Refresh()
+                end,
+            })
+        else
+            root:CreateButton(L["Add to Watchlist"], function()
+                if ns.Watchlist and ns.Watchlist.Add then
+                    ns.Watchlist:Add(entry.displayName, entry.guild or "")
+                end
+            end)
+        end
+
+        root:CreateDivider()
+        if entry.guild and entry.guild ~= "" and entry.stance ~= "SAME" and ns.Clan then
+            if ns.SocialPanels and ns.SocialPanels.AppendGuildDiplomacyMenu then
+                ns.SocialPanels:AppendGuildDiplomacyMenu(root, entry.guild)
+            else
+                local canDip = ns.Clan.CanManageDiplomacy and ns.Clan:CanManageDiplomacy()
+                if canDip then
+                    if entry.stance ~= "ENEMY" then
+                        root:CreateButton(L["Mark Guild as Enemy"], function()
+                            ns.Clan:SetGuildStance(entry.guild, "ENEMY", entry.reason or "")
+                        end)
+                    end
+                    if entry.stance ~= "ALLY" then
+                        root:CreateButton(L["Mark Guild as Ally"], function()
+                            ns.Clan:SetGuildStance(entry.guild, "ALLY", entry.reason or "")
+                        end)
+                    end
+                    root:CreateButton(L["Edit Diplomacy Entry"], function()
+                        if ns.UI and ns.UI.OpenDiplomacyModal then
+                            ns.UI:OpenDiplomacyModal(entry.guild, entry.stance, nil)
+                        end
+                    end)
+                else
+                    local authTxt = (ns.Clan.GetDiplomacyAuthoritySummary and ns.Clan:GetDiplomacyAuthoritySummary()) or L["Guild Leader Only"]
+                    root:CreateTitle("|cff8b949e" .. L["Diplomacy"] .. ": " .. authTxt .. "|r")
+                end
             end
-        end)
+        end
 
         root:CreateButton(L["Reset Position"], function()
             if Theme and Theme.ResetWindowPosition then
                 Theme:ResetWindowPosition("spotter")
             end
         end)
-
-        if entry.guild and entry.guild ~= "" and entry.stance ~= "SAME" and ns.Clan then
-            local canDip = ns.Clan.CanManageDiplomacy and ns.Clan:CanManageDiplomacy()
-            if canDip then
-                if entry.stance ~= "ENEMY" then
-                    root:CreateButton(L["Mark Guild as Enemy"], function()
-                        ns.Clan:SetGuildStance(entry.guild, "ENEMY", entry.reason or "")
-                    end)
-                end
-                if entry.stance ~= "ALLY" then
-                    root:CreateButton(L["Mark Guild as Ally"], function()
-                        ns.Clan:SetGuildStance(entry.guild, "ALLY", entry.reason or "")
-                    end)
-                end
-                root:CreateButton(L["Remove Guild Diplomacy"], function()
-                    if ns.UI and ns.UI.OpenDiplomacyModal then
-                        ns.UI:OpenDiplomacyModal(entry.guild, entry.stance, nil)
-                    elseif ns.Clan then
-                        ns.Clan:SetGuildStance(entry.guild, "NEUTRAL", "")
-                    end
-                end)
-            else
-                local authTxt = (ns.Clan.GetDiplomacyAuthoritySummary and ns.Clan:GetDiplomacyAuthoritySummary()) or L["Guild Leader Only"]
-                root:CreateTitle("|cff8b949e" .. L["Diplomacy"] .. ": " .. authTxt .. "|r")
-            end
-        end
 
         root:CreateButton(L["Dismiss Target"], function()
             if ns.Spotter then
@@ -932,8 +956,8 @@ function SpotterHUD:BuildFrame()
         local helpBtn = Theme:CreateHelpButton(
             f,
             L["Target Radar & Proximity Tracking"],
-            L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates. When a tracked player is detected, a compact HUD appears with click-to-target and range tracking when selected."],
-            L["Click the Radar HUD outside combat to select the target, use mouse wheel or number tabs to switch targets, or click '?' anytime to open Chromie's Radar Guide."],
+            L["The Target Radar tracks nearby Watchlist, Friend, Ally, Same-Clan, and Enemy players via sightlines and nameplates, and lets you quickly flag Avoid, Account Ignore, Watchlist, Favorites, or Guild Diplomacy."],
+            L["Left-click the Radar HUD outside combat to target/open quick actions (+ Avoid, Manage Block, Watchlist, Diplomacy), or right-click any spotted target for full Social & Diplomacy options."],
             19,
             { target = f }
         )
@@ -1036,7 +1060,7 @@ function SpotterHUD:BuildFrame()
             if ns.Clan and ns.Clan.CanManageDiplomacy and not ns.Clan:CanManageDiplomacy() then
                 local authTxt = (ns.Clan.GetDiplomacyAuthoritySummary and ns.Clan:GetDiplomacyAuthoritySummary()) or L["Guild Leader Only"]
                 ns:Print(L["Only guild leaders (%s) can define Allied or Enemy guilds."]:format(authTxt))
-            elseif ns.UI and ns.UI.OpenDiplomacyModal and e.guild and e.guild ~= "" then
+            elseif ns.UI and ns.UI.OpenDiplomacyModal then
                 ns.UI:OpenDiplomacyModal(e.guild, e.stance, nil)
             end
         elseif e.stance == "BLOCKED" then
@@ -1058,8 +1082,40 @@ function SpotterHUD:BuildFrame()
     watchBtn:SetPoint("LEFT", inviteBtn, "RIGHT", 6, 0)
     watchBtn:SetScript("OnClick", function()
         local e = SpotterHUD._compassEntry
-        if e and ns.Watchlist and ns.Watchlist.Add then
-            ns.Watchlist:Add(e.displayName, e.guild or "")
+        if not e then return end
+        local key = e.key or e.displayName
+        if e.stance == "BLOCKED" then
+            if Store and Store.IsAccountIgnored and Store:IsAccountIgnored(key) and ns.SocialPanels and ns.SocialPanels.OpenAccountIgnoreModal then
+                ns.SocialPanels:OpenAccountIgnoreModal(e.displayName, key)
+            elseif ns.SocialPanels and ns.SocialPanels.ConfirmToggleOrRemoveAvoid then
+                ns.SocialPanels:ConfirmToggleOrRemoveAvoid(key, e.displayName)
+            elseif Store and Store.SetSocialFlag then
+                Store:SetSocialFlag(key, "AVOID")
+            end
+        elseif e.stance == "ENEMY" then
+            if ns.SocialPanels and ns.SocialPanels.ConfirmToggleOrRemoveAvoid then
+                ns.SocialPanels:ConfirmToggleOrRemoveAvoid(key, e.displayName)
+            elseif Store and Store.SetSocialFlag then
+                Store:SetSocialFlag(key, "AVOID")
+            end
+        elseif ns.Watchlist then
+            if key and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(key) then
+                if ns.UI and ns.UI.OpenConfirmModal then
+                    ns.UI:OpenConfirmModal({
+                        title = L["Remove from Watchlist"],
+                        message = L["Are you sure you want to remove %s from your Watchlist?"]:format(e.displayName or key or "?"),
+                        confirmText = L["Remove"],
+                        onConfirm = function()
+                            if ns.Watchlist then ns.Watchlist:Remove(key) end
+                            SpotterHUD:Refresh()
+                        end,
+                    })
+                else
+                    ns.Watchlist:Remove(key)
+                end
+            elseif ns.Watchlist.Add then
+                ns.Watchlist:Add(e.displayName, e.guild or "")
+            end
         end
         SpotterHUD.interactionOpen = false
         SpotterHUD:Refresh()
@@ -1866,11 +1922,18 @@ function SpotterHUD:Refresh()
             f.actionPanel._lastPromptText = desiredPrompt
             f.actionPanel.promptFs:SetText(desiredPrompt)
         end
-        local layoutKey = (stanceVal == "ENEMY" and "ENEMY") or (stanceVal == "BLOCKED" and "BLOCKED") or "DEFAULT"
+        local baseKey = (stanceVal == "ENEMY" and "ENEMY") or (stanceVal == "BLOCKED" and "BLOCKED") or "DEFAULT"
+        local lookupId = compassEntry.key or compassEntry.displayName
+        local isWatchedNow = (baseKey == "DEFAULT" and lookupId and ns.Watchlist and ns.Watchlist.IsWatched and ns.Watchlist:IsWatched(lookupId)) == true
+        local curMetaRadar = (baseKey == "ENEMY" and lookupId and Store)
+            and ((Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(lookupId)) or (Store.GetSocialMeta and Store:GetSocialMeta(lookupId)))
+            or nil
+        local isAvoidNow = (curMetaRadar and curMetaRadar.flag == "AVOID") == true
+        local layoutKey = baseKey .. ":" .. ((baseKey == "ENEMY") and (isAvoidNow and "A" or "N") or ((baseKey == "DEFAULT") and (isWatchedNow and "W" or "N") or "B"))
         if f.actionPanel._lastLayoutStance ~= layoutKey then
             f.actionPanel._lastLayoutStance = layoutKey
             local rowBtns = {}
-            if layoutKey == "ENEMY" then
+            if baseKey == "ENEMY" then
                 if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
                 if f.actionPanel.scoutBtn then
                     Theme:SetButtonText(f.actionPanel.scoutBtn, L["Scout Alert"])
@@ -1882,10 +1945,10 @@ function SpotterHUD:Refresh()
                     rowBtns[#rowBtns + 1] = f.actionPanel.inviteBtn
                 end
                 if f.actionPanel.watchBtn then
-                    Theme:SetButtonText(f.actionPanel.watchBtn, "+ " .. L["Watchlist"])
+                    Theme:SetButtonText(f.actionPanel.watchBtn, isAvoidNow and ("|cffff4d4d[x]|r " .. L["AVOID"]) or ("+ " .. L["AVOID"]))
                     rowBtns[#rowBtns + 1] = f.actionPanel.watchBtn
                 end
-            elseif layoutKey == "BLOCKED" then
+            elseif baseKey == "BLOCKED" then
                 if f.actionPanel.whisperBtn then f.actionPanel.whisperBtn:Hide() end
                 if f.actionPanel.scoutBtn then f.actionPanel.scoutBtn:Hide() end
                 if f.actionPanel.inviteBtn then
@@ -1893,7 +1956,7 @@ function SpotterHUD:Refresh()
                     rowBtns[#rowBtns + 1] = f.actionPanel.inviteBtn
                 end
                 if f.actionPanel.watchBtn then
-                    Theme:SetButtonText(f.actionPanel.watchBtn, "+ " .. L["Watchlist"])
+                    Theme:SetButtonText(f.actionPanel.watchBtn, L["Manage Block"])
                     rowBtns[#rowBtns + 1] = f.actionPanel.watchBtn
                 end
             else
@@ -1908,7 +1971,7 @@ function SpotterHUD:Refresh()
                     rowBtns[#rowBtns + 1] = f.actionPanel.inviteBtn
                 end
                 if f.actionPanel.watchBtn then
-                    Theme:SetButtonText(f.actionPanel.watchBtn, "+ " .. L["Watchlist"])
+                    Theme:SetButtonText(f.actionPanel.watchBtn, isWatchedNow and ("- " .. L["Watchlist"]) or ("+ " .. L["Watchlist"]))
                     rowBtns[#rowBtns + 1] = f.actionPanel.watchBtn
                 end
             end

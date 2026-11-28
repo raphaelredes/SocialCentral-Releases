@@ -1471,6 +1471,37 @@ function Social:GetFavoriteCount()
     return count
 end
 
+function Social:GetAvoidCount()
+    local seen = {}
+    local count = 0
+    local metaTbl = Store and Store.GetSocialMetaTable and Store:GetSocialMetaTable() or nil
+    if type(metaTbl) == "table" then
+        for rawKey, rec in pairs(metaTbl) do
+            if type(rawKey) == "string" and rawKey ~= "" and type(rec) == "table" and rec.flag == "AVOID" then
+                local cand = rec.displayName or rawKey
+                local parsed = Compat and Compat.ParseCharacterName and Compat.ParseCharacterName(cand) or nil
+                local nk = (parsed and parsed.lookupKey) or rawKey:lower()
+                local disp = (parsed and parsed.displayName) or cand
+                if nk ~= "" and not seen[nk] and not (Compat and Compat.IsMe and Compat.IsMe(disp)) then
+                    seen[nk] = true
+                    count = count + 1
+                end
+            end
+        end
+    end
+    for _, item in pairs(Store and Store.socialDirectory or {}) do
+        local key = item and item.lookupKey
+        if key and not seen[key] and not item.isMe then
+            local meta = Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(key) or nil
+            if meta and meta.flag == "AVOID" and not (Compat and Compat.IsMe and Compat.IsMe(item.displayName or key)) then
+                seen[key] = true
+                count = count + 1
+            end
+        end
+    end
+    return count
+end
+
 --- Mark a Battle.net character as opposing faction when an in-game whisper fails while they are online on Battle.net.
 function Social:MarkBNetOppositeFaction(lookupKey)
     if type(lookupKey) ~= "string" or lookupKey == "" then return false end
@@ -1700,6 +1731,81 @@ function Social:GetDirectoryList(opts)
             return (meta and meta.folder == folderFilter) == true
         end
         return true
+    end
+
+    if srcFilter == "avoid" then
+        local seen = {}
+        local sortUpdated = {}
+        local dirByLk = Store and Store.socialDirectoryByLookup or {}
+        local metaTbl = Store and Store.GetSocialMetaTable and Store:GetSocialMetaTable() or {}
+        for rawKey, mRec in pairs(metaTbl) do
+            if type(rawKey) == "string" and rawKey ~= "" and type(mRec) == "table" and mRec.flag == "AVOID" then
+                local cand = mRec.displayName or rawKey
+                local parsed = Compat and Compat.ParseCharacterName and Compat.ParseCharacterName(cand) or nil
+                local nk = (parsed and parsed.lookupKey) or rawKey:lower()
+                local disp = (parsed and parsed.displayName) or cand
+                if nk ~= "" and not seen[nk] and not (Compat and Compat.IsMe and Compat.IsMe(disp)) then
+                    seen[nk] = true
+                    local meta = Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(nk) or mRec
+                    if MatchesFolderFilter(meta) then
+                        local existing = dirByLk[nk]
+                        local comp = Store.GetRecentCompanion and Store:GetRecentCompanion(nk) or nil
+                        local ign = Store.GetAccountIgnore and Store:GetAccountIgnore(nk) or nil
+                        local row
+                        if existing then
+                            row = existing
+                        else
+                            row = {
+                                lookupKey = nk,
+                                displayName = (mRec.displayName and mRec.displayName ~= "" and mRec.displayName)
+                                    or (comp and comp.displayName)
+                                    or (ign and ign.name)
+                                    or disp,
+                                classFile = comp and comp.classFile or nil,
+                                level = comp and comp.level or 0,
+                                area = (comp and comp.area) or (comp and comp.zone) or "",
+                                guild = comp and comp.guild or nil,
+                                faction = comp and comp.faction or nil,
+                                online = false,
+                                lastSeen = math.max(mRec.updatedAt or 0, comp and comp.lastSeen or 0, ign and ign.addedAt or 0),
+                                sources = ign and { avoid = true, blocked = true } or { avoid = true },
+                                hasCharacterName = true,
+                            }
+                        end
+                        sortUpdated[row] = math.max((meta and meta.updatedAt) or 0, mRec.updatedAt or 0, row.lastSeen or 0)
+                        out[#out + 1] = row
+                    end
+                end
+            end
+        end
+        for _, item in pairs(Store and Store.socialDirectory or {}) do
+            local key = item and item.lookupKey
+            if key and not seen[key] and not item.isMe then
+                local meta = Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(key) or nil
+                if meta and meta.flag == "AVOID" and not (Compat and Compat.IsMe and Compat.IsMe(item.displayName or key)) then
+                    seen[key] = true
+                    if MatchesFolderFilter(meta) then
+                        sortUpdated[item] = math.max((meta and meta.updatedAt) or 0, item.lastSeen or 0)
+                        out[#out + 1] = item
+                    end
+                end
+            end
+        end
+        table.sort(out, function(a, b)
+            if (a.online == true) ~= (b.online == true) then
+                return a.online == true
+            end
+            local ta = sortUpdated[a] or a.lastSeen or 0
+            local tb = sortUpdated[b] or b.lastSeen or 0
+            if ta ~= tb then
+                return ta > tb
+            end
+            local na = tostring(a.displayName or a.lookupKey or ""):lower()
+            local nb = tostring(b.displayName or b.lookupKey or ""):lower()
+            if na ~= nb then return na < nb end
+            return tostring(a.lookupKey or "") < tostring(b.lookupKey or "")
+        end)
+        return out
     end
 
     local emittedFavKeys = (srcFilter == "fav" or srcFilter == "all") and {} or nil

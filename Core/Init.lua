@@ -2,8 +2,8 @@ local ADDON_NAME, ns = ...
 
 local L = ns.L
 ns.name = ADDON_NAME
-ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.32"
-if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.32" end
+ns.version = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "0.2.33"
+if ns.version == "" or ns.version:find("^@") then ns.version = "0.2.33" end
 ns.sessionStartedAt = ns.sessionStartedAt or time()
 ns.RELEASE_REPO = "raphaelredes/SocialCentral-Releases"
 ns.RELEASE_URL = "https://github.com/" .. ns.RELEASE_REPO .. "/releases/latest"
@@ -354,6 +354,8 @@ local DEFAULTS = {
         lfgBrowseSelectedActivities = {}, -- [catId] = { [actKey] = true } persisted checked activities
         officialLfgSyncMode = "GUILD_ALLIES", -- "GUILD_ALLIES" | "GUILD_ONLY" | "OFF"
         groupAvoidAlert = true,     -- warn in chat and toast if an Avoided player enters your party or raid
+        groupLeaverAlert = true,    -- warn with 1-click Avoid if someone leaves an active dungeon/raid before final or all bosses die
+        groupAutoAvoidLeaver = false, -- opt-in: automatically flag verified mid-run leavers on your Avoid list
         dungeonRunLogEnabled = true, -- passively record started dungeon/raid groups, teammates & run duration (zero CLEU)
         dungeonLogPromptShown = false, -- one-time account-wide reminder after finishing the first dungeon or raid
         clanAutoCloseFullLfg = true, -- auto-close own Guild Dungeon LFM when party reaches 5 members
@@ -561,6 +563,10 @@ local function HandleSlash(raw)
             end
         end
     elseif cmd == "clan" or cmd == "lfg" or cmd == "diplomacy" then
+        if cmd == "diplomacy" and rest ~= "" and ns.UI and ns.UI.OpenDiplomacyModal then
+            ns.UI:OpenDiplomacyModal(rest)
+            return
+        end
         if ns.Clan and ns.Clan.SetPreferredRightView and cmd == "diplomacy" then
             ns.Clan:SetPreferredRightView("diplomacy")
         end
@@ -650,6 +656,43 @@ local function HandleSlash(raw)
                 targetName = (resolved and resolved.fullName) or (UnitName and ns.Safe and ns.Safe.String(ns.Safe.Call(UnitName, "target")))
             end
             ns.SocialPanels:OpenAccountIgnoreModal(targetName, targetName)
+        end
+    elseif cmd == "avoid" or cmd == "evitar" then
+        local sub = type(rest) == "string" and rest:lower():match("^%s*(.-)%s*$") or ""
+        if sub == "list" or sub == "lista" then
+            if ns.NavigateToModule then
+                ns:NavigateToModule("social", { socialFilter = "avoid" })
+            end
+        elseif ns.SocialPanels and ns.SocialPanels.OpenAddAvoidModal then
+            local targetName = (rest and rest ~= "") and rest or nil
+            if not targetName and UnitExists and UnitIsPlayer and UnitExists("target") and UnitIsPlayer("target") then
+                local resolved = ns.Compat and ns.Compat.ResolveUnitFullName and ns.Compat.ResolveUnitFullName("target", nil, nil, true)
+                targetName = (resolved and resolved.fullName) or (UnitName and ns.Safe and ns.Safe.String(ns.Safe.Call(UnitName, "target")))
+            end
+            ns.SocialPanels:OpenAddAvoidModal(targetName, targetName)
+        end
+    elseif cmd == "fav" or cmd == "favorite" or cmd == "favorito" then
+        local sub = type(rest) == "string" and rest:lower():match("^%s*(.-)%s*$") or ""
+        if sub == "" or sub == "list" or sub == "lista" then
+            if sub == "" and UnitExists and UnitIsPlayer and UnitExists("target") and UnitIsPlayer("target") then
+                local resolved = ns.Compat and ns.Compat.ResolveUnitFullName and ns.Compat.ResolveUnitFullName("target", nil, nil, true)
+                local targetName = (resolved and resolved.fullName) or (UnitName and ns.Safe and ns.Safe.String(ns.Safe.Call(UnitName, "target")))
+                if targetName and targetName ~= "" and not (ns.Compat and ns.Compat.IsMe and ns.Compat.IsMe(targetName)) and ns.Store and ns.Store.ToggleSocialFavorite then
+                    local nowFav = ns.Store:ToggleSocialFavorite(targetName)
+                    ns:Print("%s", nowFav and L["%s added to Favorites."]:format(targetName) or L["%s removed from Favorites."]:format(targetName))
+                    return
+                end
+            end
+            if ns.NavigateToModule then
+                ns:NavigateToModule("social", { socialFilter = "fav" })
+            end
+        elseif ns.Store and ns.Store.ToggleSocialFavorite then
+            local parsed = ns.Compat and ns.Compat.ParseCharacterName and ns.Compat.ParseCharacterName(rest)
+            local disp = (parsed and parsed.displayName) or rest
+            if disp and disp ~= "" and not (ns.Compat and ns.Compat.IsMe and ns.Compat.IsMe(disp)) then
+                local nowFav = ns.Store:ToggleSocialFavorite(disp)
+                ns:Print("%s", nowFav and L["%s added to Favorites."]:format(disp) or L["%s removed from Favorites."]:format(disp))
+            end
         end
     elseif cmd == "spam" or cmd == "filtered" then
         if ns.SocialPanels and ns.SocialPanels.OpenFilteredChatModal then
@@ -743,7 +786,10 @@ local function HandleSlash(raw)
         ns:Print("  |cffffd200/sc roll [winner|results|prompt|clear]|r — %s", L["Test Group Loot Roll"])
         ns:Print("  |cffffd200/sc rolls|r — %s", L["Open Loot Roll Results"])
         ns:Print("  |cffffd200/sc copychat [N]|r — %s", L["Copy Official Chat"])
+        ns:Print("  |cffffd200/sc avoid [name]|r — %s", L["Avoid List"])
         ns:Print("  |cffffd200/sc ignore [name]|r — %s", L["Account Ignore"])
+        ns:Print("  |cffffd200/sc fav [name]|r — %s", L["Favorites"])
+        ns:Print("  |cffffd200/sc diplomacy [guild]|r — %s", L["Guild Diplomacy Registry"])
         ns:Print("  |cffffd200/sc export|r — %s", L["Export / Import Social Data"])
         if ModOn("watchlist") then
             ns:Print("  |cffffd200/sc add <name>|r — %s", L["Add to Watchlist"])
@@ -1298,33 +1344,75 @@ end
 
 local lastIdleGcAt = 0
 local idleGcQueued = false
+local idleMaintTimerStarted = false
+
+function ns:RunMemoryMaintenance(stepBudget)
+    local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
+    if inCombat then
+        return false
+    end
+    if ns.Compat and ns.Compat.TrimMemoryCaches then
+        pcall(ns.Compat.TrimMemoryCaches)
+    end
+    if ns.Store and ns.Store.TrimRuntimeCaches then
+        pcall(ns.Store.TrimRuntimeCaches, ns.Store)
+    end
+    if ns.Chat and ns.Chat.TrimRuntimeMemory then
+        pcall(ns.Chat.TrimRuntimeMemory, ns.Chat)
+    end
+    if ns.Spotter and ns.Spotter.TrimRuntimeCaches then
+        pcall(ns.Spotter.TrimRuntimeCaches, ns.Spotter)
+    end
+    if ns.Clan and ns.Clan.TrimRuntimeCaches then
+        pcall(ns.Clan.TrimRuntimeCaches, ns.Clan)
+    end
+    if ns.Alts and ns.Alts.TrimRuntimeCaches then
+        pcall(ns.Alts.TrimRuntimeCaches, ns.Alts)
+    end
+    if type(collectgarbage) == "function" then
+        lastIdleGcAt = (GetTime and GetTime()) or 0
+        pcall(collectgarbage, "step", math.max(80, math.min(400, tonumber(stepBudget) or 200)))
+    end
+    return true
+end
+
+ns._runIdleGcFn = ns._runIdleGcFn or function()
+    idleGcQueued = false
+    ns:RunMemoryMaintenance(ns._queuedGcSteps or 180)
+end
 
 function ns:RequestIdleGcStep(steps, delay)
     if type(collectgarbage) ~= "function" or not (C_Timer and C_Timer.After) then
         return
     end
     local now = (GetTime and GetTime()) or 0
-    if lastIdleGcAt > 0 and (now - lastIdleGcAt) < 60.0 then
+    if lastIdleGcAt > 0 and (now - lastIdleGcAt) < 12.0 then
         return
     end
     if idleGcQueued then
         return
     end
     idleGcQueued = true
-    local stepBudget = math.max(40, math.min(140, tonumber(steps) or 100))
-    C_Timer.After(tonumber(delay) or 1.2, function()
-        idleGcQueued = false
-        local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
-        if inCombat then
-            return
-        end
-        lastIdleGcAt = (GetTime and GetTime()) or 0
-        pcall(collectgarbage, "step", stepBudget)
-    end)
+    ns._queuedGcSteps = math.max(60, math.min(360, tonumber(steps) or 160))
+    C_Timer.After(tonumber(delay) or 1.2, ns._runIdleGcFn)
 end
+
+ns._memMaintHost = ns._memMaintHost or {}
+ns.RegisterEvent(ns._memMaintHost, "PLAYER_REGEN_ENABLED", function()
+    ns:RequestIdleGcStep(240, 2.5)
+end)
+ns.RegisterEvent(ns._memMaintHost, "ZONE_CHANGED_NEW_AREA", function()
+    ns:RequestIdleGcStep(220, 2.0)
+end)
 
 ns.RegisterEvent(boot, "PLAYER_ENTERING_WORLD", function()
     ns.UnregisterEvent(boot, "PLAYER_ENTERING_WORLD")
+    if not idleMaintTimerStarted and C_Timer and C_Timer.NewTicker then
+        idleMaintTimerStarted = true
+        ns._idleMaintTicker = C_Timer.NewTicker(45.0, function()
+            ns:RequestIdleGcStep(180, 0.5)
+        end)
+    end
     if ns.Compat and ns.Compat.InvalidateRealmCache then
         ns.Compat.InvalidateRealmCache()
     end
@@ -1695,6 +1783,19 @@ if EventRegistry and EventRegistry.RegisterCallback then
             end
             if ns.Group and ns.Group.OpenMissingBuffsDraft then
                 ns.Group:OpenMissingBuffsDraft()
+            end
+        elseif link:find("addon:SCentral:avoidleaver:", 1, true) then
+            local rawPayload = link:match("addon:SCentral:avoidleaver:([^|]+)")
+            if rawPayload and rawPayload ~= "" then
+                local cleanTarget = rawPayload:gsub("%%(%x%x)", function(hex)
+                    return string.char(tonumber(hex, 16) or 32)
+                end)
+                if ns.Group and ns.Group.AddLeaverToAvoidList then
+                    ns.Group:AddLeaverToAvoidList(cleanTarget)
+                elseif ns.Store and ns.Store.FlagPlayerAvoid then
+                    ns.Store:FlagPlayerAvoid(cleanTarget, L["Left dungeon/raid before completion"])
+                    ns:Print("|cffff4d4d[!] %s|r", L["%s added to your Avoid list."]:format(cleanTarget))
+                end
             end
         elseif link:find("addon:SCentral:room:", 1, true) then
             local roomId = link:match("addon:SCentral:room:([^|]+)")

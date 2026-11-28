@@ -430,6 +430,10 @@ local function GetSelectedIdsCached()
     return ids
 end
 
+function QuickBar:GetSelectedIdsCached()
+    return GetSelectedIdsCached()
+end
+
 function QuickBar:GetOrientation()
     local s = GetSettingsTable()
     if s and s.quickBarOrientation == "vertical" then

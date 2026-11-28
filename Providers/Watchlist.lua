@@ -1528,6 +1528,25 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
     end
 
     local targetEntry = list[pending.id]
+    local matchedStranger = nil
+    if (not targetEntry) and (not matchedTarget) and type(matches) == "table" then
+        local pendingLk = type(pending.id) == "string" and pending.id:lower() or ""
+        local pendingHasSur = (pendingLk:find("-", 1, true) ~= nil) or (pendingLk:find(" ", 1, true) ~= nil)
+        for _, m in ipairs(matches) do
+            local p = m and m.parsed
+            if p and p.lookupKey then
+                if p.lookupKey == pendingLk or ((not pendingHasSur) and p.firstName and p.firstName:lower() == pendingLk) then
+                    matchedTarget = true
+                    matchedStranger = m
+                    break
+                end
+            end
+        end
+        if not matchedStranger and #matches == 1 then
+            matchedStranger = matches[1]
+            matchedTarget = true
+        end
+    end
     if targetEntry and not matchedTarget then
         targetEntry.lastChecked = now
         local hasSurname = type(targetEntry.surname) == "string" and targetEntry.surname ~= ""
@@ -1567,7 +1586,7 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
     if Store and Store.RecordLiveUnitObservation then
         for _, m in ipairs(matches) do
             local p = m and m.parsed
-            if p and p.displayName and ((m.level and m.level > 0) or (m.area and m.area ~= "")) then
+            if p and p.displayName and ((m.level and m.level > 0) or (m.area and m.area ~= "") or m.classFile or (m.guild and m.guild ~= "")) then
                 Store:RecordLiveUnitObservation(p.displayName, {
                     level = m.level,
                     classFile = m.classFile,
@@ -1575,6 +1594,38 @@ function Watchlist:ApplyWhoResults(matches, totalCount)
                     guild = m.guild,
                     source = "who",
                 })
+            end
+        end
+    end
+    if ns.Chat and ns.Chat.RecordWhoObservation and #matches > 0 then
+        for _, m in ipairs(matches) do
+            local p = m and m.parsed
+            if p and p.displayName then
+                ns.Chat:RecordWhoObservation(p.displayName, m.level, m.classFile, m.area, m.guild, true)
+            end
+        end
+        ns:Emit("CHAT_UPDATED")
+    end
+    if (not targetEntry) and (not pending.silent) then
+        if matchedStranger and matchedStranger.parsed and matchedStranger.parsed.displayName then
+            local sp = matchedStranger.parsed.displayName
+            local sLvl = (matchedStranger.level and matchedStranger.level > 0) and (L["Lv."] .. tostring(matchedStranger.level)) or nil
+            local sArea = (matchedStranger.area and matchedStranger.area ~= "") and matchedStranger.area or nil
+            local sGuild = (matchedStranger.guild and matchedStranger.guild ~= "") and ("<" .. matchedStranger.guild .. ">") or nil
+            local parts = { sp }
+            if sLvl then parts[#parts + 1] = sLvl end
+            if sArea then parts[#parts + 1] = sArea end
+            if sGuild then parts[#parts + 1] = sGuild end
+            local summaryMsg = table.concat(parts, " · ")
+            ns:Print("%s", summaryMsg)
+            if ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.ShowInlineNotice then
+                ns.QuickReply:ShowInlineNotice(summaryMsg)
+            end
+        elseif not matchedTarget then
+            local missMsg = string.format(L["No /who result found for %s (offline or in another layer)."], pending.displayName or "?")
+            ns:Print("%s", missMsg)
+            if ns.QuickReply and ns.QuickReply.frame and ns.QuickReply.frame:IsShown() and ns.QuickReply.ShowInlineNotice then
+                ns.QuickReply:ShowInlineNotice(missMsg)
             end
         end
     end
@@ -2259,9 +2310,13 @@ local function RegisterUnitContextMenus()
         "MENU_UNIT_FRIEND",
         "MENU_UNIT_COMMUNITIES_GUILD_MEMBER",
         "MENU_UNIT_CHAT_PLAYER",
+        "MENU_UNIT_TARGET",
+        "MENU_UNIT_FOCUS",
+        "MENU_UNIT_ENEMY_PLAYER",
+        "MENU_UNIT_BN_FRIEND",
     }
 
-    local function InjectMenu(_, rootDescription, contextData)
+    local function InjectMenu(owner, rootDescription, contextData)
         if type(contextData) ~= "table" or not rootDescription then return end
         local rawUnit = Safe.String(contextData.unit)
         local rawName = Safe.String(contextData.name)
@@ -2284,6 +2339,23 @@ local function RegisterUnitContextMenus()
             return
         end
 
+        local isFriendlyUnit = true
+        if Safe.String(contextData.which) == "ENEMY_PLAYER" then
+            isFriendlyUnit = false
+        elseif rawUnit and UnitIsFriend then
+            local friendCheck = Safe.Call(UnitIsFriend, "player", rawUnit)
+            if friendCheck == false then
+                isFriendlyUnit = false
+            end
+        end
+        local unitGuild = rawUnit and GetGuildInfo and Safe.String(Safe.Call(GetGuildInfo, rawUnit))
+        if (not unitGuild or unitGuild == "") and ns.Store and ns.Store.socialDirectoryByLookup and parsed.lookupKey then
+            local dirEntry = ns.Store.socialDirectoryByLookup[parsed.lookupKey]
+            if dirEntry and dirEntry.guild and dirEntry.guild ~= "" then
+                unitGuild = dirEntry.guild
+            end
+        end
+
         local curMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(parsed.lookupKey or parsed.displayName) or (Store.GetSocialMeta and Store:GetSocialMeta(parsed.displayName)))
         local existingEntry = Watchlist:GetEntry(parsed.displayName)
         if existingEntry then
@@ -2298,7 +2370,7 @@ local function RegisterUnitContextMenus()
         local isWatched = existingEntry ~= nil
 
         local bnId = contextData and Safe.Number(contextData.bnetIDAccount)
-        local scConfirmed = ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(parsed.lookupKey or parsed.displayName, bnId)
+        local scConfirmed = isFriendlyUnit and ns.Chat and ns.Chat.IsPlayerAddonConfirmed and ns.Chat:IsPlayerAddonConfirmed(parsed.lookupKey or parsed.displayName, bnId)
 
         rootDescription:CreateDivider()
         rootDescription:CreateTitle("SocialCentral (" .. parsed.displayName .. ")")
@@ -2325,10 +2397,30 @@ local function RegisterUnitContextMenus()
             end)
         end
 
-        if watchModOn then
+        if isFriendlyUnit and Store and Store.IsSocialFavorite and Store.ToggleSocialFavorite then
+            local favKey = parsed.lookupKey or parsed.displayName
+            local isFav = Store:IsSocialFavorite(favKey) == true
+            local starMark = (Compat and Compat.FavoriteStarMarkup) and Compat.FavoriteStarMarkup(12) or ""
+            rootDescription:CreateButton(isFav and (starMark .. L["Unfavorite"]) or L["Favorite"], function()
+                Store:ToggleSocialFavorite(favKey)
+            end)
+        end
+
+        if isFriendlyUnit and watchModOn then
             if isWatched and existingEntry then
                 rootDescription:CreateButton(L["Remove from Watchlist"], function()
-                    Watchlist:Remove(existingEntry.id)
+                    if ns.UI and ns.UI.OpenConfirmModal then
+                        ns.UI:OpenConfirmModal({
+                            title = L["Remove from Watchlist"],
+                            message = L["Are you sure you want to remove %s from your Watchlist?"]:format(parsed.displayName or "?"),
+                            confirmText = L["Remove"],
+                            onConfirm = function()
+                                Watchlist:Remove(existingEntry.id)
+                            end,
+                        })
+                    else
+                        Watchlist:Remove(existingEntry.id)
+                    end
                 end)
             else
                 rootDescription:CreateButton("+ " .. L["Add to Watchlist"], function()
@@ -2337,22 +2429,26 @@ local function RegisterUnitContextMenus()
             end
         end
 
-        rootDescription:CreateButton(L["Edit Social Card"], function()
-            if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
-                ns.SocialPanels:OpenSocialMetaModal(parsed.displayName, parsed.lookupKey)
-            end
-        end)
+        if isFriendlyUnit then
+            rootDescription:CreateButton(L["Edit Social Card"], function()
+                if ns.SocialPanels and ns.SocialPanels.OpenSocialMetaModal then
+                    ns.SocialPanels:OpenSocialMetaModal(parsed.displayName, parsed.lookupKey)
+                end
+            end)
 
-        local goodLabel = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
-        rootDescription:CreateButton(goodLabel, function()
-            if Store and Store.SetSocialFlag then
-                Store:SetSocialFlag(parsed.displayName, "GOOD")
-            end
-        end)
+            local goodLabel = (curMeta and curMeta.flag == "GOOD") and ("|cff3fb950[x]|r " .. L["Good Partner (+)"]) or L["Good Partner (+)"]
+            rootDescription:CreateButton(goodLabel, function()
+                if Store and Store.SetSocialFlag then
+                    Store:SetSocialFlag(parsed.displayName, "GOOD")
+                end
+            end)
+        end
 
         local avoidLabel = (curMeta and curMeta.flag == "AVOID") and ("|cffff4d4d[x]|r " .. L["Flag: Avoid"]) or L["Flag: Avoid"]
         rootDescription:CreateButton(avoidLabel, function()
-            if Store and Store.SetSocialFlag then
+            if ns.SocialPanels and ns.SocialPanels.ConfirmToggleOrRemoveAvoid then
+                ns.SocialPanels:ConfirmToggleOrRemoveAvoid(parsed.lookupKey or parsed.displayName, parsed.displayName)
+            elseif Store and Store.SetSocialFlag then
                 Store:SetSocialFlag(parsed.displayName, "AVOID")
             end
         end)
@@ -2364,6 +2460,20 @@ local function RegisterUnitContextMenus()
                 ns.SocialPanels:OpenAccountIgnoreModal(parsed.displayName, parsed.lookupKey)
             end
         end)
+        if isAcctIgn then
+            rootDescription:CreateButton("|cff3fb950" .. L["Unblock"] .. "|r", function()
+                if ns.SocialPanels and ns.SocialPanels.ConfirmRemoveAccountIgnore then
+                    ns.SocialPanels:ConfirmRemoveAccountIgnore(parsed.lookupKey or parsed.displayName, parsed.displayName)
+                elseif Store and Store.RemoveAccountIgnore then
+                    Store:RemoveAccountIgnore(parsed.lookupKey or parsed.displayName, true)
+                end
+            end)
+        end
+
+        if unitGuild and unitGuild ~= "" and ns.SocialPanels and ns.SocialPanels.AppendGuildDiplomacyMenu then
+            local unitFac = rawUnit and UnitFactionGroup and Safe.String(Safe.Call(UnitFactionGroup, rawUnit)) or nil
+            ns.SocialPanels:AppendGuildDiplomacyMenu(rootDescription, unitGuild, unitFac)
+        end
 
         if radarModOn and ns.SpotterHUD and ns.SpotterHUD.TrackEntry then
             local isTracked = ns.Spotter and ns.Spotter.IsPlayerTracked and ns.Spotter:IsPlayerTracked(parsed.displayName)
@@ -2376,7 +2486,8 @@ local function RegisterUnitContextMenus()
                     ns.SpotterHUD:TrackEntry({
                         displayName = parsed.displayName,
                         lookupKey = parsed.lookupKey,
-                    }, "SOCIAL")
+                        guild = unitGuild,
+                    }, isFriendlyUnit and "SOCIAL" or "ENEMY")
                 end)
             end
         end

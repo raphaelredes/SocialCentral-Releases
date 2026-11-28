@@ -226,8 +226,8 @@ local function CatalogLookup(itemID)
     local cls = tonumber(p4)
     local sub = tonumber(p5)
     local eq = (p6 and p6 ~= "") and p6 or nil
-    if catalogCacheCount >= 1200 then
-        wipe(catalogParsedCache)
+    if catalogCacheCount >= 500 then
+        catalogParsedCache = {}
         catalogCacheCount = 0
     end
     catalogParsedCache[id] = { name, icon, qual, cls, sub, eq }
@@ -1551,13 +1551,29 @@ local function ParseRecipeCatalogRaw(rKey, raw)
         icon = tonumber(p7) or ((p7 and p7 ~= "") and p7 or nil),
         reagentsStr = (p8 and p8 ~= "") and p8 or nil,
     }
-    if recipeCatalogCacheCount >= 2000 then
-        wipe(recipeCatalogCache)
+    if recipeCatalogCacheCount >= 500 then
+        recipeCatalogCache = {}
         recipeCatalogCacheCount = 0
     end
     recipeCatalogCache[rKey] = obj
     recipeCatalogCacheCount = recipeCatalogCacheCount + 1
     return obj
+end
+
+function Alts:TrimRuntimeCaches()
+    if catalogCacheCount > 120 then
+        catalogParsedCache = {}
+        catalogCacheCount = 0
+    end
+    if recipeCatalogCacheCount > 120 then
+        recipeCatalogCache = {}
+        recipeCatalogCacheCount = 0
+    end
+    if not (ns.UI and ns.UI.IsMainVisible and ns.UI:IsMainVisible()) then
+        self.itemIndex = nil
+        self._recipeIndexCache = nil
+        self._recipeIndexSig = nil
+    end
 end
 
 local function RecipeCatalogUpsert(rKey, name, profCode, profDisp, itemID, spellID, quality, icon, reagentsStr)
@@ -1643,7 +1659,9 @@ local function CompareRecipeAltEntries(a, b)
     local aCur = (a.altKey == curKey)
     local bCur = (b.altKey == curKey)
     if aCur ~= bCur then return aCur end
-    return (a.displayName or ""):lower() < (b.displayName or ""):lower()
+    local an, bn = (a.displayName or ""):lower(), (b.displayName or ""):lower()
+    if an ~= bn then return an < bn end
+    return tostring(a.altKey or "") < tostring(b.altKey or "")
 end
 
 function Alts:GetRecipeIndex(worldScope, factionFilter)

@@ -84,9 +84,13 @@ local function LooksLikeServerRealm(raw)
     if p == "" then return false end
     if p:sub(1, 6) == "camwow" then return true end
     if p:find("realm", 1, true) then return true end
-    if p:match("rppvp$") or p:match("rppve$") or p:match("rpnormal$")
-        or p:match("pvp$") or p:match("pve$") or p:match("normal$") then
-        return true
+    local lastByte = p:byte(#p)
+    -- Only strings ending in 'p' (112), 'e' (101), or 'l' (108) can end in pvp/pve/normal.
+    if (lastByte == 112 or lastByte == 101 or lastByte == 108) and #p >= 3 then
+        if p:match("rppvp$") or p:match("rppve$") or p:match("rpnormal$")
+            or p:match("pvp$") or p:match("pve$") or p:match("normal$") then
+            return true
+        end
     end
     return false
 end
@@ -295,11 +299,15 @@ local function ResolveSavedRealmFallback()
 end
 
 local cachedCharacterKey
+local shardLabelCache = {}
+local shardLabelCacheCount = 0
 
 function Compat.InvalidateRealmCache()
     cachedRealm = nil
     cachedRealmIsLive = false
     cachedCharacterKey = nil
+    wipe(shardLabelCache)
+    shardLabelCacheCount = 0
 end
 
 function Compat.Realm()
@@ -390,12 +398,27 @@ end
 
 function Compat.IsForeverShardLabel(label)
     if type(label) ~= "string" or label == "" then return false end
+    local cached = shardLabelCache[label]
+    if cached ~= nil then
+        return cached
+    end
+    local res = false
     local p = Plain(label)
-    if p == "" then return false end
-    if p:match("^camwow%a*%d*realm%d*%a+$") then return true end
-    if not LooksLikeServerRealm(label) then return false end
-    local own = Compat.Realm()
-    return own ~= "" and LooksLikeServerRealm(own) and Compat.RealmPool(p) == Compat.RealmPool(own)
+    if p ~= "" then
+        if p:match("^camwow%a*%d*realm%d*%a+$") then
+            res = true
+        elseif LooksLikeServerRealm(label) then
+            local own = Compat.Realm()
+            res = (own ~= "" and LooksLikeServerRealm(own) and Compat.RealmPool(p) == Compat.RealmPool(own))
+        end
+    end
+    if shardLabelCacheCount >= 512 then
+        wipe(shardLabelCache)
+        shardLabelCacheCount = 0
+    end
+    shardLabelCache[label] = res
+    shardLabelCacheCount = shardLabelCacheCount + 1
+    return res
 end
 
 local cachedEngFaction, cachedLocFaction
@@ -546,7 +569,7 @@ local parseCharCache = {}
 local parseCharCacheCount = 0
 local parseForeverCache = {}
 local parseForeverCacheCount = 0
-local PARSE_CACHE_LIMIT = 500
+local PARSE_CACHE_LIMIT = 2000
 
 local function IterChildrenVararg(fn, ...)
     local n = select("#", ...)
@@ -678,7 +701,7 @@ local function ParseCharInternal(raw)
     end
 
     if parseCharCacheCount >= PARSE_CACHE_LIMIT then
-        wipe(parseCharCache)
+        parseCharCache = {}
         parseCharCacheCount = 0
     end
     parseCharCache[raw] = result
@@ -712,7 +735,7 @@ local function ParseForeverInternal(raw)
     local cleaned = Compat.CleanInput(raw)
     if not cleaned then
         if parseForeverCacheCount >= PARSE_CACHE_LIMIT then
-            wipe(parseForeverCache)
+            parseForeverCache = {}
             parseForeverCacheCount = 0
         end
         parseForeverCache[raw] = false
@@ -752,7 +775,7 @@ local function ParseForeverInternal(raw)
     end
 
     if parseForeverCacheCount >= PARSE_CACHE_LIMIT then
-        wipe(parseForeverCache)
+        parseForeverCache = {}
         parseForeverCacheCount = 0
     end
     parseForeverCache[raw] = result
@@ -855,11 +878,9 @@ local guildMemberByFirst = {}
 local guildMemberByKey = {}
 local unitGuildByGuid = {}
 local unitGuildByGuidCount = 0
-local unitGuildMissAt = {}
-local tooltipTitleMissAt = {}
 local foreverLookupMissAt = {}
 local foreverLookupMissCount = 0
-local GUID_CACHE_LIMIT = 400
+local GUID_CACHE_LIMIT = 250
 local ROSTER_SYNC_THROTTLE = 15
 local lastRosterSyncAt = nil
 local lastSyncedGuildTotal = -1
@@ -869,13 +890,32 @@ local scanTooltip
 local function PutBoundedMap(tbl, curCount, maxCount, key, val)
     if tbl[key] == nil then
         if curCount >= maxCount then
-            wipe(tbl)
+            tbl = {}
             curCount = 0
         end
         curCount = curCount + 1
     end
     tbl[key] = val
-    return curCount
+    return tbl, curCount
+end
+
+function Compat.TrimMemoryCaches()
+    if parseCharCacheCount >= 120 then
+        parseCharCache = {}
+        parseCharCacheCount = 0
+    end
+    if parseForeverCacheCount >= 120 then
+        parseForeverCache = {}
+        parseForeverCacheCount = 0
+    end
+    if foreverLookupMissCount > 0 then
+        foreverLookupMissAt = {}
+        foreverLookupMissCount = 0
+    end
+    if unitGuildByGuidCount >= 150 then
+        unitGuildByGuid = {}
+        unitGuildByGuidCount = 0
+    end
 end
 
 local function MakeForeverRecord(parsed, cleanGuid)
@@ -952,7 +992,6 @@ local function ReadUnitTooltipTitle(unit, guid)
     if ReadShownGameTooltipUnit(unit) and _G["GameTooltipTextLeft1"] then
         local txt = Safe.String(_G["GameTooltipTextLeft1"]:GetText())
         if txt then
-            if guid then tooltipTitleMissAt[guid] = nil end
             return txt
         end
     end
@@ -1027,8 +1066,7 @@ function Compat.ReadUnitTooltipGuild(unit, guid, cacheOnly)
     end
 
     if foundGuild and cleanGuid then
-        unitGuildByGuidCount = PutBoundedMap(unitGuildByGuid, unitGuildByGuidCount, GUID_CACHE_LIMIT, cleanGuid, foundGuild)
-        unitGuildMissAt[cleanGuid] = nil
+        unitGuildByGuid, unitGuildByGuidCount = PutBoundedMap(unitGuildByGuid, unitGuildByGuidCount, GUID_CACHE_LIMIT, cleanGuid, foundGuild)
     end
     return foundGuild
 end
@@ -1051,7 +1089,7 @@ local function StoreFirstNameSurnameCandidate(firstLower, parsed, cleanGuid)
         end
     end
     local rec = (cleanGuid and not parsed.guid) and MakeForeverRecord(parsed, cleanGuid) or parsed
-    foreverNameByFirstCount = PutBoundedMap(foreverNameByFirst, foreverNameByFirstCount, GUID_CACHE_LIMIT, firstLower, rec)
+    foreverNameByFirst, foreverNameByFirstCount = PutBoundedMap(foreverNameByFirst, foreverNameByFirstCount, GUID_CACHE_LIMIT, firstLower, rec)
 end
 
 function Compat.CacheForeverFullName(guid, fullName, firstNameHint)
@@ -1070,9 +1108,8 @@ function Compat.CacheForeverFullName(guid, fullName, firstNameHint)
     if parsed and parsed.surname then
         local stored = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
         if cleanGuid then
-            foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, stored)
+            foreverNameByGuid, foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, stored)
             foreverLookupMissAt[cleanGuid] = nil
-            tooltipTitleMissAt[cleanGuid] = nil
         end
         if stored.firstName then
             StoreFirstNameSurnameCandidate(stored.firstName:lower(), stored, cleanGuid)
@@ -1207,7 +1244,7 @@ function Compat.LookupForeverFullName(guid, firstName, allowRosterSync)
                     return c
                 end
             end
-            foreverLookupMissCount = PutBoundedMap(foreverLookupMissAt, foreverLookupMissCount, GUID_CACHE_LIMIT, cleanGuid, nowClock)
+            foreverLookupMissAt, foreverLookupMissCount = PutBoundedMap(foreverLookupMissAt, foreverLookupMissCount, GUID_CACHE_LIMIT, cleanGuid, nowClock)
         end
     end
 
@@ -1236,7 +1273,7 @@ function Compat.SyncRosterForeverNames(force, friendsOnly)
         lastRosterSyncAt = nowClock
         lastSyncedGuildTotal = numGuild
         lastSyncedGuildOnline = numOnline
-        wipe(foreverLookupMissAt)
+        foreverLookupMissAt = {}
         foreverLookupMissCount = 0
     end
 
@@ -1257,7 +1294,7 @@ function Compat.SyncRosterForeverNames(force, friendsOnly)
                     if (force or gOnline == true or gOnline == 1) and parsed.surname then
                         local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
                         if cleanGuid then
-                            foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
+                            foreverNameByGuid, foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
                         end
                         if rec.firstName then
                             StoreFirstNameSurnameCandidate(rec.firstName:lower(), rec, cleanGuid)
@@ -1282,7 +1319,7 @@ function Compat.SyncRosterForeverNames(force, friendsOnly)
                 if parsed and parsed.surname then
                     local rec = cleanGuid and MakeForeverRecord(parsed, cleanGuid) or parsed
                     if cleanGuid then
-                        foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
+                        foreverNameByGuid, foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, cleanGuid, rec)
                         foreverLookupMissAt[cleanGuid] = nil
                     end
                     if rec.firstName then
@@ -1339,7 +1376,7 @@ function Compat.ResolveUnitFullName(unit, guidHint, existingFullName, fastOnly)
         if not parsed or not parsed.surname then return parsed end
         local rec = guid and MakeForeverRecord(parsed, guid) or parsed
         if guid then
-            foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, guid, rec)
+            foreverNameByGuid, foreverNameByGuidCount = PutBoundedMap(foreverNameByGuid, foreverNameByGuidCount, GUID_CACHE_LIMIT, guid, rec)
             foreverLookupMissAt[guid] = nil
         end
         if rec.firstName then
@@ -1638,6 +1675,20 @@ local function InsertDraftIntoActiveChatBox(draftText)
     return false
 end
 
+local function BeginIntentionalOfficialTell()
+    local qr = ns.QuickReply
+    if qr then
+        qr._scIntentionalOfficialTellDepth = (qr._scIntentionalOfficialTellDepth or 0) + 1
+    end
+end
+
+local function EndIntentionalOfficialTell()
+    local qr = ns.QuickReply
+    if qr and (qr._scIntentionalOfficialTellDepth or 0) > 0 then
+        qr._scIntentionalOfficialTellDepth = qr._scIntentionalOfficialTellDepth - 1
+    end
+end
+
 function Compat.Whisper(target, draftText)
     local clean = Compat.FormatForeverTarget(target)
     if not clean then return false end
@@ -1648,6 +1699,7 @@ function Compat.Whisper(target, draftText)
     if (not combatRedirecting) and ns.QuickReply and ns.QuickReply.PrepareTemporaryOfficialEditBox then
         ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
     end
+    BeginIntentionalOfficialTell()
 
     local function VerifyOrForceWhisperEditBox(forceParse)
         local activeEb = GetActiveEditableChatBox()
@@ -1692,6 +1744,7 @@ function Compat.Whisper(target, draftText)
         return true
     end
 
+    local handled = false
     if ChatFrameUtil and ChatFrameUtil.SendTell then
         local ok = pcall(ChatFrameUtil.SendTell, clean)
         if ok then
@@ -1700,11 +1753,11 @@ function Compat.Whisper(target, draftText)
                 if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                     ns.QuickReply:ShowActiveOfficialEditBox()
                 end
-                return true
+                handled = true
             end
         end
     end
-    if ChatFrame_SendTell then
+    if (not handled) and ChatFrame_SendTell then
         local ok = pcall(ChatFrame_SendTell, clean)
         if ok then
             VerifyOrForceWhisperEditBox(true)
@@ -1712,32 +1765,35 @@ function Compat.Whisper(target, draftText)
                 if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                     ns.QuickReply:ShowActiveOfficialEditBox()
                 end
-                return true
+                handled = true
             end
         end
     end
-    local line = "/w " .. slashName .. " " .. (draft or "")
-    if ChatFrameUtil and ChatFrameUtil.OpenChat then
-        local ok = pcall(ChatFrameUtil.OpenChat, line)
-        if ok then
-            VerifyOrForceWhisperEditBox(true)
-            if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
-                ns.QuickReply:ShowActiveOfficialEditBox()
+    if not handled then
+        local line = "/w " .. slashName .. " " .. (draft or "")
+        if ChatFrameUtil and ChatFrameUtil.OpenChat then
+            local ok = pcall(ChatFrameUtil.OpenChat, line)
+            if ok then
+                VerifyOrForceWhisperEditBox(true)
+                if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                    ns.QuickReply:ShowActiveOfficialEditBox()
+                end
+                handled = true
             end
-            return true
+        end
+        if (not handled) and ChatFrame_OpenChat then
+            local ok = pcall(ChatFrame_OpenChat, line)
+            if ok then
+                VerifyOrForceWhisperEditBox(true)
+                if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
+                    ns.QuickReply:ShowActiveOfficialEditBox()
+                end
+                handled = true
+            end
         end
     end
-    if ChatFrame_OpenChat then
-        local ok = pcall(ChatFrame_OpenChat, line)
-        if ok then
-            VerifyOrForceWhisperEditBox(true)
-            if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
-                ns.QuickReply:ShowActiveOfficialEditBox()
-            end
-            return true
-        end
-    end
-    return false
+    EndIntentionalOfficialTell()
+    return handled
 end
 
 function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
@@ -1754,6 +1810,8 @@ function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
         ns.QuickReply:PrepareTemporaryOfficialEditBox(25)
     end
     if cleanBNet then
+        BeginIntentionalOfficialTell()
+        local handled = false
         if ChatFrameUtil and ChatFrameUtil.SendBNetTell then
             local ok = pcall(ChatFrameUtil.SendBNetTell, cleanBNet)
             if ok then
@@ -1761,18 +1819,22 @@ function Compat.BNetWhisper(bnetName, fallbackTarget, draftText)
                 if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                     ns.QuickReply:ShowActiveOfficialEditBox()
                 end
-                return true
+                handled = true
             end
         end
-        if ChatFrame_SendBNetTell then
+        if (not handled) and ChatFrame_SendBNetTell then
             local ok = pcall(ChatFrame_SendBNetTell, cleanBNet)
             if ok then
                 InsertDraftIntoActiveChatBox(draftText)
                 if ns.QuickReply and ns.QuickReply.ShowActiveOfficialEditBox then
                     ns.QuickReply:ShowActiveOfficialEditBox()
                 end
-                return true
+                handled = true
             end
+        end
+        EndIntentionalOfficialTell()
+        if handled then
+            return true
         end
     end
     if fallbackTarget then

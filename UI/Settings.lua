@@ -4083,10 +4083,28 @@ local function BuildNotificationsTab(nf, deps, refs, NotifySettingChanged)
         L["Immediately alerts you with a warning toast and chat notice if someone on your Avoid list or linked alts enters your party or raid."],
         L["Allows you to address toxic encounters or leave before dungeons and raids start."]
     )
+    Search.SetPendingMeta(nil, nil, nil, nil, "avoid leaver dungeon raid boss final masmorra abandonar sair antes")
+    local leaverAlertCb = CreateCheckbox(
+        nf, L["Alert with 1-click Avoid if someone leaves dungeon/raid before completion"], avoidGrpCb, -6,
+        function() return not ns.db or not ns.db.settings or ns.db.settings.groupLeaverAlert ~= false end,
+        function(checked) ns.db.settings.groupLeaverAlert = checked; NotifySettingChanged("SETTINGS_UPDATED") end,
+        L["Help: Early Leaver Verification"],
+        L["Monitors active dungeon and raid runs and verifies whether a teammate voluntarily left before the final boss or all required bosses were killed (ignores kicks and group disbands)."],
+        L["Shows a toast with an 'Add to Avoid List' button and a clickable link in chat so you can flag the leaver immediately, or review runs anytime in Group -> Dungeon & Raid Log."]
+    )
+    Search.SetPendingMeta(nil, nil, nil, nil, "avoid leaver auto dungeon raid boss final evitar automatico")
+    local autoAvoidLeaverCb = CreateCheckbox(
+        nf, L["Auto-add verified early dungeon/raid leavers to Avoid List (opt-in)"], leaverAlertCb, -6,
+        function() return ns.db and ns.db.settings and ns.db.settings.groupAutoAvoidLeaver == true end,
+        function(checked) ns.db.settings.groupAutoAvoidLeaver = checked; NotifySettingChanged("SETTINGS_UPDATED") end,
+        L["Help: Auto-Avoid Early Leavers"],
+        L["Optional hands-free mode: automatically flags teammates on your Avoid List if they voluntarily leave a started dungeon or raid before the final or all bosses die."],
+        L["Leave unchecked if you prefer the 1-click confirmation toast and chat prompt. You can always review or unflag players in Social -> Avoid List."]
+    )
 
-    BuildMentionsSettingsSection(nf, avoidGrpCb, deps, NotifySettingChanged)
+    BuildMentionsSettingsSection(nf, autoAvoidLeaverCb, deps, NotifySettingChanged)
     AddDeps(deps.guild, clanLfgAlertCb, clanLfgDngOnlyCb, clanLfgNearLevelCb, clanLfgAlertSoundCb, clanFilterLbl, clanFilterInput, clanEventAlertCb, clanSignupAlertCb, clanEventRemindersCb, scoutAlertCb)
-    AddDeps(deps.group, avoidGrpCb)
+    AddDeps(deps.group, avoidGrpCb, leaverAlertCb, autoAvoidLeaverCb)
 end
 
 local function BuildRadarTab(rd, deps, NotifySettingChanged, CloseSettingsBeforeJump, refs)
@@ -5066,7 +5084,7 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
             end,
             L["Help: Group Loot Roll Helper"],
             L["Replaces guesswork on group drops with a sleek mini-window showing Need/Greed/Disenchant/Pass buttons, class usability alerts, BoP confirmation, real-time group member picks, and stat + item level differences compared to your currently equipped slot."],
-            L["Check to open the roll card automatically on group loot drops (only asks once on your first drop by default)."]
+            L["Check to replace WoW's official roll bar with SocialCentral's roll card on group loot drops (only asks once on your first drop by default)."]
         )
 
         local lootRollLayoutHeader = CreateFieldLabel(
@@ -5091,8 +5109,8 @@ local function BuildExtendedSocialSettingsSection(gn, anchorTo, deps, NotifySett
                 SetRollSetting("lootRollHideOfficial", checked)
             end,
             L["Help: Hide Official Loot Roll Bar"],
-            L["Automatically hides WoW's default group loot roll bars whenever SocialCentral's Group Loot Roll window is enabled so the two bars never overlap."],
-            L["Requires 'Enable SocialCentral Group Loot Roll window' to be checked. If you close SocialCentral's roll window or uncheck this option, Blizzard's official bar reappears automatically."]
+            L["Cleanly removes WoW's default group loot roll screen whenever SocialCentral's Group Loot Roll window is active so the two never overlap or freeze."],
+            L["Requires 'Enable SocialCentral Group Loot Roll window' to be checked. Uncheck only if you want future drops to show Blizzard's official bar alongside SocialCentral."]
         )
 
         local lootRollCompareTipCb = CreateCheckbox(
@@ -6560,7 +6578,7 @@ function SettingsMod:Register()
         local wasBuilt = (panelBuilt == true)
         BuildPanel()
         DockRootContainer(panel, nil)
-        SyncPanelControls(wasBuilt and false or true)
+        SyncPanelControls(not wasBuilt)
         if Search.query ~= "" then
             Search.RenderResults()
         end

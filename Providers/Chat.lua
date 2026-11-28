@@ -1835,8 +1835,8 @@ function Chat:ShouldPersistThreadKey(threadKey)
     return self:GetHistoryLimitForKey(threadKey) > 0
 end
 
-Chat._MAX_TEXT_HISTORY_BYTES = 100 * 1024 * 1024
-Chat._TEXT_QUOTA_TARGET_BYTES = 95 * 1024 * 1024
+Chat._MAX_TEXT_HISTORY_BYTES = 6 * 1024 * 1024
+Chat._TEXT_QUOTA_TARGET_BYTES = 4.5 * 1024 * 1024
 
 function Chat:_EstimateEntryTextBytes(entry)
     if type(entry) ~= "table" then return 0 end
@@ -1886,11 +1886,11 @@ end
 
 function Chat:_EnforceSavedHistoryTextQuota()
     local curBytes = tonumber(self._savedTextBytes) or 0
-    local maxBytes = self._MAX_TEXT_HISTORY_BYTES or (100 * 1024 * 1024)
+    local maxBytes = self._MAX_TEXT_HISTORY_BYTES or (6 * 1024 * 1024)
     if curBytes <= maxBytes then
         return
     end
-    local targetBytes = self._TEXT_QUOTA_TARGET_BYTES or (95 * 1024 * 1024)
+    local targetBytes = self._TEXT_QUOTA_TARGET_BYTES or (4.5 * 1024 * 1024)
     local histRoot = ns.db and ns.db.chatHistory
     if type(histRoot) ~= "table" then
         return
@@ -2078,7 +2078,7 @@ local function PersistWhisperLine(threadKey, entry, unreadCount, threadObj)
             PruneSavedScopeTable(hist, HISTORY_TTL_SECONDS, MAX_SAVED_THREADS, GetHistoryStamp, IsProtectedThreadRecord)
         end
     end
-    if Chat._savedTextBytes and Chat._savedTextBytes > (Chat._MAX_TEXT_HISTORY_BYTES or (100 * 1024 * 1024)) then
+    if Chat._savedTextBytes and Chat._savedTextBytes > (Chat._MAX_TEXT_HISTORY_BYTES or (6 * 1024 * 1024)) then
         Chat:_EnforceSavedHistoryTextQuota()
     end
 end
@@ -2170,8 +2170,84 @@ local function RewriteThreadHistory(thread)
     if Chat._savedTextBytes ~= nil then
         local newBytes = Chat:_EstimateThreadRecordBytes(hist[storageKey])
         Chat._savedTextBytes = math.max(0, Chat._savedTextBytes - prevBytes + newBytes)
-        if Chat._savedTextBytes > (Chat._MAX_TEXT_HISTORY_BYTES or (100 * 1024 * 1024)) then
+        if Chat._savedTextBytes > (Chat._MAX_TEXT_HISTORY_BYTES or (6 * 1024 * 1024)) then
             Chat:_EnforceSavedHistoryTextQuota()
+        end
+    end
+end
+
+function Chat:TrimRuntimeMemory()
+    local nowEpoch = time()
+    local nowMono = (GetTime and GetTime()) or 0
+    if type(self._recentWorldOnlyDedup) == "table" then
+        for k, at in pairs(self._recentWorldOnlyDedup) do
+            if (nowMono - (tonumber(at) or 0)) > 6.0 then
+                self._recentWorldOnlyDedup[k] = nil
+            end
+        end
+    end
+    if type(self._worldLogDedup) == "table" then
+        for k, at in pairs(self._worldLogDedup) do
+            if (nowEpoch - (tonumber(at) or 0)) > 8 then
+                self._worldLogDedup[k] = nil
+            end
+        end
+    end
+    if type(self._errorOriginLineCache) == "table" then
+        for k, rec in pairs(self._errorOriginLineCache) do
+            if type(rec) ~= "table" or (nowMono - (rec.at or 0)) > 3.0 then
+                self._errorOriginLineCache[k] = nil
+            end
+        end
+    end
+    if type(self.silentNotFoundLedger) == "table" then
+        for k, rec in pairs(self.silentNotFoundLedger) do
+            if type(rec) ~= "table" or nowMono > (rec.expiresAt or 0) then
+                self.silentNotFoundLedger[k] = nil
+            end
+        end
+    end
+    if type(self.lastWhisperCandidates) == "table" then
+        for k, rec in pairs(self.lastWhisperCandidates) do
+            if type(rec) ~= "table" or (nowMono - (rec.at or 0)) > 20 then
+                self.lastWhisperCandidates[k] = nil
+            end
+        end
+    end
+    if type(self.seenAllianceMsgs) == "table" then
+        for k, at in pairs(self.seenAllianceMsgs) do
+            if (nowMono - (tonumber(at) or 0)) > 120 then
+                self.seenAllianceMsgs[k] = nil
+            end
+        end
+    end
+    if self._ResetTransientShieldCaches then
+        self:_ResetTransientShieldCaches()
+    end
+    local hist = GetHistoryScopeTable()
+    if type(hist) == "table" and type(self.threads) == "table" then
+        for key, t in pairs(self.threads) do
+            if type(key) == "string" and key:sub(1, 2) == "w:" and type(t) == "table"
+                and t._hydrated ~= false and type(t.messages) == "table" and #t.messages > 10
+                and (tonumber(t.unread) or 0) == 0
+                and (nowEpoch - (tonumber(t.lastAt) or 0)) > 600
+                and not (self.IsThreadPinned and self:IsThreadPinned(key))
+                and not (self.IsQuickReplyPinned and self:IsQuickReplyPinned(key))
+                and not (ns.QuickReply and ns.QuickReply.IsViewingThread and ns.QuickReply:IsViewingThread(key))
+                and not (ns.UI and ns.UI.IsChatThreadVisible and ns.UI:IsChatThreadVisible(key))
+                and self.activeThreadKey ~= key
+            then
+                local histKey = t._savedHistKey or key
+                local saved = hist[histKey]
+                if type(saved) == "table" and type(saved.lines) == "table" and #saved.lines > 0 and self:ShouldPersistThreadKey(key) then
+                    t._savedHistKey = histKey
+                    t._savedCanonDisp = t.targetName or t.title
+                    t._savedCount = math.min(#saved.lines, self:GetHistoryLimitForKey(key))
+                    t._savedLastLine = saved.lines[#saved.lines]
+                    t._hydrated = false
+                    t.messages = {}
+                end
+            end
         end
     end
 end
@@ -2359,6 +2435,12 @@ local function LookupClassFromCache(lookupKey, guid)
                 return pres.classFile
             end
         end
+        if ns.Clan and ns.Clan.GetCachedLfgPlayerInfo then
+            local lfgRec = ns.Clan:GetCachedLfgPlayerInfo(lookupKey)
+            if lfgRec and lfgRec.classFile then
+                return lfgRec.classFile
+            end
+        end
     end
     return nil
 end
@@ -2494,6 +2576,9 @@ local function LookupLevelFromCache(lookupKey, displayName, guid, bnetAccountID,
             local wlTbl = Store:GetWatchlistTable()
             resolvedLvl = ValidLevel(wlTbl and wlTbl[lk] and wlTbl[lk].level)
         end
+        if not resolvedLvl and Store.liveUnitObs and Store.liveUnitObs[lk] then
+            resolvedLvl = ValidLevel(Store.liveUnitObs[lk].level)
+        end
         if not resolvedLvl and Store.GetFriendPresence then
             local pres = Store:GetFriendPresence(lk)
             resolvedLvl = ValidLevel(pres and (pres.lastLevel or pres.level))
@@ -2508,6 +2593,11 @@ local function LookupLevelFromCache(lookupKey, displayName, guid, bnetAccountID,
         local sp = (guid and ns.Spotter.entryByGuid and ns.Spotter.entryByGuid[guid])
             or (lk and ns.Spotter.entries and ns.Spotter.entries[lk])
         resolvedLvl = ValidLevel(sp and sp.level)
+    end
+
+    if not resolvedLvl and lk and ns.Clan and ns.Clan.GetCachedLfgPlayerInfo then
+        local lfgRec = ns.Clan:GetCachedLfgPlayerInfo(lk, dispStr)
+        resolvedLvl = ValidLevel(lfgRec and lfgRec.level)
     end
 
     if (not cacheOnly) and not resolvedLvl and lk and ns.db and type(ns.db.alts) == "table" then
@@ -2540,6 +2630,60 @@ end
 
 function Chat:ResolvePlayerLevel(lookupKey, displayName, guid, bnetAccountID, cacheOnly)
     return LookupLevelFromCache(lookupKey, displayName, guid, bnetAccountID, cacheOnly)
+end
+
+function Chat:RecordWhoObservation(fullName, level, classFile, area, guild, skipEmit, obsSource)
+    if type(fullName) ~= "string" or fullName == "" then return false end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(fullName)
+    local lk = parsed and parsed.lookupKey
+    if not lk or lk == "" then return false end
+    local lvl = ValidLevel(level)
+    local cleanCls = (type(classFile) == "string" and classFile ~= "") and classFile or nil
+    local cleanArea = (type(area) == "string" and area ~= "") and area or nil
+    local cleanGuild = (type(guild) == "string" and guild ~= "") and guild or nil
+    local changed = false
+
+    if lvl then
+        if whoLevelCache[lk] == nil then
+            if whoLevelCount >= MAX_WHO_LEVEL_CACHE then
+                wipe(whoLevelCache)
+                whoLevelCount = 0
+            end
+            whoLevelCount = whoLevelCount + 1
+        end
+        if whoLevelCache[lk] ~= lvl then
+            whoLevelCache[lk] = lvl
+            changed = true
+        end
+    end
+
+    local wt = Chat.threads and Chat.threads["w:" .. lk]
+    if wt then
+        if lvl and (not wt.level or wt.level <= 0 or wt.level < lvl) then
+            wt.level = lvl
+            changed = true
+        end
+        if cleanCls and (not wt.classFile or wt.classFile == "") then
+            wt.classFile = cleanCls
+            changed = true
+        end
+    end
+
+    if Store and Store.RecordLiveUnitObservation and (lvl or cleanCls or cleanArea or cleanGuild) then
+        Store:RecordLiveUnitObservation(parsed.displayName, {
+            level = lvl,
+            classFile = cleanCls,
+            area = cleanArea,
+            guild = cleanGuild,
+            source = obsSource or "who",
+        })
+        changed = true
+    end
+
+    if changed and not skipEmit then
+        QueueChatEmit(0.1)
+    end
+    return changed
 end
 
 local function LookupGuidFromCache(lookupKey)
@@ -2696,20 +2840,22 @@ function Chat:_RememberGeneralDedup(rawText, senderKey)
         list = {}
         self._recentGeneralDedup = list
     end
+    local cap = 80
     local nowMono = (GetTime and GetTime()) or 0
-    local w = 1
-    for i = 1, #list do
-        if list[i] and (nowMono - (list[i].at or 0)) <= 18.0 then
-            list[w] = list[i]
-            w = w + 1
-        end
+    local count = self._recentGenDedupCount or 0
+    local head = self._recentGenDedupHead or 0
+    local writeIdx = (head % cap) + 1
+    local rec = list[writeIdx]
+    if type(rec) ~= "table" then
+        rec = {}
+        list[writeIdx] = rec
     end
-    for i = #list, w, -1 do
-        list[i] = nil
-    end
-    list[#list + 1] = { sig = sig, sender = senderKey, at = nowMono }
-    while #list > 80 do
-        table.remove(list, 1)
+    rec.sig = sig
+    rec.sender = senderKey
+    rec.at = nowMono
+    self._recentGenDedupHead = writeIdx
+    if count < cap then
+        self._recentGenDedupCount = count + 1
     end
 end
 
@@ -2719,10 +2865,17 @@ function Chat:_WasRecentlyRecordedInGeneral(rawText, senderKey)
     local bodyPart = norm:match(":%s*(.+)$") or norm
     local list = self._recentGeneralDedup
     local nowMono = (GetTime and GetTime()) or 0
-    if type(list) == "table" and #list > 0 then
-        for i = #list, 1, -1 do
-            local item = list[i]
-            if item and (nowMono - (item.at or 0)) <= 18.0 and item.sig and item.sig ~= "" then
+    local cap = 80
+    local count = self._recentGenDedupCount or (type(list) == "table" and #list or 0)
+    local head = self._recentGenDedupHead or count
+    if type(list) == "table" and count > 0 then
+        for step = 0, count - 1 do
+            local idx = ((head - 1 - step) % cap) + 1
+            local item = list[idx]
+            if item and item.sig and item.sig ~= "" then
+                if (nowMono - (item.at or 0)) > 18.0 then
+                    break
+                end
                 local senderMatch = (not senderKey) or (not item.sender) or (senderKey == item.sender)
                 if senderMatch then
                     local sig = item.sig
@@ -3089,8 +3242,15 @@ function Chat:RecordGeneralMessage(kind, senderDisp, text, isMe, resolvedClass, 
         table.insert(genThread.messages, gEntry)
     end
     local maxGenLines = math.max(200, Chat:GetHistoryLimitForKey("ch:general"), MAX_THREAD_LINES)
-    while #genThread.messages > maxGenLines do
-        table.remove(genThread.messages, 1)
+    local genMsgs = genThread.messages
+    local dropGen = #genMsgs - maxGenLines
+    if dropGen > 0 then
+        for k = 1, maxGenLines do
+            genMsgs[k] = genMsgs[k + dropGen]
+        end
+        for k = #genMsgs, maxGenLines + 1, -1 do
+            genMsgs[k] = nil
+        end
     end
     genThread.lastAt = math.max(tonumber(genThread.lastAt) or 0, ts)
     genThread.unread = 0
@@ -4264,6 +4424,39 @@ function Chat:RefreshTrackedGroupSectionLabel(state, sessKey, gInfo, msgTs)
     end
 end
 
+--- Shifts section marker indices cleanly after trimming old items from a stream viewport.
+function Chat:ShiftTrackedSections(state, dropped)
+    local d = tonumber(dropped) or 0
+    if not (state and state.sections and d > 0) then
+        return
+    end
+    local secs = state.sections
+    local w = 1
+    local lastEvicted = nil
+    for i = 1, #secs do
+        local sec = secs[i]
+        sec.bannerLineIdx = (sec.bannerLineIdx or 1) - d
+        sec.firstMsgLineIdx = (sec.firstMsgLineIdx or 1) - d
+        if sec.firstMsgLineIdx >= 1 then
+            if sec.bannerLineIdx < 1 then
+                sec.bannerLineIdx = 0
+            end
+            secs[w] = sec
+            w = w + 1
+        else
+            lastEvicted = sec
+        end
+    end
+    for i = #secs, w, -1 do
+        secs[i] = nil
+    end
+    if lastEvicted and (#secs == 0 or (secs[1].firstMsgLineIdx or 1) > 1) then
+        lastEvicted.bannerLineIdx = 0
+        lastEvicted.firstMsgLineIdx = 1
+        table.insert(secs, 1, lastEvicted)
+    end
+end
+
 --- Computes the topmost and bottommost logical message/item indices visible inside `msgFrame`.
 function Chat:FindTopVisibleLine(msgFrame, lineVisRows)
     if msgFrame and msgFrame._isStreamViewport and msgFrame.GetVisibleItemBounds then
@@ -4588,10 +4781,16 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
         end
         local fnLow = Chat._cachedMyFirstLower
         if fnLow and fnLow ~= false then
-            local plainLow = tostring(text):gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):lower()
-            local padded = " " .. plainLow:gsub("[%p]", " ") .. " "
-            if padded:find(" " .. fnLow .. " ", 1, true) or plainLow:find("@" .. fnLow, 1, true) then
-                isMention = true
+            local rawStr = tostring(text)
+            local rawLow = rawStr:lower()
+            if rawLow:find(fnLow, 1, true) then
+                local plainLow = rawStr:find("|", 1, true)
+                    and rawStr:gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):lower()
+                    or rawLow
+                local padded = " " .. plainLow:gsub("[%p]", " ") .. " "
+                if padded:find(" " .. fnLow .. " ", 1, true) or plainLow:find("@" .. fnLow, 1, true) then
+                    isMention = true
+                end
             end
         end
     end
@@ -4709,23 +4908,33 @@ local function AppendMessage(thread, senderName, text, incoming, classFile, skip
     end
     if thread.kind ~= "NOTES" then
         local maxMem = math.max(MAX_THREAD_LINES, Chat:GetHistoryLimitForKey(thread.key))
-        local trimmedGrp = false
-        while #thread.messages > maxMem do
-            local rem = table.remove(thread.messages, 1)
-            if rem and rem.groupRosterId then
-                trimmedGrp = true
-            end
-        end
-        if trimmedGrp and type(thread.groupRosters) == "table" then
-            local keep = {}
-            for _, mm in ipairs(thread.messages) do
-                if type(mm) == "table" and mm.groupRosterId then
-                    keep[mm.groupRosterId] = true
+        local msgs = thread.messages
+        local dropMem = #msgs - maxMem
+        if dropMem > 0 then
+            local trimmedGrp = false
+            for i = 1, dropMem do
+                local rem = msgs[i]
+                if rem and rem.groupRosterId then
+                    trimmedGrp = true
                 end
             end
-            for rk in pairs(thread.groupRosters) do
-                if not keep[rk] then
-                    thread.groupRosters[rk] = nil
+            for k = 1, maxMem do
+                msgs[k] = msgs[k + dropMem]
+            end
+            for k = #msgs, maxMem + 1, -1 do
+                msgs[k] = nil
+            end
+            if trimmedGrp and type(thread.groupRosters) == "table" then
+                local keep = {}
+                for _, mm in ipairs(msgs) do
+                    if type(mm) == "table" and mm.groupRosterId then
+                        keep[mm.groupRosterId] = true
+                    end
+                end
+                for rk in pairs(thread.groupRosters) do
+                    if not keep[rk] then
+                        thread.groupRosters[rk] = nil
+                    end
                 end
             end
         end
@@ -5188,7 +5397,7 @@ function Chat:LoadSavedHistory()
     local limit = GetChatHistoryLimit()
     local hist = GetHistoryScopeTable()
     self._savedTextBytes = self:_EstimateAllSavedTextBytes()
-    if self._savedTextBytes > (self._MAX_TEXT_HISTORY_BYTES or (100 * 1024 * 1024)) then
+    if self._savedTextBytes > (self._MAX_TEXT_HISTORY_BYTES or (6 * 1024 * 1024)) then
         self:_EnforceSavedHistoryTextQuota()
     end
     if hist then
@@ -7418,6 +7627,52 @@ function Chat:FindBNetAccountIdByLookupKey(lookupKey)
     return FindBNetAccountIdByLookupKey(lookupKey)
 end
 
+function Chat:EnsureBNetWhisperThreadByTarget(rawTarget)
+    local clean = Safe.String(rawTarget)
+    if not clean then return nil end
+    clean = clean:gsub("[%c]", ""):gsub("^%s*(.-)%s*$", "%1")
+    if clean == "" then return nil end
+    local wantLow = clean:lower()
+    if type(self.threads) == "table" then
+        for tKey, tr in pairs(self.threads) do
+            if type(tr) == "table" and tr.kind == "BN_WHISPER" then
+                local t1 = type(tr.title) == "string" and tr.title:lower() or ""
+                local t2 = type(tr.targetName) == "string" and tr.targetName:lower() or ""
+                local t3 = type(tr.bnetName) == "string" and tr.bnetName:lower() or ""
+                if t1 == wantLow or t2 == wantLow or t3 == wantLow then
+                    return tKey
+                end
+            end
+        end
+    end
+    local cache = EnsureBNetLookupCache()
+    local targetLk = (Compat and Compat.ParseCharacterFields and Compat.ParseCharacterFields(clean)) or nil
+    local matchedRec = nil
+    for _, rec in pairs(cache.anyById) do
+        if type(rec) == "table" then
+            local aName = type(rec.accName) == "string" and rec.accName:lower() or ""
+            local fChar = type(rec.fullChar) == "string" and rec.fullChar:lower() or ""
+            if aName == wantLow
+                or tostring(rec.accId or "") == clean
+                or (fChar ~= "" and fChar == wantLow)
+                or (targetLk and rec.lookupKey and rec.lookupKey == targetLk)
+            then
+                matchedRec = rec
+                break
+            end
+        end
+    end
+    if matchedRec and matchedRec.accId and self.OpenDirectConversation then
+        return self:OpenDirectConversation({
+            bnetAccountID = matchedRec.accId,
+            bnetName = matchedRec.accName,
+            targetName = matchedRec.fullChar,
+            autoProbe = false,
+        })
+    end
+    return nil
+end
+
 function Chat:GetBNetCachedLevel(lookupKey, guid, bnetAccountID)
     local cache = EnsureBNetLookupCache()
     local rec = (guid and cache.byGuid[guid])
@@ -8633,13 +8888,19 @@ function Chat:MarkPeerVerified(targetChar, bnetGameAccId, versionStr, sourceTag,
             if self.probeFailures then self.probeFailures["w:" .. lk] = nil end
             if self.probeAttemptIndex then self.probeAttemptIndex["w:" .. lk] = nil end
 
+            local syncDisp = reconciledDisplay[lk] or (lk == parsed.lookupKey and parsed.displayName) or parsed.displayName
+            local cleanPeerCls = (type(peerClass) == "string" and peerClass ~= "") and peerClass or nil
+            local cleanPeerLvl = (type(peerLevel) == "number" and peerLevel > 0) and peerLevel or nil
+            local cleanPeerZone = (type(peerZone) == "string" and peerZone ~= "") and peerZone or nil
+            if cleanPeerCls or cleanPeerLvl or cleanPeerZone then
+                self:RecordWhoObservation(syncDisp, cleanPeerLvl, cleanPeerCls, cleanPeerZone, nil, true, "addon")
+            end
             if Store and Store.SyncWatchlistObservation then
-                local syncDisp = reconciledDisplay[lk] or (lk == parsed.lookupKey and parsed.displayName) or parsed.displayName
                 Store:SyncWatchlistObservation(syncDisp, {
                     online = true,
-                    classFile = (type(peerClass) == "string" and peerClass ~= "") and peerClass or nil,
-                    level = (type(peerLevel) == "number" and peerLevel > 0) and peerLevel or nil,
-                    area = (type(peerZone) == "string" and peerZone ~= "") and peerZone or nil,
+                    classFile = cleanPeerCls,
+                    level = cleanPeerLvl,
+                    area = cleanPeerZone,
                     source = "addon",
                 })
             end
@@ -9781,6 +10042,19 @@ function Chat:SendDirectLfgWhisper(targetName, message, isHardwareEvent, suppres
     return false
 end
 
+function Chat:BuildDirectPresencePayload(tag)
+    local _, myClass = Safe.Call(UnitClass, "player")
+    myClass = Compat.CleanPayloadField(Safe.String(myClass) or "", 16)
+    local myLvl = tostring(Safe.Number(Safe.Call(UnitLevel, "player")) or 0)
+    local shareLoc = not (ns.db and ns.db.settings and ns.db.settings.chatShareLocation == false)
+    local myZone = shareLoc and Compat.CleanPayloadField((Compat.CurrentZoneName and Compat.CurrentZoneName()) or "", 42) or ""
+    return (tag or "DPING")
+        .. "|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+        .. "|" .. myClass
+        .. "|" .. myLvl
+        .. "|" .. myZone
+end
+
 function Chat:ProbePeerAddon(threadKey, force)
     local t = threadKey and self.threads[threadKey]
     if not t or (t.kind ~= "WHISPER" and t.kind ~= "BN_WHISPER") then
@@ -9821,7 +10095,7 @@ function Chat:ProbePeerAddon(threadKey, force)
     end
 
     local attemptOffset = self.probeAttemptIndex[threadKey] or 0
-    local payload = "DPING|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+    local payload = self:BuildDirectPresencePayload("DPING")
     local target = state.targetChar or t.targetName
     local extra = (state.rawTargetChar and state.rawTargetChar ~= target) and { state.rawTargetChar } or nil
     local pLk = target and Compat.ParseCharacterFields(target) or nil
@@ -9957,7 +10231,7 @@ local function DrainDiscoveryQueue()
             elseif item.parsed then
                 bnetGId = select(1, FindBNetWoWGameAccountByChar(item.parsed, item.guid))
             end
-            local payload = "DPING|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+            local payload = Chat:BuildDirectPresencePayload("DPING")
             if bnetGId and not (Chat.sessionBNetPeers and Chat.sessionBNetPeers[bnetGId]) then
                 Chat.lastDiscoveryPingAt = monoNow
                 SendRoomPacket(nil, bnetGId, payload, 0, {
@@ -10399,7 +10673,7 @@ function Chat:StepPresenceProbes()
     self.lastPresenceProbedAt[chosenLk] = monoNow
     self.pendingPresenceProbes[chosenLk] = probeRec
 
-    local payload = "DPING|" .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
+    local payload = self:BuildDirectPresencePayload("DPING")
     local sentOk = SendRoomPacket(chosenDisp, nil, payload, 0, {
         allowBNet = false,
         sendAllCandidates = false,
@@ -11536,16 +11810,7 @@ local function HandleIncomingAddonPacket(payloadRaw, senderRaw, bnGameAccId)
                     end
                     Chat._pongCount = kept
                 end
-                local _, myClass = Safe.Call(UnitClass, "player")
-                myClass = Compat.CleanPayloadField(Safe.String(myClass) or "", 16)
-                local myLvl = tostring(Safe.Number(Safe.Call(UnitLevel, "player")) or 0)
-                local shareLoc = not (ns.db and ns.db.settings and ns.db.settings.chatShareLocation == false)
-                local myZone = shareLoc and Compat.CleanPayloadField((Compat.CurrentZoneName and Compat.CurrentZoneName()) or "", 42) or ""
-                local replyPayload = "DPONG|"
-                    .. Compat.CleanPayloadField(ns.version or "0.0.0", 24)
-                    .. "|" .. myClass
-                    .. "|" .. myLvl
-                    .. "|" .. myZone
+                local replyPayload = Chat:BuildDirectPresencePayload("DPONG")
                 local targetForPong = (parsedSender and parsedSender.displayName) or cleanSenderStr
                 local extraPong = (cleanSenderStr and cleanSenderStr ~= targetForPong) and { cleanSenderStr } or nil
                 SendRoomPacket(targetForPong, bnGameAccId, replyPayload, nil, {
@@ -12002,8 +12267,28 @@ local function BuildOfficialSenderTagPrefix(lookupKey, displayName, guid)
 end
 
 function Chat:InvalidateOfficialChatCache()
-    wipe(filterDecisionCache)
+    filterDecisionCache = {}
     filterDecisionCount = 0
+end
+
+function Chat:_ResetTransientShieldCaches()
+    if filterDecisionCount > 0 then
+        filterDecisionCache = {}
+        filterDecisionCount = 0
+    end
+    if floodTrackerCount > 0 then
+        floodTracker = {}
+        floodTrackerCount = 0
+    end
+    if mentionCooldownCount > 0 then
+        local nowMono = (GetTime and GetTime()) or 0
+        for k, at in pairs(mentionCooldowns) do
+            if (nowMono - (tonumber(at) or 0)) > (MENTION_COOLDOWN_SEC * 2) then
+                mentionCooldowns[k] = nil
+                mentionCooldownCount = math.max(0, mentionCooldownCount - 1)
+            end
+        end
+    end
 end
 
 local MAX_OFFICIAL_CAPTURE_LINES = 60
@@ -12038,8 +12323,13 @@ local function CleanRenderedChatLine(rawMsg)
     return s
 end
 
+Chat._COMBAT_LOG_CAP = 400
 Chat._combatLogBuffer = Chat._combatLogBuffer or {}
 Chat._combatLogEmitPending = false
+Chat._combatLogEmitFn = Chat._combatLogEmitFn or function()
+    Chat._combatLogEmitPending = false
+    ns:Emit("COMBAT_LOG_UPDATED")
+end
 
 function Chat:_ClassifyCombatLogKind(plainStr, r, g, b)
     local low = (type(plainStr) == "string") and plainStr:lower() or ""
@@ -12069,6 +12359,11 @@ end
 function Chat:ClearCombatLogBufferSilent()
     if self._combatLogBuffer then
         wipe(self._combatLogBuffer)
+    end
+    self._combatLogHead = 1
+    self._combatLogCount = 0
+    if self._combatLogViewBuf then
+        wipe(self._combatLogViewBuf)
     end
 end
 
@@ -12137,30 +12432,35 @@ function Chat:RecordCombatLogLine(rawMsg, r, g, b, customTs, isBackfill)
         buf = {}
         self._combatLogBuffer = buf
     end
-    buf[#buf + 1] = {
-        ts = parsedTs or time(),
-        text = safeLine,
-        plain = plain,
-        r = nr or 0.92,
-        g = ng or 0.88,
-        b = nb or 0.78,
-        kind = self:_ClassifyCombatLogKind(plain, nr, ng, nb),
-    }
-    if #buf > 460 then
-        local trimmed = {}
-        local startAt = #buf - 400 + 1
-        for i = startAt, #buf do
-            trimmed[#trimmed + 1] = buf[i]
-        end
-        self._combatLogBuffer = trimmed
+    local cap = self._COMBAT_LOG_CAP or 400
+    local count = self._combatLogCount or 0
+    local head = self._combatLogHead or 1
+    local writeIdx
+    if count < cap then
+        count = count + 1
+        writeIdx = ((head + count - 2) % cap) + 1
+    else
+        writeIdx = head
+        head = (head % cap) + 1
     end
+    self._combatLogHead = head
+    self._combatLogCount = count
+    local slot = buf[writeIdx]
+    if type(slot) ~= "table" then
+        slot = {}
+        buf[writeIdx] = slot
+    end
+    slot.ts = parsedTs or time()
+    slot.text = safeLine
+    slot.plain = plain
+    slot.r = nr or 0.92
+    slot.g = ng or 0.88
+    slot.b = nb or 0.78
+    slot.kind = self:_ClassifyCombatLogKind(plain, nr, ng, nb)
     if (not isBackfill) and not self._combatLogEmitPending then
         self._combatLogEmitPending = true
         if C_Timer and C_Timer.After then
-            C_Timer.After(0.15, function()
-                self._combatLogEmitPending = false
-                ns:Emit("COMBAT_LOG_UPDATED")
-            end)
+            C_Timer.After(0.15, self._combatLogEmitFn)
         else
             self._combatLogEmitPending = false
             ns:Emit("COMBAT_LOG_UPDATED")
@@ -12173,8 +12473,11 @@ function Chat:GetCombatLogEntries(filterKind)
     if not buf then
         buf = {}
         self._combatLogBuffer = buf
+        self._combatLogHead = 1
+        self._combatLogCount = 0
     end
-    if #buf == 0 then
+    local count = self._combatLogCount or 0
+    if count == 0 then
         local cf2 = _G.ChatFrame2
         if cf2 and cf2.GetNumMessages and cf2.GetMessageInfo then
             local okN, total = pcall(cf2.GetNumMessages, cf2)
@@ -12188,15 +12491,24 @@ function Chat:GetCombatLogEntries(filterKind)
                     end
                 end
                 buf = self._combatLogBuffer
+                count = self._combatLogCount or 0
             end
         end
     end
-    if not filterKind or filterKind == "all" then
-        return buf
+    local head = self._combatLogHead or 1
+    local out = self._combatLogViewBuf
+    if not out then
+        out = {}
+        self._combatLogViewBuf = out
+    else
+        wipe(out)
     end
-    local out = {}
-    for _, item in ipairs(buf) do
-        if item and (item.kind == filterKind or (filterKind == "kills" and item.kind == "misc")) then
+    local wantAll = (not filterKind or filterKind == "all")
+    local cap = self._COMBAT_LOG_CAP or 400
+    for i = 1, count do
+        local idx = ((head + i - 2) % cap) + 1
+        local item = buf[idx]
+        if item and (wantAll or item.kind == filterKind or (filterKind == "kills" and item.kind == "misc")) then
             out[#out + 1] = item
         end
     end
@@ -12204,9 +12516,7 @@ function Chat:GetCombatLogEntries(filterKind)
 end
 
 function Chat:ClearCombatLogEntries()
-    if self._combatLogBuffer then
-        wipe(self._combatLogBuffer)
-    end
+    self:ClearCombatLogBufferSilent()
     ns:Emit("COMBAT_LOG_UPDATED")
 end
 
@@ -12293,10 +12603,7 @@ function Chat:RecordWorldLogLine(kind, tagLabel, rawMsg, r, g, b, customTs, skip
     if not skipEmit and not self._combatLogEmitPending then
         self._combatLogEmitPending = true
         if C_Timer and C_Timer.After then
-            C_Timer.After(0.15, function()
-                self._combatLogEmitPending = false
-                ns:Emit("COMBAT_LOG_UPDATED")
-            end)
+            C_Timer.After(0.15, self._combatLogEmitFn)
         else
             self._combatLogEmitPending = false
             ns:Emit("COMBAT_LOG_UPDATED")
@@ -12606,13 +12913,17 @@ function Chat:ClearFilteredChatLog()
     ns:Emit("CHAT_FILTERED_UPDATED")
 end
 
+Chat._SHIELD_CLEAN = Chat._SHIELD_CLEAN or { blocked = false }
+
 local function EvaluateShieldDecision(eventName, text, author, guid, lineID, channelLabel)
     local cacheKey = (lineID and lineID ~= 0) and (tostring(eventName) .. ":" .. tostring(lineID)) or nil
     if cacheKey and filterDecisionCache[cacheKey] ~= nil then
         return filterDecisionCache[cacheKey]
     end
 
-    local decision = { blocked = false, modifiedText = nil }
+    local blocked = false
+    local modifiedText = nil
+    local modifiedChannel = nil
     local s = ns.db and ns.db.settings
     local parsed = author and Compat.ParseCharacterName and Compat.ParseCharacterName(author)
     local lookupKey = parsed and parsed.lookupKey or nil
@@ -12624,14 +12935,14 @@ local function EvaluateShieldDecision(eventName, text, author, guid, lineID, cha
         if (not s) or (s.accountIgnoreHideChat ~= false) then
             local ign = ns.Store and ns.Store.GetAccountIgnore and ns.Store:GetAccountIgnore(lookupKey)
             if ign and ign.hideChat ~= false then
-                decision.blocked = true
+                blocked = true
                 local rLbl = (ns.Store and ns.Store.FormatIgnoreReason) and ns.Store:FormatIgnoreReason(ign.reason, L) or L["Account Ignore"]
                 RecordFilteredMessage("IGNORE", rLbl, displayName, lookupKey, GetShortChannelLabel(eventName, channelLabel), text)
             end
         end
 
         -- 2) Opt-in Public Anti-Spam Shield (never blocks Friends, Guild, BNet, or Group)
-        if (not decision.blocked) and s and s.chatAntiSpamEnabled == true then
+        if (not blocked) and s and s.chatAntiSpamEnabled == true then
             local isPublicSpamEvent = (eventName == "CHAT_MSG_CHANNEL" or eventName == "CHAT_MSG_SAY" or eventName == "CHAT_MSG_YELL" or eventName == "CHAT_MSG_WHISPER")
             if isPublicSpamEvent and not IsTrustedSocialSender(lookupKey, guid) then
                 local folded = Chat:FoldSearchText(text)
@@ -12664,7 +12975,7 @@ local function EvaluateShieldDecision(eventName, text, author, guid, lineID, cha
                         matchedReason = L["Repeated Flood"]
                     else
                         if floodTrackerCount >= 180 then
-                            wipe(floodTracker)
+                            floodTracker = {}
                             floodTrackerCount = 0
                         end
                         if not floodTracker[fKey] then
@@ -12675,7 +12986,7 @@ local function EvaluateShieldDecision(eventName, text, author, guid, lineID, cha
                 end
 
                 if matchedReason then
-                    decision.blocked = true
+                    blocked = true
                     RecordFilteredMessage("SPAM", matchedReason, displayName, lookupKey, GetShortChannelLabel(eventName, channelLabel), text)
                 end
             end
@@ -12683,38 +12994,42 @@ local function EvaluateShieldDecision(eventName, text, author, guid, lineID, cha
     end
 
     -- 3) Clickable URLs, {rt1..rt8} Raid Icons & Official Chat Enhancements (only if not blocked)
-    if (not decision.blocked) and ((not s) or (s.chatClickableUrls ~= false)) then
+    if (not blocked) and ((not s) or (s.chatClickableUrls ~= false)) then
         local linked = Chat:LinkifyUrls(text)
         if linked and linked ~= text then
-            decision.modifiedText = linked
+            modifiedText = linked
         end
     end
 
-    if (not decision.blocked) and ((not s) or (s.embedOfficialChat ~= false)) then
-        local curTxt = decision.modifiedText or text
+    if (not blocked) and ((not s) or (s.embedOfficialChat ~= false)) then
+        local curTxt = modifiedText or text
         if curTxt:find("{", 1, true) then
             local rtFormatted = Chat:FormatRaidTargetTokens(curTxt)
             if rtFormatted and rtFormatted ~= curTxt then
-                decision.modifiedText = rtFormatted
+                modifiedText = rtFormatted
             end
         end
         if eventName == "CHAT_MSG_CHANNEL" and ((not s) or (s.officialChatShortChannels ~= false)) then
             local shortCh = ShortenOfficialChannelLabel(channelLabel)
             if shortCh then
-                decision.modifiedChannel = shortCh
+                modifiedChannel = shortCh
             end
         end
         if (not isMe) and eventName ~= "CHAT_MSG_TEXT_EMOTE" and ((not s) or (s.officialChatSenderTags ~= false)) then
             local prefixTags = BuildOfficialSenderTagPrefix(lookupKey, displayName, guid)
             if prefixTags and prefixTags ~= "" then
-                decision.modifiedText = prefixTags .. (decision.modifiedText or text)
+                modifiedText = prefixTags .. (modifiedText or text)
             end
         end
     end
 
+    local decision = (blocked or modifiedText ~= nil or modifiedChannel ~= nil)
+        and { blocked = blocked, modifiedText = modifiedText, modifiedChannel = modifiedChannel }
+        or Chat._SHIELD_CLEAN
+
     if cacheKey then
         if filterDecisionCount >= FILTER_CACHE_MAX then
-            wipe(filterDecisionCache)
+            filterDecisionCache = {}
             filterDecisionCount = 0
         end
         filterDecisionCache[cacheKey] = decision
@@ -12779,7 +13094,7 @@ function Chat:MarkChatLineRecorded(eventName, lineID)
     local k2 = LineTrackCategoryKey(eventName, lineID)
     if not lt.ids[k1] or not lt.ids[k2] then
         if lt.count >= lt.max then
-            wipe(lt.ids)
+            lt.ids = {}
             lt.count = 0
         end
         if not lt.ids[k1] then
@@ -12928,7 +13243,7 @@ local function OfficialChatShieldFilter(_, eventName, msgRaw, authorRaw, ...)
     local outText = dec.modifiedText or msg
     local isMeSender = (eventName == "CHAT_MSG_WHISPER_INFORM" or eventName == "CHAT_MSG_BN_WHISPER_INFORM")
         or (author and Compat.IsMe and Compat.IsMe(author, guid) == true)
-    if dec ~= Chat._SHIELD_NOT_BLOCKED and dec._fmtReady and dec._fmtSrc == msg and dec._fmtMe == (isMeSender == true) then
+    if dec ~= Chat._SHIELD_NOT_BLOCKED and dec ~= Chat._SHIELD_CLEAN and dec._fmtReady and dec._fmtSrc == msg and dec._fmtMe == (isMeSender == true) then
         outText = dec._fmtOut
     else
         if eventName == "CHAT_MSG_WHISPER_INFORM" then
@@ -12952,11 +13267,21 @@ local function OfficialChatShieldFilter(_, eventName, msgRaw, authorRaw, ...)
                 outText = hl
             end
         end
-        if dec ~= Chat._SHIELD_NOT_BLOCKED and lineID and lineID ~= 0 then
-            dec._fmtReady = true
-            dec._fmtSrc = msg
-            dec._fmtMe = (isMeSender == true)
-            dec._fmtOut = outText
+        if lineID and lineID ~= 0 and dec ~= Chat._SHIELD_NOT_BLOCKED then
+            if dec ~= Chat._SHIELD_CLEAN then
+                dec._fmtReady = true
+                dec._fmtSrc = msg
+                dec._fmtMe = (isMeSender == true)
+                dec._fmtOut = outText
+            elseif outText ~= msg then
+                filterDecisionCache[tostring(eventName) .. ":" .. tostring(lineID)] = {
+                    blocked = false,
+                    _fmtReady = true,
+                    _fmtSrc = msg,
+                    _fmtMe = (isMeSender == true),
+                    _fmtOut = outText,
+                }
+            end
         end
     end
     if dec.modifiedChannel and eventName == "CHAT_MSG_CHANNEL" then
@@ -13568,11 +13893,13 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
         local kind = (linked and linked.kind) or "WHISPER"
         local title = (linked and linked.title and linked.title ~= "" and linked.title) or peerParsed.displayName
         local cls = LookupClassFromCache(peerParsed.lookupKey, guid)
+        local resolvedLvl = LookupLevelFromCache(peerParsed.lookupKey, peerParsed.displayName, guid, bnAccId)
         local t = EnsureThread(key, kind, title, {
             targetName = PickNonClobberTarget(linked, peerParsed.displayName),
             bnetAccountID = bnAccId or (linked and linked.bnetAccountID),
             bnetName = bnAccName or (linked and linked.bnetName),
             classFile = (linked and linked.classFile) or cls,
+            level = (linked and linked.level) or resolvedLvl,
         })
         if t and peerParsed and peerParsed.displayName then
             SyncActiveCharacterOnThread(t, peerParsed.displayName, cls, nil)
@@ -13600,6 +13927,7 @@ local function OnChatEvent(event, textRaw, authorRaw, ...)
             AppendMessage(t, senderLabel, loggedText, incoming, incoming and cls or Safe.String(myClass), (kind ~= "WHISPER"), not incoming, {
                 senderGuid = incoming and guid or nil,
                 senderCharName = incoming and peerDispResolved or nil,
+                senderLevel = incoming and resolvedLvl or nil,
                 targetChar = targetCharLabel,
                 targetClass = incoming and Safe.String(myClass) or cls,
                 previewCategory = "WHISPER",
@@ -13935,21 +14263,25 @@ function Chat:RecordOutboundOrigin(kind, chatType, target, origin, prefix)
     if not self:IsErrorOriginTaggingEnabled() then return end
     if not origin or origin == "" then return end
     local monoNow = (GetTime and GetTime()) or 0
-    local cleanTarget = Safe.String(target) or ""
+    local cleanChatType = (type(chatType) == "string" and not Safe.IsSecret(chatType)) and chatType or (Safe.String(chatType) or "")
+    local cleanTarget = ""
     local fullLow = ""
     local baseLow = ""
     local lookupKey = ""
-    if cleanTarget ~= "" then
-        local trimmed = (Compat.Trim and Compat.Trim(cleanTarget)) or cleanTarget:match("^%s*(.-)%s*$") or ""
-        if trimmed ~= "" then
-            fullLow = (Compat.LowerUtf8 and Compat.LowerUtf8(trimmed)) or trimmed:lower()
-            local stripped = trimmed:gsub("%-[^%-]+$", "")
-            baseLow = (Compat.LowerUtf8 and Compat.LowerUtf8(stripped)) or stripped:lower()
-            if Compat.ParseCharacterFields then
-                lookupKey = Compat.ParseCharacterFields(trimmed) or ""
-            elseif Compat.ParseCharacterName then
-                local parsed = Compat.ParseCharacterName(trimmed)
-                lookupKey = (parsed and parsed.lookupKey) or ""
+    if cleanChatType == "WHISPER" then
+        cleanTarget = (type(target) == "string" and not Safe.IsSecret(target)) and target or (Safe.String(target) or "")
+        if cleanTarget ~= "" then
+            local trimmed = (Compat.Trim and Compat.Trim(cleanTarget)) or cleanTarget:match("^%s*(.-)%s*$") or ""
+            if trimmed ~= "" then
+                fullLow = (Compat.LowerUtf8 and Compat.LowerUtf8(trimmed)) or trimmed:lower()
+                local stripped = trimmed:gsub("%-[^%-]+$", "")
+                baseLow = (Compat.LowerUtf8 and Compat.LowerUtf8(stripped)) or stripped:lower()
+                if Compat.ParseCharacterFields then
+                    lookupKey = Compat.ParseCharacterFields(trimmed) or ""
+                elseif Compat.ParseCharacterName then
+                    local parsed = Compat.ParseCharacterName(trimmed)
+                    lookupKey = (parsed and parsed.lookupKey) or ""
+                end
             end
         end
     end
@@ -13958,22 +14290,28 @@ function Chat:RecordOutboundOrigin(kind, chatType, target, origin, prefix)
         ring = {}
         self._outboundOriginRing = ring
     end
-    local rec
-    if #ring >= 64 then
-        rec = table.remove(ring, 1)
-    else
+    local cap = 64
+    local head = self._outboundOriginHead or 0
+    local count = self._outboundOriginCount or 0
+    local writeIdx = (head % cap) + 1
+    local rec = ring[writeIdx]
+    if type(rec) ~= "table" then
         rec = {}
+        ring[writeIdx] = rec
     end
     rec.at = monoNow
     rec.kind = kind or "ADDON_MSG"
-    rec.chatType = Safe.String(chatType) or ""
+    rec.chatType = cleanChatType
     rec.target = cleanTarget
     rec.fullLow = fullLow
     rec.baseLow = baseLow
     rec.lookupKey = lookupKey
     rec.origin = origin
-    rec.prefix = Safe.String(prefix) or ""
-    ring[#ring + 1] = rec
+    rec.prefix = (type(prefix) == "string" and not Safe.IsSecret(prefix)) and prefix or (Safe.String(prefix) or "")
+    self._outboundOriginHead = writeIdx
+    if count < cap then
+        self._outboundOriginCount = count + 1
+    end
 end
 
 function Chat:InstallErrorOriginTracker()
@@ -14061,8 +14399,14 @@ function Chat:InstallErrorOriginTracker()
 
     if C_ChatInfo and type(C_ChatInfo.RegisterAddonMessagePrefix) == "function" then
         hooksecurefunc(C_ChatInfo, "RegisterAddonMessagePrefix", function(prefixRaw)
-            local p = Safe.String(prefixRaw)
-            if p and p ~= "" and not Chat._addonPrefixOwners[p] then
+            if not Chat:IsErrorOriginTaggingEnabled() then return end
+            if Safe.IsSecret(prefixRaw) or type(prefixRaw) ~= "string" or prefixRaw == "" then return end
+            local p = prefixRaw
+            if not Chat._addonPrefixOwners[p] then
+                if (Chat._addonPrefixOwnerCount or 0) >= 250 then
+                    Chat._addonPrefixOwners = {}
+                    Chat._addonPrefixOwnerCount = 0
+                end
                 if not Chat._regPrefixHookLoc and type(debugstack) == "function" then
                     Chat._regPrefixHookLoc = NormalizeHookLoc(debugstack(1, 1, 0))
                 end
@@ -14070,6 +14414,7 @@ function Chat:InstallErrorOriginTracker()
                 local owner = ResolveStackOrigin(p, false, rawStack, Chat._regPrefixHookLoc)
                 if owner and owner ~= "" then
                     Chat._addonPrefixOwners[p] = owner
+                    Chat._addonPrefixOwnerCount = (Chat._addonPrefixOwnerCount or 0) + 1
                 end
             end
         end)
@@ -14083,9 +14428,7 @@ function Chat:InstallErrorOriginTracker()
 
     local function OnAddonMsgHook(prefixRaw, _, chatTypeRaw, targetRaw)
         if not Chat:IsErrorOriginTaggingEnabled() then return end
-        local p = Safe.String(prefixRaw) or ""
-        local ct = Safe.String(chatTypeRaw) or ""
-        local tgt = Safe.String(targetRaw) or ""
+        local p = (not Safe.IsSecret(prefixRaw) and type(prefixRaw) == "string") and prefixRaw or (Safe.String(prefixRaw) or "")
         local cachedOwner = (p ~= "" and Chat._addonPrefixOwners[p]) or nil
         local origin
         if p == PREFIX or p == "SCentral1" then
@@ -14093,27 +14436,43 @@ function Chat:InstallErrorOriginTracker()
         elseif cachedOwner and cachedOwner ~= "SocialCentral" and not IsSharedOwnerLabel(cachedOwner) then
             origin = cachedOwner
         else
+            Chat._addonSharedProbeTries = Chat._addonSharedProbeTries or {}
+            local probeKey = (p ~= "") and p or "__empty__"
+            local tries = Chat._addonSharedProbeTries[probeKey] or 0
             local inCombatNow = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
             local nowMono = (GetTime and GetTime()) or 0
             Chat._addonStackProbeAt = Chat._addonStackProbeAt or {}
-            local probeKey = (p ~= "") and p or "__empty__"
             local lastProbe = Chat._addonStackProbeAt[probeKey] or 0
-            if inCombatNow or (lastProbe > 0 and (nowMono - lastProbe) < 30.0) then
+            if inCombatNow or (cachedOwner and tries >= 2) or (lastProbe > 0 and (nowMono - lastProbe) < 30.0) then
                 origin = cachedOwner
             else
+                if (Chat._addonStackProbeCount or 0) >= 250 then
+                    Chat._addonStackProbeAt = {}
+                    Chat._addonSharedProbeTries = {}
+                    Chat._addonStackProbeCount = 0
+                end
                 if not Chat._addonMsgHookLoc and type(debugstack) == "function" then
                     Chat._addonMsgHookLoc = NormalizeHookLoc(debugstack(1, 1, 0))
                 end
                 local rawStack = type(debugstack) == "function" and debugstack(2, 14, 0) or nil
                 origin = ResolveStackOrigin(p, true, rawStack, Chat._addonMsgHookLoc)
+                if Chat._addonStackProbeAt[probeKey] == nil then
+                    Chat._addonStackProbeCount = (Chat._addonStackProbeCount or 0) + 1
+                end
                 Chat._addonStackProbeAt[probeKey] = nowMono
+                Chat._addonSharedProbeTries[probeKey] = tries + 1
                 if p ~= "" and origin and origin ~= "" and not Chat._addonPrefixOwners[p] then
+                    if (Chat._addonPrefixOwnerCount or 0) >= 250 then
+                        Chat._addonPrefixOwners = {}
+                        Chat._addonPrefixOwnerCount = 0
+                    end
                     Chat._addonPrefixOwners[p] = origin
+                    Chat._addonPrefixOwnerCount = (Chat._addonPrefixOwnerCount or 0) + 1
                 end
             end
         end
         if origin and origin ~= "" then
-            Chat:RecordOutboundOrigin("ADDON_MSG", ct, tgt, origin, p)
+            Chat:RecordOutboundOrigin("ADDON_MSG", chatTypeRaw, targetRaw, origin, p)
         end
     end
 
@@ -14298,6 +14657,9 @@ function Chat:DecorateSystemErrorOrigin(msgRaw, lineID)
     end
 
     local ring = self._outboundOriginRing or {}
+    local ringCap = 64
+    local ringCount = self._outboundOriginCount or #ring
+    local ringHead = self._outboundOriginHead or ringCount
     if matchCategory == "WHISPER_TARGET" and extractedTarget and extractedTarget ~= "" then
         local trimmedTgt = (Compat.Trim and Compat.Trim(extractedTarget)) or extractedTarget:match("^%s*(.-)%s*$") or ""
         local tgtFullLow = (Compat.LowerUtf8 and Compat.LowerUtf8(trimmedTgt)) or trimmedTgt:lower()
@@ -14306,8 +14668,9 @@ function Chat:DecorateSystemErrorOrigin(msgRaw, lineID)
         local tgtParsed = Compat.ParseCharacterName and Compat.ParseCharacterName(trimmedTgt)
         local tgtLk = (tgtParsed and tgtParsed.lookupKey) or ""
 
-        for i = #ring, 1, -1 do
-            local item = ring[i]
+        for step = 0, ringCount - 1 do
+            local idx = ((ringHead - 1 - step) % ringCap) + 1
+            local item = ring[idx]
             if item and (monoNow - (item.at or 0)) <= 10.0 and item.chatType == "WHISPER" then
                 local matched = (tgtFullLow ~= "" and (item.fullLow == tgtFullLow or item.baseLow == tgtFullLow))
                     or (tgtBaseLow ~= "" and (item.fullLow == tgtBaseLow or item.baseLow == tgtBaseLow))
@@ -14331,8 +14694,9 @@ function Chat:DecorateSystemErrorOrigin(msgRaw, lineID)
         end
     else
         local maxAge = (matchCategory == "WHISPER_ANY") and 8.0 or 3.5
-        for i = #ring, 1, -1 do
-            local item = ring[i]
+        for step = 0, ringCount - 1 do
+            local idx = ((ringHead - 1 - step) % ringCap) + 1
+            local item = ring[idx]
             if item and (monoNow - (item.at or 0)) <= maxAge then
                 local okMatch = false
                 if matchCategory == "WHISPER_ANY" then
@@ -15247,40 +15611,29 @@ function Chat:Init()
         if n <= 0 then return end
         local updated = false
         for i = 1, math.min(n, 50) do
-            local fullName, lvl
+            local fullName, lvl, wCls, wArea, wGuild
             if C_FriendList and C_FriendList.GetWhoInfo then
                 local info = Safe.Call(C_FriendList.GetWhoInfo, i)
                 if type(info) == "table" then
                     fullName = Safe.String(info.fullName)
                     lvl = ValidLevel(Safe.Number(info.level))
+                    wCls = Safe.String(info.filename)
+                    wArea = Safe.String(info.area)
+                    wGuild = Safe.String(info.fullGuildName)
                 end
             elseif GetWhoInfo then
-                local ok, wName, _, wLvl = pcall(GetWhoInfo, i)
+                local ok, wName, wG, wLvl, _, _, wZ, wClsFile = pcall(GetWhoInfo, i)
                 if ok then
                     fullName = Safe.String(wName)
                     lvl = ValidLevel(Safe.Number(wLvl))
+                    wGuild = Safe.String(wG)
+                    wArea = Safe.String(wZ)
+                    wCls = Safe.String(wClsFile)
                 end
             end
-            if fullName and lvl then
-                local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(fullName)
-                local lk = parsed and parsed.lookupKey
-                if lk and lk ~= "" then
-                    if whoLevelCache[lk] == nil then
-                        if whoLevelCount >= MAX_WHO_LEVEL_CACHE then
-                            wipe(whoLevelCache)
-                            whoLevelCount = 0
-                        end
-                        whoLevelCount = whoLevelCount + 1
-                    end
-                    if whoLevelCache[lk] ~= lvl then
-                        whoLevelCache[lk] = lvl
-                        updated = true
-                    end
-                    local wt = Chat.threads and Chat.threads["w:" .. lk]
-                    if wt and (not wt.level or wt.level <= 0 or wt.level < lvl) then
-                        wt.level = lvl
-                        updated = true
-                    end
+            if fullName and (lvl or wArea or wGuild or wCls) then
+                if Chat:RecordWhoObservation(fullName, lvl, wCls, wArea, wGuild, true) then
+                    updated = true
                 end
             end
         end

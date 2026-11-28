@@ -755,19 +755,32 @@ function LootRoll:SetEnabledFromPrompt(enabled, hideOfficial)
     if ns.db and ns.db.settings then
         ns.db.settings.lootRollPromptAnswered = true
         ns.db.settings.lootRollHelperEnabled = isOn
-        if hideOfficial ~= nil then
-            ns.db.settings.lootRollHideOfficial = (hideOfficial and true or false)
+        if isOn then
+            ns.db.settings.lootRollHideOfficial = (hideOfficial == nil) and true or (hideOfficial and true or false)
         end
     end
     if SocialCentralDB and SocialCentralDB.settings then
         SocialCentralDB.settings.lootRollPromptAnswered = true
         SocialCentralDB.settings.lootRollHelperEnabled = isOn
-        if hideOfficial ~= nil then
-            SocialCentralDB.settings.lootRollHideOfficial = (hideOfficial and true or false)
+        if isOn then
+            SocialCentralDB.settings.lootRollHideOfficial = (hideOfficial == nil) and true or (hideOfficial and true or false)
         end
     end
-    ns:Emit("LOOT_ROLL_UPDATED")
+    if not isOn then
+        for i = #self.rollOrder, 1, -1 do
+            local rId = self.rollOrder[i]
+            local rec = self.activeRolls[rId]
+            if not rec or not rec.isSimulated then
+                self.activeRolls[rId] = nil
+                table.remove(self.rollOrder, i)
+            end
+        end
+    end
     ns:Emit("SETTINGS_UPDATED")
+    if isOn and next(self.activeRolls) ~= nil then
+        self:SyncLootHistory()
+    end
+    ns:Emit("LOOT_ROLL_UPDATED")
 end
 
 function LootRoll:GetDisplayMode()

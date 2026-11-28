@@ -81,6 +81,7 @@ local KIND_RGB = {
     FRIEND_OFFLINE   = { 0.62, 0.66, 0.72 },
     WATCHLIST_ONLINE = { 0.40, 0.94, 0.48 },
     AVOID_ALERT      = { 1.00, 0.30, 0.30 },
+    EARLY_LEAVER     = { 1.00, 0.56, 0.22 },
     MENTION          = { 1.00, 0.80, 0.24 },
     FOCUS_SUMMARY    = { 0.35, 0.78, 1.00 },
     VERSION_UPDATE   = { 1.00, 0.78, 0.20 },
@@ -91,7 +92,7 @@ local function ResolveIconForKind(kind)
         return ICON_ONLINE
     elseif kind == "RMI" or kind == "CLAN_LFG" then
         return ICON_PARTY
-    elseif kind == "WORLDBUFF" or kind == "SCOUT" or kind == "AVOID_ALERT" or kind == "VERSION_UPDATE" then
+    elseif kind == "WORLDBUFF" or kind == "SCOUT" or kind == "AVOID_ALERT" or kind == "EARLY_LEAVER" or kind == "VERSION_UPDATE" then
         return ICON_DEFAULT
     end
     return ICON_MAIL
@@ -118,6 +119,8 @@ local function GetToastTooltipHint(item)
         action = L["Click: view in Watchlist"]
     elseif k == "AVOID_ALERT" then
         action = L["Click: open Group"]
+    elseif k == "EARLY_LEAVER" then
+        action = L["Click: view Dungeon & Raid Log"]
     elseif k == "WORLDBUFF" then
         action = L["Click: view World Buffs"]
     elseif k == "CLAN_EVENT" or k == "CLAN_SIGNUP" then
@@ -293,6 +296,12 @@ local function NavigateForItem(item)
         end
     elseif k == "AVOID_ALERT" then
         if ns.NavigateToModule then
+            ns:NavigateToModule("group")
+        end
+    elseif k == "EARLY_LEAVER" then
+        if ns.UI and ns.UI.OpenGroupRunsView then
+            ns.UI:OpenGroupRunsView()
+        elseif ns.NavigateToModule then
             ns:NavigateToModule("group")
         end
     elseif k == "WATCHLIST_ONLINE" then
@@ -1141,6 +1150,14 @@ function Toast:EnsureFrame(index)
             end
             Toast:DismissItem(item)
             return
+        elseif item and item.actionKind == "ADD_AVOID" and item.avoidCandidateKey then
+            if ns.Group and ns.Group.AddLeaverToAvoidList then
+                ns.Group:AddLeaverToAvoidList(item.avoidCandidateKey)
+            elseif ns.Store and ns.Store.FlagPlayerAvoid then
+                ns.Store:FlagPlayerAvoid(item.avoidCandidateKey, item.avoidNote, item.avoidCandidateName or item.sender)
+            end
+            Toast:DismissItem(item)
+            return
         end
         if item then
             Toast:DismissItem(item)
@@ -1335,7 +1352,8 @@ local function RenderItemOnFrame(f, item, showNav)
 
     local isInvite = (item.kind == "RMI" and item.roomId and item.roomId ~= "")
     local isLfgAction = (item.kind == "CLAN_LFG" and item.sender and item.sender ~= "")
-    local hasActionRow = isInvite or isLfgAction
+    local isAvoidAddAction = (item.actionKind == "ADD_AVOID" and item.avoidCandidateKey and item.avoidCandidateKey ~= "")
+    local hasActionRow = isInvite or isLfgAction or isAvoidAddAction
     local navOffset = showNav and NAV_H or 0
     f:SetWidth(TOAST_WIDTH)
 
@@ -1542,6 +1560,15 @@ local function RenderItemOnFrame(f, item, showNav)
         if f.buffAnnounceBtn then
             Theme:SetButtonText(f.buffAnnounceBtn, L["Quick Apply (/w)"])
             Theme:AutoFitButton(f.buffAnnounceBtn, 120, 16, 210)
+            f.buffAnnounceBtn:Show()
+        end
+        f.actionRow:Show()
+    elseif isAvoidAddAction then
+        f.acceptBtn:Hide()
+        f.declineBtn:Hide()
+        if f.buffAnnounceBtn then
+            Theme:SetButtonText(f.buffAnnounceBtn, L["Add to Avoid List"])
+            Theme:AutoFitButton(f.buffAnnounceBtn, 126, 16, 224)
             f.buffAnnounceBtn:Show()
         end
         f.actionRow:Show()
@@ -2056,6 +2083,17 @@ local function DescribeDisableTarget(item)
                 EmitDisabledFeedback(L["Group Avoid Warnings"], function(it) return it and it.kind == "AVOID_ALERT" end)
             end,
         }
+    elseif k == "EARLY_LEAVER" then
+        return {
+            label = L["Early Leaver Alerts"],
+            desc = L["Stop warning when someone leaves a dungeon or raid before the final or all bosses die."],
+            disableFn = function()
+                if ns.db and ns.db.settings then
+                    ns.db.settings.groupLeaverAlert = false
+                end
+                EmitDisabledFeedback(L["Early Leaver Alerts"], function(it) return it and it.kind == "EARLY_LEAVER" end)
+            end,
+        }
     elseif k == "MENTION" then
         return {
             label = L["Mentions & Keywords Radar"],
@@ -2334,6 +2372,36 @@ function Toast:DismissItem(item)
     self:LayoutStack()
 end
 
+function Toast:DismissById(itemId)
+    if type(itemId) ~= "string" or itemId == "" then return false end
+    local removed = false
+    for i = #self.queue, 1, -1 do
+        local qIt = self.queue[i]
+        if qIt and qIt.id == itemId then
+            table.remove(self.queue, i)
+            removed = true
+        end
+    end
+    local removedActive = false
+    for i = #self.activeItems, 1, -1 do
+        local it = self.activeItems[i]
+        if it and it.id == itemId then
+            if self.confirmPopup and self.confirmPopup:IsShown() and self.confirmPopup._targetItem == it then
+                self.confirmPopup:Hide()
+            end
+            if RemoveActiveToastAt(i) then
+                removedActive = true
+            end
+            removed = true
+        end
+    end
+    if removed then
+        DrainToastQueueAndResetElapsed(removedActive)
+        self:LayoutStack()
+    end
+    return removed
+end
+
 function Toast:DismissAll()
     if self.confirmPopup and self.confirmPopup:IsShown() then
         self.confirmPopup:Hide()
@@ -2349,7 +2417,7 @@ function Toast:PushNotification(item)
     if type(item) ~= "table" then return end
     local s = ns.db and ns.db.settings
     local itemId = type(item.id) == "string" and item.id or ""
-    if item.kind ~= "AVOID_ALERT" and item.kind ~= "FOCUS_SUMMARY" and not item.isTest
+    if item.kind ~= "AVOID_ALERT" and item.kind ~= "EARLY_LEAVER" and item.kind ~= "FOCUS_SUMMARY" and not item.isTest
         and Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced(item.lookupKey or item.sender, item.bnetAccountID)
     then
         return
@@ -2365,6 +2433,10 @@ function Toast:PushNotification(item)
             end
         elseif item.kind == "AVOID_ALERT" then
             if s and s.groupAvoidAlert == false then
+                return
+            end
+        elseif item.kind == "EARLY_LEAVER" then
+            if s and s.groupLeaverAlert == false then
                 return
             end
         elseif item.kind == "WATCHLIST_ONLINE" then
@@ -2490,7 +2562,7 @@ function Toast:PushNotification(item)
         table.insert(self.activeItems, entry)
         if #self.activeItems == 1 then
             self.activeIndex = 1
-        elseif entry.kind == "AVOID_ALERT" then
+        elseif entry.kind == "AVOID_ALERT" or entry.kind == "EARLY_LEAVER" then
             self.activeIndex = #self.activeItems
         end
     else
@@ -2499,7 +2571,7 @@ function Toast:PushNotification(item)
         else
             self.queue[#self.queue] = entry
         end
-        if entry.kind == "AVOID_ALERT" then
+        if entry.kind == "AVOID_ALERT" or entry.kind == "EARLY_LEAVER" then
             self.activeItems[#self.activeItems] = entry
             self.activeIndex = #self.activeItems
         end
@@ -2744,7 +2816,7 @@ function Toast:Init()
         if not s then return end
         local function ShouldPrune(it)
             if not it then return false end
-            if it.kind ~= "AVOID_ALERT" and it.kind ~= "FOCUS_SUMMARY" and not it.isTest
+            if it.kind ~= "AVOID_ALERT" and it.kind ~= "EARLY_LEAVER" and it.kind ~= "FOCUS_SUMMARY" and not it.isTest
                 and Compat and Compat.IsFocusSilenced and Compat.IsFocusSilenced(it.lookupKey or it.sender, it.bnetAccountID)
             then
                 return true
@@ -2762,6 +2834,7 @@ function Toast:Init()
             if it.kind == "WATCHLIST_ONLINE" and (s.moduleWatchlistEnabled == false or (s.alerts and s.alerts.toast == false)) then return true end
             if it.kind == "MENTION" and (s.moduleChatEnabled == false or s.mentionAlertsEnabled == false) then return true end
             if it.kind == "AVOID_ALERT" and s.groupAvoidAlert == false then return true end
+            if it.kind == "EARLY_LEAVER" and (s.groupLeaverAlert == false or (Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("group"))) then return true end
             if it.kind == "VERSION_UPDATE" and s.versionCheck == false then return true end
             if (it.kind == "DIRECT" or it.kind == "ROOM" or it.kind == "RMI" or it.kind == "ALLIANCE" or it.kind == "WHISPER" or it.kind == "BN_WHISPER" or it.kind == "PARTY" or it.kind == "GROUP" or it.kind == "RAID" or it.kind == "GUILD" or it.kind == "OFFICER") and s.moduleChatEnabled == false then return true end
             local isLfgWatcher = (it.kind == "CLAN_LFG" and tostring(it.id or ""):sub(1, 9) == "lfgwatch:")

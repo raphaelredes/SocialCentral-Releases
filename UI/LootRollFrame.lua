@@ -26,6 +26,7 @@ table.insert(ns.modules, LootRollUI)
 -- Weak-key registries so we NEVER mutate Blizzard's official GroupLootFrame1..8 or GroupLootContainer tables (Rule #3).
 local hookedOfficialFrames = setmetatable({}, { __mode = "k" })
 local suppressedOfficialFrames = setmetatable({}, { __mode = "k" })
+local suppressedStartRollFrames = setmetatable({}, { __mode = "k" })
 
 local WHITE8X8 = "Interface\\Buttons\\WHITE8X8"
 local ICON_TEX = "Interface\\AddOns\\SocialCentral\\Media\\icon.tga"
@@ -235,6 +236,18 @@ local function OpenPlayerQuickRollMenu(anchor, playerName, itemLink, isMe)
                     end
                 end)
             end
+            if ns.SocialPanels and ns.SocialPanels.PopulatePlayerQuickMenu then
+                root:CreateDivider()
+                ns.SocialPanels:PopulatePlayerQuickMenu(root, {
+                    displayName = playerName,
+                    includeWatchlist = true,
+                    includeFavorite = true,
+                    includeCard = true,
+                    includeFlags = true,
+                    includeIgnore = true,
+                    includeDiplomacy = true,
+                })
+            end
         end
         root:CreateButton(L["Copy Name"], function()
             if ns.UI and ns.UI.OpenCopyModal then
@@ -434,7 +447,7 @@ function LootRollUI:EnsurePromptFrame()
 
     local pFrame = CreateFrame("Frame", "SocialCentralLootRollPrompt", UIParent, "BackdropTemplate")
     pFrame:Hide()
-    pFrame:SetSize(424, 252)
+    pFrame:SetSize(424, 224)
     pFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
     pFrame:SetClampedToScreen(true)
     table.insert(UISpecialFrames, "SocialCentralLootRollPrompt")
@@ -469,7 +482,7 @@ function LootRollUI:EnsurePromptFrame()
         hdr,
         L["Help: Group Loot Roll Window"],
         L["Shows a sleek SocialCentral roll card on group drops with Need/Greed/Disenchant/Pass buttons, automatic stat & item level comparison against your equipped gear, live teammate choices, roll numbers, an epic win celebration, and a persistent Roll Results ledger."],
-        L["Choose Enable Now to start using it right on this drop (you can also hide WoW's official roll bar so they don't overlap), or Keep Default anytime in Settings -> General & Tools."],
+        L["Choose Use SocialCentral to replace WoW's official roll bar cleanly on this and future drops, or Keep Official to continue with Blizzard's default bar (changeable anytime in Settings -> General & Tools)."],
         16,
         { target = pFrame }
     )
@@ -510,44 +523,32 @@ function LootRollUI:EnsurePromptFrame()
     descFs:SetPoint("RIGHT", pFrame, "RIGHT", -14, 0)
     descFs:SetJustifyH("LEFT")
     descFs:SetWordWrap(true)
-    descFs:SetText(L["Would you like to activate SocialCentral's Group Loot Roll system with equipped-gear comparison, live party choices, and a fixed Roll Results button?"])
+    descFs:SetText(L["Would you like to use SocialCentral's Group Loot Roll window instead of WoW's official roll bar? While active, it removes the game's roll bar cleanly and adds gear comparison, live teammate choices, and Roll Results."])
+    pFrame.descFs = descFs
 
     local pathHint = pFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    pathHint:SetPoint("TOPLEFT", descFs, "BOTTOMLEFT", 0, -6)
+    pathHint:SetPoint("TOPLEFT", descFs, "BOTTOMLEFT", 0, -8)
     pathHint:SetPoint("RIGHT", pFrame, "RIGHT", -14, 0)
     pathHint:SetJustifyH("LEFT")
     pathHint:SetWordWrap(true)
     pathHint:SetTextColor(0.95, 0.80, 0.36)
     pathHint:SetText(L["Toggle anytime in SocialCentral Settings -> General & Tools"])
+    pFrame.pathHint = pathHint
 
-    local hideOfficialCb = CreateFrame("CheckButton", nil, pFrame, "UICheckButtonTemplate")
-    hideOfficialCb:SetSize(22, 22)
-    hideOfficialCb:SetPoint("TOPLEFT", pathHint, "BOTTOMLEFT", -2, -6)
-    hideOfficialCb:SetChecked(true)
-    local hideOfficialLbl = pFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    hideOfficialLbl:SetPoint("LEFT", hideOfficialCb, "RIGHT", 5, 0)
-    hideOfficialLbl:SetPoint("RIGHT", pFrame, "RIGHT", -14, 0)
-    hideOfficialLbl:SetJustifyH("LEFT")
-    hideOfficialLbl:SetWordWrap(true)
-    hideOfficialLbl:SetText(L["Hide official WoW roll bar while active"])
-    pFrame.hideOfficialCb = hideOfficialCb
-
-    local enableBtn = Theme:CreateButton(pFrame, 154, 24, L["Enable Now"], "primary")
-    local enW = Theme:AutoFitButton(enableBtn, 120, 18, 220)
+    local enableBtn = Theme:CreateButton(pFrame, 166, 24, L["Use SocialCentral"], "primary")
+    local enW = Theme:AutoFitButton(enableBtn, 130, 18, 224)
     enableBtn:SetPoint("BOTTOMRIGHT", pFrame, "BOTTOMRIGHT", -14, 12)
     enableBtn:SetScript("OnClick", function()
-        local hideOff = pFrame.hideOfficialCb and pFrame.hideOfficialCb:GetChecked() and true or false
         pFrame:Hide()
         if ns.LootRoll and ns.LootRoll.SetEnabledFromPrompt then
-            ns.LootRoll:SetEnabledFromPrompt(true, hideOff)
+            ns.LootRoll:SetEnabledFromPrompt(true, true)
         end
-        LootRollUI:Refresh()
     end)
 
-    local skipBtn = Theme:CreateButton(pFrame, 140, 24, L["Keep Default"], "default")
-    local skW = Theme:AutoFitButton(skipBtn, 120, 18, 220)
+    local skipBtn = Theme:CreateButton(pFrame, 146, 24, L["Keep Official"], "default")
+    local skW = Theme:AutoFitButton(skipBtn, 124, 18, 220)
     skipBtn:SetPoint("BOTTOMLEFT", pFrame, "BOTTOMLEFT", 14, 12)
-    pFrame:SetWidth(math.max(412, enW + skW + 48))
+    pFrame:SetWidth(math.max(424, enW + skW + 48))
     skipBtn:SetScript("OnClick", function()
         if ns.LootRoll and ns.LootRoll.SetEnabledFromPrompt then
             ns.LootRoll:SetEnabledFromPrompt(false, false)
@@ -563,6 +564,9 @@ function LootRollUI:ShowFirstRollPrompt(rec)
     local pFrame = self:EnsurePromptFrame()
     local Theme = ns.Theme
     if not (pFrame and Theme) then return end
+    if pFrame:IsShown() then
+        return
+    end
     local p = Theme:GetPalette()
     Theme:ApplyBackdrop(pFrame, "window", p)
     ApplySolidOpaqueBg(pFrame, p)
@@ -570,11 +574,11 @@ function LootRollUI:ShowFirstRollPrompt(rec)
         pFrame.itemIco:SetTexture(rec.texture or "Interface\\Icons\\INV_Misc_QuestionMark")
         pFrame.itemName:SetText(QualityHex(rec.quality) .. tostring(rec.name or "?") .. "|r")
     end
-    if pFrame.hideOfficialCb then
-        pFrame.hideOfficialCb:SetChecked(true)
-    end
     Theme:PrepareTopOverlayModal(pFrame, 850)
     pFrame:Show()
+    local descH = (pFrame.descFs and pFrame.descFs.GetStringHeight and math.ceil(pFrame.descFs:GetStringHeight())) or 42
+    local hintH = (pFrame.pathHint and pFrame.pathHint.GetStringHeight and math.ceil(pFrame.pathHint:GetStringHeight())) or 16
+    pFrame:SetHeight(math.max(204, 78 + descH + 8 + hintH + 46))
     if pFrame.Raise then pFrame:Raise() end
 end
 
@@ -768,8 +772,9 @@ local function CreateStackedRollRow(parent, idx, cardFrame)
     ApplyIconOnlyLootButton(btnNeed, CHOICE_ICONS.NEED, 15, nil, "NEED")
     btnNeed:SetPoint("RIGHT", btnGreed, "LEFT", -4, 0)
 
-    local bopBtn = Theme:CreateButton(row, 102, 24, L["Confirm BoP"], "default")
+    local bopBtn = Theme:CreateButton(row, 124, 24, L["Confirm BoP"], "default")
     ApplyIconOnlyLootButton(bopBtn, CHOICE_ICONS.NEED, 14, L["Confirm BoP"], "NEED")
+    Theme:AutoFitButton(bopBtn, 118, 28, 146)
     bopBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     bopBtn:SetPoint("RIGHT", row, "RIGHT", -8, 2)
     bopBtn:Hide()
@@ -1289,9 +1294,6 @@ function LootRollUI:EnsureFrame()
     closeBtn:SetScript("OnClick", function()
         LootRollUI._userClosedActive = true
         f:Hide()
-        if LootRollUI.SyncOfficialRollBarVisibility then
-            LootRollUI:SyncOfficialRollBarVisibility()
-        end
         LootRollUI:SyncResultsButton()
     end)
     f.closeBtn = closeBtn
@@ -1958,7 +1960,7 @@ function LootRollUI:ApplyTheme()
 end
 
 -- ============================================================================
--- 3. Blizzard Official Roll Bar Suppression (Zero Taint, Weak-Key, Fail-Open)
+-- 3. Blizzard Official Roll Bar Removal (Zero Taint, Event-Clean, Weak-Key)
 -- ============================================================================
 local function SafeIsFrameForbidden(obj)
     if not obj then return true end
@@ -1973,32 +1975,24 @@ local function SafeIsFrameProtected(obj)
     return ok and (prot == true)
 end
 
-function LootRollUI:ShouldSuppressOfficialRollBar(targetFrame)
+local function IsOwnAddonRollFrame(obj)
+    if not obj then return true end
+    if ns and ns._eventFrame and obj == ns._eventFrame then
+        return true
+    end
+    local okName, fName = pcall(obj.GetName, obj)
+    if okName and type(fName) == "string" and fName:find("^SocialCentral") then
+        return true
+    end
+    return false
+end
+
+function LootRollUI:ShouldSuppressOfficialRollBar()
     if not (ns.LootRoll and ns.LootRoll.IsEnabled and ns.LootRoll:IsEnabled()) then
         return false
     end
     if not (ns.LootRoll.IsHideOfficialEnabled and ns.LootRoll:IsHideOfficialEnabled()) then
         return false
-    end
-    if self._userClosedActive then
-        return false
-    end
-    -- Fail-open safety: never hide an official GroupLootFrame whose active rollID is untracked by SocialCentral!
-    if targetFrame and targetFrame ~= _G.GroupLootContainer then
-        local rId = Safe.Number(targetFrame.rollID)
-        if rId and rId > 0 then
-            local remMs = GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId)) or 0
-            if remMs and remMs > 0 then
-                if not (ns.LootRoll.activeRolls and ns.LootRoll.activeRolls[rId]) then
-                    if ns.LootRoll.RecoverActiveRolls then
-                        ns.LootRoll:RecoverActiveRolls()
-                    end
-                    if not (ns.LootRoll.activeRolls and ns.LootRoll.activeRolls[rId]) then
-                        return false
-                    end
-                end
-            end
-        end
     end
     return true
 end
@@ -2020,7 +2014,7 @@ end
 function LootRollUI:SyncSingleOfficialLootFrame(frame, shouldHide, isContainer)
     if not frame or SafeIsFrameForbidden(frame) then return end
 
-    if not hookedOfficialFrames[frame] and frame.HookScript then
+    if shouldHide and not hookedOfficialFrames[frame] and frame.HookScript then
         hookedOfficialFrames[frame] = true
         frame:HookScript("OnShow", function(selfFrame)
             if LootRollUI and LootRollUI.ShouldSuppressOfficialRollBar and LootRollUI:ShouldSuppressOfficialRollBar(selfFrame) then
@@ -2031,75 +2025,131 @@ function LootRollUI:SyncSingleOfficialLootFrame(frame, shouldHide, isContainer)
 
     local isProtected = SafeIsFrameProtected(frame)
     local inCombat = (InCombatLockdown and InCombatLockdown()) == true
+    local okShown, isSh = pcall(frame.IsShown, frame)
     if shouldHide then
-        local okShown, isSh = pcall(frame.IsShown, frame)
-        if okShown and isSh then
-            suppressedOfficialFrames[frame] = true
-        end
-        pcall(frame.SetAlpha, frame, 0)
-        if inCombat and isProtected then
-            self._pendingOfficialLootSync = true
+        if inCombat or isProtected then
+            if okShown and isSh then
+                suppressedOfficialFrames[frame] = true
+            end
+            pcall(frame.SetAlpha, frame, 0)
+            if inCombat then
+                self._pendingOfficialLootSync = true
+            end
             return
         end
-        SetOfficialRollMouseState(frame, false)
-        if not isProtected and not isContainer then
-            pcall(frame.SetScale, frame, 0.001)
+        if (okShown and isSh) or suppressedOfficialFrames[frame] then
+            suppressedOfficialFrames[frame] = nil
+            pcall(frame.SetAlpha, frame, 1)
+            pcall(frame.SetScale, frame, 1)
+            SetOfficialRollMouseState(frame, true)
+            if okShown and isSh and frame.Hide then
+                pcall(frame.Hide, frame)
+            end
         end
     else
-        pcall(frame.SetAlpha, frame, 1)
         if inCombat and isProtected then
             self._pendingOfficialLootSync = true
             return
         end
-        if not isProtected and not isContainer then
-            pcall(frame.SetScale, frame, 1)
-        end
-        SetOfficialRollMouseState(frame, true)
         if suppressedOfficialFrames[frame] then
             suppressedOfficialFrames[frame] = nil
-            local shouldShow = false
-            if isContainer then
-                local maxFrames = math.max(8, Safe.Number(_G.NUM_GROUP_LOOT_FRAMES) or 8)
-                for i = 1, maxFrames do
-                    local child = _G["GroupLootFrame" .. i]
-                    if child and not SafeIsFrameForbidden(child) then
-                        local rId = child.rollID and Safe.Number(child.rollID)
-                        local rem = rId and GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId))
-                        if rem and rem > 0 then
-                            shouldShow = true
-                            break
-                        end
+            pcall(frame.SetAlpha, frame, 1)
+            if not isProtected then
+                pcall(frame.SetScale, frame, 1)
+                SetOfficialRollMouseState(frame, true)
+                -- Cleanly dismiss any expired/stale frame instead of leaving a frozen 0% roll bar on screen.
+                if (not isContainer) and okShown and isSh and frame.Hide then
+                    local rId = Safe.Number(frame.rollID)
+                    local rem = rId and GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId)) or 0
+                    if not rem or rem <= 0 then
+                        pcall(frame.Hide, frame)
                     end
                 end
-            else
-                local rId = frame.rollID and Safe.Number(frame.rollID)
-                local rem = rId and GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId))
-                if rem and rem > 0 then
-                    shouldShow = true
+            end
+        end
+    end
+end
+
+local function AddRegisteredStartRollFrames(addFn, ok, ...)
+    if not ok then return end
+    local n = select("#", ...)
+    for i = 1, n do
+        addFn(select(i, ...))
+    end
+end
+
+function LootRollUI:SyncOfficialStartLootEvent(shouldHide, inCombat)
+    if shouldHide then
+        if inCombat then
+            self._pendingOfficialLootSync = true
+            return
+        end
+        local candidates = {}
+        local seen = {}
+        local function AddCand(f)
+            if f and not seen[f] and not IsOwnAddonRollFrame(f) and not SafeIsFrameForbidden(f) and not SafeIsFrameProtected(f) then
+                seen[f] = true
+                candidates[#candidates + 1] = f
+            end
+        end
+        if _G.GetFramesRegisteredForEvent then
+            AddRegisteredStartRollFrames(AddCand, pcall(_G.GetFramesRegisteredForEvent, "START_LOOT_ROLL"))
+        end
+        AddCand(_G.UIParent)
+        AddCand(_G.GroupLootContainer)
+        local maxFrames = math.max(8, Safe.Number(_G.NUM_GROUP_LOOT_FRAMES) or 8)
+        for i = 1, maxFrames do
+            AddCand(_G["GroupLootFrame" .. i])
+        end
+        for _, f in ipairs(candidates) do
+            if f.IsEventRegistered and f.UnregisterEvent then
+                local okEv, isReg = pcall(f.IsEventRegistered, f, "START_LOOT_ROLL")
+                if okEv and isReg then
+                    local okUnreg = pcall(f.UnregisterEvent, f, "START_LOOT_ROLL")
+                    if okUnreg then
+                        suppressedStartRollFrames[f] = true
+                    end
                 end
             end
-            if shouldShow and not isProtected then
-                pcall(frame.Show, frame)
+        end
+    else
+        if next(suppressedStartRollFrames) == nil then
+            return
+        end
+        if inCombat then
+            self._pendingOfficialLootSync = true
+            return
+        end
+        local toRestore = {}
+        for f in pairs(suppressedStartRollFrames) do
+            toRestore[#toRestore + 1] = f
+        end
+        for _, f in ipairs(toRestore) do
+            suppressedStartRollFrames[f] = nil
+            if f and not SafeIsFrameForbidden(f) and not SafeIsFrameProtected(f) and f.RegisterEvent then
+                pcall(f.RegisterEvent, f, "START_LOOT_ROLL")
             end
         end
     end
 end
 
 function LootRollUI:SyncOfficialRollBarVisibility()
+    local shouldRemove = self:ShouldSuppressOfficialRollBar()
+    local inCombat = (InCombatLockdown and InCombatLockdown()) == true
+    if shouldRemove then
+        self:InstallOfficialLootHooks()
+    end
+    self:SyncOfficialStartLootEvent(shouldRemove, inCombat)
+
+    if (not shouldRemove) and next(suppressedOfficialFrames) == nil then
+        return
+    end
+
     local maxFrames = math.max(8, Safe.Number(_G.NUM_GROUP_LOOT_FRAMES) or 8)
-    local anyUntrackedVisible = false
     for i = 1, maxFrames do
         local f = _G["GroupLootFrame" .. i]
         if f and not SafeIsFrameForbidden(f) then
-            local hideThis = self:ShouldSuppressOfficialRollBar(f)
-            if not hideThis then
-                local rId = Safe.Number(f.rollID)
-                local rem = rId and GetLootRollTimeLeft and Safe.Number(Safe.Call(GetLootRollTimeLeft, rId))
-                if rem and rem > 0 then
-                    anyUntrackedVisible = true
-                end
-            end
-            self:SyncSingleOfficialLootFrame(f, hideThis, false)
+            self:SyncSingleOfficialLootFrame(f, shouldRemove, false)
         end
     end
     local container = _G.GroupLootContainer
@@ -2107,14 +2157,11 @@ function LootRollUI:SyncOfficialRollBarVisibility()
         if type(container.rollFrames) == "table" then
             for _, rf in ipairs(container.rollFrames) do
                 if rf and not SafeIsFrameForbidden(rf) then
-                    local hideRf = self:ShouldSuppressOfficialRollBar(rf)
-                    if not hideRf then anyUntrackedVisible = true end
-                    self:SyncSingleOfficialLootFrame(rf, hideRf, false)
+                    self:SyncSingleOfficialLootFrame(rf, shouldRemove, false)
                 end
             end
         end
-        local hideContainer = self:ShouldSuppressOfficialRollBar(container) and (not anyUntrackedVisible)
-        self:SyncSingleOfficialLootFrame(container, hideContainer, true)
+        self:SyncSingleOfficialLootFrame(container, shouldRemove, true)
     end
 end
 
@@ -2124,26 +2171,26 @@ function LootRollUI:InstallOfficialLootHooks()
     if hooksecurefunc then
         if type(_G.GroupLootFrame_OpenNewFrame) == "function" then
             hooksecurefunc("GroupLootFrame_OpenNewFrame", function()
-                LootRollUI:SyncOfficialRollBarVisibility()
+                if LootRollUI and LootRollUI.ShouldSuppressOfficialRollBar and LootRollUI:ShouldSuppressOfficialRollBar() then
+                    LootRollUI:SyncOfficialRollBarVisibility()
+                end
             end)
         end
         if type(_G.GroupLootContainer_AddFrame) == "function" then
             hooksecurefunc("GroupLootContainer_AddFrame", function()
-                LootRollUI:SyncOfficialRollBarVisibility()
-            end)
-        end
-        if type(_G.GroupLootContainer_Update) == "function" then
-            hooksecurefunc("GroupLootContainer_Update", function()
-                LootRollUI:SyncOfficialRollBarVisibility()
+                if LootRollUI and LootRollUI.ShouldSuppressOfficialRollBar and LootRollUI:ShouldSuppressOfficialRollBar() then
+                    LootRollUI:SyncOfficialRollBarVisibility()
+                end
             end)
         end
         if type(_G.GroupLootFrame_OnShow) == "function" then
             hooksecurefunc("GroupLootFrame_OnShow", function()
-                LootRollUI:SyncOfficialRollBarVisibility()
+                if LootRollUI and LootRollUI.ShouldSuppressOfficialRollBar and LootRollUI:ShouldSuppressOfficialRollBar() then
+                    LootRollUI:SyncOfficialRollBarVisibility()
+                end
             end)
         end
     end
-    self:SyncOfficialRollBarVisibility()
 end
 
 -- ============================================================================
@@ -5213,6 +5260,7 @@ local function RefreshStackedMode(f, active, unvotedCount)
                 sr.btnPass:Hide()
                 sr.statusFs:Hide()
                 ns.Theme:SetButtonText(sr.bopBtn, L["Confirm BoP"])
+                ns.Theme:AutoFitButton(sr.bopBtn, 118, 28, 146)
                 sr.bopBtn:Show()
                 sr.titleFs:SetPoint("RIGHT", sr.bopBtn, "LEFT", -8, 0)
                 sr.subFs:SetPoint("RIGHT", sr.bopBtn, "LEFT", -8, 0)
@@ -5302,6 +5350,12 @@ function LootRollUI:Refresh()
     self:SyncResultsButton()
     if self.resultsWindow and self.resultsWindow:IsShown() then
         self:RefreshResultsWindow()
+    end
+    if self.promptFrame and self.promptFrame:IsShown() and ns.LootRoll
+        and ((ns.LootRoll.HasAnsweredPrompt and ns.LootRoll:HasAnsweredPrompt())
+            or (ns.LootRoll.IsEnabled and ns.LootRoll:IsEnabled()))
+    then
+        self.promptFrame:Hide()
     end
 
     local active = ns.LootRoll:GetActiveList()
@@ -5882,12 +5936,13 @@ function LootRollUI:Refresh()
 end
 
 function LootRollUI:Init()
-    self:InstallOfficialLootHooks()
     ns.RegisterEvent(self, "START_LOOT_ROLL", function()
         self._userClosedActive = false
-        self:SyncOfficialRollBarVisibility()
-        if C_Timer and C_Timer.After then
-            C_Timer.After(0, function() self:SyncOfficialRollBarVisibility() end)
+        if self:ShouldSuppressOfficialRollBar() then
+            self:SyncOfficialRollBarVisibility()
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0, function() self:SyncOfficialRollBarVisibility() end)
+            end
         end
     end)
     ns.RegisterEvent(self, "PLAYER_REGEN_ENABLED", function()
@@ -5897,6 +5952,7 @@ function LootRollUI:Init()
         end
     end)
     ns.RegisterEvent(self, "PLAYER_ENTERING_WORLD", function()
+        self:SyncOfficialRollBarVisibility()
         self:SyncResultsButton()
     end)
     ns.RegisterEvent(self, "ZONE_CHANGED_NEW_AREA", function()

@@ -682,8 +682,16 @@ end
 -- Social, Directory, Guild Roster, Nearby, and FriendPresence without bloating SavedVariables.
 function Store:RecordLiveUnitObservation(rawName, data)
     if type(rawName) ~= "string" or rawName == "" or type(data) ~= "table" then return end
-    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(rawName)
-    local lookupKey = (parsed and parsed.lookupKey) or rawName:lower()
+    local lookupKey
+    if Compat.ParseCharacterFields then
+        lookupKey = Compat.ParseCharacterFields(rawName)
+    else
+        local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(rawName)
+        lookupKey = parsed and parsed.lookupKey
+    end
+    if not lookupKey or lookupKey == "" then
+        lookupKey = rawName:lower()
+    end
     if not lookupKey or lookupKey == "" then return end
 
     local nowClock = (GetTime and GetTime()) or time()
@@ -696,8 +704,17 @@ function Store:RecordLiveUnitObservation(rawName, data)
     self.liveUnitObs = self.liveUnitObs or {}
     local obs = self.liveUnitObs[lookupKey]
     if not obs then
+        local curCount = (self._liveUnitObsCount or 0)
+        if curCount >= 350 or (self._liveUnitObsPruneAt and (nowClock - self._liveUnitObsPruneAt) >= 120) then
+            self:PruneLiveUnitObservations(nowClock)
+        end
+        if (self._liveUnitObsCount or 0) >= 350 then
+            self.liveUnitObs = {}
+            self._liveUnitObsCount = 0
+        end
         obs = {}
         self.liveUnitObs[lookupKey] = obs
+        self._liveUnitObsCount = (self._liveUnitObsCount or 0) + 1
     end
     local stale = (nowClock - (obs.observedAt or 0)) >= 1800
     if newLevel and newLevel > 0 then
@@ -762,6 +779,38 @@ function Store:RecordLiveUnitObservation(rawName, data)
     end
 end
 
+function Store:PruneLiveUnitObservations(nowClock)
+    local now = nowClock or (GetTime and GetTime()) or time()
+    self._liveUnitObsPruneAt = now
+    local tbl = self.liveUnitObs
+    if type(tbl) ~= "table" then
+        self._liveUnitObsCount = 0
+        return
+    end
+    local kept = 0
+    for k, rec in pairs(tbl) do
+        if type(rec) ~= "table" or (now - (rec.observedAt or 0)) >= 1800 then
+            tbl[k] = nil
+        else
+            kept = kept + 1
+        end
+    end
+    if kept == 0 then
+        self.liveUnitObs = {}
+    end
+    self._liveUnitObsCount = kept
+end
+
+function Store:TrimRuntimeCaches()
+    self:PruneLiveUnitObservations()
+    if self.GetFriendPresenceTable then
+        self:GetFriendPresenceTable(true)
+    end
+    if self.GetRecentCompanionsTable then
+        self:GetRecentCompanionsTable(true)
+    end
+end
+
 function Store:InvalidateWatchlistIndex()
     self._wlIndexDirty = true
     if ns.Watchlist then
@@ -775,12 +824,21 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
     if ns.db and ns.db.settings and ns.db.settings.moduleWatchlistEnabled == false then return end
     local list = self:GetWatchlistTable()
     if next(list) == nil then return end
-    local parsed = Compat.ParseCharacterName(rawName)
-    if not parsed then return end
+    local pLookup, pFirst, pDisp, pSur
+    if Compat.ParseCharacterFields then
+        pLookup, pFirst, pDisp, pSur = Compat.ParseCharacterFields(rawName)
+    else
+        local tmpParsed = Compat.ParseCharacterName(rawName)
+        if tmpParsed then
+            pLookup, pFirst, pDisp, pSur = tmpParsed.lookupKey, tmpParsed.firstName, tmpParsed.displayName, tmpParsed.surname
+        end
+    end
+    if not pLookup or pLookup == "" then return end
 
-    if self._wlIndexDirty or self._wlIndexedRef ~= list or type(self._wlNoSurnameByFirst) ~= "table" then
+    if self._wlIndexDirty or self._wlIndexedRef ~= list or type(self._wlNoSurnameByFirst) ~= "table" or type(self._wlLinkedAltIndex) ~= "table" then
         local byFirst = {}
         local idIndex = {}
+        local linkedIndex = {}
         for idKey, entry in pairs(list) do
             if type(entry) == "table" then
                 if entry.id and entry.id ~= idKey then
@@ -800,36 +858,44 @@ function Store:SyncWatchlistObservation(rawName, data, opts)
                     end
                     fBucket[#fBucket + 1] = idKey
                 end
-            end
-        end
-        self._wlNoSurnameByFirst = byFirst
-        self._wlIdMatches = idIndex
-        self._wlIndexedRef = list
-        self._wlIndexDirty = false
-    end
-
-    local firstLower = parsed.firstName and parsed.firstName:lower() or nil
-    local directEntry = list[parsed.lookupKey]
-    local idMatches = self._wlIdMatches and self._wlIdMatches[parsed.lookupKey]
-    local firstMatches = firstLower and self._wlNoSurnameByFirst and self._wlNoSurnameByFirst[firstLower]
-    local linkedAltMatches = nil
-    if not (data and data.altLookupKey) and self.GetAllLinkedCharacters then
-        for idKey, wlEntry in pairs(list) do
-            if type(wlEntry) == "table" and wlEntry.watchAllAlts == true and idKey ~= parsed.lookupKey and wlEntry.id ~= parsed.lookupKey then
-                local linked = self:GetAllLinkedCharacters(wlEntry.id or idKey)
-                for _, altRec in ipairs(linked) do
-                    if altRec and altRec.lookupKey == parsed.lookupKey then
-                        linkedAltMatches = linkedAltMatches or {}
-                        linkedAltMatches[#linkedAltMatches + 1] = idKey
-                        break
+                if entry.watchAllAlts == true and self.GetAllLinkedCharacters then
+                    local linked = self:GetAllLinkedCharacters(entry.id or idKey)
+                    for _, altRec in ipairs(linked) do
+                        local altLk = altRec and altRec.lookupKey
+                        if altLk and altLk ~= "" and altLk ~= idKey and altLk ~= entry.id then
+                            local lBucket = linkedIndex[altLk]
+                            if not lBucket then
+                                lBucket = {}
+                                linkedIndex[altLk] = lBucket
+                            end
+                            lBucket[#lBucket + 1] = idKey
+                        end
                     end
                 end
             end
         end
+        self._wlNoSurnameByFirst = byFirst
+        self._wlIdMatches = idIndex
+        self._wlLinkedAltIndex = linkedIndex
+        self._wlIndexedRef = list
+        self._wlIndexDirty = false
     end
+
+    local firstLower = pFirst and pFirst:lower() or nil
+    local directEntry = list[pLookup]
+    local idMatches = self._wlIdMatches and self._wlIdMatches[pLookup]
+    local firstMatches = firstLower and self._wlNoSurnameByFirst and self._wlNoSurnameByFirst[firstLower]
+    local linkedAltMatches = (not (data and data.altLookupKey)) and self._wlLinkedAltIndex and self._wlLinkedAltIndex[pLookup] or nil
     if not directEntry and not idMatches and not firstMatches and not linkedAltMatches then
         return
     end
+
+    local parsed = {
+        lookupKey = pLookup,
+        firstName = pFirst,
+        displayName = pDisp,
+        surname = pSur,
+    }
 
     local now = time()
     local changed = false
@@ -1128,6 +1194,13 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
             rec.flag = patch.flag
         else
             rec.flag = nil
+            rec.displayName = nil
+        end
+    end
+    if patch.displayName ~= nil then
+        local cleanDisp = Compat.CleanInput(patch.displayName)
+        if cleanDisp and not cleanDisp:find("#", 1, true) and not cleanDisp:find("|K", 1, true) and not cleanDisp:find("@", 1, true) then
+            rec.displayName = cleanDisp
         end
     end
     if patch.favorite ~= nil then
@@ -1151,6 +1224,7 @@ function Store:SetSocialMeta(rawNameOrKey, patch)
     end
     self._socialFoldersCache = nil
     self._linkedAltsDirty = true
+    self._wlIndexDirty = true
     ns:Emit("SOCIAL_UPDATED")
     ns:Emit("WATCHLIST_UPDATED")
     ns:Emit("GROUP_UPDATED")
@@ -1163,6 +1237,41 @@ function Store:SetSocialFlag(rawNameOrKey, flagVal)
     local cur = self:GetSocialMeta(rawNameOrKey)
     local nextFlag = (cur and cur.flag == flagVal) and "" or (flagVal or "")
     return self:SetSocialMeta(rawNameOrKey, { flag = nextFlag })
+end
+
+function Store:FlagPlayerAvoid(rawNameOrKey, noteText, displayName)
+    local key = NormalizeMetaKey(rawNameOrKey)
+    if not key then return nil end
+    local cleanDisp = (type(displayName) == "string" and displayName ~= "" and Compat.CleanInput(displayName)) or nil
+    if not cleanDisp and type(rawNameOrKey) == "string" and rawNameOrKey ~= "" and rawNameOrKey ~= key then
+        cleanDisp = Compat.CleanInput(rawNameOrKey)
+    end
+    local parsed = Compat.ParseCharacterName and Compat.ParseCharacterName(cleanDisp or rawNameOrKey)
+    if Compat.IsMe and Compat.IsMe((parsed and parsed.displayName) or cleanDisp or rawNameOrKey) then
+        return nil
+    end
+
+    local cur = self:GetSocialMeta(key)
+    local patch = {
+        flag = "AVOID",
+        displayName = (cleanDisp and cleanDisp ~= "") and cleanDisp or (parsed and parsed.displayName) or (cur and cur.displayName) or nil,
+    }
+    if type(noteText) == "string" and noteText ~= "" then
+        local cleanNote = Compat.CleanInput(noteText)
+        if cleanNote and cleanNote ~= "" then
+            local prevNote = cur and type(cur.note) == "string" and cur.note or ""
+            if prevNote == "" then
+                patch.note = cleanNote
+            elseif not prevNote:lower():find(cleanNote:lower(), 1, true) then
+                local combined = cleanNote .. " · " .. prevNote
+                if #combined > 160 then
+                    combined = (Compat.TruncateUtf8 and Compat.TruncateUtf8(combined, 160)) or combined:sub(1, 160)
+                end
+                patch.note = combined
+            end
+        end
+    end
+    return self:SetSocialMeta(key, patch)
 end
 
 local VALID_IGNORE_REASONS = {
@@ -1540,6 +1649,7 @@ function Store:RecordObservedAltPair(nameOrKeyA, nameOrKeyB)
 
     link(kA, kB)
     link(kB, kA)
+    self._wlIndexDirty = true
 end
 
 function Store:GetAllLinkedCharacters(rawNameOrKey)
@@ -1616,6 +1726,7 @@ function Store:MigrateSocialSurnameRecords(firstName, lookupKey)
         metaTbl[firstLower] = nil
         self._socialFoldersCache = nil
         self._linkedAltsDirty = true
+        self._wlIndexDirty = true
     end
 
     local presRoot = ns.db and ns.db.friendPresence

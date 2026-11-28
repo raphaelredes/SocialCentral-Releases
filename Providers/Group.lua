@@ -837,6 +837,503 @@ local function FoldDungeonSearchText(s)
     return out:lower()
 end
 
+-- Verified Classic + Forever (16001) dungeon/raid completion rules:
+-- completion is satisfied when EITHER the instance/wing final boss OR all required bosses die.
+local COMPLETION_RULES = {
+    optionalEncIds = {
+        [492] = true,   -- Avatar of Hakkar (Sunken Temple summon)
+        [548] = true,   -- The Lost Dwarves (Uldaman faction-only)
+        [3055] = true,  -- Kormok (Scholomance optional)
+        [3070] = true,  -- Lord Valthalak (UBRS optional)
+        [2798] = true,  -- Postmaster Malown (Stratholme Living optional)
+        [3310] = true,  -- Lyn the Ignored (City of Dalaran optional)
+        [3511] = true,  -- Primeval Elemental (The Drowned City optional)
+    },
+    fightGroupIds = {
+        [486] = "grp:st_dw", [487] = "grp:st_dw",
+        [490] = "grp:st_mh", [491] = "grp:st_mh",
+        [278] = "grp:ubrs_rend", [3063] = "grp:ubrs_rend",
+        [230] = "grp:brd_arena",
+    },
+    wings = {
+        sm_gy = { mapId = 189, req = 2, finalIds = { [445] = true }, finalNames = { ["bloodmage thalnos"] = true }, encIds = { 444, 445 }, subzones = { "atonement", "cloister", "honor's tomb", "expiacao", "expiacion", "tumba da honra" } },
+        sm_lib = { mapId = 189, req = 2, finalIds = { [447] = true }, finalNames = { ["arcanist doan"] = true }, encIds = { 446, 447 }, subzones = { "huntsman", "treasures", "athenaeum", "tesouros", "ateneu" } },
+        sm_arm = { mapId = 189, req = 1, finalIds = { [448] = true }, finalNames = { ["herod"] = true }, encIds = { 448 }, subzones = { "training grounds", "footman's armory", "crusader's armory", "hall of champions", "arsenal", "campeoes", "campeones" } },
+        sm_cath = { mapId = 189, req = 2, finalIds = { [450] = true }, finalNames = { ["high inquisitor whitemane"] = true, ["whitemane"] = true }, encIds = { 449, 450 }, subzones = { "chapel", "capela", "capilla" } },
+        dm_east = { mapId = 429, req = 4, finalIds = { [346] = true }, finalNames = { ["alzzin the wildshaper"] = true }, encIds = { 343, 344, 345, 346 }, subzones = { "warpwood", "eldretharr", "east", "leste", "este" } },
+        dm_west = { mapId = 429, req = 5, finalIds = { [361] = true }, finalNames = { ["prince tortheldrin"] = true }, encIds = { 347, 348, 349, 350, 361 }, subzones = { "capital gardens", "highborne", "immol'thar", "west", "oeste" } },
+        dm_north = { mapId = 429, req = 7, finalIds = { [368] = true }, finalNames = { ["king gordok"] = true }, encIds = { 362, 363, 364, 365, 366, 367, 368 }, subzones = { "gordok", "north", "norte" } },
+        strat_live = { mapId = 329, req = 5, finalIds = { [478] = true }, finalNames = { ["balnazzar"] = true }, encIds = { 472, 473, 474, 475, 476, 477, 478, 2798 }, subzones = { "crusaders' square", "elders' square", "festival lane", "market row", "scarlet bastion", "king's square", "praca", "plaza", "living", "viva" } },
+        strat_ud = { mapId = 329, req = 6, finalIds = { [484] = true }, finalNames = { ["baron rivendare"] = true }, encIds = { 479, 480, 481, 482, 483, 484 }, subzones = { "gauntlet", "slaughter house", "ziggurat", "service", "matadouro", "zigurate", "undead" } },
+        brs_lbrs = { mapId = 229, req = 9, finalIds = { [275] = true }, finalNames = { ["overlord wyrmthalak"] = true }, encIds = { 267, 268, 269, 270, 271, 272, 273, 274, 275 }, subzones = { "hordemar", "mok'doom", "tazz'alor", "skitterweb", "lower", "inferior" } },
+        brs_ubrs = { mapId = 229, req = 5, finalIds = { [280] = true, [3069] = true }, finalNames = { ["general drakkisath"] = true }, encIds = { 276, 277, 278, 279, 280, 3062, 3063, 3068, 3069, 3070 }, subzones = { "dragonspire", "hall of binding", "rookery", "blackhand's hall", "upper", "superior" } },
+    },
+    byMap = {
+        -- Classic Dungeons
+        [389] = { req = 4,  finalIds = { [433] = true, [2735] = true }, finalNames = { ["bazzalan"] = true } },
+        [36]  = { req = 6,  finalIds = { [167] = true, [2747] = true }, finalNames = { ["edwin vancleef"] = true } },
+        [43]  = { req = 8,  finalIds = { [592] = true }, finalNames = { ["mutanus the devourer"] = true } },
+        [33]  = { req = 8,  finalIds = { [471] = true, [2755] = true }, finalNames = { ["archmage arugal"] = true } },
+        [34]  = { req = 5,  finalIds = { [2760] = true }, finalNames = { ["bazil thredd"] = true } },
+        [48]  = { req = 7,  finalIds = { [226] = true, [2767] = true, [2910] = true }, finalNames = { ["aku'mai"] = true } },
+        [90]  = { req = 5,  finalIds = { [382] = true }, finalNames = { ["mekgineer thermaplugg"] = true } },
+        [47]  = { req = 6,  finalIds = { [443] = true, [2778] = true }, finalNames = { ["charlga razorflank"] = true } },
+        [129] = { req = 4,  finalIds = { [437] = true, [2785] = true }, finalNames = { ["amnennar the coldbringer"] = true } },
+        [70]  = { req = 7,  finalIds = { [554] = true }, finalNames = { ["archaedas"] = true } },
+        [209] = { req = 8,  finalIds = { [600] = true }, finalNames = { ["chief ukorz sandscalp"] = true } },
+        [349] = { req = 8,  finalIds = { [429] = true }, finalNames = { ["princess theradras"] = true } },
+        [109] = { req = 6,  finalIds = { [493] = true }, finalNames = { ["shade of eranikus"] = true } },
+        [230] = { req = 19, finalIds = { [245] = true }, finalNames = { ["emperor dagran thaurissan"] = true } },
+        [289] = { req = 13, finalIds = { [2801] = true }, finalNames = { ["darkmaster gandling"] = true } },
+        [302] = { wingKey = "sm_gy" },
+        [303] = { wingKey = "sm_lib" },
+        [304] = { wingKey = "sm_arm" },
+        [305] = { wingKey = "sm_cath" },
+        -- Forever 16001 Custom Dungeons
+        [2998] = { req = 3, finalIds = { [3482] = true }, finalNames = { ["relic guardian"] = true } },
+        [2999] = { req = 6, finalIds = { [3354] = true }, finalNames = { ["rath'mael"] = true } },
+        [2959] = { req = 7, finalIds = { [3303] = true }, finalNames = { ["shade of the archmage"] = true } },
+        [3039] = { req = 5, finalIds = { [3451] = true }, finalNames = { ["overlord mugg"] = true } },
+        [2994] = { req = 5, finalIds = { [3409] = true }, finalNames = { ["blazeroar"] = true } },
+        [2974] = { req = 7, finalIds = { [3334] = true }, finalNames = { ["varrox bleakhoof"] = true } },
+        [2970] = { req = 5, finalIds = { [3479] = true }, finalNames = { ["min'loth the serpent"] = true } },
+        [3065] = { req = 3, finalIds = { [3496] = true }, finalNames = { ["durgen dirgehammer"] = true } },
+        [3001] = { req = 9, finalIds = { [3502] = true }, finalNames = { ["nanaya"] = true } },
+        -- Classic Raids
+        [249] = { req = 1,  finalIds = { [1084] = true, [2844] = true }, finalNames = { ["onyxia"] = true } },
+        [409] = { req = 10, finalIds = { [672] = true }, finalNames = { ["ragnaros"] = true } },
+        [469] = { req = 8,  finalIds = { [617] = true }, finalNames = { ["nefarian"] = true } },
+        [309] = { req = 10, finalIds = { [793] = true }, finalNames = { ["hakkar"] = true } },
+        [509] = { req = 6,  finalIds = { [723] = true }, finalNames = { ["ossirian the unscarred"] = true } },
+        [531] = { req = 9,  finalIds = { [717] = true }, finalNames = { ["c'thun"] = true } },
+        [533] = { req = 15, finalIds = { [1114] = true }, finalNames = { ["kel'thuzad"] = true } },
+    },
+    byName = {
+        ["barrow deeps"] = { req = 8, finalIds = {}, finalNames = { ["sonya darkhallow"] = true, ["sonya"] = true, ["sonya cavasombra"] = true } },
+        ["profundezas de tumulo"] = { req = 8, finalIds = {}, finalNames = { ["sonya darkhallow"] = true, ["sonya"] = true, ["sonya cavasombra"] = true } },
+        ["hyjal summit"] = { req = 13, finalIds = {}, finalNames = { ["the wild king"] = true, ["wild king"] = true, ["o rei selvagem"] = true, ["el rey salvaje"] = true } },
+        ["pico hyjal"] = { req = 13, finalIds = {}, finalNames = { ["the wild king"] = true, ["wild king"] = true, ["o rei selvagem"] = true, ["el rey salvaje"] = true } },
+        ["cumbre hyjal"] = { req = 13, finalIds = {}, finalNames = { ["the wild king"] = true, ["wild king"] = true, ["o rei selvagem"] = true, ["el rey salvaje"] = true } },
+    },
+    encToWing = {},
+}
+
+do
+    for wKey, wSpec in pairs(COMPLETION_RULES.wings) do
+        for _, eId in ipairs(wSpec.encIds or {}) do
+            COMPLETION_RULES.encToWing[eId] = wKey
+        end
+    end
+end
+
+local function BuildGlobalSysPattern(tmpl)
+    if type(tmpl) ~= "string" or tmpl == "" or not tmpl:find("%", 1, true) then
+        return nil
+    end
+    local phToken = "__SC_ARG__"
+    local work = tmpl:gsub("%%%d*%$?s", phToken)
+    if not work:find(phToken, 1, true) then
+        return nil
+    end
+    work = work:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+    work = work:gsub(phToken, "(.+)")
+    return "^" .. work .. "%.?$"
+end
+
+local function ExtractCleanPlayerFromSysArg(rawWho)
+    if type(rawWho) ~= "string" or rawWho == "" then return nil end
+    local who = rawWho
+    local linkDisp = who:match("|Hplayer:[^|]+|h%[?([^|%]]+)%]?|h")
+    if linkDisp and linkDisp ~= "" then
+        who = linkDisp
+    else
+        who = who:gsub("^%s+", ""):gsub("%s+$", "")
+        who = who:gsub("^%[", ""):gsub("%]$", "")
+    end
+    who = who:gsub("[%.!]+$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if who == "" or who:find("|", 1, true) then return nil end
+    return who
+end
+
+local groupSysPatternsCache = nil
+local function ClassifyGroupSystemMessage(cleanMsg)
+    if type(cleanMsg) ~= "string" or cleanMsg == "" then
+        return nil, nil
+    end
+    if not groupSysPatternsCache then
+        groupSysPatternsCache = {
+            disbandExact = Safe.String(_G.ERR_GROUP_DISBANDED),
+            kickPats = {},
+            leavePats = {},
+        }
+        local pKick = BuildGlobalSysPattern(_G.ERR_UNINVITE_S)
+        if pKick then groupSysPatternsCache.kickPats[#groupSysPatternsCache.kickPats + 1] = pKick end
+        groupSysPatternsCache.kickPats[#groupSysPatternsCache.kickPats + 1] = "^(.+) has been removed from the group%.?$"
+        groupSysPatternsCache.kickPats[#groupSysPatternsCache.kickPats + 1] = "^(.+) foi removid[oa] do grupo%.?$"
+        groupSysPatternsCache.kickPats[#groupSysPatternsCache.kickPats + 1] = "^(.+) ha sido expulsad[oa] del grupo%.?$"
+        local pLeave = BuildGlobalSysPattern(_G.ERR_LEFT_GROUP_S)
+        if pLeave then groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = pLeave end
+        local pRaidLeave = BuildGlobalSysPattern(_G.ERR_RAID_MEMBER_REMOVED_S)
+        if pRaidLeave then groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = pRaidLeave end
+        groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = "^(.+) leaves the party%.?$"
+        groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = "^(.+) has left the raid group%.?$"
+        groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = "^(.+) saiu do grupo%.?$"
+        groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = "^(.+) deixou o grupo de raide%.?$"
+        groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = "^(.+) abandona el grupo%.?$"
+        groupSysPatternsCache.leavePats[#groupSysPatternsCache.leavePats + 1] = "^(.+) ha dejado la banda%.?$"
+    end
+    if groupSysPatternsCache.disbandExact and cleanMsg == groupSysPatternsCache.disbandExact then
+        return "disbanded", nil
+    end
+    local msgLow = FoldDungeonSearchText(cleanMsg)
+    if msgLow:find("group has been disbanded", 1, true)
+        or msgLow:find("grupo foi desfeito", 1, true)
+        or msgLow:find("grupo se ha disuelto", 1, true)
+    then
+        return "disbanded", nil
+    end
+    for _, pat in ipairs(groupSysPatternsCache.kickPats) do
+        local whoRaw = cleanMsg:match(pat)
+        if whoRaw then
+            local cleanWho = ExtractCleanPlayerFromSysArg(whoRaw)
+            if cleanWho then return "kicked", cleanWho end
+        end
+    end
+    for _, pat in ipairs(groupSysPatternsCache.leavePats) do
+        local whoRaw = cleanMsg:match(pat)
+        if whoRaw then
+            local cleanWho = ExtractCleanPlayerFromSysArg(whoRaw)
+            if cleanWho then return "left", cleanWho end
+        end
+    end
+    return nil, nil
+end
+
+local function EncodeLeaverLinkPayload(rawStr)
+    if type(rawStr) ~= "string" or rawStr == "" then return "" end
+    return (rawStr:gsub("([^%w%._%-])", function(ch)
+        return string.format("%%%02X", string.byte(ch))
+    end))
+end
+
+local function ResolveRunCompletionSpec(run, encId, subZone)
+    if not run then return nil end
+    local wingKey = run.wingKey
+    if encId and COMPLETION_RULES.encToWing[encId] then
+        wingKey = COMPLETION_RULES.encToWing[encId]
+        run.wingKey = wingKey
+    end
+    local mSpec = run.mapId and COMPLETION_RULES.byMap[run.mapId] or nil
+    if mSpec and mSpec.wingKey then
+        wingKey = mSpec.wingKey
+        run.wingKey = wingKey
+    end
+    if (not wingKey) and (run.mapId == 189 or run.mapId == 229 or run.mapId == 329 or run.mapId == 429) then
+        local szFold = FoldDungeonSearchText(subZone or (GetSubZoneText and Safe.String(Safe.Call(GetSubZoneText))) or run.zone or "")
+        if szFold ~= "" then
+            for wKey, wSpec in pairs(COMPLETION_RULES.wings) do
+                if wSpec.mapId == run.mapId and wSpec.subzones then
+                    for _, token in ipairs(wSpec.subzones) do
+                        if szFold:find(token, 1, true) then
+                            wingKey = wKey
+                            run.wingKey = wKey
+                            break
+                        end
+                    end
+                    if wingKey then break end
+                end
+            end
+        end
+    end
+    local spec = wingKey and COMPLETION_RULES.wings[wingKey] or mSpec
+    if (not spec) and run.zone then
+        local zFold = FoldDungeonSearchText(run.zone)
+        if COMPLETION_RULES.byName[zFold] then
+            spec = COMPLETION_RULES.byName[zFold]
+        else
+            for nKey, nSpec in pairs(COMPLETION_RULES.byName) do
+                if zFold:find(nKey, 1, true) then
+                    spec = nSpec
+                    break
+                end
+            end
+        end
+    end
+    if spec and spec.req and spec.req > 0 then
+        run.expectedBosses = spec.req
+    end
+    return spec
+end
+
+function Group:IsLeaverVerificationEnabled()
+    if Compat and Compat.IsModuleEnabled and not Compat.IsModuleEnabled("group") then
+        return false
+    end
+    local s = ns.db and ns.db.settings
+    if not s then return true end
+    return (s.groupLeaverAlert ~= false) or (s.groupAutoAvoidLeaver == true)
+end
+
+function Group:ShouldTrackActiveInstanceRun()
+    return self:IsDungeonRunLogEnabled() or self:IsLeaverVerificationEnabled()
+end
+
+function Group:BuildLeaverAvoidNote(run, rec)
+    local zoneName = (run and run.zone) or L["Instance"]
+    local kills = (run and run.bossKills) or (rec and rec.lvBoss) or 0
+    local expected = (run and run.expectedBosses) or (rec and rec.lvReq) or 0
+    if expected and expected > 0 then
+        return L["Left %s early (%d/%d bosses)"]:format(zoneName, kills, expected)
+    elseif kills and kills > 0 then
+        return L["Left %s early (%d boss(es))"]:format(zoneName, kills)
+    end
+    return L["Left %s before final boss"]:format(zoneName)
+end
+
+function Group:AddLeaverToAvoidList(rawTarget, isAuto)
+    if type(rawTarget) ~= "string" or rawTarget == "" then return false end
+    local parsed = Compat and Compat.ParseCharacterName and Compat.ParseCharacterName(rawTarget) or nil
+    local key = (parsed and parsed.lookupKey) or rawTarget:lower()
+    if not key or key == "" then return false end
+    if Compat and Compat.IsMe and Compat.IsMe((parsed and parsed.displayName) or rawTarget) then
+        return false
+    end
+
+    local detail = self._earlyLeaverDetails and self._earlyLeaverDetails[key] or nil
+    local dispName = (detail and detail.name) or (parsed and parsed.displayName) or rawTarget
+    local noteText = (detail and detail.note) or L["Left dungeon/raid before completion"]
+
+    if Store and Store.FlagPlayerAvoid then
+        Store:FlagPlayerAvoid(key, noteText, dispName)
+    elseif Store and Store.SetSocialMeta then
+        Store:SetSocialMeta(key, { flag = "AVOID", note = noteText, displayName = dispName })
+    end
+
+    if ns.NotificationToast and ns.NotificationToast.DismissById then
+        ns.NotificationToast:DismissById("leaver:" .. key)
+    end
+
+    if isAuto then
+        ns:Print("|cffff4d4d[!] %s:|r %s — %s", L["Early Leaver (Auto-Avoid)"], dispName, noteText)
+    else
+        ns:Print("|cffff4d4d[!] %s|r (%s)", L["%s added to your Avoid list."]:format(dispName), noteText)
+    end
+    ns:Emit("GROUP_UPDATED")
+    ns:Emit("SOCIAL_UPDATED")
+    return true
+end
+
+function Group:TriggerEarlyLeaverNotification(run, rec)
+    if not (run and run.started and rec and rec.k) then return end
+    if run.completed or run.finalBossKilled or run.allBossesKilled then return end
+    if run._leaverAlertedKeys and run._leaverAlertedKeys[rec.k] then return end
+    if Compat and Compat.IsMe and Compat.IsMe(rec.n) then return end
+
+    run._leaverAlertedKeys = run._leaverAlertedKeys or {}
+    run._leaverAlertedKeys[rec.k] = true
+
+    local dispName = rec.n or rec.k
+    local noteSummary = self:BuildLeaverAvoidNote(run, rec)
+    self._earlyLeaverDetails = self._earlyLeaverDetails or {}
+    self._earlyLeaverDetails[rec.k] = {
+        key = rec.k,
+        name = dispName,
+        classFile = rec.c,
+        zone = run.zone,
+        note = noteSummary,
+        leftAt = time(),
+    }
+
+    local curMeta = Store and ((Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(rec.k)) or (Store.GetSocialMeta and Store:GetSocialMeta(rec.k))) or nil
+    local alreadyAvoid = (curMeta and curMeta.flag == "AVOID") == true
+    local s = ns.db and ns.db.settings
+
+    if alreadyAvoid then
+        if (not s) or s.groupLeaverAlert ~= false then
+            ns:Print("|cffff9b42[!] %s:|r %s", L["Early Leaver"], L["%s (already on Avoid List) left %s before completion."]:format(dispName, run.zone or L["Instance"]))
+        end
+        return
+    end
+
+    if s and s.groupAutoAvoidLeaver == true then
+        self:AddLeaverToAvoidList(rec.k, true)
+        if s.groupLeaverAlert ~= false then
+            ns:Emit("ADDON_MESSAGE_NOTIFY", {
+                id = "leaver:" .. rec.k,
+                kind = "EARLY_LEAVER",
+                sourceTag = L["Early Leaver (Auto-Avoid)"],
+                sender = dispName,
+                senderClass = rec.c,
+                lookupKey = rec.k,
+                text = noteSummary .. " · " .. L["Added to Avoid List"],
+                ts = time(),
+                priority = 2,
+                minDuration = 12.0,
+                totalDuration = 12.0,
+            })
+        end
+        return
+    end
+
+    if (not s) or s.groupLeaverAlert ~= false then
+        local encKey = EncodeLeaverLinkPayload(rec.k)
+        ns:Print(
+            "|cffff9b42[!] %s:|r %s — |cff00ccff|Haddon:SCentral:avoidleaver:%s|h[%s]|h|r",
+            L["Early Leaver"],
+            dispName .. " — " .. noteSummary,
+            encKey,
+            L["Add to Avoid List"]
+        )
+        ns:Emit("ADDON_MESSAGE_NOTIFY", {
+            id = "leaver:" .. rec.k,
+            kind = "EARLY_LEAVER",
+            actionKind = "ADD_AVOID",
+            avoidCandidateKey = rec.k,
+            avoidCandidateName = dispName,
+            avoidNote = noteSummary,
+            sourceTag = L["Early Leaver"],
+            sender = dispName,
+            senderClass = rec.c,
+            lookupKey = rec.k,
+            text = noteSummary .. " — " .. L["Before final or all bosses died."],
+            ts = time(),
+            priority = 2,
+            minDuration = 16.0,
+            totalDuration = 16.0,
+        })
+    end
+end
+
+function Group:ScheduleEarlyLeaverCheck(run, rec, explicitSysLeave)
+    if not (run and run.started and rec and rec.k) then return end
+    if not self:IsLeaverVerificationEnabled() then return end
+    if run.completed or run.finalBossKilled or run.allBossesKilled then return end
+    if run.disbandedAt and (time() - run.disbandedAt) <= 15 then return end
+    if run.recentKicks and run.recentKicks[rec.k] and (time() - run.recentKicks[rec.k]) <= 20 then return end
+    if run._leaverAlertedKeys and run._leaverAlertedKeys[rec.k] then return end
+    if run._leaverPendingKeys and run._leaverPendingKeys[rec.k] then return end
+    if Compat and Compat.IsMe and Compat.IsMe(rec.n) then return end
+
+    run._leaverPendingKeys = run._leaverPendingKeys or {}
+    run._leaverPendingKeys[rec.k] = true
+    local targetKey = rec.k
+
+    local function ConfirmNow()
+        if run._leaverPendingKeys then
+            run._leaverPendingKeys[targetKey] = nil
+        end
+        if run.completed or run.finalBossKilled or run.allBossesKilled then
+            if rec.lv and not (run._leaverAlertedKeys and run._leaverAlertedKeys[targetKey]) then
+                rec.lv = nil
+                rec.lvBoss = nil
+                rec.lvReq = nil
+            end
+            return
+        end
+        local now = time()
+        if run.disbandedAt and (now - run.disbandedAt) <= 15 then
+            if rec.lv and not (run._leaverAlertedKeys and run._leaverAlertedKeys[targetKey]) then
+                rec.lv = nil
+                rec.lvBoss = nil
+                rec.lvReq = nil
+            end
+            return
+        end
+        if run.recentKicks and run.recentKicks[targetKey] and (now - run.recentKicks[targetKey]) <= 20 then
+            rec.lv = nil
+            rec.lvBoss = nil
+            rec.lvReq = nil
+            rec.kicked = true
+            return
+        end
+        if run.presentKeys and run.presentKeys[targetKey] then
+            if rec.lv and not (run._leaverAlertedKeys and run._leaverAlertedKeys[targetKey]) then
+                rec.lv = nil
+                rec.lvBoss = nil
+                rec.lvReq = nil
+            end
+            return
+        end
+        local hasSysProof = explicitSysLeave or (run.recentSysLeaves and run.recentSysLeaves[targetKey] and (now - run.recentSysLeaves[targetKey]) <= 25)
+        if (not hasSysProof) and (not (Compat and Compat.IsInGroup and Compat.IsInGroup()) or self._activeRun ~= run) then
+            if rec.lv and not (run._leaverAlertedKeys and run._leaverAlertedKeys[targetKey]) then
+                rec.lv = nil
+                rec.lvBoss = nil
+                rec.lvReq = nil
+            end
+            return
+        end
+        Group:TriggerEarlyLeaverNotification(run, rec)
+    end
+
+    if C_Timer and C_Timer.After then
+        C_Timer.After(2.5, ConfirmNow)
+    else
+        ConfirmNow()
+    end
+end
+
+function Group:MarkActiveRunCompleted(reasonTag)
+    local run = self._activeRun
+    if not run then return end
+    run.completed = true
+    if not run.completedReason then
+        run.completedReason = reasonTag or "completed"
+    end
+    run.pendingLeaveAt = nil
+    run.leftSinceCombat = 0
+    ns:Emit("GROUP_UPDATED")
+end
+
+function Group:CheckActiveRaidLockoutCompletion()
+    local run = self._activeRun
+    if not (run and run.instType == "raid" and GetNumSavedInstances and GetSavedInstanceInfo) then
+        return false
+    end
+    local okN, numSaved = pcall(GetNumSavedInstances)
+    numSaved = okN and Safe.Number(numSaved) or 0
+    if not numSaved or numSaved <= 0 then return false end
+
+    local zoneFold = FoldDungeonSearchText(run.zone or "")
+    for idx = 1, numSaved do
+        local okI, rName, _, _, _, locked, _, _, isRaid, _, _, numEnc, encProg, _, instId = pcall(GetSavedInstanceInfo, idx)
+        if okI then
+            local cleanName = Safe.String(rName) or ""
+            local cleanNumEnc = Safe.Number(numEnc) or 0
+            local cleanProg = Safe.Number(encProg) or 0
+            local cleanInstId = Safe.Number(instId)
+            local isMatch = (run.mapId and cleanInstId and cleanInstId == run.mapId)
+                or (cleanName ~= "" and zoneFold ~= "" and FoldDungeonSearchText(cleanName) == zoneFold)
+            if isMatch and (Safe.Value(isRaid) ~= false) then
+                if cleanNumEnc > 0 then
+                    run.expectedBosses = math.max(run.expectedBosses or 0, cleanNumEnc)
+                    if cleanProg >= cleanNumEnc then
+                        run.allBossesKilled = true
+                        self:MarkActiveRunCompleted("lockout_complete")
+                        return true
+                    end
+                    local spec = ResolveRunCompletionSpec(run, nil, nil)
+                    if spec and spec.finalNames and GetSavedInstanceEncounterInfo then
+                        for eIdx = 1, cleanNumEnc do
+                            local okE, eName, _, eKilled = pcall(GetSavedInstanceEncounterInfo, idx, eIdx)
+                            if okE and Safe.Value(eKilled) == true then
+                                local cleanE = FoldDungeonSearchText(Safe.String(eName) or "")
+                                if cleanE ~= "" and spec.finalNames[cleanE] then
+                                    run.finalBossKilled = true
+                                    self:MarkActiveRunCompleted("final_boss")
+                                    return true
+                                end
+                            end
+                        end
+                    end
+                end
+                break
+            end
+        end
+    end
+    return false
+end
+
 local function IsInPartyOrRaidInstanceNow()
     local inInst, instType = Safe.Call(IsInInstance)
     instType = Safe.String(instType)
@@ -997,7 +1494,13 @@ local function ReadDamageMeterSessionByKey(run, sessionType)
                 if sDur and sDur > maxDurationSec then
                     maxDurationSec = sDur
                 end
-                local seenInMetric = {}
+                local seenInMetric = Group._dmSeenScratch
+                if not seenInMetric then
+                    seenInMetric = {}
+                    Group._dmSeenScratch = seenInMetric
+                else
+                    wipe(seenInMetric)
+                end
                 for _, src in ipairs(session.combatSources) do
                     local key, dispName, cls, guid = ResolveDamageMeterSourceKey(run, src)
                     if key then
@@ -1198,7 +1701,13 @@ local function UpdateDungeonRunDamageMeter(run, isPullEnd)
             run.dmLastOverallDur = overallDur
         end
 
-        local allKeys = {}
+        local allKeys = Group._dmAllKeysScratch
+        if not allKeys then
+            allKeys = {}
+            Group._dmAllKeysScratch = allKeys
+        else
+            wipe(allKeys)
+        end
         for k in pairs(overallNow) do allKeys[k] = true end
         for k in pairs(run.dmResetAccumByKey or {}) do allKeys[k] = true end
         for k in pairs(run.dmLiveByKey) do allKeys[k] = true end
@@ -1245,8 +1754,22 @@ local function UpdateDungeonRunDamageMeter(run, isPullEnd)
         run.lastPullMetered = run.pulls or 0
         local currNow, currDur, currSessId = ReadDamageMeterSessionByKey(run, sessCurrent)
         if currNow and next(currNow) ~= nil then
-            local parts = { tostring(currSessId or ""), string.format("%.2f", currDur or 0) }
-            local sortedKeys = {}
+            local parts = Group._dmPartsScratch
+            if not parts then
+                parts = {}
+                Group._dmPartsScratch = parts
+            else
+                wipe(parts)
+            end
+            parts[1] = tostring(currSessId or "")
+            parts[2] = string.format("%.2f", currDur or 0)
+            local sortedKeys = Group._dmSortedKeysScratch
+            if not sortedKeys then
+                sortedKeys = {}
+                Group._dmSortedKeysScratch = sortedKeys
+            else
+                wipe(sortedKeys)
+            end
             for k in pairs(currNow) do
                 sortedKeys[#sortedKeys + 1] = k
             end
@@ -1741,8 +2264,10 @@ function Group:CaptureActiveRunMembers(isInitial)
             local parsedMem = m.displayName and Compat.ParseCharacterName and Compat.ParseCharacterName(m.displayName)
             if parsedMem and parsedMem.firstName then
                 local fl = parsedMem.firstName:lower()
-                if not run.firstToKey[fl] then
+                if run.firstToKey[fl] == nil then
                     run.firstToKey[fl] = m.lookupKey
+                elseif run.firstToKey[fl] ~= m.lookupKey then
+                    run.firstToKey[fl] = false
                 end
             end
             if m.isMe then
@@ -1782,19 +2307,37 @@ function Group:CaptureActiveRunMembers(isInitial)
                     if m.level and m.level > (rec.l or 0) then rec.l = m.level end
                     if gName and not rec.g then rec.g = gName end
                     rec.lv = nil
+                    rec.lvBoss = nil
+                    rec.lvReq = nil
+                    rec.kicked = nil
+                    if run._leaverPendingKeys then
+                        run._leaverPendingKeys[m.lookupKey] = nil
+                    end
                 end
             end
         end
     end
 
     if not isInitial and run.started then
+        local now = time()
+        local isCompleted = (run.completed == true) or (run.finalBossKilled == true) or (run.allBossesKilled == true)
+        local recentDisband = run.disbandedAt and (now - run.disbandedAt) <= 15
         local leftNow = 0
         for prevKey in pairs(run.presentKeys) do
             if not liveKeys[prevKey] and prevKey ~= run.myKey then
                 leftNow = leftNow + 1
                 local rec = run.membersByKey[prevKey]
                 if rec then
-                    rec.lv = true
+                    local wasKicked = run.recentKicks and run.recentKicks[prevKey] and (now - run.recentKicks[prevKey]) <= 20
+                    if wasKicked then
+                        rec.lv = nil
+                        rec.kicked = true
+                    elseif not isCompleted and not recentDisband then
+                        rec.lv = true
+                        rec.lvBoss = run.bossKills or 0
+                        rec.lvReq = run.expectedBosses
+                        self:ScheduleEarlyLeaverCheck(run, rec, false)
+                    end
                 end
             end
         end
@@ -1804,12 +2347,11 @@ function Group:CaptureActiveRunMembers(isInitial)
             run.leftSinceCombat = 0
             run._leaveSeq = (run._leaveSeq or 0) + 1
         elseif leftNow > 0 then
-            local now = time()
             run.pendingLeaveAt = run.pendingLeaveAt or now
             run.leftSinceCombat = (run.leftSinceCombat or 0) + leftNow
             local inCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
             if run.exitedAt then
-                self:FinalizeActiveDungeonRun("member_left", false)
+                self:FinalizeActiveDungeonRun(isCompleted and "completed" or "member_left", false)
                 return
             elseif not inCombat then
                 local isSmallLeft
@@ -1828,7 +2370,8 @@ function Group:CaptureActiveRunMembers(isInitial)
                             if cur == run and cur._leaveSeq == lSeq and cur.started and cur.pendingLeaveAt then
                                 local stillCombat = (InCombatLockdown and InCombatLockdown()) or (UnitAffectingCombat and UnitAffectingCombat("player"))
                                 if not stillCombat then
-                                    Group:FinalizeActiveDungeonRun("member_left", false)
+                                    local doneNow = (cur.completed == true) or (cur.finalBossKilled == true) or (cur.allBossesKilled == true)
+                                    Group:FinalizeActiveDungeonRun(doneNow and "completed" or "member_left", false)
                                 end
                             end
                         end)
@@ -1849,6 +2392,7 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
     local run = self._activeRun
     self._activeRun = nil
     if not run or not run.started or not self:IsDungeonRunLogEnabled() then
+        self:SyncDungeonRunEvents()
         return false
     end
 
@@ -1876,14 +2420,21 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
     local startedAt = run.startedAt or run.enteredAt or now
     local endedAt
     local endReason = reason or "completed"
-    if run.pendingLeaveAt and run.pendingLeaveAt >= (run.lastCombatAt or startedAt) then
+    local isCompleted = (run.completed == true) or (run.finalBossKilled == true) or (run.allBossesKilled == true)
+    if isCompleted and reason ~= "instance_reset" and reason ~= "zone_change" and reason ~= "logout" then
+        endReason = "completed"
+        endedAt = run.lastBossAt or run.exitedAt or now
+    elseif run.pendingLeaveAt and run.pendingLeaveAt >= (run.lastCombatAt or startedAt) then
         endedAt = run.pendingLeaveAt
-        endReason = "member_left"
+        endReason = isCompleted and "completed" or "member_left"
     elseif run.exitedAt and run.exitedAt >= startedAt then
         endedAt = run.exitedAt
-        endReason = (reason == "left_group") and "left_group" or (reason or "exited_instance")
+        endReason = isCompleted and "completed" or ((reason == "left_group") and "left_group" or (reason or "exited_instance"))
     else
         endedAt = now
+        if isCompleted and reason ~= "instance_reset" then
+            endReason = "completed"
+        end
     end
 
     local duration = math.max(1, endedAt - startedAt)
@@ -1907,7 +2458,12 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
     local dmLive = run.dmLiveByKey or {}
     local memberList = {}
     local roleRank = { TANK = 1, HEALER = 2, DAMAGER = 3, NONE = 4 }
-    for _, m in pairs(run.membersByKey or {}) do
+    for mk, m in pairs(run.membersByKey or {}) do
+        if m.lv and not (run._leaverAlertedKeys and run._leaverAlertedKeys[mk]) and (isCompleted or run.disbandedAt ~= nil) then
+            m.lv = nil
+            m.lvBoss = nil
+            m.lvReq = nil
+        end
         local mDm = m.k and dmLive[m.k]
         if m.deaths and m.deaths > 0 then
             m.d = m.deaths
@@ -1996,6 +2552,10 @@ function Group:FinalizeActiveDungeonRun(reason, silent)
         cdur = (dmDur > 0 or (run.combatSeconds or 0) > 0) and combatDur or nil,
         pulls = (run.pulls and run.pulls > 0) and run.pulls or nil,
         bk = bossKills,
+        bt = (run.expectedBosses and run.expectedBosses > 0) and run.expectedBosses or nil,
+        done = isCompleted and true or false,
+        fb = (run.finalBossKilled == true) or nil,
+        ab = (run.allBossesKilled == true) or nil,
         bn = run.lastBossName,
         bs = (type(run.bosses) == "table" and #run.bosses > 0) and run.bosses or nil,
         wipes = (run.wipes and run.wipes > 0) and run.wipes or nil,
@@ -2068,6 +2628,9 @@ local function SavePendingDungeonRunForReload(run, savedRecId)
                 g = m.g,
                 j = m.j,
                 lv = m.lv,
+                lvBoss = m.lvBoss,
+                lvReq = m.lvReq,
+                kicked = m.kicked,
                 deaths = (dCount and dCount > 0) and dCount or nil,
             }
         end
@@ -2075,6 +2638,14 @@ local function SavePendingDungeonRunForReload(run, savedRecId)
     local bossesCopy = {}
     for i = 1, #(run.bosses or {}) do
         bossesCopy[i] = run.bosses[i]
+    end
+    local bossIdCopy = {}
+    for k, v in pairs(run.bossIdSeen or {}) do
+        if v then bossIdCopy[k] = true end
+    end
+    local reqSeenCopy = {}
+    for k, v in pairs(run.reqBossSeen or {}) do
+        if v then reqSeenCopy[k] = true end
     end
     local lootCopy = {}
     for i = 1, #(run.loot or {}) do
@@ -2089,6 +2660,16 @@ local function SavePendingDungeonRunForReload(run, savedRecId)
         sig = run.sig,
         zone = run.zone,
         instType = run.instType,
+        mapId = run.mapId,
+        wingKey = run.wingKey,
+        expectedBosses = run.expectedBosses,
+        finalBossKilled = run.finalBossKilled == true,
+        allBossesKilled = run.allBossesKilled == true,
+        completed = run.completed == true,
+        completedReason = run.completedReason,
+        reqBossKills = run.reqBossKills or 0,
+        reqBossSeen = reqSeenCopy,
+        bossIdSeen = bossIdCopy,
         difficultyName = run.difficultyName,
         maxPlayers = run.maxPlayers,
         enteredAt = run.enteredAt,
@@ -2129,7 +2710,7 @@ local function SavePendingDungeonRunForReload(run, savedRecId)
     }
 end
 
-local function TryResumePendingDungeonRun(sig, instName, instType, diffName, maxPlayers)
+local function TryResumePendingDungeonRun(sig, instName, instType, diffName, maxPlayers, mapId)
     if type(SocialCentralCharDB) ~= "table" then return false end
     local pending = SocialCentralCharDB._pendingDungeonRun
     if type(pending) ~= "table" then return false end
@@ -2159,6 +2740,14 @@ local function TryResumePendingDungeonRun(sig, instName, instType, diffName, max
             bosses[#bosses + 1] = bn
         end
     end
+    local bossIdSeen = {}
+    for k, v in pairs(pending.bossIdSeen or {}) do
+        if v then bossIdSeen[k] = true end
+    end
+    local reqBossSeen = {}
+    for k, v in pairs(pending.reqBossSeen or {}) do
+        if v then reqBossSeen[k] = true end
+    end
 
     local lootSeen = {}
     local loot = {}
@@ -2185,6 +2774,9 @@ local function TryResumePendingDungeonRun(sig, instName, instType, diffName, max
                 g = m.g,
                 j = m.j,
                 lv = m.lv,
+                lvBoss = m.lvBoss,
+                lvReq = m.lvReq,
+                kicked = m.kicked,
                 deaths = m.deaths,
             }
         end
@@ -2194,6 +2786,19 @@ local function TryResumePendingDungeonRun(sig, instName, instType, diffName, max
         sig = sig,
         zone = (instName and instName ~= "") and instName or pending.zone,
         instType = instType or pending.instType,
+        mapId = mapId or pending.mapId,
+        wingKey = pending.wingKey,
+        expectedBosses = pending.expectedBosses,
+        finalBossKilled = pending.finalBossKilled == true,
+        allBossesKilled = pending.allBossesKilled == true,
+        completed = pending.completed == true,
+        completedReason = pending.completedReason,
+        reqBossKills = pending.reqBossKills or 0,
+        reqBossSeen = reqBossSeen,
+        bossIdSeen = bossIdSeen,
+        bossRecentAt = {},
+        recentKicks = {},
+        recentSysLeaves = {},
         difficultyName = (diffName and diffName ~= "") and diffName or pending.difficultyName,
         maxPlayers = maxPlayers or pending.maxPlayers,
         enteredAt = pending.enteredAt or now,
@@ -2254,6 +2859,7 @@ local function TryResumePendingDungeonRun(sig, instName, instType, diffName, max
         dmLastCurrentSessionSig = pending.dmLastCurrentSessionSig,
     }
     SocialCentralCharDB._pendingDungeonRun = nil
+    ResolveRunCompletionSpec(Group._activeRun, nil, nil)
 
     Group:CaptureActiveRunMembers(false)
     for _, mem in ipairs(Group.members or {}) do
@@ -2275,7 +2881,7 @@ local function TryResumePendingDungeonRun(sig, instName, instType, diffName, max
 end
 
 function Group:CheckActiveDungeonRunZone()
-    if not self:IsDungeonRunLogEnabled() then
+    if not self:ShouldTrackActiveInstanceRun() then
         self._activeRun = nil
         self:SyncDungeonRunEvents()
         return
@@ -2290,22 +2896,37 @@ function Group:CheckActiveDungeonRunZone()
             -- Returned to same instance (e.g. after corpse run or quick summon): cancel pending exit finalize.
             run.exitedAt = nil
             run._exitSeq = (run._exitSeq or 0) + 1
+            if mapId and not run.mapId then run.mapId = mapId end
             if diffName and diffName ~= "" and (not run.difficultyName or run.difficultyName == "") then
                 run.difficultyName = diffName
             end
+            ResolveRunCompletionSpec(run, nil, nil)
             self:CaptureActiveRunMembers(false)
             return
         end
         if run and run.started then
             self:FinalizeActiveDungeonRun("zone_change", false)
         end
-        if TryResumePendingDungeonRun(sig, instName, instType, diffName, maxPlayers) then
+        if TryResumePendingDungeonRun(sig, instName, instType, diffName, maxPlayers, mapId) then
             return
         end
         self._activeRun = {
             sig = sig,
             zone = instName,
             instType = instType,
+            mapId = mapId,
+            wingKey = nil,
+            expectedBosses = nil,
+            finalBossKilled = false,
+            allBossesKilled = false,
+            completed = false,
+            completedReason = nil,
+            reqBossKills = 0,
+            reqBossSeen = {},
+            bossIdSeen = {},
+            bossRecentAt = {},
+            recentKicks = {},
+            recentSysLeaves = {},
             difficultyName = diffName,
             maxPlayers = maxPlayers,
             enteredAt = time(),
@@ -2347,9 +2968,17 @@ function Group:CheckActiveDungeonRunZone()
             _exitSeq = 0,
             _leaveSeq = 0,
         }
+        ResolveRunCompletionSpec(self._activeRun, nil, nil)
         self:CaptureActiveRunMembers(true)
         SnapshotDungeonRunDamageMeterBaseline(self._activeRun)
         self:SyncDungeonRunEvents()
+        if instType == "raid" and RequestRaidInfo then
+            local nowMono = (GetTime and GetTime()) or 0
+            if (nowMono - (self._lastRaidInfoReqAt or 0)) >= 5.0 then
+                self._lastRaidInfoReqAt = nowMono
+                pcall(RequestRaidInfo)
+            end
+        end
         return
     end
 
@@ -2420,7 +3049,7 @@ function Group:OnActiveRunRosterUpdated(inGroupNow)
             end
             return
         end
-        if self:IsDungeonRunLogEnabled() then
+        if self:ShouldTrackActiveInstanceRun() then
             local inInst = IsInPartyOrRaidInstanceNow()
             if inInst then
                 self:CheckActiveDungeonRunZone()
@@ -2441,7 +3070,7 @@ function Group:OnActiveRunRosterUpdated(inGroupNow)
 end
 
 function Group:OnDungeonRunCombatStart()
-    if not self:IsDungeonRunLogEnabled() then return end
+    if not self:ShouldTrackActiveInstanceRun() then return end
     local run = self._activeRun
     if not run then
         if Compat.IsInGroup() then
@@ -2502,16 +3131,27 @@ function Group:OnDungeonRunCombatEnd()
     ns:Emit("GROUP_UPDATED")
 end
 
-function Group:OnDungeonRunEncounterStart(encName)
+function Group:OnDungeonRunEncounterStart(encName, encId)
     self:OnDungeonRunCombatStart()
     local run = self._activeRun
-    if run and encName and encName ~= "" then
+    if not run then return end
+    local numEncId = Safe.Number(encId)
+    if numEncId and numEncId <= 0 then numEncId = nil end
+    if encName and encName ~= "" then
         run.currentEncounter = encName
     end
+    ResolveRunCompletionSpec(run, numEncId, nil)
 end
 
-function Group:OnDungeonRunEncounterEnd(encName, success)
+function Group:OnDungeonRunEncounterEnd(encName, success, encId)
     local run = self._activeRun
+    if not run and self:ShouldTrackActiveInstanceRun() and Compat.IsInGroup() then
+        local inInst = IsInPartyOrRaidInstanceNow()
+        if inInst then
+            self:CheckActiveDungeonRunZone()
+            run = self._activeRun
+        end
+    end
     if not run then return end
     local now = time()
     local okKill = Safe.Number(success) == 1
@@ -2528,17 +3168,77 @@ function Group:OnDungeonRunEncounterEnd(encName, success)
         run.started = true
         run.startedAt = run.enteredAt or now
     end
-    run.lastCombatAt = now
-    run.lastBossAt = now
-    run.bossKills = (run.bossKills or 0) + 1
+
+    local numEncId = Safe.Number(encId)
+    if numEncId and numEncId <= 0 then numEncId = nil end
     local cleanBoss = Safe.String(encName) or run.currentEncounter
-    if cleanBoss and cleanBoss ~= "" then
-        run.lastBossName = cleanBoss
-        if not run.bossSeen[cleanBoss] and #(run.bosses or {}) < MAX_RUN_BOSSES then
-            run.bossSeen[cleanBoss] = true
-            run.bosses[#run.bosses + 1] = cleanBoss
+    local normBoss = (cleanBoss and cleanBoss ~= "") and FoldDungeonSearchText(cleanBoss) or ""
+
+    run.bossIdSeen = run.bossIdSeen or {}
+    run.bossRecentAt = run.bossRecentAt or {}
+    run.reqBossSeen = run.reqBossSeen or {}
+    run.bossSeen = run.bossSeen or {}
+    run.bosses = run.bosses or {}
+
+    local alreadyById = (numEncId ~= nil and run.bossIdSeen[numEncId] == true)
+    local alreadyRecentName = (normBoss ~= "" and run.bossRecentAt[normBoss] ~= nil and (now - run.bossRecentAt[normBoss]) <= 12)
+    local isDuplicateKill = alreadyById or alreadyRecentName
+
+    local spec = ResolveRunCompletionSpec(run, numEncId, nil)
+
+    if not isDuplicateKill then
+        run.lastCombatAt = now
+        run.lastBossAt = now
+        run.bossKills = (run.bossKills or 0) + 1
+        if cleanBoss and cleanBoss ~= "" then
+            run.lastBossName = cleanBoss
+            if not run.bossSeen[cleanBoss] and #run.bosses < MAX_RUN_BOSSES then
+                run.bossSeen[cleanBoss] = true
+                run.bosses[#run.bosses + 1] = cleanBoss
+            end
+        end
+        local grpKey = numEncId and COMPLETION_RULES.fightGroupIds[numEncId]
+        local reqKey = grpKey or (numEncId and ("id:" .. tostring(numEncId)) or ((normBoss ~= "") and ("nm:" .. normBoss) or nil))
+        if not (numEncId and COMPLETION_RULES.optionalEncIds[numEncId]) then
+            if reqKey and not run.reqBossSeen[reqKey] then
+                run.reqBossSeen[reqKey] = true
+                run.reqBossKills = (run.reqBossKills or 0) + 1
+            elseif not reqKey then
+                run.reqBossKills = (run.reqBossKills or 0) + 1
+            end
         end
     end
+
+    if numEncId then run.bossIdSeen[numEncId] = true end
+    if normBoss ~= "" then run.bossRecentAt[normBoss] = now end
+
+    local isFinalBoss = false
+    if spec then
+        if numEncId and spec.finalIds and spec.finalIds[numEncId] then
+            isFinalBoss = true
+        elseif normBoss ~= "" and spec.finalNames and spec.finalNames[normBoss] then
+            isFinalBoss = true
+        end
+    elseif run.mapId == 249 then
+        isFinalBoss = true
+    end
+
+    if isFinalBoss then
+        run.finalBossKilled = true
+        self:MarkActiveRunCompleted("final_boss")
+    elseif spec and spec.req and spec.req > 0 and (run.reqBossKills or 0) >= spec.req then
+        run.allBossesKilled = true
+        self:MarkActiveRunCompleted("all_bosses")
+    end
+
+    if run.instType == "raid" and RequestRaidInfo then
+        local nowMono = (GetTime and GetTime()) or 0
+        if (nowMono - (self._lastRaidInfoReqAt or 0)) >= 3.0 then
+            self._lastRaidInfoReqAt = nowMono
+            pcall(RequestRaidInfo)
+        end
+    end
+
     UpdateDungeonRunDamageMeter(run, false)
     ns:Emit("GROUP_UPDATED")
 end
@@ -2960,6 +3660,9 @@ end
 local GROUP_ACTIVE_RUN_EVENTS = {
     "ENCOUNTER_START",
     "ENCOUNTER_END",
+    "BOSS_KILL",
+    "LFG_COMPLETION_REWARD",
+    "UPDATE_INSTANCE_INFO",
     "CHAT_MSG_SYSTEM",
     "PLAYER_DEAD",
     "UNIT_FLAGS",
@@ -2973,23 +3676,90 @@ local GROUP_ACTIVE_RUN_EVENTS = {
 }
 
 function Group:SyncDungeonRunEvents()
-    local wantRunEvents = (self._activeRun ~= nil) and self:IsDungeonRunLogEnabled()
+    local wantRunEvents = (self._activeRun ~= nil) and self:ShouldTrackActiveInstanceRun()
     if wantRunEvents then
         if self._runEventsActive then return end
         self._runEventsActive = true
-        ns.RegisterEvent(self, "ENCOUNTER_START", function(_, _, _, encName)
-            Group:OnDungeonRunEncounterStart(Safe.String(encName))
+        ns.RegisterEvent(self, "ENCOUNTER_START", function(_, _, encId, encName)
+            Group:OnDungeonRunEncounterStart(Safe.String(encName), encId)
         end)
-        ns.RegisterEvent(self, "ENCOUNTER_END", function(_, _, _, encName, _, _, success)
-            Group:OnDungeonRunEncounterEnd(Safe.String(encName), success)
+        ns.RegisterEvent(self, "ENCOUNTER_END", function(_, _, encId, encName, _, _, success)
+            Group:OnDungeonRunEncounterEnd(Safe.String(encName), success, encId)
+        end)
+        ns.RegisterEvent(self, "BOSS_KILL", function(_, _, encId, encName)
+            Group:OnDungeonRunEncounterEnd(Safe.String(encName), 1, encId)
+        end)
+        ns.RegisterEvent(self, "LFG_COMPLETION_REWARD", function()
+            Group:MarkActiveRunCompleted("lfg_reward")
+        end)
+        ns.RegisterEvent(self, "UPDATE_INSTANCE_INFO", function()
+            Group:CheckActiveRaidLockoutCompletion()
         end)
         ns.RegisterEvent(self, "CHAT_MSG_SYSTEM", function(_, _, rawMsg)
-            if not (Group._activeRun and Group._activeRun.started) then
+            local run = Group._activeRun
+            if not run then
                 return
             end
             local cleanMsg = Safe.String(rawMsg)
-            if cleanMsg and IsInstanceResetSystemMessage(cleanMsg) then
+            if not cleanMsg or cleanMsg == "" then
+                return
+            end
+            if run.started and IsInstanceResetSystemMessage(cleanMsg) then
                 Group:FinalizeActiveDungeonRun("instance_reset", false)
+                return
+            end
+            local sysKind, sysWho = ClassifyGroupSystemMessage(cleanMsg)
+            if not sysKind then return end
+            local now = time()
+            if sysKind == "disbanded" then
+                run.disbandedAt = now
+                if type(run.membersByKey) == "table" then
+                    for mk, mRec in pairs(run.membersByKey) do
+                        if type(mRec) == "table" and mRec.lv and not (run._leaverAlertedKeys and run._leaverAlertedKeys[mk]) then
+                            mRec.lv = nil
+                            mRec.lvBoss = nil
+                            mRec.lvReq = nil
+                        end
+                    end
+                end
+                return
+            end
+            if sysWho then
+                local parsed = Compat and Compat.ParseCharacterName and Compat.ParseCharacterName(sysWho) or nil
+                local targetKey = (parsed and parsed.lookupKey) or sysWho:lower()
+                if run.firstToKey and not (run.membersByKey and run.membersByKey[targetKey]) then
+                    local fLow = (parsed and parsed.firstName and parsed.firstName:lower()) or targetKey
+                    if type(run.firstToKey[fLow]) == "string" then
+                        targetKey = run.firstToKey[fLow]
+                    end
+                end
+                if sysKind == "kicked" then
+                    run.recentKicks = run.recentKicks or {}
+                    run.recentKicks[targetKey] = now
+                    if run._leaverPendingKeys then
+                        run._leaverPendingKeys[targetKey] = nil
+                    end
+                    local rec = run.membersByKey and run.membersByKey[targetKey]
+                    if rec then
+                        rec.lv = nil
+                        rec.lvBoss = nil
+                        rec.lvReq = nil
+                        rec.kicked = true
+                    end
+                elseif sysKind == "left" and run.started and targetKey ~= run.myKey and not (Compat and Compat.IsMe and Compat.IsMe(sysWho)) then
+                    run.recentSysLeaves = run.recentSysLeaves or {}
+                    run.recentSysLeaves[targetKey] = now
+                    local isDone = (run.completed == true) or (run.finalBossKilled == true) or (run.allBossesKilled == true)
+                    local recentDisband = run.disbandedAt and (now - run.disbandedAt) <= 15
+                    local wasKicked = run.recentKicks and run.recentKicks[targetKey] and (now - run.recentKicks[targetKey]) <= 20
+                    local rec = run.membersByKey and run.membersByKey[targetKey]
+                    if rec and not isDone and not recentDisband and not wasKicked then
+                        rec.lv = true
+                        rec.lvBoss = run.bossKills or 0
+                        rec.lvReq = run.expectedBosses
+                        Group:ScheduleEarlyLeaverCheck(run, rec, true)
+                    end
+                end
             end
         end)
         ns.RegisterEvent(self, "PLAYER_DEAD", function()

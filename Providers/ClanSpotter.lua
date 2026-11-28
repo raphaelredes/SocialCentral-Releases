@@ -125,9 +125,9 @@ end
 local function RecordPosGuildRawCache(rawGuild, value)
     if not rawGuild then return end
     if posGuildRawCache[rawGuild] == nil then
-        if posGuildRawCacheCount >= 200 then
-            wipe(posGuildRawPrev)
-            posGuildRawPrev, posGuildRawCache = posGuildRawCache, posGuildRawPrev
+        if posGuildRawCacheCount >= 160 then
+            posGuildRawPrev = posGuildRawCache
+            posGuildRawCache = {}
             posGuildRawCacheCount = 0
         end
         posGuildRawCacheCount = posGuildRawCacheCount + 1
@@ -136,20 +136,20 @@ local function RecordPosGuildRawCache(rawGuild, value)
 end
 
 local function InvalidateBystanderCache()
-    wipe(bystanderCooldown)
-    wipe(bystanderPrev)
+    bystanderCooldown = {}
+    bystanderPrev = {}
     bystanderCooldownCount = 0
-    wipe(coldGuildRetryUsed)
-    wipe(posGuildRawCache)
-    wipe(posGuildRawPrev)
+    coldGuildRetryUsed = {}
+    posGuildRawCache = {}
+    posGuildRawPrev = {}
     posGuildRawCacheCount = 0
 end
 
 local function MarkPositiveIndexDirty()
     posIndexDirty = true
     socialCacheDirty = true
-    wipe(posGuildRawCache)
-    wipe(posGuildRawPrev)
+    posGuildRawCache = {}
+    posGuildRawPrev = {}
     posGuildRawCacheCount = 0
 end
 
@@ -172,15 +172,58 @@ end
 local function RecordBystanderCooldown(guid, expiresAt)
     if not guid then return end
     if bystanderCooldown[guid] == nil then
-        if bystanderCooldownCount >= 200 then
-            wipe(bystanderPrev)
-            bystanderPrev, bystanderCooldown = bystanderCooldown, bystanderPrev
+        if bystanderCooldownCount >= 160 then
+            bystanderPrev = bystanderCooldown
+            bystanderCooldown = {}
             bystanderCooldownCount = 0
-            wipe(coldGuildRetryUsed)
+            coldGuildRetryUsed = {}
         end
         bystanderCooldownCount = bystanderCooldownCount + 1
     end
     bystanderCooldown[guid] = expiresAt
+end
+
+function Spotter:TrimRuntimeCaches()
+    local nowClock = (GetTime and GetTime()) or 0
+    for k, exp in pairs(bystanderPrev) do
+        if (tonumber(exp) or 0) <= nowClock then
+            bystanderPrev[k] = nil
+        end
+    end
+    if next(bystanderPrev) == nil then
+        bystanderPrev = {}
+    end
+    for k, exp in pairs(bystanderCooldown) do
+        if (tonumber(exp) or 0) <= nowClock then
+            bystanderCooldown[k] = nil
+        end
+    end
+    local bc = 0
+    for _ in pairs(bystanderCooldown) do bc = bc + 1 end
+    bystanderCooldownCount = bc
+    if bc == 0 then
+        bystanderCooldown = {}
+        coldGuildRetryUsed = {}
+    end
+    for k, exp in pairs(chatPrev) do
+        if (tonumber(exp) or 0) <= nowClock then
+            chatPrev[k] = nil
+        end
+    end
+    if next(chatPrev) == nil then
+        chatPrev = {}
+    end
+    for k, exp in pairs(chatCooldown) do
+        if (tonumber(exp) or 0) <= nowClock then
+            chatCooldown[k] = nil
+        end
+    end
+    local cc = 0
+    for _ in pairs(chatCooldown) do cc = cc + 1 end
+    chatCooldownCount = cc
+    if cc == 0 then
+        chatCooldown = {}
+    end
 end
 
 local BYSTANDER_COOLDOWN_SECONDS = 25.0
@@ -220,9 +263,9 @@ end
 local function RecordChatCooldown(cacheKey, expiresAt)
     if not cacheKey then return end
     if chatCooldown[cacheKey] == nil then
-        if chatCooldownCount >= 150 then
-            wipe(chatPrev)
-            chatPrev, chatCooldown = chatCooldown, chatPrev
+        if chatCooldownCount >= 120 then
+            chatPrev = chatCooldown
+            chatCooldown = {}
             chatCooldownCount = 0
         end
         chatCooldownCount = chatCooldownCount + 1

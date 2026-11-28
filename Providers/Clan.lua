@@ -4891,7 +4891,9 @@ function Clan:GetCachedRecipeCrafters(itemID, itemName)
     end
     if #out == 0 then return nil end
     table.sort(out, function(a, b)
-        return (a.updatedAt or 0) > (b.updatedAt or 0)
+        local au, bu = a.updatedAt or 0, b.updatedAt or 0
+        if au ~= bu then return au > bu end
+        return tostring(a.lookupKey or "") < tostring(b.lookupKey or "")
     end)
     return out
 end
@@ -7130,6 +7132,60 @@ local inspectMSeenScratch = {}
 local inspectSearchPartsScratch = {}
 local inspectTagsScratch = {}
 
+local function NoteCachedLfgPlayerInfo(self, dispName, lookupKey, level, classFile, area, guild, nowTs)
+    if not self then return end
+    local lk = (type(lookupKey) == "string" and lookupKey ~= "") and lookupKey or nil
+    if (not lk) and type(dispName) == "string" and dispName ~= "" and Compat.ParseCharacterFields then
+        lk = Compat.ParseCharacterFields(dispName)
+    end
+    if not lk or lk == "" then return end
+    if Compat.IsMe and Compat.IsMe(dispName or lk) then return end
+
+    local lvlNum = tonumber(level)
+    lvlNum = (lvlNum and lvlNum > 0) and math.floor(lvlNum) or nil
+    local cleanCls = (type(classFile) == "string" and classFile ~= "") and classFile or nil
+    local cleanArea = (type(area) == "string" and area ~= "") and area or nil
+    local cleanGuild = (type(guild) == "string" and guild ~= "") and guild or nil
+    if not (lvlNum or cleanCls or cleanArea or cleanGuild or (type(dispName) == "string" and dispName ~= "")) then
+        return
+    end
+
+    self.lfgPlayerInfoByLookup = self.lfgPlayerInfoByLookup or {}
+    local cache = self.lfgPlayerInfoByLookup
+    local ts = tonumber(nowTs) or time()
+    local existing = cache[lk]
+    if type(existing) ~= "table" then
+        self._lfgPlayerInfoCount = (self._lfgPlayerInfoCount or 0) + 1
+        if self._lfgPlayerInfoCount > 400 then
+            PruneAndBoundByTimestamp(cache, 300, 1800, ts)
+            local recount = 0
+            for _ in pairs(cache) do recount = recount + 1 end
+            self._lfgPlayerInfoCount = recount
+        end
+        existing = {
+            lookupKey = lk,
+            displayName = (type(dispName) == "string" and dispName ~= "") and dispName or nil,
+            level = lvlNum,
+            classFile = cleanCls,
+            area = cleanArea,
+            guild = cleanGuild,
+            updatedAt = ts,
+        }
+        cache[lk] = existing
+    else
+        if type(dispName) == "string" and dispName ~= "" and (not existing.displayName or dispName:find(" ", 1, true)) then
+            existing.displayName = dispName
+        end
+        if lvlNum and ((not existing.level) or lvlNum >= existing.level) then
+            existing.level = lvlNum
+        end
+        if cleanCls then existing.classFile = cleanCls end
+        if cleanArea then existing.area = cleanArea end
+        if cleanGuild then existing.guild = cleanGuild end
+        existing.updatedAt = ts
+    end
+end
+
 local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDisp)
     local out = {
         leaderLvl = Safe.Number(info and info.leaderLevel) or 0,
@@ -7193,7 +7249,7 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
         end
     end
 
-    local function RecordMember(mName, mLvl, mClass, mRole, mIsLeader, lfgRoles, slotIdx)
+    local function RecordMember(mName, mLvl, mClass, mRole, mIsLeader, lfgRoles, slotIdx, mArea)
         if mClass and mClass ~= "" then
             out.memberClassSet[mClass] = true
             if #out.memberClasses < 5 then
@@ -7247,6 +7303,7 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
             local mGood, mAvoid, mEnemy, mAddon = false, false, false, false
             if mLk and not isMe then
                 mClan, mAllied, mFriend, mWatch, mGuild = self:GetPlayerRelationshipFlags(mLk, disp)
+                NoteCachedLfgPlayerInfo(self, disp, mLk, mLvl, mClass, mArea or out.areaName, mGuild, time())
                 local sMeta = Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(mLk) or (Store.GetSocialMeta and Store:GetSocialMeta(mLk)))
                 local comp = Store and Store.GetRecentCompanion and Store:GetRecentCompanion(mLk)
                 if (sMeta and sMeta.flag == "GOOD") or comp ~= nil then
@@ -7346,6 +7403,7 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
                     end
                 end
                 local mClean = PickOfficialNameFromTable(mi, nil)
+                local mArea = Safe.String(mi.areaName)
                 RecordMember(
                     mClean or Safe.String(mi.name),
                     Safe.Number(mi.level) or 0,
@@ -7353,7 +7411,8 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
                     Safe.String(mi.assignedRole),
                     Safe.Value(mi.isLeader) == true,
                     mi.lfgRoles,
-                    mIdx
+                    mIdx,
+                    mArea
                 )
             end
         end
@@ -7370,11 +7429,12 @@ local function InspectOfficialGroupMembers(self, resId, info, leaderLk, leaderDi
             Safe.String(leaderInfo.assignedRole),
             true,
             leaderInfo.lfgRoles,
-            1
+            1,
+            Safe.String(leaderInfo.areaName)
         )
     end
     if not leaderAdded and leaderDisp and leaderDisp ~= L["Official LFG"] then
-        RecordMember(leaderDisp, out.leaderLvl, out.leaderClass, nil, true, nil, 1)
+        RecordMember(leaderDisp, out.leaderLvl, out.leaderClass, nil, true, nil, 1, out.areaName)
     end
 
     if out.numGuildMates > 0 then out.hasGuildMember = true end
@@ -7738,6 +7798,7 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         self.officialLfgCache[fallbackKey] = nil
     end
     self.officialLfgCache[leaderLk] = rec
+    NoteCachedLfgPlayerInfo(self, leaderDisp, leaderLk, leaderLvl, mbrMeta.leaderClass, mbrMeta.areaName, resolvedGuild, now)
     if freshKeys then freshKeys[leaderLk] = true end
     local notifiedClan = false
     if (not isSelfLeader) and (rec.hasGuildMember or rec.hasAlliedMember or rec.hasFriendMember or rec.hasWatchlistMember) then
@@ -7748,6 +7809,108 @@ local function ScanSingleOfficialSearchResult(self, resId, searchOrder, now, sca
         self:MaybeTriggerLfgWatcher(rec, "OFFICIAL_LFG")
     end
     return true
+end
+
+function Clan:GetCachedLfgPlayerInfo(lookupKey, displayName)
+    local lk = (type(lookupKey) == "string" and lookupKey ~= "") and lookupKey or nil
+    if (not lk) and type(displayName) == "string" and displayName ~= "" and Compat.ParseCharacterFields then
+        lk = Compat.ParseCharacterFields(displayName)
+    end
+    if not lk or lk == "" then return nil end
+
+    local nowTs = time()
+    local map = self.lfgPlayerInfoByLookup
+    local cached = map and map[lk]
+    if type(cached) == "table" and ((not cached.updatedAt) or (nowTs - cached.updatedAt) <= 3600) then
+        return cached
+    end
+
+    if type(self.officialLfgCache) == "table" then
+        local directRec = self.officialLfgCache[lk]
+        if type(directRec) == "table" and ((directRec.level and directRec.level > 0) or directRec.classFile or (directRec.area and directRec.area ~= "")) then
+            NoteCachedLfgPlayerInfo(self, directRec.displayName or displayName, lk, directRec.level, directRec.classFile, directRec.area, directRec.guild, directRec.updatedAt or nowTs)
+            return self.lfgPlayerInfoByLookup and self.lfgPlayerInfoByLookup[lk] or directRec
+        end
+        for _, offRec in pairs(self.officialLfgCache) do
+            if type(offRec) == "table" and type(offRec.members) == "table" then
+                for _, mb in ipairs(offRec.members) do
+                    if type(mb) == "table" and mb.name and Compat.ParseCharacterFields then
+                        local mLk = Compat.ParseCharacterFields(mb.name)
+                        if mLk == lk then
+                            NoteCachedLfgPlayerInfo(self, mb.name, lk, mb.level, mb.classFile, offRec.area, nil, offRec.updatedAt or nowTs)
+                            return self.lfgPlayerInfoByLookup and self.lfgPlayerInfoByLookup[lk]
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if type(self.externalLFG) == "table" and type(self.externalLFG[lk]) == "table" then
+        local ext = self.externalLFG[lk]
+        if ext.displayName or ext.guild or ext.classFile then
+            NoteCachedLfgPlayerInfo(self, ext.displayName, lk, ext.level, ext.classFile, ext.area, ext.guild, ext.updatedAt or nowTs)
+            return self.lfgPlayerInfoByLookup and self.lfgPlayerInfoByLookup[lk]
+        end
+    end
+
+    -- Read-only passive peek into already-fetched C_LFGList results in client memory (never invokes Search()).
+    local monoNow = GetTime and GetTime() or 0
+    if C_LFGList and (C_LFGList.GetFilteredSearchResults or C_LFGList.GetSearchResults) and C_LFGList.GetSearchResultInfo
+        and (monoNow - (self._lastPassiveLfgPeekAt or 0)) >= 8.0
+    then
+        self._lastPassiveLfgPeekAt = monoNow
+        local r1, r2
+        if C_LFGList.GetFilteredSearchResults then
+            r1, r2 = Safe.Call(C_LFGList.GetFilteredSearchResults)
+        end
+        local results = (type(r2) == "table" and r2) or (type(r1) == "table" and r1)
+        if (type(results) ~= "table" or #results == 0) and C_LFGList.GetSearchResults then
+            r1, r2 = Safe.Call(C_LFGList.GetSearchResults)
+            results = (type(r2) == "table" and r2) or (type(r1) == "table" and r1)
+        end
+        if type(results) == "table" and #results > 0 then
+            for i = 1, math.min(#results, 80) do
+                local resId = results[i]
+                local info = resId and Safe.Call(C_LFGList.GetSearchResultInfo, resId)
+                if type(info) == "table" and not info.isDelisted then
+                    local lName = PickOfficialLeaderName(info)
+                    local lLk = nil
+                    if lName and Compat.ParseCharacterFields then
+                        lLk = select(1, Compat.ParseCharacterFields(lName))
+                    end
+                    if lName and lLk then
+                        local lInfo = C_LFGList.GetSearchResultLeaderInfo and Safe.Call(C_LFGList.GetSearchResultLeaderInfo, resId) or nil
+                        local lLvl = (Safe.Number(info.leaderLevel) or 0)
+                        if lLvl <= 0 and type(lInfo) == "table" then
+                            lLvl = Safe.Number(lInfo.level) or 0
+                        end
+                        local lCls = type(lInfo) == "table" and Safe.String(lInfo.classFilename) or nil
+                        local lArea = type(lInfo) == "table" and Safe.String(lInfo.areaName) or nil
+                        NoteCachedLfgPlayerInfo(self, lName, lLk, lLvl, lCls, lArea, nil, nowTs)
+                    end
+                    if C_LFGList.GetSearchResultPlayerInfo then
+                        local numM = math.min(math.max(1, Safe.Number(info.numMembers) or 1), 15)
+                        for mIdx = 1, numM do
+                            local mi = Safe.Call(C_LFGList.GetSearchResultPlayerInfo, resId, mIdx)
+                            if type(mi) == "table" then
+                                local mName = PickOfficialNameFromTable(mi, nil) or Safe.String(mi.name)
+                                local mLk = nil
+                                if mName and Compat.ParseCharacterFields then
+                                    mLk = select(1, Compat.ParseCharacterFields(mName))
+                                end
+                                if mName and mLk then
+                                    NoteCachedLfgPlayerInfo(self, mName, mLk, Safe.Number(mi.level) or 0, Safe.String(mi.classFilename), Safe.String(mi.areaName), nil, nowTs)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return self.lfgPlayerInfoByLookup and self.lfgPlayerInfoByLookup[lk] or nil
+    end
+    return nil
 end
 
 function Clan:ScanOfficialLfgResults(skipPruningEmpty, specificResIds)
@@ -7798,7 +7961,13 @@ function Clan:ScanOfficialLfgResults(skipPruningEmpty, specificResIds)
     if not skipPruningEmpty then
         self._officialSearchPendingUntil = 0
     end
-    local freshKeys = {}
+    local freshKeys = self._officialFreshKeysScratch
+    if not freshKeys then
+        freshKeys = {}
+        self._officialFreshKeysScratch = freshKeys
+    else
+        wipe(freshKeys)
+    end
     local limit = math.min(#results, 120)
     for i = 1, limit do
         local resId = results[i]
@@ -8946,6 +9115,18 @@ function Clan:GetMergedGuildMembers(query, opts)
             return false
         elseif statusFilter == "inactive90" and (row.online or (row.offlineDays or 0) < 90) then
             return false
+        elseif statusFilter == "fav" then
+            local rk = row.lookupKey or row.displayName
+            if not (rk and Store and Store.IsSocialFavorite and Store:IsSocialFavorite(rk) == true) then
+                return false
+            end
+        elseif statusFilter == "good" or statusFilter == "avoid" then
+            local rk = row.lookupKey or row.displayName
+            local rMeta = rk and Store and (Store.GetResolvedSocialMeta and Store:GetResolvedSocialMeta(rk) or (Store.GetSocialMeta and Store:GetSocialMeta(rk))) or nil
+            local wantFlag = (statusFilter == "good") and "GOOD" or "AVOID"
+            if not (rMeta and rMeta.flag == wantFlag) then
+                return false
+            end
         end
         if rankFilter ~= nil and row.rankIndex ~= rankFilter then
             return false
@@ -11800,30 +11981,59 @@ function Clan:Init()
         end
         if Clan._searchResultUpdatePending then return end
         Clan._searchResultUpdatePending = true
-        local function FlushDirtyResults()
-            Clan._searchResultUpdatePending = false
-            local batch = nil
-            if (not Clan._dirtySearchTooMany) and Clan._dirtySearchIds and (Clan._dirtySearchIdCount or 0) > 0 then
-                batch = {}
-                for rid in pairs(Clan._dirtySearchIds) do
-                    batch[rid] = true
+        if not Clan._flushDirtySearchResultsFn then
+            Clan._dirtySearchBatchBuf = {}
+            Clan._flushDirtySearchResultsFn = function()
+                Clan._searchResultUpdatePending = false
+                local batch = nil
+                local batchBuf = Clan._dirtySearchBatchBuf
+                wipe(batchBuf)
+                if (not Clan._dirtySearchTooMany) and Clan._dirtySearchIds and (Clan._dirtySearchIdCount or 0) > 0 then
+                    for rid in pairs(Clan._dirtySearchIds) do
+                        batchBuf[rid] = true
+                    end
+                    batch = batchBuf
                 end
-            end
-            if Clan._dirtySearchIds then
-                wipe(Clan._dirtySearchIds)
-            end
-            Clan._dirtySearchIdCount = 0
-            Clan._dirtySearchTooMany = false
-            if Clan.ScanOfficialLfgResults then
-                Clan:ScanOfficialLfgResults(true, batch)
+                if Clan._dirtySearchIds then
+                    wipe(Clan._dirtySearchIds)
+                end
+                Clan._dirtySearchIdCount = 0
+                Clan._dirtySearchTooMany = false
+                if Clan.ScanOfficialLfgResults then
+                    Clan:ScanOfficialLfgResults(true, batch)
+                end
             end
         end
         if C_Timer and C_Timer.After then
-            C_Timer.After(0.75, FlushDirtyResults)
+            C_Timer.After(0.75, Clan._flushDirtySearchResultsFn)
         else
-            FlushDirtyResults()
+            Clan._flushDirtySearchResultsFn()
         end
     end)
+
+function Clan:TrimRuntimeCaches()
+    local nowEpoch = time()
+    if type(self.lfgAlertCooldowns) == "table" then
+        for k, ts in pairs(self.lfgAlertCooldowns) do
+            if (nowEpoch - (tonumber(ts) or 0)) >= 240 then
+                self.lfgAlertCooldowns[k] = nil
+            end
+        end
+    end
+    if type(self.lfgWatcherCooldowns) == "table" then
+        for k, ts in pairs(self.lfgWatcherCooldowns) do
+            if (nowEpoch - (tonumber(ts) or 0)) >= 240 then
+                self.lfgWatcherCooldowns[k] = nil
+            end
+        end
+    end
+    if type(self.globalChatLFG) == "table" and next(self.globalChatLFG) ~= nil then
+        PruneAndBoundByTimestamp(self.globalChatLFG, self.MAX_GLOBAL_CHAT_LFG or 35, 600, nowEpoch)
+    end
+    if type(self.officialLfgCache) == "table" and next(self.officialLfgCache) ~= nil then
+        PruneAndBoundByTimestamp(self.officialLfgCache, 120, 240, nowEpoch)
+    end
+end
 
     ns:On("SETTINGS_UPDATED", function()
         local s = ns.db and ns.db.settings

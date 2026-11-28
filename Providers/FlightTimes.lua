@@ -1722,8 +1722,8 @@ local function TryResumeMidFlightFromSaved()
     pendingDstID = saved.dstID
     pendingSrcName = saved.srcName
     pendingDstName = saved.dstName
-    pendingEstSec = isExpired and nil or saved.estSec
-    pendingQuality = isExpired and nil or saved.quality
+    pendingEstSec = (not isExpired) and saved.estSec or nil
+    pendingQuality = (not isExpired) and saved.quality or nil
     pendingCanSave = (not isExpired) and (saved.canSave == true)
     flightStartAt = isExpired and nowMono or (nowMono - elapsedUnix)
     confirmedOnTaxi = true
@@ -1856,9 +1856,9 @@ function FlightTimes:Init()
         end
     end)
 
-    ns:On("THEME_CHANGED", function()
-        ApplyTimerBarTheme()
-    end)
+    if ns.Theme and ns.Theme.RegisterListener then
+        ns.Theme:RegisterListener(ApplyTimerBarTheme)
+    end
 
     ns:On("SETTINGS_UPDATED", function()
         FlightTimes:RefreshTimerVisibility()
